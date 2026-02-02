@@ -13,6 +13,18 @@ read README.md, then ask which module(s) to work on. Based on the answer, read t
 
 ## Code Quality
 
+### Requirements
+
+- All code must compile without errors (`cargo check`)
+- All tests must pass (`cargo test`)
+- No linter warnings for modified code
+- Add unit tests for new functionality
+
+### Check Methods
+
+- Total check: `./check.sh`
+- Per-package: `cd packages/<name> && cargo check && cargo test`
+
 ## Commands
 
 ## Style

@@ -95,3 +95,99 @@ pub fn models_are_equal(a: Option<&Model>, b: Option<&Model>) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Cost, InputType, KnownApi, KnownProvider, Usage};
+
+    fn test_model(id: &str, provider: KnownProvider) -> Model {
+        Model {
+            id: id.to_string(),
+            name: "Test".to_string(),
+            api: KnownApi::OpenAIResponses,
+            provider,
+            base_url: "https://example.com".to_string(),
+            reasoning: false,
+            input: vec![InputType::Text],
+            cost: Cost {
+                input: 1.0,
+                output: 2.0,
+                cache_read: 0.5,
+                cache_write: 0.25,
+            },
+            context_window: 128,
+            max_tokens: 64,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    #[test]
+    fn models_parses_non_empty() {
+        let parsed = models().expect("models json should parse");
+        assert!(!parsed.is_empty());
+    }
+
+    #[test]
+    fn provider_keys_are_sorted() {
+        let parsed = models().expect("models json should parse");
+        let mut expected: Vec<String> = parsed.keys().cloned().collect();
+        expected.sort();
+        assert_eq!(expected, get_provider_keys());
+    }
+
+    #[test]
+    fn get_model_and_models_roundtrip() {
+        let parsed = models().expect("models json should parse");
+        let provider = get_provider_keys().first().cloned().expect("provider key");
+        let model_id = parsed
+            .get(&provider)
+            .and_then(|m| m.keys().next())
+            .cloned()
+            .expect("model id");
+        let via_get = get_model(&provider, &model_id).expect("get_model should find model");
+        assert_eq!(via_get.id, model_id);
+        let models = get_models(&provider);
+        assert!(models.iter().any(|m| m.id == model_id));
+    }
+
+    #[test]
+    fn calculate_cost_sets_breakdown_and_total() {
+        let model = test_model("cost-test", KnownProvider::OpenAI);
+        let mut usage = Usage {
+            input: 2_000_000,
+            output: 1_000_000,
+            cache_read: 2_000_000,
+            cache_write: 4_000_000,
+            total_tokens: 0,
+            cost: Default::default(),
+        };
+        let cost = calculate_cost(&model, &mut usage);
+        assert!((cost.input - 2.0).abs() < f64::EPSILON);
+        assert!((cost.output - 2.0).abs() < f64::EPSILON);
+        assert!((cost.cache_read - 1.0).abs() < f64::EPSILON);
+        assert!((cost.cache_write - 1.0).abs() < f64::EPSILON);
+        assert!((cost.total - 6.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn supports_xhigh_checks_ids() {
+        let xhigh = test_model("gpt-5.2", KnownProvider::OpenAI);
+        let normal = test_model("gpt-4o", KnownProvider::OpenAI);
+        assert!(supports_xhigh(&xhigh));
+        assert!(!supports_xhigh(&normal));
+    }
+
+    #[test]
+    fn models_are_equal_checks_id_and_provider() {
+        let a = test_model("same", KnownProvider::OpenAI);
+        let b = test_model("same", KnownProvider::OpenAI);
+        let c = test_model("same", KnownProvider::Anthropic);
+        let d = test_model("other", KnownProvider::OpenAI);
+        assert!(models_are_equal(Some(&a), Some(&b)));
+        assert!(!models_are_equal(Some(&a), Some(&c)));
+        assert!(!models_are_equal(Some(&a), Some(&d)));
+        assert!(!models_are_equal(Some(&a), None));
+    }
+}

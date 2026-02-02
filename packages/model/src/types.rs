@@ -229,3 +229,40 @@ pub struct Model {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compat: Option<Compat>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::KnownProvider;
+
+    #[test]
+    fn known_provider_roundtrip() {
+        let providers = [
+            KnownProvider::AmazonBedrock,
+            KnownProvider::Anthropic,
+            KnownProvider::Google,
+            KnownProvider::GoogleGeminiCli,
+            KnownProvider::GoogleAntigravity,
+            KnownProvider::GoogleVertex,
+            KnownProvider::OpenAI,
+            KnownProvider::AzureOpenAiResponses,
+            KnownProvider::OpenAICodex,
+            KnownProvider::GitHubCopilot,
+            KnownProvider::Xai,
+            KnownProvider::Groq,
+            KnownProvider::Cerebras,
+            KnownProvider::Openrouter,
+            KnownProvider::VercelAiGateway,
+            KnownProvider::Zai,
+            KnownProvider::Mistral,
+            KnownProvider::Minimax,
+            KnownProvider::MinimaxCn,
+            KnownProvider::Huggingface,
+            KnownProvider::Opencode,
+            KnownProvider::KimiCoding,
+        ];
+        for provider in providers {
+            let key = provider.as_str();
+            assert_eq!(KnownProvider::from_str(key), Some(provider));
+        }
+    }
+}
