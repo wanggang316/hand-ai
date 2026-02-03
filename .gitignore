@@ -10,3 +10,8 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
+
+
+# Added by cargo
+
+/target
