@@ -4,10 +4,11 @@
 //! AI providers (OpenAI, Anthropic, Google, etc.) through a common API.
 
 pub mod api_registry;
+pub mod client;
+pub mod cli;
 pub mod env_api_keys;
 pub mod models;
 pub mod providers;
-pub mod stream;
 pub mod types;
 
 // Re-export commonly used items from types
@@ -28,14 +29,10 @@ pub use models::{
 };
 
 // Re-export from api_registry
-pub use api_registry::{
-    ApiProvider, BoxedProvider, clear_api_providers, get_api_provider, get_api_providers,
-    has_api_provider, register_api_provider, unregister_api_providers,
-    AssistantMessageEventStream,
-};
+pub use api_registry::{ApiProvider, ApiProviderRegistry, BoxedApiProvider, AssistantMessageEventStream};
 
-// Re-export from stream
-pub use stream::{complete, complete_simple, stream, stream_simple, ModelStreamExt};
+// Re-export from client
+pub use client::Client;
 
 // Re-export from env_api_keys
 pub use env_api_keys::{clear_vertex_adc_cache, get_env_api_key, get_env_api_key_by_str};

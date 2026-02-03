@@ -7,6 +7,10 @@ edition = "2024"
 name = "generate_models"
 path = "src/generate_models.rs"
 
+[[bin]]
+name = "model-cli"
+path = "src/bin/model_cli.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -61,13 +61,13 @@ impl OpenAICompletionsProvider {
     }
 }
 
-impl crate::api_registry::Provider for OpenAICompletionsProvider {
+impl crate::api_registry::ApiProvider for OpenAICompletionsProvider {
     fn stream(
         &self,
         model: Model,
         context: Context,
         options: Option<StreamOptions>,
-    ) -> crate::api_registry::AssistantMessageEventStream<'_> {
+    ) -> crate::api_registry::AssistantMessageEventStream<'static> {
         let opts = options.map(|base| OpenAICompletionsOptions {
             base,
             tool_choice: None,
@@ -81,7 +81,7 @@ impl crate::api_registry::Provider for OpenAICompletionsProvider {
         model: Model,
         context: Context,
         options: Option<SimpleStreamOptions>,
-    ) -> crate::api_registry::AssistantMessageEventStream<'_> {
+    ) -> crate::api_registry::AssistantMessageEventStream<'static> {
         let api_key = options
             .as_ref()
             .and_then(|o| o.api_key().map(|s| s.to_string()))

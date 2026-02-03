@@ -1,6 +1,6 @@
 //! API provider registry.
 //!
-//! Defines the Provider trait and allows registering API providers
+//! Defines the ApiProvider trait and allows registering API providers
 //! that can handle streaming requests for specific API types.
 
 use crate::types::{
@@ -19,14 +19,14 @@ pub type AssistantMessageEventStream<'a> =
 ///
 /// Implement this trait for each API provider (OpenAI, Anthropic, Google, etc.)
 /// to enable unified access through the provider registry.
-pub trait Provider: Send + Sync {
+pub trait ApiProvider: Send + Sync {
     /// Stream chat completions with full options.
     fn stream(
         &self,
         model: Model,
         context: Context,
         options: Option<StreamOptions>,
-    ) -> AssistantMessageEventStream<'_>;
+    ) -> AssistantMessageEventStream<'static>;
 
     /// Stream chat completions with simplified options.
     fn stream_simple(
@@ -34,36 +34,14 @@ pub trait Provider: Send + Sync {
         model: Model,
         context: Context,
         options: Option<SimpleStreamOptions>,
-    ) -> AssistantMessageEventStream<'_>;
+    ) -> AssistantMessageEventStream<'static>;
 }
 
 /// A boxed provider trait object that can be shared across threads.
-pub type BoxedProvider = Box<dyn Provider + Send + Sync>;
-
-/// A registered API provider that can be used to stream chat completions.
-#[derive(Clone)]
-pub struct ApiProvider {
-    pub api: Api,
-    provider: Arc<BoxedProvider>,
-}
-
-impl ApiProvider {
-    /// Create a new API provider wrapper.
-    pub fn new(api: Api, provider: BoxedProvider) -> Self {
-        Self {
-            api,
-            provider: Arc::new(provider),
-        }
-    }
-
-    /// Get the underlying provider.
-    pub fn provider(&self) -> Arc<BoxedProvider> {
-        self.provider.clone()
-    }
-}
+pub type BoxedApiProvider = Box<dyn ApiProvider + Send + Sync>;
 
 struct RegisteredApiProvider {
-    provider: ApiProvider,
+    provider: Arc<BoxedApiProvider>,
     source_id: Option<String>,
 }
 
@@ -87,25 +65,25 @@ impl ApiProviderRegistry {
     }
 
     /// Register an API provider.
-    pub fn register(&self, api: Api, provider: BoxedProvider, source_id: Option<String>) {
+    pub fn register(&self, api: Api, provider: BoxedApiProvider, source_id: Option<String>) {
         let mut providers = self.providers.write().unwrap();
         providers.insert(
             api,
             RegisteredApiProvider {
-                provider: ApiProvider::new(api, provider),
+                provider: Arc::new(provider),
                 source_id,
             },
         );
     }
 
     /// Get an API provider by API type.
-    pub fn get(&self, api: &Api) -> Option<ApiProvider> {
+    pub fn get(&self, api: &Api) -> Option<Arc<BoxedApiProvider>> {
         let providers = self.providers.read().unwrap();
         providers.get(api).map(|r| r.provider.clone())
     }
 
     /// Get all registered API providers.
-    pub fn get_all(&self) -> Vec<ApiProvider> {
+    pub fn get_all(&self) -> Vec<Arc<BoxedApiProvider>> {
         let providers = self.providers.read().unwrap();
         providers.values().map(|r| r.provider.clone()).collect()
     }
@@ -129,57 +107,19 @@ impl ApiProviderRegistry {
     }
 }
 
-/// Global API provider registry.
-static GLOBAL_REGISTRY: std::sync::OnceLock<ApiProviderRegistry> = std::sync::OnceLock::new();
-
-/// Get the global API provider registry.
-pub fn global_registry() -> &'static ApiProviderRegistry {
-    GLOBAL_REGISTRY.get_or_init(ApiProviderRegistry::new)
-}
-
-/// Register an API provider in the global registry.
-pub fn register_api_provider(api: Api, provider: BoxedProvider, source_id: Option<String>) {
-    global_registry().register(api, provider, source_id);
-}
-
-/// Get an API provider from the global registry.
-pub fn get_api_provider(api: &Api) -> Option<ApiProvider> {
-    global_registry().get(api)
-}
-
-/// Get all API providers from the global registry.
-pub fn get_api_providers() -> Vec<ApiProvider> {
-    global_registry().get_all()
-}
-
-/// Unregister API providers by source ID from the global registry.
-pub fn unregister_api_providers(source_id: &str) {
-    global_registry().unregister_by_source(source_id);
-}
-
-/// Clear all API providers from the global registry.
-pub fn clear_api_providers() {
-    global_registry().clear();
-}
-
-/// Check if a provider is registered for an API type in the global registry.
-pub fn has_api_provider(api: &Api) -> bool {
-    global_registry().has(api)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     struct MockProvider;
 
-    impl Provider for MockProvider {
+    impl ApiProvider for MockProvider {
         fn stream(
             &self,
             _model: Model,
             _context: Context,
             _options: Option<StreamOptions>,
-        ) -> AssistantMessageEventStream<'_> {
+        ) -> AssistantMessageEventStream<'static> {
             Box::pin(async_stream::stream! {
                 yield AssistantMessageEvent::Done {
                     reason: crate::types::StopReason::Stop,
@@ -203,7 +143,7 @@ mod tests {
             model: Model,
             context: Context,
             options: Option<SimpleStreamOptions>,
-        ) -> AssistantMessageEventStream<'_> {
+        ) -> AssistantMessageEventStream<'static> {
             self.stream(model, context, options.map(|o| o.base))
         }
     }
@@ -220,7 +160,6 @@ mod tests {
 
         let retrieved = registry.get(&Api::OpenAICompletions);
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().api, Api::OpenAICompletions);
     }
 
     #[test]
