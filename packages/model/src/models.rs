@@ -33,7 +33,7 @@ pub fn get_model(provider: &str, model_id: &str) -> Option<Model> {
 /// Get a model by provider enum and model id.
 #[inline]
 pub fn get_model_by_provider(
-    provider: crate::types::KnownProvider,
+    provider: crate::types::Provider,
     model_id: &str,
 ) -> Option<Model> {
     get_model(provider.as_str(), model_id)
@@ -47,10 +47,10 @@ pub fn get_provider_keys() -> Vec<String> {
 }
 
 /// All known providers that have at least one model in the registry.
-pub fn get_providers() -> Vec<crate::types::KnownProvider> {
+pub fn get_providers() -> Vec<crate::types::Provider> {
     registry()
         .keys()
-        .filter_map(|k| crate::types::KnownProvider::from_str(k))
+        .filter_map(|k| crate::types::Provider::from_str(k))
         .collect()
 }
 
@@ -63,7 +63,7 @@ pub fn get_models(provider: &str) -> Vec<Model> {
 }
 
 /// All models for a provider (by enum).
-pub fn get_models_by_provider(provider: crate::types::KnownProvider) -> Vec<Model> {
+pub fn get_models_by_provider(provider: crate::types::Provider) -> Vec<Model> {
     get_models(provider.as_str())
 }
 
@@ -99,13 +99,13 @@ pub fn models_are_equal(a: Option<&Model>, b: Option<&Model>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Cost, InputType, KnownApi, KnownProvider, Usage};
+    use crate::types::{Api, Cost, InputType, Provider, Usage};
 
-    fn test_model(id: &str, provider: KnownProvider) -> Model {
+    fn test_model(id: &str, provider: Provider) -> Model {
         Model {
             id: id.to_string(),
             name: "Test".to_string(),
-            api: KnownApi::OpenAIResponses,
+            api: Api::OpenAIResponses,
             provider,
             base_url: "https://example.com".to_string(),
             reasoning: false,
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn calculate_cost_sets_breakdown_and_total() {
-        let model = test_model("cost-test", KnownProvider::OpenAI);
+        let model = test_model("cost-test", Provider::OpenAI);
         let mut usage = Usage {
             input: 2_000_000,
             output: 1_000_000,
@@ -173,18 +173,18 @@ mod tests {
 
     #[test]
     fn supports_xhigh_checks_ids() {
-        let xhigh = test_model("gpt-5.2", KnownProvider::OpenAI);
-        let normal = test_model("gpt-4o", KnownProvider::OpenAI);
+        let xhigh = test_model("gpt-5.2", Provider::OpenAI);
+        let normal = test_model("gpt-4o", Provider::OpenAI);
         assert!(supports_xhigh(&xhigh));
         assert!(!supports_xhigh(&normal));
     }
 
     #[test]
     fn models_are_equal_checks_id_and_provider() {
-        let a = test_model("same", KnownProvider::OpenAI);
-        let b = test_model("same", KnownProvider::OpenAI);
-        let c = test_model("same", KnownProvider::Anthropic);
-        let d = test_model("other", KnownProvider::OpenAI);
+        let a = test_model("same", Provider::OpenAI);
+        let b = test_model("same", Provider::OpenAI);
+        let c = test_model("same", Provider::Anthropic);
+        let d = test_model("other", Provider::OpenAI);
         assert!(models_are_equal(Some(&a), Some(&b)));
         assert!(!models_are_equal(Some(&a), Some(&c)));
         assert!(!models_are_equal(Some(&a), Some(&d)));

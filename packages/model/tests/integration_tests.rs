@@ -8,7 +8,7 @@ use model::models::{
     get_provider_keys, get_providers, models, models_are_equal, supports_xhigh,
 };
 use model::types::{
-    Compat, Cost, InputType, Api, Provider, Model, OpenAICompletionsCompat, Usage,
+    Api, Compat, Cost, InputType, Provider, Model, OpenAICompletionsCompat, Usage,
     UsageCost,
 };
 
@@ -259,7 +259,7 @@ fn test_supports_xhigh_false() {
 // =============================================================================
 
 #[test]
-fn test_known_provider_roundtrip_all_variants() {
+fn test_provider_roundtrip_all_variants() {
     let providers = vec![
         Provider::AmazonBedrock,
         Provider::Anthropic,
@@ -298,7 +298,7 @@ fn test_known_provider_roundtrip_all_variants() {
 }
 
 #[test]
-fn test_known_provider_from_str_invalid() {
+fn test_provider_from_str_invalid() {
     assert!(Provider::from_str("invalid-provider").is_none());
     assert!(Provider::from_str("").is_none());
     assert!(Provider::from_str("OPENAI").is_none()); // case sensitive
@@ -395,7 +395,8 @@ fn test_model_input_types_are_valid() {
 // =============================================================================
 
 #[test]
-fn test_known_api_variants_exist() {
+fn test_api_variants_exist() {
+    // This test ensures all expected API variants compile and exist
     // This test ensures all expected API variants compile and exist
     let _apis = vec![
         Api::OpenAICompletions,
@@ -460,6 +461,7 @@ fn test_compat_serialization() {
         supports_developer_role: Some(false),
         supports_reasoning_effort: None,
         thinking_format: Some("openai".to_string()),
+        ..Default::default()
     });
 
     let json = serde_json::to_string(&compat).expect("should serialize");

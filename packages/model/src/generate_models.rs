@@ -236,8 +236,8 @@ async fn fetch_openrouter_models(client: &reqwest::Client) -> Vec<Model> {
         models.push(Model {
             id: m.id.clone(),
             name: m.name,
-            api: KnownApi::OpenAICompletions,
-            provider: KnownProvider::Openrouter,
+            api: Api::OpenAICompletions,
+            provider: Provider::Openrouter,
             base_url: OPENROUTER_API.to_string(),
             reasoning: m.supported_parameters.iter().any(|p| p == "reasoning"),
             input,
@@ -287,8 +287,8 @@ async fn fetch_ai_gateway_models(client: &reqwest::Client) -> Vec<Model> {
         models.push(Model {
             id: m.id.clone(),
             name: m.name.unwrap_or(m.id),
-            api: KnownApi::AnthropicMessages,
-            provider: KnownProvider::VercelAiGateway,
+            api: Api::AnthropicMessages,
+            provider: Provider::VercelAiGateway,
             base_url: AI_GATEWAY_BASE_URL.to_string(),
             reasoning: tags.iter().any(|t| t.as_str() == "reasoning"),
             input,
@@ -395,8 +395,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             let bedrock_model = Model {
                 id: id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::BedrockConverseStream,
-                provider: KnownProvider::AmazonBedrock,
+                api: Api::BedrockConverseStream,
+                provider: Provider::AmazonBedrock,
                 base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -433,8 +433,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::AnthropicMessages,
-                provider: KnownProvider::Anthropic,
+                api: Api::AnthropicMessages,
+                provider: Provider::Anthropic,
                 base_url: "https://api.anthropic.com".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -460,8 +460,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::GoogleGenerativeAi,
-                provider: KnownProvider::Google,
+                api: Api::GoogleGenerativeAi,
+                provider: Provider::Google,
                 base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -487,8 +487,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::OpenAIResponses,
-                provider: KnownProvider::OpenAI,
+                api: Api::OpenAIResponses,
+                provider: Provider::OpenAI,
                 base_url: "https://api.openai.com/v1".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -514,8 +514,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::OpenAICompletions,
-                provider: KnownProvider::Groq,
+                api: Api::OpenAICompletions,
+                provider: Provider::Groq,
                 base_url: "https://api.groq.com/openai/v1".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -541,8 +541,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::OpenAICompletions,
-                provider: KnownProvider::Cerebras,
+                api: Api::OpenAICompletions,
+                provider: Provider::Cerebras,
                 base_url: "https://api.cerebras.ai/v1".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -568,8 +568,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::OpenAICompletions,
-                provider: KnownProvider::Xai,
+                api: Api::OpenAICompletions,
+                provider: Provider::Xai,
                 base_url: "https://api.x.ai/v1".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -595,8 +595,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::OpenAICompletions,
-                provider: KnownProvider::Zai,
+                api: Api::OpenAICompletions,
+                provider: Provider::Zai,
                 base_url: "https://api.z.ai/api/coding/paas/v4".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -613,6 +613,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                     supports_developer_role: Some(false),
                     supports_reasoning_effort: None,
                     thinking_format: Some("zai".to_string()),
+                    ..Default::default()
                 })),
             });
         }
@@ -627,8 +628,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::OpenAICompletions,
-                provider: KnownProvider::Mistral,
+                api: Api::OpenAICompletions,
+                provider: Provider::Mistral,
                 base_url: "https://api.mistral.ai/v1".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -654,8 +655,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::OpenAICompletions,
-                provider: KnownProvider::Huggingface,
+                api: Api::OpenAICompletions,
+                provider: Provider::Huggingface,
                 base_url: "https://router.huggingface.co/v1".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -672,6 +673,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                     supports_developer_role: Some(false),
                     supports_reasoning_effort: None,
                     thinking_format: None,
+                    ..Default::default()
                 })),
             });
         }
@@ -687,20 +689,20 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 continue;
             }
             let (api, base_url) = match m.provider.as_ref().and_then(|p| p.npm.as_deref()) {
-                Some("@ai-sdk/openai") => (KnownApi::OpenAIResponses, "https://opencode.ai/zen/v1"),
+                Some("@ai-sdk/openai") => (Api::OpenAIResponses, "https://opencode.ai/zen/v1"),
                 Some("@ai-sdk/anthropic") => {
-                    (KnownApi::AnthropicMessages, "https://opencode.ai/zen")
+                    (Api::AnthropicMessages, "https://opencode.ai/zen")
                 }
                 Some("@ai-sdk/google") => {
-                    (KnownApi::GoogleGenerativeAi, "https://opencode.ai/zen/v1")
+                    (Api::GoogleGenerativeAi, "https://opencode.ai/zen/v1")
                 }
-                _ => (KnownApi::OpenAICompletions, "https://opencode.ai/zen/v1"),
+                _ => (Api::OpenAICompletions, "https://opencode.ai/zen/v1"),
             };
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
                 api,
-                provider: KnownProvider::Opencode,
+                provider: Provider::Opencode,
                 base_url: base_url.to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -739,9 +741,9 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             let needs_responses_api =
                 model_id.starts_with("gpt-5") || model_id.starts_with("oswe");
             let api = if needs_responses_api {
-                KnownApi::OpenAIResponses
+                Api::OpenAIResponses
             } else {
-                KnownApi::OpenAICompletions
+                Api::OpenAICompletions
             };
             let compat = if needs_responses_api {
                 None
@@ -751,13 +753,14 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                     supports_developer_role: Some(false),
                     supports_reasoning_effort: Some(false),
                     thinking_format: None,
+                    ..Default::default()
                 }))
             };
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
                 api,
-                provider: KnownProvider::GitHubCopilot,
+                provider: Provider::GitHubCopilot,
                 base_url: "https://api.individual.githubcopilot.com".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -776,8 +779,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
 
     // MiniMax
     let minimax_configs = [
-        ("minimax", KnownProvider::Minimax, "https://api.minimax.io/anthropic"),
-        ("minimax-cn", KnownProvider::MinimaxCn, "https://api.minimaxi.com/anthropic"),
+        ("minimax", Provider::Minimax, "https://api.minimax.io/anthropic"),
+        ("minimax-cn", Provider::MinimaxCn, "https://api.minimaxi.com/anthropic"),
     ];
     for (key, provider, base_url) in minimax_configs {
         let prov = match key {
@@ -792,7 +795,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 models.push(Model {
                     id: model_id.clone(),
                     name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                    api: KnownApi::AnthropicMessages,
+                    api: Api::AnthropicMessages,
                     provider,
                     base_url: base_url.to_string(),
                     reasoning: m.reasoning == Some(true),
@@ -820,8 +823,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
-                api: KnownApi::AnthropicMessages,
-                provider: KnownProvider::KimiCoding,
+                api: Api::AnthropicMessages,
+                provider: Provider::KimiCoding,
                 base_url: "https://api.kimi.com/coding".to_string(),
                 reasoning: m.reasoning == Some(true),
                 input: if has_image(m) {
@@ -842,30 +845,30 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
     models
 }
 
-fn provider_key(p: KnownProvider) -> &'static str {
+fn provider_key(p: Provider) -> &'static str {
     match p {
-        KnownProvider::AmazonBedrock => "amazon-bedrock",
-        KnownProvider::Anthropic => "anthropic",
-        KnownProvider::Google => "google",
-        KnownProvider::GoogleGeminiCli => "google-gemini-cli",
-        KnownProvider::GoogleAntigravity => "google-antigravity",
-        KnownProvider::GoogleVertex => "google-vertex",
-        KnownProvider::OpenAI => "openai",
-        KnownProvider::AzureOpenAiResponses => "azure-openai-responses",
-        KnownProvider::OpenAICodex => "openai-codex",
-        KnownProvider::GitHubCopilot => "github-copilot",
-        KnownProvider::Xai => "xai",
-        KnownProvider::Groq => "groq",
-        KnownProvider::Cerebras => "cerebras",
-        KnownProvider::Openrouter => "openrouter",
-        KnownProvider::VercelAiGateway => "vercel-ai-gateway",
-        KnownProvider::Zai => "zai",
-        KnownProvider::Mistral => "mistral",
-        KnownProvider::Minimax => "minimax",
-        KnownProvider::MinimaxCn => "minimax-cn",
-        KnownProvider::Huggingface => "huggingface",
-        KnownProvider::Opencode => "opencode",
-        KnownProvider::KimiCoding => "kimi-coding",
+        Provider::AmazonBedrock => "amazon-bedrock",
+        Provider::Anthropic => "anthropic",
+        Provider::Google => "google",
+        Provider::GoogleGeminiCli => "google-gemini-cli",
+        Provider::GoogleAntigravity => "google-antigravity",
+        Provider::GoogleVertex => "google-vertex",
+        Provider::OpenAI => "openai",
+        Provider::AzureOpenAiResponses => "azure-openai-responses",
+        Provider::OpenAICodex => "openai-codex",
+        Provider::GitHubCopilot => "github-copilot",
+        Provider::Xai => "xai",
+        Provider::Groq => "groq",
+        Provider::Cerebras => "cerebras",
+        Provider::Openrouter => "openrouter",
+        Provider::VercelAiGateway => "vercel-ai-gateway",
+        Provider::Zai => "zai",
+        Provider::Mistral => "mistral",
+        Provider::Minimax => "minimax",
+        Provider::MinimaxCn => "minimax-cn",
+        Provider::Huggingface => "huggingface",
+        Provider::Opencode => "opencode",
+        Provider::KimiCoding => "kimi-coding",
     }
 }
 
@@ -882,8 +885,8 @@ fn static_codex_models() -> Vec<Model> {
         Model {
             id: "gpt-5.1".to_string(),
             name: "GPT-5.1".to_string(),
-            api: KnownApi::OpenAICodexResponses,
-            provider: KnownProvider::OpenAICodex,
+            api: Api::OpenAICodexResponses,
+            provider: Provider::OpenAICodex,
             base_url: CODEX_BASE_URL.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -896,8 +899,8 @@ fn static_codex_models() -> Vec<Model> {
         Model {
             id: "gpt-5.1-codex-max".to_string(),
             name: "GPT-5.1 Codex Max".to_string(),
-            api: KnownApi::OpenAICodexResponses,
-            provider: KnownProvider::OpenAICodex,
+            api: Api::OpenAICodexResponses,
+            provider: Provider::OpenAICodex,
             base_url: CODEX_BASE_URL.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -910,8 +913,8 @@ fn static_codex_models() -> Vec<Model> {
         Model {
             id: "gpt-5.1-codex-mini".to_string(),
             name: "GPT-5.1 Codex Mini".to_string(),
-            api: KnownApi::OpenAICodexResponses,
-            provider: KnownProvider::OpenAICodex,
+            api: Api::OpenAICodexResponses,
+            provider: Provider::OpenAICodex,
             base_url: CODEX_BASE_URL.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -924,8 +927,8 @@ fn static_codex_models() -> Vec<Model> {
         Model {
             id: "gpt-5.2".to_string(),
             name: "GPT-5.2".to_string(),
-            api: KnownApi::OpenAICodexResponses,
-            provider: KnownProvider::OpenAICodex,
+            api: Api::OpenAICodexResponses,
+            provider: Provider::OpenAICodex,
             base_url: CODEX_BASE_URL.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -938,8 +941,8 @@ fn static_codex_models() -> Vec<Model> {
         Model {
             id: "gpt-5.2-codex".to_string(),
             name: "GPT-5.2 Codex".to_string(),
-            api: KnownApi::OpenAICodexResponses,
-            provider: KnownProvider::OpenAICodex,
+            api: Api::OpenAICodexResponses,
+            provider: Provider::OpenAICodex,
             base_url: CODEX_BASE_URL.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -961,8 +964,8 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
         Model {
             id: "gemini-2.5-pro".to_string(),
             name: "Gemini 2.5 Pro (Cloud Code Assist)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleGeminiCli,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleGeminiCli,
             base_url: CLOUD_CODE_ASSIST.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -975,8 +978,8 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
         Model {
             id: "gemini-2.5-flash".to_string(),
             name: "Gemini 2.5 Flash (Cloud Code Assist)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleGeminiCli,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleGeminiCli,
             base_url: CLOUD_CODE_ASSIST.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -989,8 +992,8 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
         Model {
             id: "gemini-2.0-flash".to_string(),
             name: "Gemini 2.0 Flash (Cloud Code Assist)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleGeminiCli,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleGeminiCli,
             base_url: CLOUD_CODE_ASSIST.to_string(),
             reasoning: false,
             input: input_text_image(),
@@ -1003,8 +1006,8 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
         Model {
             id: "gemini-3-pro-preview".to_string(),
             name: "Gemini 3 Pro Preview (Cloud Code Assist)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleGeminiCli,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleGeminiCli,
             base_url: CLOUD_CODE_ASSIST.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1017,8 +1020,8 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
         Model {
             id: "gemini-3-flash-preview".to_string(),
             name: "Gemini 3 Flash Preview (Cloud Code Assist)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleGeminiCli,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleGeminiCli,
             base_url: CLOUD_CODE_ASSIST.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1040,8 +1043,8 @@ fn static_antigravity_models() -> Vec<Model> {
         Model {
             id: "gemini-3-pro-high".to_string(),
             name: "Gemini 3 Pro High (Antigravity)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleAntigravity,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleAntigravity,
             base_url: ANTIGRAVITY.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1054,8 +1057,8 @@ fn static_antigravity_models() -> Vec<Model> {
         Model {
             id: "gemini-3-pro-low".to_string(),
             name: "Gemini 3 Pro Low (Antigravity)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleAntigravity,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleAntigravity,
             base_url: ANTIGRAVITY.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1068,8 +1071,8 @@ fn static_antigravity_models() -> Vec<Model> {
         Model {
             id: "gemini-3-flash".to_string(),
             name: "Gemini 3 Flash (Antigravity)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleAntigravity,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleAntigravity,
             base_url: ANTIGRAVITY.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1082,8 +1085,8 @@ fn static_antigravity_models() -> Vec<Model> {
         Model {
             id: "claude-sonnet-4-5".to_string(),
             name: "Claude Sonnet 4.5 (Antigravity)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleAntigravity,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleAntigravity,
             base_url: ANTIGRAVITY.to_string(),
             reasoning: false,
             input: input_text_image(),
@@ -1096,8 +1099,8 @@ fn static_antigravity_models() -> Vec<Model> {
         Model {
             id: "claude-sonnet-4-5-thinking".to_string(),
             name: "Claude Sonnet 4.5 Thinking (Antigravity)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleAntigravity,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleAntigravity,
             base_url: ANTIGRAVITY.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1110,8 +1113,8 @@ fn static_antigravity_models() -> Vec<Model> {
         Model {
             id: "claude-opus-4-5-thinking".to_string(),
             name: "Claude Opus 4.5 Thinking (Antigravity)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleAntigravity,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleAntigravity,
             base_url: ANTIGRAVITY.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1124,8 +1127,8 @@ fn static_antigravity_models() -> Vec<Model> {
         Model {
             id: "gpt-oss-120b-medium".to_string(),
             name: "GPT-OSS 120B Medium (Antigravity)".to_string(),
-            api: KnownApi::GoogleGeminiCli,
-            provider: KnownProvider::GoogleAntigravity,
+            api: Api::GoogleGeminiCli,
+            provider: Provider::GoogleAntigravity,
             base_url: ANTIGRAVITY.to_string(),
             reasoning: false,
             input: input_text(),
@@ -1145,8 +1148,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-3-pro-preview".to_string(),
             name: "Gemini 3 Pro Preview (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1159,8 +1162,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-3-flash-preview".to_string(),
             name: "Gemini 3 Flash Preview (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1173,8 +1176,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-2.0-flash".to_string(),
             name: "Gemini 2.0 Flash (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: false,
             input: input_text_image(),
@@ -1187,8 +1190,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-2.0-flash-lite".to_string(),
             name: "Gemini 2.0 Flash Lite (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1201,8 +1204,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-2.5-pro".to_string(),
             name: "Gemini 2.5 Pro (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1215,8 +1218,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-2.5-flash".to_string(),
             name: "Gemini 2.5 Flash (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1229,8 +1232,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-2.5-flash-lite-preview-09-2025".to_string(),
             name: "Gemini 2.5 Flash Lite Preview 09-25 (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1243,8 +1246,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-2.5-flash-lite".to_string(),
             name: "Gemini 2.5 Flash Lite (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1257,8 +1260,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-1.5-pro".to_string(),
             name: "Gemini 1.5 Pro (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: false,
             input: input_text_image(),
@@ -1271,8 +1274,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-1.5-flash".to_string(),
             name: "Gemini 1.5 Flash (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: false,
             input: input_text_image(),
@@ -1285,8 +1288,8 @@ fn static_vertex_models() -> Vec<Model> {
         Model {
             id: "gemini-1.5-flash-8b".to_string(),
             name: "Gemini 1.5 Flash-8B (Vertex)".to_string(),
-            api: KnownApi::GoogleVertex,
-            provider: KnownProvider::GoogleVertex,
+            api: Api::GoogleVertex,
+            provider: Provider::GoogleVertex,
             base_url: VERTEX.to_string(),
             reasoning: false,
             input: input_text_image(),
@@ -1308,8 +1311,8 @@ fn static_kimi_coding_models() -> Vec<Model> {
         Model {
             id: "kimi-k2-thinking".to_string(),
             name: "Kimi K2 Thinking".to_string(),
-            api: KnownApi::AnthropicMessages,
-            provider: KnownProvider::KimiCoding,
+            api: Api::AnthropicMessages,
+            provider: Provider::KimiCoding,
             base_url: KIMI_CODING_BASE_URL.to_string(),
             reasoning: true,
             input: input_text(),
@@ -1322,8 +1325,8 @@ fn static_kimi_coding_models() -> Vec<Model> {
         Model {
             id: "k2p5".to_string(),
             name: "Kimi K2.5".to_string(),
-            api: KnownApi::AnthropicMessages,
-            provider: KnownProvider::KimiCoding,
+            api: Api::AnthropicMessages,
+            provider: Provider::KimiCoding,
             base_url: KIMI_CODING_BASE_URL.to_string(),
             reasoning: true,
             input: input_text(),
@@ -1373,19 +1376,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Fix Claude Opus 4.5 cache pricing
     if let Some(opus) = all.iter_mut().find(|m| {
-        m.provider == KnownProvider::Anthropic && m.id == "claude-opus-4-5"
+        m.provider == Provider::Anthropic && m.id == "claude-opus-4-5"
     }) {
         opus.cost.cache_read = 0.5;
         opus.cost.cache_write = 6.25;
     }
 
     // Add missing OpenAI models (only if not already present)
-    if !all.iter().any(|m| m.provider == KnownProvider::OpenAI && m.id == "gpt-5-chat-latest") {
+    if !all.iter().any(|m| m.provider == Provider::OpenAI && m.id == "gpt-5-chat-latest") {
         all.push(Model {
             id: "gpt-5-chat-latest".to_string(),
             name: "GPT-5 Chat Latest".to_string(),
-            api: KnownApi::OpenAIResponses,
-            provider: KnownProvider::OpenAI,
+            api: Api::OpenAIResponses,
+            provider: Provider::OpenAI,
             base_url: "https://api.openai.com/v1".to_string(),
             reasoning: false,
             input: input_text_image(),
@@ -1397,12 +1400,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    if !all.iter().any(|m| m.provider == KnownProvider::OpenAI && m.id == "gpt-5.1-codex") {
+    if !all.iter().any(|m| m.provider == Provider::OpenAI && m.id == "gpt-5.1-codex") {
         all.push(Model {
             id: "gpt-5.1-codex".to_string(),
             name: "GPT-5.1 Codex".to_string(),
-            api: KnownApi::OpenAIResponses,
-            provider: KnownProvider::OpenAI,
+            api: Api::OpenAIResponses,
+            provider: Provider::OpenAI,
             base_url: "https://api.openai.com/v1".to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1414,12 +1417,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    if !all.iter().any(|m| m.provider == KnownProvider::OpenAI && m.id == "gpt-5.1-codex-max") {
+    if !all.iter().any(|m| m.provider == Provider::OpenAI && m.id == "gpt-5.1-codex-max") {
         all.push(Model {
             id: "gpt-5.1-codex-max".to_string(),
             name: "GPT-5.1 Codex Max".to_string(),
-            api: KnownApi::OpenAIResponses,
-            provider: KnownProvider::OpenAI,
+            api: Api::OpenAIResponses,
+            provider: Provider::OpenAI,
             base_url: "https://api.openai.com/v1".to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1437,12 +1440,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     all.extend(static_codex_models());
 
     // Add missing Grok model (only if not already present)
-    if !all.iter().any(|m| m.provider == KnownProvider::Xai && m.id == "grok-code-fast-1") {
+    if !all.iter().any(|m| m.provider == Provider::Xai && m.id == "grok-code-fast-1") {
         all.push(Model {
             id: "grok-code-fast-1".to_string(),
             name: "Grok Code Fast 1".to_string(),
-            api: KnownApi::OpenAICompletions,
-            provider: KnownProvider::Xai,
+            api: Api::OpenAICompletions,
+            provider: Provider::Xai,
             base_url: "https://api.x.ai/v1".to_string(),
             reasoning: false,
             input: input_text(),
@@ -1455,12 +1458,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Add missing OpenRouter model (only if not already present)
-    if !all.iter().any(|m| m.provider == KnownProvider::Openrouter && m.id == "openrouter/auto") {
+    if !all.iter().any(|m| m.provider == Provider::Openrouter && m.id == "openrouter/auto") {
         all.push(Model {
             id: "openrouter/auto".to_string(),
             name: "OpenRouter: Auto Router".to_string(),
-            api: KnownApi::OpenAICompletions,
-            provider: KnownProvider::Openrouter,
+            api: Api::OpenAICompletions,
+            provider: Provider::Openrouter,
             base_url: OPENROUTER_API.to_string(),
             reasoning: true,
             input: input_text_image(),
@@ -1483,7 +1486,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add Kimi Coding models (fallback - only if not already present from models.dev)
     for model in static_kimi_coding_models() {
-        if !all.iter().any(|m| m.provider == KnownProvider::KimiCoding && m.id == model.id) {
+        if !all.iter().any(|m| m.provider == Provider::KimiCoding && m.id == model.id) {
             all.push(model);
         }
     }
@@ -1491,11 +1494,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Azure OpenAI variants (copy from openai openai-responses)
     let azure_models: Vec<Model> = all
         .iter()
-        .filter(|m| m.provider == KnownProvider::OpenAI && m.api == KnownApi::OpenAIResponses)
+        .filter(|m| m.provider == Provider::OpenAI && m.api == Api::OpenAIResponses)
         .cloned()
         .map(|m| Model {
-            api: KnownApi::AzureOpenAiResponses,
-            provider: KnownProvider::AzureOpenAiResponses,
+            api: Api::AzureOpenAiResponses,
+            provider: Provider::AzureOpenAiResponses,
             base_url: String::new(),
             ..m
         })
