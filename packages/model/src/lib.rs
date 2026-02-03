@@ -2,11 +2,11 @@
 //!
 //! This crate provides a unified interface for interacting with various
 //! AI providers (OpenAI, Anthropic, Google, etc.) through a common API.
-//!
 
 pub mod api_registry;
 pub mod env_api_keys;
 pub mod models;
+pub mod providers;
 pub mod stream;
 pub mod types;
 
@@ -14,7 +14,7 @@ pub mod types;
 pub use types::{
     Api, AssistantContentBlock, AssistantContentBlock as AssistantContent, AssistantMessage,
     AssistantMessageEvent, Compat, Context, Cost, ImageContent, InputType, Message, Model,
-    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting, Provider,
+    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting,
     ProviderStreamOptions, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
     ThinkingBudgets, ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolResultContent,
     ToolResultMessage, Usage, UsageCost, UserContent, UserContentBlock, UserMessage,
@@ -29,12 +29,20 @@ pub use models::{
 
 // Re-export from api_registry
 pub use api_registry::{
-    ApiProvider, ApiProviderInternal, AssistantMessageEventStream, clear_api_providers,
-    get_api_provider, get_api_providers, register_api_provider, unregister_api_providers,
+    ApiProvider, BoxedProvider, clear_api_providers, get_api_provider, get_api_providers,
+    has_api_provider, register_api_provider, unregister_api_providers,
+    AssistantMessageEventStream,
 };
 
 // Re-export from stream
-pub use stream::{complete, complete_simple, stream, stream_simple};
+pub use stream::{complete, complete_simple, stream, stream_simple, ModelStreamExt};
 
 // Re-export from env_api_keys
 pub use env_api_keys::{clear_vertex_adc_cache, get_env_api_key, get_env_api_key_by_str};
+
+// Re-export from providers
+pub use providers::{
+    stream_openai_completions,
+    OpenAICompletionsOptions, normalize_mistral_tool_id, convert_messages,
+    ResolvedCompat, OpenAICompletionsProvider,
+};
