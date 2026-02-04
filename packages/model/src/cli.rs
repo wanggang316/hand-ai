@@ -5,7 +5,8 @@
 use std::env;
 
 use crate::{
-    Compat, get_env_api_key_by_str, get_model, get_models, get_provider_keys, get_providers, models,
+    Client, Compat, Context, Message, SimpleStreamOptions, UserMessage, get_env_api_key_by_str,
+    get_model, get_models, get_provider_keys, get_providers, models,
 };
 
 /// Print help message.
@@ -18,6 +19,7 @@ Commands:
   list-models [provider]      List models for a provider (or all if not specified)
   check-keys                  Check API key configuration status
   model-info <provider> <id>  Show details for a specific model
+  chat <provider> <model_id> <prompt>  Send a chat completion request
   help, --help, -h            Show this help message
 
 Examples:
@@ -25,6 +27,7 @@ Examples:
   cargo run --bin model-cli list-models openai
   cargo run --bin model-cli check-keys
   cargo run --bin model-cli model-info openai gpt-4o
+  cargo run --bin model-cli chat openai gpt-4o "Hello, how are you?"
 "#
     );
 }
@@ -241,6 +244,74 @@ impl PadToWidth for String {
     }
 }
 
+/// Send a chat completion request using the Client.
+async fn chat(provider: &str, model_id: &str, prompt: &str) {
+    // Get the model
+    let model = match get_model(provider, model_id) {
+        Some(m) => m,
+        None => {
+            eprintln!("Model not found: {provider} / {model_id}");
+            std::process::exit(1);
+        }
+    };
+
+    // Check if API key is configured
+    let api_key = get_env_api_key_by_str(provider);
+    if api_key.is_none() {
+        eprintln!("Error: API key not configured for provider '{provider}'");
+        std::process::exit(1);
+    }
+
+    // Create client and context
+    let client = Client::new();
+    let context = Context {
+        system_prompt: None,
+        messages: vec![Message::User(UserMessage::new_text(prompt))],
+        tools: None,
+    };
+
+    // Build options
+    let options = SimpleStreamOptions::default();
+
+    // Send request
+    println!("Sending request to {provider} / {model_id}...\n");
+
+    match client.stream_simple(&model, context, Some(options)) {
+        Ok(mut stream) => {
+            use futures::StreamExt;
+            while let Some(event) = stream.next().await {
+                match event {
+                    crate::AssistantMessageEvent::TextDelta { delta, .. } => {
+                        print!("{delta}");
+                    }
+                    crate::AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+                        eprint!("[Thinking: {delta}]");
+                    }
+                    crate::AssistantMessageEvent::ToolCallDelta { .. } => {
+                        println!("\n[Tool call received]");
+                    }
+                    crate::AssistantMessageEvent::Done { message, .. } => {
+                        println!("\n\n--- Done ---");
+                        println!("Stop reason: {:?}", message.stop_reason);
+                        if message.usage.total_tokens > 0 {
+                            println!("Total tokens: {}", message.usage.total_tokens);
+                        }
+                    }
+                    crate::AssistantMessageEvent::Error { error, .. } => {
+                        eprintln!("\nError: {}", error.error_message.unwrap_or_default());
+                        std::process::exit(1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to start stream: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Main CLI entry point.
 pub fn main() {
     let args: Vec<String> = env::args().collect();
@@ -260,6 +331,18 @@ pub fn main() {
                 std::process::exit(1);
             }
             model_info(&args[2], &args[3]);
+        }
+        Some("chat") => {
+            if args.len() < 5 {
+                eprintln!("Error: chat requires provider, model_id, and prompt arguments");
+                eprintln!(
+                    "Usage: cargo run --bin model-cli chat <provider> <model_id> \"<prompt>\""
+                );
+                std::process::exit(1);
+            }
+            // Run the async chat function
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(chat(&args[2], &args[3], &args[4]));
         }
         Some("help") | Some("--help") | Some("-h") | None => print_help(),
         Some(cmd) => {

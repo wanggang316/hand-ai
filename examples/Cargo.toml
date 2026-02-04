@@ -1,0 +1,14 @@
+[package]
+name = "model-examples"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+
+[[bin]]
+name = "client-test"
+path = "src/main.rs"
+
+[dependencies]
+model = { path = "../packages/model" }
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["packages/model"]
+members = ["packages/model", "examples"]
 resolver = "2"
 
 [workspace.package]
