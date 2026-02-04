@@ -25,7 +25,10 @@ impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ClientError::ProviderNotFound { api, model_id } => {
-                write!(f, "No provider registered for api: {:?} (model: {})", api, model_id)
+                write!(
+                    f,
+                    "No provider registered for api: {api:?} (model: {model_id})"
+                )
             }
             ClientError::StreamEndedWithoutResult => {
                 write!(f, "Stream ended without producing a result")
@@ -76,7 +79,7 @@ impl Client {
         match self.registry.get(&model.api) {
             Some(provider) => Ok(provider.stream(model.clone(), context, options)),
             None => Err(ClientError::ProviderNotFound {
-                api: model.api.clone(),
+                api: model.api,
                 model_id: model.id.clone(),
             }),
         }
@@ -96,7 +99,7 @@ impl Client {
         match self.registry.get(&model.api) {
             Some(provider) => Ok(provider.stream_simple(model.clone(), context, options)),
             None => Err(ClientError::ProviderNotFound {
-                api: model.api.clone(),
+                api: model.api,
                 model_id: model.id.clone(),
             }),
         }

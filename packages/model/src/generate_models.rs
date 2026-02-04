@@ -182,17 +182,21 @@ fn input_text_image() -> Vec<InputType> {
 
 async fn fetch_openrouter_models(client: &reqwest::Client) -> Vec<Model> {
     println!("Fetching models from OpenRouter API...");
-    let resp = match client.get("https://openrouter.ai/api/v1/models").send().await {
+    let resp = match client
+        .get("https://openrouter.ai/api/v1/models")
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Failed to fetch OpenRouter models: {}", e);
+            eprintln!("Failed to fetch OpenRouter models: {e}");
             return vec![];
         }
     };
     let data: OpenRouterResponse = match resp.json().await {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("Failed to parse OpenRouter response: {}", e);
+            eprintln!("Failed to parse OpenRouter response: {e}");
             return vec![];
         }
     };
@@ -252,13 +256,16 @@ async fn fetch_openrouter_models(client: &reqwest::Client) -> Vec<Model> {
             compat: None,
         });
     }
-    println!("Fetched {} tool-capable models from OpenRouter", models.len());
+    println!(
+        "Fetched {} tool-capable models from OpenRouter",
+        models.len()
+    );
     models
 }
 
 async fn fetch_ai_gateway_models(client: &reqwest::Client) -> Vec<Model> {
     println!("Fetching models from Vercel AI Gateway API...");
-    let url = format!("{}/models", AI_GATEWAY_MODELS_URL);
+    let url = format!("{AI_GATEWAY_MODELS_URL}/models");
     let Ok(resp) = client.get(&url).send().await else {
         eprintln!("Failed to fetch AI Gateway models");
         return vec![];
@@ -341,14 +348,14 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
     let resp = match client.get(MODELS_DEV_API).send().await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("Failed to fetch models.dev: {}", e);
+            eprintln!("Failed to fetch models.dev: {e}");
             return vec![];
         }
     };
     let data: ModelsDevData = match resp.json().await {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("Failed to parse models.dev response: {}", e);
+            eprintln!("Failed to parse models.dev response: {e}");
             return vec![];
         }
     };
@@ -376,7 +383,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 || id.starts_with("cohere.embed-v4")
                 || id.starts_with("twelvelabs.pegasus-1-2")
             {
-                id = format!("global.{}", id);
+                id = format!("global.{id}");
             }
             if id.starts_with("amazon.nova-lite")
                 || id.starts_with("amazon.nova-micro")
@@ -390,7 +397,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 || id.starts_with("meta.llama3-3")
                 || id.starts_with("meta.llama4")
             {
-                id = format!("us.{}", id);
+                id = format!("us.{id}");
             }
             let bedrock_model = Model {
                 id: id.clone(),
@@ -416,7 +423,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 || model_id.starts_with("anthropic.claude-opus-4-5")
             {
                 models.push(Model {
-                    id: format!("eu.{}", model_id),
+                    id: format!("eu.{model_id}"),
                     name: format!("{} (EU)", m.name.as_deref().unwrap_or(model_id)),
                     ..bedrock_model.clone()
                 });
@@ -690,12 +697,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             }
             let (api, base_url) = match m.provider.as_ref().and_then(|p| p.npm.as_deref()) {
                 Some("@ai-sdk/openai") => (Api::OpenAIResponses, "https://opencode.ai/zen/v1"),
-                Some("@ai-sdk/anthropic") => {
-                    (Api::AnthropicMessages, "https://opencode.ai/zen")
-                }
-                Some("@ai-sdk/google") => {
-                    (Api::GoogleGenerativeAi, "https://opencode.ai/zen/v1")
-                }
+                Some("@ai-sdk/anthropic") => (Api::AnthropicMessages, "https://opencode.ai/zen"),
+                Some("@ai-sdk/google") => (Api::GoogleGenerativeAi, "https://opencode.ai/zen/v1"),
                 _ => (Api::OpenAICompletions, "https://opencode.ai/zen/v1"),
             };
             models.push(Model {
@@ -738,8 +741,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             if m.status.as_deref() == Some("deprecated") {
                 continue;
             }
-            let needs_responses_api =
-                model_id.starts_with("gpt-5") || model_id.starts_with("oswe");
+            let needs_responses_api = model_id.starts_with("gpt-5") || model_id.starts_with("oswe");
             let api = if needs_responses_api {
                 Api::OpenAIResponses
             } else {
@@ -779,8 +781,16 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
 
     // MiniMax
     let minimax_configs = [
-        ("minimax", Provider::Minimax, "https://api.minimax.io/anthropic"),
-        ("minimax-cn", Provider::MinimaxCn, "https://api.minimaxi.com/anthropic"),
+        (
+            "minimax",
+            Provider::Minimax,
+            "https://api.minimax.io/anthropic",
+        ),
+        (
+            "minimax-cn",
+            Provider::MinimaxCn,
+            "https://api.minimaxi.com/anthropic",
+        ),
     ];
     for (key, provider, base_url) in minimax_configs {
         let prov = match key {
@@ -841,7 +851,10 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
         }
     }
 
-    println!("Loaded {} tool-capable models from models.dev", models.len());
+    println!(
+        "Loaded {} tool-capable models from models.dev",
+        models.len()
+    );
     models
 }
 
@@ -959,7 +972,7 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
     // Google Cloud Code Assist models (Gemini CLI)
     // Uses production endpoint, standard Gemini models only
     const CLOUD_CODE_ASSIST: &str = "https://cloudcode-pa.googleapis.com";
-    
+
     vec![
         Model {
             id: "gemini-2.5-pro".to_string(),
@@ -1038,7 +1051,7 @@ fn static_antigravity_models() -> Vec<Model> {
     // Antigravity models (Gemini 3, Claude, GPT-OSS via Google Cloud)
     // Uses sandbox endpoint and different OAuth credentials for access to additional models
     const ANTIGRAVITY: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
-    
+
     vec![
         Model {
             id: "gemini-3-pro-high".to_string(),
@@ -1143,7 +1156,7 @@ fn static_antigravity_models() -> Vec<Model> {
 
 fn static_vertex_models() -> Vec<Model> {
     const VERTEX: &str = "https://{location}-aiplatform.googleapis.com";
-    
+
     vec![
         Model {
             id: "gemini-3-pro-preview".to_string(),
@@ -1306,7 +1319,7 @@ fn static_kimi_coding_models() -> Vec<Model> {
     // Kimi For Coding models (Moonshot AI's Anthropic-compatible coding API)
     // Static fallback in case models.dev doesn't have them yet
     const KIMI_CODING_BASE_URL: &str = "https://api.kimi.com/coding";
-    
+
     vec![
         Model {
             id: "kimi-k2-thinking".to_string(),
@@ -1343,7 +1356,10 @@ fn static_kimi_coding_models() -> Vec<Model> {
 // Main Entry Point & File Generation
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-fn write_generated(all_models: &[Model], out_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn write_generated(
+    all_models: &[Model],
+    out_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Dedupe: group by provider, then by id (first wins = models.dev priority)
     let mut by_provider: HashMap<String, HashMap<String, Model>> = HashMap::new();
     for m in all_models {
@@ -1375,15 +1391,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     all.extend(ai_gateway);
 
     // Fix Claude Opus 4.5 cache pricing
-    if let Some(opus) = all.iter_mut().find(|m| {
-        m.provider == Provider::Anthropic && m.id == "claude-opus-4-5"
-    }) {
+    if let Some(opus) = all
+        .iter_mut()
+        .find(|m| m.provider == Provider::Anthropic && m.id == "claude-opus-4-5")
+    {
         opus.cost.cache_read = 0.5;
         opus.cost.cache_write = 6.25;
     }
 
     // Add missing OpenAI models (only if not already present)
-    if !all.iter().any(|m| m.provider == Provider::OpenAI && m.id == "gpt-5-chat-latest") {
+    if !all
+        .iter()
+        .any(|m| m.provider == Provider::OpenAI && m.id == "gpt-5-chat-latest")
+    {
         all.push(Model {
             id: "gpt-5-chat-latest".to_string(),
             name: "GPT-5 Chat Latest".to_string(),
@@ -1400,7 +1420,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    if !all.iter().any(|m| m.provider == Provider::OpenAI && m.id == "gpt-5.1-codex") {
+    if !all
+        .iter()
+        .any(|m| m.provider == Provider::OpenAI && m.id == "gpt-5.1-codex")
+    {
         all.push(Model {
             id: "gpt-5.1-codex".to_string(),
             name: "GPT-5.1 Codex".to_string(),
@@ -1417,7 +1440,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    if !all.iter().any(|m| m.provider == Provider::OpenAI && m.id == "gpt-5.1-codex-max") {
+    if !all
+        .iter()
+        .any(|m| m.provider == Provider::OpenAI && m.id == "gpt-5.1-codex-max")
+    {
         all.push(Model {
             id: "gpt-5.1-codex-max".to_string(),
             name: "GPT-5.1 Codex Max".to_string(),
@@ -1440,7 +1466,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     all.extend(static_codex_models());
 
     // Add missing Grok model (only if not already present)
-    if !all.iter().any(|m| m.provider == Provider::Xai && m.id == "grok-code-fast-1") {
+    if !all
+        .iter()
+        .any(|m| m.provider == Provider::Xai && m.id == "grok-code-fast-1")
+    {
         all.push(Model {
             id: "grok-code-fast-1".to_string(),
             name: "Grok Code Fast 1".to_string(),
@@ -1458,7 +1487,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Add missing OpenRouter model (only if not already present)
-    if !all.iter().any(|m| m.provider == Provider::Openrouter && m.id == "openrouter/auto") {
+    if !all
+        .iter()
+        .any(|m| m.provider == Provider::Openrouter && m.id == "openrouter/auto")
+    {
         all.push(Model {
             id: "openrouter/auto".to_string(),
             name: "OpenRouter: Auto Router".to_string(),
@@ -1486,7 +1518,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Add Kimi Coding models (fallback - only if not already present from models.dev)
     for model in static_kimi_coding_models() {
-        if !all.iter().any(|m| m.provider == Provider::KimiCoding && m.id == model.id) {
+        if !all
+            .iter()
+            .any(|m| m.provider == Provider::KimiCoding && m.id == model.id)
+        {
             all.push(model);
         }
     }
@@ -1512,8 +1547,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total = all.len();
     let reasoning = all.iter().filter(|m| m.reasoning).count();
     println!("\nModel Statistics:");
-    println!("  Total tool-capable models: {}", total);
-    println!("  Reasoning-capable models: {}", reasoning);
+    println!("  Total tool-capable models: {total}");
+    println!("  Reasoning-capable models: {reasoning}");
 
     let mut by_provider: HashMap<String, usize> = HashMap::new();
     for m in &all {

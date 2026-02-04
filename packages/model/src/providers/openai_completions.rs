@@ -89,7 +89,7 @@ impl crate::api_registry::ApiProvider for OpenAICompletionsProvider {
 
         if api_key.is_none() {
             let error_msg = format!("No API key for provider: {:?}", model.provider);
-            return make_error_stream(error_msg, model.id.clone(), model.provider.clone());
+            return make_error_stream(error_msg, model.id.clone(), model.provider);
         }
 
         let mut base = StreamOptions::default();
@@ -135,7 +135,7 @@ fn make_error_stream(
             error: AssistantMessage {
                 role: "assistant".to_string(),
                 api: crate::types::Api::OpenAICompletions,
-                provider: provider,
+                provider,
                 model: model_id,
                 usage: crate::types::Usage::default(),
                 stop_reason: StopReason::Error,
@@ -160,7 +160,7 @@ pub fn stream_openai_completions(
             role: "assistant".to_string(),
             content: vec![],
             api: crate::types::Api::OpenAICompletions,
-            provider: model.provider.clone(),
+            provider: model.provider,
             model: model.id.clone(),
             usage: crate::types::Usage {
                 input: 0,
@@ -237,9 +237,7 @@ async fn run_stream(
                         output.stop_reason = map_stop_reason(finish_reason);
                     }
 
-                    if let Err(e) = handle_delta(&choice.delta, &mut current_block, output).await {
-                        return Err(e);
-                    }
+                    handle_delta(&choice.delta, &mut current_block, output).await?
                 }
             }
             Err(e) => {
@@ -444,7 +442,7 @@ fn build_params(
         .messages(messages)
         .stream(true);
 
-    if compat.supports_usage_in_streaming != false {
+    if compat.supports_usage_in_streaming {
         builder = builder.stream_options(openai_rust::types::StreamOptions {
             include_usage: Some(true),
             include_obfuscation: None,
@@ -500,20 +498,18 @@ fn build_params(
     }
 
     if model.base_url.contains("openrouter.ai") {
-        if let Some(routing) = &model.compat {
-            if let crate::types::Compat::OpenAICompletions(compat_settings) = routing {
-                if let Some(router_routing) = &compat_settings.open_router_routing {
-                    if router_routing.only.is_some() || router_routing.order.is_some() {
-                        let mut extra = HashMap::new();
-                        extra.insert(
-                            "provider".to_string(),
-                            serde_json::json!({
-                                "only": router_routing.only,
-                                "order": router_routing.order
-                            }),
-                        );
-                        builder = builder.extra_params(extra);
-                    }
+        if let Some(crate::types::Compat::OpenAICompletions(compat_settings)) = &model.compat {
+            if let Some(router_routing) = &compat_settings.open_router_routing {
+                if router_routing.only.is_some() || router_routing.order.is_some() {
+                    let mut extra = HashMap::new();
+                    extra.insert(
+                        "provider".to_string(),
+                        serde_json::json!({
+                            "only": router_routing.only,
+                            "order": router_routing.order
+                        }),
+                    );
+                    builder = builder.extra_params(extra);
                 }
             }
         }
@@ -562,20 +558,20 @@ pub fn convert_messages(
                 crate::types::UserContent::Blocks(blocks) => {
                     let content_parts: Vec<ContentPart> = blocks
                         .iter()
-                        .filter_map(|block| match block {
-                            UserContentBlock::Text(text) => Some(ContentPart::Text {
+                        .filter(|block| match block {
+                            UserContentBlock::Image(_) => model.input.contains(&InputType::Image),
+                            _ => true,
+                        })
+                        .map(|block| match block {
+                            UserContentBlock::Text(text) => ContentPart::Text {
                                 text: sanitize_surrogates(&text.text),
-                            }),
-                            UserContentBlock::Image(img) => Some(ContentPart::ImageUrl {
+                            },
+                            UserContentBlock::Image(img) => ContentPart::ImageUrl {
                                 image_url: ImageUrl {
                                     url: format!("data:{};base64,{},", img.mime_type, img.data),
                                     detail: None,
                                 },
-                            }),
-                        })
-                        .filter(|part| match part {
-                            ContentPart::ImageUrl { .. } => model.input.contains(&InputType::Image),
-                            _ => true,
+                            },
                         })
                         .collect();
 
@@ -591,11 +587,7 @@ pub fn convert_messages(
                 }
             },
             Message::Assistant(assistant_msg) => {
-                let assistant_content = if compat.requires_assistant_after_tool_result {
-                    Content::Text("".to_string())
-                } else {
-                    Content::Text("".to_string())
-                };
+                let assistant_content = Content::Text("".to_string());
 
                 let text_blocks: Vec<&TextContent> = assistant_msg
                     .content
@@ -656,7 +648,7 @@ pub fn convert_messages(
                                 Content::Array(parts)
                             }
                             Content::Text(existing) => {
-                                Content::Text(format!("{}\n\n{}", thinking_text, existing))
+                                Content::Text(format!("{thinking_text}\n\n{existing}"))
                             }
                         }
                     } else {
@@ -1011,45 +1003,43 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
 fn get_compat(model: &Model) -> ResolvedCompat {
     let detected = detect_compat(model);
 
-    if let Some(compat) = &model.compat {
-        if let crate::types::Compat::OpenAICompletions(compat_settings) = compat {
-            return ResolvedCompat {
-                supports_store: compat_settings
-                    .supports_store
-                    .unwrap_or(detected.supports_store),
-                supports_developer_role: compat_settings
-                    .supports_developer_role
-                    .unwrap_or(detected.supports_developer_role),
-                supports_reasoning_effort: compat_settings
-                    .supports_reasoning_effort
-                    .unwrap_or(detected.supports_reasoning_effort),
-                supports_usage_in_streaming: compat_settings
-                    .supports_usage_in_streaming
-                    .unwrap_or(detected.supports_usage_in_streaming),
-                max_tokens_field: compat_settings
-                    .max_tokens_field
-                    .clone()
-                    .or(detected.max_tokens_field),
-                requires_tool_result_name: compat_settings
-                    .requires_tool_result_name
-                    .unwrap_or(detected.requires_tool_result_name),
-                requires_assistant_after_tool_result: compat_settings
-                    .requires_assistant_after_tool_result
-                    .unwrap_or(detected.requires_assistant_after_tool_result),
-                requires_thinking_as_text: compat_settings
-                    .requires_thinking_as_text
-                    .unwrap_or(detected.requires_thinking_as_text),
-                requires_mistral_tool_ids: compat_settings
-                    .requires_mistral_tool_ids
-                    .unwrap_or(detected.requires_mistral_tool_ids),
-                thinking_format: compat_settings
-                    .thinking_format
-                    .clone()
-                    .or(detected.thinking_format),
-                open_router_routing: compat_settings.open_router_routing.clone(),
-                vercel_gateway_routing: compat_settings.vercel_gateway_routing.clone(),
-            };
-        }
+    if let Some(crate::types::Compat::OpenAICompletions(compat_settings)) = &model.compat {
+        return ResolvedCompat {
+            supports_store: compat_settings
+                .supports_store
+                .unwrap_or(detected.supports_store),
+            supports_developer_role: compat_settings
+                .supports_developer_role
+                .unwrap_or(detected.supports_developer_role),
+            supports_reasoning_effort: compat_settings
+                .supports_reasoning_effort
+                .unwrap_or(detected.supports_reasoning_effort),
+            supports_usage_in_streaming: compat_settings
+                .supports_usage_in_streaming
+                .unwrap_or(detected.supports_usage_in_streaming),
+            max_tokens_field: compat_settings
+                .max_tokens_field
+                .clone()
+                .or(detected.max_tokens_field),
+            requires_tool_result_name: compat_settings
+                .requires_tool_result_name
+                .unwrap_or(detected.requires_tool_result_name),
+            requires_assistant_after_tool_result: compat_settings
+                .requires_assistant_after_tool_result
+                .unwrap_or(detected.requires_assistant_after_tool_result),
+            requires_thinking_as_text: compat_settings
+                .requires_thinking_as_text
+                .unwrap_or(detected.requires_thinking_as_text),
+            requires_mistral_tool_ids: compat_settings
+                .requires_mistral_tool_ids
+                .unwrap_or(detected.requires_mistral_tool_ids),
+            thinking_format: compat_settings
+                .thinking_format
+                .clone()
+                .or(detected.thinking_format),
+            open_router_routing: compat_settings.open_router_routing.clone(),
+            vercel_gateway_routing: compat_settings.vercel_gateway_routing.clone(),
+        };
     }
 
     detected

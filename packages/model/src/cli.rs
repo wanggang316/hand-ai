@@ -5,8 +5,7 @@
 use std::env;
 
 use crate::{
-    get_env_api_key_by_str, get_model, get_models, get_provider_keys,
-    get_providers, models, Compat,
+    Compat, get_env_api_key_by_str, get_model, get_models, get_provider_keys, get_providers, models,
 };
 
 /// Print help message.
@@ -45,8 +44,16 @@ fn list_providers() {
     for provider_key in provider_keys {
         let has_key = get_env_api_key_by_str(&provider_key).is_some();
         let status = if has_key { "✓" } else { "✗" };
-        println!("  {} {} {}", status, provider_key.chars().take(25).collect::<String>().pad_to_width(25),
-                 if has_key { "(configured)" } else { "" });
+        println!(
+            "  {} {} {}",
+            status,
+            provider_key
+                .chars()
+                .take(25)
+                .collect::<String>()
+                .pad_to_width(25),
+            if has_key { "(configured)" } else { "" }
+        );
     }
 
     println!("\n✓ = API key configured");
@@ -57,21 +64,32 @@ fn list_providers() {
 fn list_models(provider: Option<&str>) {
     match provider {
         Some(p) => {
-            println!("Models for provider '{}':\n", p);
+            println!("Models for provider '{p}':\n");
             let models = get_models(p);
             if models.is_empty() {
-                println!("No models found for provider '{}'.", p);
+                println!("No models found for provider '{p}'.");
                 return;
             }
 
             for model in models {
-                println!("  {} {}",
-                         model.id.chars().take(40).collect::<String>().pad_to_width(40),
-                         model.name);
-                println!("    API: {:?}, Context: {}, Max tokens: {}",
-                         model.api, model.context_window, model.max_tokens);
-                println!("    Cost: ${:.4}/1M input, ${:.4}/1M output",
-                         model.cost.input, model.cost.output);
+                println!(
+                    "  {} {}",
+                    model
+                        .id
+                        .chars()
+                        .take(40)
+                        .collect::<String>()
+                        .pad_to_width(40),
+                    model.name
+                );
+                println!(
+                    "    API: {:?}, Context: {}, Max tokens: {}",
+                    model.api, model.context_window, model.max_tokens
+                );
+                println!(
+                    "    Cost: ${:.4}/1M input, ${:.4}/1M output",
+                    model.cost.input, model.cost.output
+                );
                 println!();
             }
         }
@@ -84,14 +102,21 @@ fn list_models(provider: Option<&str>) {
 
                     for provider_key in provider_keys {
                         if let Some(provider_models) = registry.get(provider_key) {
-                            println!("{}:", provider_key);
+                            println!("{provider_key}:");
                             let mut model_ids: Vec<_> = provider_models.keys().collect();
                             model_ids.sort();
                             for model_id in model_ids {
                                 if let Some(model) = provider_models.get(model_id) {
-                                    println!("  {} {}",
-                                             model.id.chars().take(40).collect::<String>().pad_to_width(40),
-                                             model.name);
+                                    println!(
+                                        "  {} {}",
+                                        model
+                                            .id
+                                            .chars()
+                                            .take(40)
+                                            .collect::<String>()
+                                            .pad_to_width(40),
+                                        model.name
+                                    );
                                 }
                             }
                             println!();
@@ -99,7 +124,7 @@ fn list_models(provider: Option<&str>) {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error loading models: {}", e);
+                    eprintln!("Error loading models: {e}");
                     std::process::exit(1);
                 }
             }
@@ -131,7 +156,7 @@ fn check_keys() {
                 if key == "<authenticated>" {
                     ("✓", "Authenticated via credentials".to_string())
                 } else if key.len() > 20 {
-                    ("✓", format!("{}...{}", &key[..8], &key[key.len()-4..]))
+                    ("✓", format!("{}...{}", &key[..8], &key[key.len() - 4..]))
                 } else {
                     ("✓", "Configured".to_string())
                 }
@@ -139,13 +164,19 @@ fn check_keys() {
             None => ("✗", "Not configured".to_string()),
         };
 
-        println!("  {} {} {}",
-                 status,
-                 provider_key.chars().take(25).collect::<String>().pad_to_width(25),
-                 details);
+        println!(
+            "  {} {} {}",
+            status,
+            provider_key
+                .chars()
+                .take(25)
+                .collect::<String>()
+                .pad_to_width(25),
+            details
+        );
     }
 
-    println!("\n{}/{} providers configured", configured_count, total_count);
+    println!("\n{configured_count}/{total_count} providers configured");
 }
 
 /// Show details for a specific model.
@@ -172,10 +203,10 @@ fn model_info(provider: &str, model_id: &str) {
                 println!("\nCompatibility:");
                 match compat {
                     Compat::OpenAICompletions(oai_compat) => {
-                        println!("  OpenAI Completions: {:?}", oai_compat);
+                        println!("  OpenAI Completions: {oai_compat:?}");
                     }
                     Compat::OpenAIResponses(oai_resp_compat) => {
-                        println!("  OpenAI Responses: {:?}", oai_resp_compat);
+                        println!("  OpenAI Responses: {oai_resp_compat:?}");
                     }
                 }
             }
@@ -183,13 +214,13 @@ fn model_info(provider: &str, model_id: &str) {
             if let Some(headers) = &model.headers {
                 println!("\nCustom Headers:");
                 for (key, value) in headers {
-                    println!("  {}: {}", key, value);
+                    println!("  {key}: {value}");
                 }
             }
         }
         None => {
-            eprintln!("Model not found: {} / {}", provider, model_id);
-            eprintln!("Use 'list-models {}' to see available models.", provider);
+            eprintln!("Model not found: {provider} / {model_id}");
+            eprintln!("Use 'list-models {provider}' to see available models.");
             std::process::exit(1);
         }
     }
@@ -232,7 +263,7 @@ pub fn main() {
         }
         Some("help") | Some("--help") | Some("-h") | None => print_help(),
         Some(cmd) => {
-            eprintln!("Unknown command: {}", cmd);
+            eprintln!("Unknown command: {cmd}");
             eprintln!("Use 'help' for usage information.");
             std::process::exit(1);
         }

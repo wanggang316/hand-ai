@@ -8,10 +8,8 @@ use model::models::{
     get_provider_keys, get_providers, models, models_are_equal, supports_xhigh,
 };
 use model::types::{
-    Api, Compat, Cost, InputType, Provider, Model, OpenAICompletionsCompat, Usage,
-    UsageCost,
+    Api, Compat, Cost, InputType, Model, OpenAICompletionsCompat, Provider, Usage, UsageCost,
 };
-
 
 // =============================================================================
 // Model Registry Tests
@@ -40,7 +38,10 @@ fn test_provider_keys_returns_sorted_list() {
 #[test]
 fn test_get_providers_returns_valid_enums() {
     let providers = get_providers();
-    assert!(!providers.is_empty(), "should have at least one known provider");
+    assert!(
+        !providers.is_empty(),
+        "should have at least one known provider"
+    );
 
     // All returned providers should be valid Provider variants
     for provider in &providers {
@@ -109,7 +110,10 @@ fn test_get_models_by_provider_enum() {
 #[test]
 fn test_get_models_returns_empty_for_unknown_provider() {
     let models = get_models("unknown-provider-xyz");
-    assert!(models.is_empty(), "should return empty vec for unknown provider");
+    assert!(
+        models.is_empty(),
+        "should return empty vec for unknown provider"
+    );
 }
 
 // =============================================================================
@@ -133,7 +137,10 @@ fn test_calculate_cost_basic() {
     // input: 1.0/1M * 1M = 1.0
     // output: 2.0/1M * 1M = 2.0
     assert!((cost.input - 1.0).abs() < 0.001, "input cost should be 1.0");
-    assert!((cost.output - 2.0).abs() < 0.001, "output cost should be 2.0");
+    assert!(
+        (cost.output - 2.0).abs() < 0.001,
+        "output cost should be 2.0"
+    );
     assert!((cost.total - 3.0).abs() < 0.001, "total cost should be 3.0");
 }
 
@@ -288,11 +295,7 @@ fn test_provider_roundtrip_all_variants() {
     for provider in providers {
         let key = provider.as_str();
         let parsed = Provider::from_str(key);
-        assert!(
-            parsed.is_some(),
-            "should parse {} back to Provider",
-            key
-        );
+        assert!(parsed.is_some(), "should parse {key} back to Provider");
         assert_eq!(parsed.unwrap(), provider);
     }
 }
@@ -316,24 +319,19 @@ fn test_all_models_have_required_fields() {
         for (model_id, model) in models_map {
             assert!(
                 !model.id.is_empty(),
-                "model {} under {} should have an id",
-                model_id,
-                provider_key
+                "model {model_id} under {provider_key} should have an id"
             );
             assert!(
                 !model.name.is_empty(),
-                "model {} should have a name",
-                model_id
+                "model {model_id} should have a name"
             );
             assert!(
                 model.context_window > 0,
-                "model {} should have a positive context_window",
-                model_id
+                "model {model_id} should have a positive context_window"
             );
             assert!(
                 model.max_tokens > 0,
-                "model {} should have a positive max_tokens",
-                model_id
+                "model {model_id} should have a positive max_tokens"
             );
             // base_url is optional for some models (e.g., Azure OpenAI)
         }
@@ -348,24 +346,19 @@ fn test_model_costs_are_non_negative() {
         for (model_id, model) in models_map {
             assert!(
                 model.cost.input >= 0.0,
-                "model {} under {} should have non-negative input cost",
-                model_id,
-                provider_key
+                "model {model_id} under {provider_key} should have non-negative input cost"
             );
             assert!(
                 model.cost.output >= 0.0,
-                "model {} should have non-negative output cost",
-                model_id
+                "model {model_id} should have non-negative output cost"
             );
             assert!(
                 model.cost.cache_read >= 0.0,
-                "model {} should have non-negative cache_read cost",
-                model_id
+                "model {model_id} should have non-negative cache_read cost"
             );
             assert!(
                 model.cost.cache_write >= 0.0,
-                "model {} should have non-negative cache_write cost",
-                model_id
+                "model {model_id} should have non-negative cache_write cost"
             );
         }
     }
@@ -375,10 +368,13 @@ fn test_model_costs_are_non_negative() {
 fn test_model_input_types_are_valid() {
     let registry = models().expect("models should parse");
 
-    for (_provider_key, models_map) in &registry {
-        for (_model_id, model) in models_map {
+    for models_map in registry.values() {
+        for model in models_map.values() {
             // Input should not be empty
-            assert!(!model.input.is_empty(), "model should have at least one input type");
+            assert!(
+                !model.input.is_empty(),
+                "model should have at least one input type"
+            );
 
             // All input types should be valid (Text or Image)
             for input_type in &model.input {
@@ -398,7 +394,7 @@ fn test_model_input_types_are_valid() {
 fn test_api_variants_exist() {
     // This test ensures all expected API variants compile and exist
     // This test ensures all expected API variants compile and exist
-    let _apis = vec![
+    let _apis = [
         Api::OpenAICompletions,
         Api::OpenAIResponses,
         Api::AzureOpenAiResponses,
@@ -476,18 +472,13 @@ fn test_compat_serialization() {
 #[test]
 fn test_common_models_exist() {
     // Test that some common models exist in the registry
-    let common_checks = vec![
-        ("openai", "gpt-4o"),
-        ("openai", "gpt-4o-mini"),
-    ];
+    let common_checks = vec![("openai", "gpt-4o"), ("openai", "gpt-4o-mini")];
 
     for (provider, model_id) in common_checks {
         let model = get_model(provider, model_id);
         assert!(
             model.is_some(),
-            "should find common model {} under {}",
-            model_id,
-            provider
+            "should find common model {model_id} under {provider}"
         );
     }
 }
@@ -504,8 +495,7 @@ fn test_model_provider_consistency() {
             let model_provider_key = model.provider.as_str();
             assert_eq!(
                 model_provider_key, provider_key,
-                "model {} provider mismatch: enum says {}, but stored under {}",
-                model_id, model_provider_key, provider_key
+                "model {model_id} provider mismatch: enum says {model_provider_key}, but stored under {provider_key}"
             );
         }
     }
@@ -515,8 +505,8 @@ fn test_model_provider_consistency() {
 fn test_reasoning_flag_consistency() {
     let registry = models().expect("models should parse");
 
-    for (_provider_key, models_map) in &registry {
-        for (_model_id, model) in models_map {
+    for models_map in registry.values() {
+        for model in models_map.values() {
             // Models explicitly marked with "-non-reasoning" should have reasoning=false
             if model.id.to_lowercase().contains("non-reasoning") {
                 assert!(

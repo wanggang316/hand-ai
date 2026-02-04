@@ -15,11 +15,11 @@ static VERTEX_ADC_CACHE: Mutex<Option<bool>> = Mutex::new(None);
 /// Check if Vertex ADC credentials exist.
 fn has_vertex_adc_credentials() -> bool {
     let mut cache = VERTEX_ADC_CACHE.lock().unwrap();
-    
+
     if let Some(cached) = *cache {
         return cached;
     }
-    
+
     let result = check_vertex_adc_credentials();
     *cache = Some(result);
     result
@@ -30,13 +30,13 @@ fn check_vertex_adc_credentials() -> bool {
     if let Ok(gac_path) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
         return PathBuf::from(gac_path).exists();
     }
-    
+
     // Fall back to default ADC path
     if let Some(home_dir) = dirs::home_dir() {
         let adc_path = home_dir.join(".config/gcloud/application_default_credentials.json");
         return adc_path.exists();
     }
-    
+
     false
 }
 
@@ -45,12 +45,10 @@ fn check_vertex_adc_credentials() -> bool {
 /// Will not return API keys for providers that require OAuth tokens.
 pub fn get_env_api_key(provider: &Provider) -> Option<String> {
     let key = match provider {
-        Provider::GitHubCopilot => {
-            env::var("COPILOT_GITHUB_TOKEN")
-                .or_else(|_| env::var("GH_TOKEN"))
-                .or_else(|_| env::var("GITHUB_TOKEN"))
-                .ok()
-        }
+        Provider::GitHubCopilot => env::var("COPILOT_GITHUB_TOKEN")
+            .or_else(|_| env::var("GH_TOKEN"))
+            .or_else(|_| env::var("GITHUB_TOKEN"))
+            .ok(),
         Provider::Anthropic => {
             // ANTHROPIC_OAUTH_TOKEN takes precedence over ANTHROPIC_API_KEY
             env::var("ANTHROPIC_OAUTH_TOKEN")
@@ -61,10 +59,10 @@ pub fn get_env_api_key(provider: &Provider) -> Option<String> {
             // Vertex AI uses Application Default Credentials, not API keys.
             // Auth is configured via `gcloud auth application-default login`.
             let has_credentials = has_vertex_adc_credentials();
-            let has_project = env::var("GOOGLE_CLOUD_PROJECT").is_ok() 
-                || env::var("GCLOUD_PROJECT").is_ok();
+            let has_project =
+                env::var("GOOGLE_CLOUD_PROJECT").is_ok() || env::var("GCLOUD_PROJECT").is_ok();
             let has_location = env::var("GOOGLE_CLOUD_LOCATION").is_ok();
-            
+
             if has_credentials && has_project && has_location {
                 Some("<authenticated>".to_string())
             } else {
@@ -80,7 +78,8 @@ pub fn get_env_api_key(provider: &Provider) -> Option<String> {
             // 5. AWS_CONTAINER_CREDENTIALS_FULL_URI - ECS task roles (full URI)
             // 6. AWS_WEB_IDENTITY_TOKEN_FILE - IRSA (IAM Roles for Service Accounts)
             if env::var("AWS_PROFILE").is_ok()
-                || (env::var("AWS_ACCESS_KEY_ID").is_ok() && env::var("AWS_SECRET_ACCESS_KEY").is_ok())
+                || (env::var("AWS_ACCESS_KEY_ID").is_ok()
+                    && env::var("AWS_SECRET_ACCESS_KEY").is_ok())
                 || env::var("AWS_BEARER_TOKEN_BEDROCK").is_ok()
                 || env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_ok()
                 || env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_ok()
@@ -113,13 +112,14 @@ pub fn get_env_api_key(provider: &Provider) -> Option<String> {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-            
+
             let provider_key = provider.as_str();
-            env_map.get(provider_key)
+            env_map
+                .get(provider_key)
                 .and_then(|var_name| env::var(var_name).ok())
         }
     };
-    
+
     key.filter(|s| !s.is_empty())
 }
 
@@ -129,7 +129,7 @@ pub fn get_env_api_key_by_str(provider: &str) -> Option<String> {
     if let Some(provider) = Provider::from_str(provider) {
         return get_env_api_key(&provider);
     }
-    
+
     // Fallback to direct env var lookup
     let env_map: HashMap<String, String> = [
         ("github-copilot", "COPILOT_GITHUB_TOKEN"),
@@ -153,8 +153,9 @@ pub fn get_env_api_key_by_str(provider: &str) -> Option<String> {
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
-    
-    env_map.get(provider)
+
+    env_map
+        .get(provider)
         .and_then(|var_name| env::var(var_name).ok())
         .filter(|s| !s.is_empty())
 }

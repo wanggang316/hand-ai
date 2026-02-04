@@ -32,10 +32,7 @@ pub fn get_model(provider: &str, model_id: &str) -> Option<Model> {
 
 /// Get a model by provider enum and model id.
 #[inline]
-pub fn get_model_by_provider(
-    provider: crate::types::Provider,
-    model_id: &str,
-) -> Option<Model> {
+pub fn get_model_by_provider(provider: crate::types::Provider, model_id: &str) -> Option<Model> {
     get_model(provider.as_str(), model_id)
 }
 
