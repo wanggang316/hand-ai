@@ -363,6 +363,85 @@ impl SimpleStreamOptions {
     pub fn max_retry_delay_ms(&self) -> Option<u64> {
         self.base.max_retry_delay_ms
     }
+
+    /// Build base stream options with defaults applied.
+    ///
+    /// If max_tokens is not specified, defaults to min(model.max_tokens, 32000).
+    pub fn build_base_options(&self, model: &Model, api_key: Option<String>) -> StreamOptions {
+        StreamOptions {
+            temperature: self.base.temperature,
+            max_tokens: self.base.max_tokens.or_else(|| {
+                let default_max = model.max_tokens.min(32000) as u32;
+                Some(default_max)
+            }),
+            api_key: api_key.or_else(|| self.base.api_key.clone()),
+            session_id: self.base.session_id.clone(),
+            headers: self.base.headers.clone(),
+            max_retry_delay_ms: self.base.max_retry_delay_ms,
+        }
+    }
+
+    /// Clamp thinking level to exclude "xhigh".
+    pub fn clamp_reasoning(&self) -> Option<ThinkingLevel> {
+        self.reasoning.map(|r| match r {
+            ThinkingLevel::Xhigh => ThinkingLevel::High,
+            _ => r,
+        })
+    }
+
+    /// Adjust max_tokens for thinking/reasoning models.
+    ///
+    /// Returns the adjusted max_tokens and thinking budget.
+    pub fn adjust_max_tokens_for_thinking(
+        &self,
+        base_max_tokens: u32,
+        model_max_tokens: u64,
+    ) -> (u32, u32) {
+        if self.reasoning.is_none() {
+            return (base_max_tokens, 0);
+        }
+
+        let level = self.clamp_reasoning().unwrap_or(ThinkingLevel::High);
+
+        // Default budgets for each thinking level
+        let default_budgets = ThinkingBudgets {
+            minimal: Some(1024),
+            low: Some(2048),
+            medium: Some(8192),
+            high: Some(16384),
+        };
+
+        // Merge with custom budgets if provided
+        let budgets = self
+            .thinking_budgets
+            .as_ref()
+            .map(|custom| ThinkingBudgets {
+                minimal: custom.minimal.or(default_budgets.minimal),
+                low: custom.low.or(default_budgets.low),
+                medium: custom.medium.or(default_budgets.medium),
+                high: custom.high.or(default_budgets.high),
+            })
+            .unwrap_or(default_budgets);
+
+        let thinking_budget = match level {
+            ThinkingLevel::Minimal => budgets.minimal.unwrap_or(1024),
+            ThinkingLevel::Low => budgets.low.unwrap_or(2048),
+            ThinkingLevel::Medium => budgets.medium.unwrap_or(8192),
+            ThinkingLevel::High | ThinkingLevel::Xhigh => budgets.high.unwrap_or(16384),
+        };
+
+        const MIN_OUTPUT_TOKENS: u32 = 1024;
+
+        let max_tokens = (base_max_tokens + thinking_budget).min(model_max_tokens as u32);
+
+        let thinking_budget = if max_tokens <= thinking_budget {
+            max_tokens.saturating_sub(MIN_OUTPUT_TOKENS)
+        } else {
+            thinking_budget
+        };
+
+        (max_tokens, thinking_budget)
+    }
 }
 
 /// Text content block.
