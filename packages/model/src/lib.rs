@@ -33,7 +33,7 @@ pub use api_registry::{
 };
 
 // Re-export from client
-pub use client::Client;
+pub use client::{Client, ClientError};
 
 // Re-export from env_api_keys
 pub use env_api_keys::{clear_vertex_adc_cache, get_env_api_key, get_env_api_key_by_str};
