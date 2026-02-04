@@ -4,8 +4,8 @@
 //! AI providers (OpenAI, Anthropic, Google, etc.) through a common API.
 
 pub mod api_registry;
-pub mod client;
 pub mod cli;
+pub mod client;
 pub mod env_api_keys;
 pub mod models;
 pub mod providers;
@@ -15,11 +15,10 @@ pub mod types;
 pub use types::{
     Api, AssistantContentBlock, AssistantContentBlock as AssistantContent, AssistantMessage,
     AssistantMessageEvent, Compat, Context, Cost, ImageContent, InputType, Message, Model,
-    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting,
-    ProviderStreamOptions, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
-    ThinkingBudgets, ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolResultContent,
-    ToolResultMessage, Usage, UsageCost, UserContent, UserContentBlock, UserMessage,
-    VercelGatewayRouting,
+    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting, ProviderStreamOptions,
+    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingBudgets, ThinkingContent,
+    ThinkingLevel, Tool, ToolCall, ToolResultContent, ToolResultMessage, Usage, UsageCost,
+    UserContent, UserContentBlock, UserMessage, VercelGatewayRouting,
 };
 
 // Re-export from models module
@@ -29,7 +28,9 @@ pub use models::{
 };
 
 // Re-export from api_registry
-pub use api_registry::{ApiProvider, ApiProviderRegistry, BoxedApiProvider, AssistantMessageEventStream};
+pub use api_registry::{
+    ApiProvider, ApiProviderRegistry, AssistantMessageEventStream, BoxedApiProvider,
+};
 
 // Re-export from client
 pub use client::Client;
@@ -39,7 +40,6 @@ pub use env_api_keys::{clear_vertex_adc_cache, get_env_api_key, get_env_api_key_
 
 // Re-export from providers
 pub use providers::{
-    stream_openai_completions,
-    OpenAICompletionsOptions, normalize_mistral_tool_id, convert_messages,
-    ResolvedCompat, OpenAICompletionsProvider,
+    OpenAICompletionsOptions, OpenAICompletionsProvider, ResolvedCompat, convert_messages,
+    normalize_mistral_tool_id, stream_openai_completions,
 };

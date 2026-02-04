@@ -1,6 +1,6 @@
 //! AI client for streaming completions.
 
-use crate::api_registry::{ApiProvider, ApiProviderRegistry, AssistantMessageEventStream};
+use crate::api_registry::{ApiProviderRegistry, AssistantMessageEventStream};
 use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, Model, ProviderStreamOptions,
     SimpleStreamOptions, StopReason,
@@ -11,26 +11,20 @@ use std::sync::Arc;
 /// AI client that manages provider registry and streaming operations.
 #[derive(Clone)]
 pub struct Client {
-    registry: Arc<ApiProviderRegistry>,
+    pub registry: Arc<ApiProviderRegistry>,
 }
 
 impl Client {
-    /// Create a new client with an empty registry.
+    /// Create a new client with all built-in providers registered.
     pub fn new() -> Self {
-        Self {
+        let client = Self {
             registry: Arc::new(ApiProviderRegistry::new()),
-        }
-    }
-
-    /// Create a new client with built-in providers registered.
-    pub fn with_builtin_providers() -> Self {
-        let client = Self::new();
+        };
         client.register_builtin_providers();
         client
     }
 
-    /// Register all built-in API providers.
-    pub fn register_builtin_providers(&self) {
+    fn register_builtin_providers(&self) {
         use crate::providers::openai_completions::OpenAICompletionsProvider;
 
         self.registry.register(
@@ -38,16 +32,6 @@ impl Client {
             Box::new(OpenAICompletionsProvider::new()),
             Some("builtin".to_string()),
         );
-    }
-
-    /// Register a custom API provider.
-    pub fn register_provider(
-        &self,
-        api: crate::types::Api,
-        provider: Box<dyn ApiProvider + Send + Sync>,
-        source_id: Option<String>,
-    ) {
-        self.registry.register(api, provider, source_id);
     }
 
     /// Stream a response from the model.
@@ -137,11 +121,6 @@ impl Client {
 
         final_message.unwrap_or_else(|| make_error_message(model, "Stream ended without result"))
     }
-
-    /// Get the underlying registry.
-    pub fn registry(&self) -> &ApiProviderRegistry {
-        &self.registry
-    }
 }
 
 impl Default for Client {
@@ -154,10 +133,7 @@ impl Default for Client {
 // Helper functions
 // =============================================================================
 
-fn make_error_stream(
-    error_msg: String,
-    model: Model,
-) -> AssistantMessageEventStream<'static> {
+fn make_error_stream(error_msg: String, model: Model) -> AssistantMessageEventStream<'static> {
     Box::pin(async_stream::stream! {
         yield AssistantMessageEvent::Error {
             reason: StopReason::Error,
