@@ -12,6 +12,10 @@ use hand_agent::types::{AgentContext, AgentEvent, AgentLoopConfig, AgentTool};
 use hand_agent::{agent_loop, AgentEventSink};
 use model::{Message, SimpleStreamOptions};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+type EventListener = Arc<dyn Fn(AgentSessionEvent) + Send + Sync>;
+type EventListeners = Arc<Mutex<Vec<EventListener>>>;
 
 /// Events emitted by the agent session.
 #[derive(Debug, Clone)]
@@ -50,7 +54,7 @@ pub struct AgentSession {
     context: AgentContext,
     tools: Vec<AgentTool>,
     client: model::Client,
-    event_listeners: Vec<Box<dyn Fn(AgentSessionEvent) + Send + Sync>>,
+    event_listeners: EventListeners,
 }
 
 impl AgentSession {
@@ -101,7 +105,7 @@ impl AgentSession {
             context,
             tools,
             client,
-            event_listeners: Vec::new(),
+            event_listeners: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -129,13 +133,16 @@ impl AgentSession {
             context,
             tools,
             client: model::Client::new(),
-            event_listeners: Vec::new(),
+            event_listeners: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// Subscribe to session events.
     pub fn subscribe(&mut self, listener: impl Fn(AgentSessionEvent) + Send + Sync + 'static) {
-        self.event_listeners.push(Box::new(listener));
+        self.event_listeners
+            .lock()
+            .unwrap()
+            .push(Arc::new(listener));
     }
 
     /// Send a user message and run the agent loop.
@@ -160,9 +167,7 @@ impl AgentSession {
         };
 
         // Create event sink for the agent loop
-        let emit: AgentEventSink = Box::new(|_event: AgentEvent| {
-            // Events are handled after the loop completes
-        });
+        let emit = self.build_event_sink();
 
         let result = agent_loop::run_agent_loop(
             prompts,
@@ -269,7 +274,19 @@ impl AgentSession {
     }
 
     fn emit(&self, event: AgentSessionEvent) {
-        for listener in &self.event_listeners {
+        Self::emit_to_listeners(&self.event_listeners, event);
+    }
+
+    fn build_event_sink(&self) -> AgentEventSink {
+        let listeners = Arc::clone(&self.event_listeners);
+        Box::new(move |event: AgentEvent| {
+            Self::emit_to_listeners(&listeners, AgentSessionEvent::Agent(event));
+        })
+    }
+
+    fn emit_to_listeners(listeners: &EventListeners, event: AgentSessionEvent) {
+        let listeners = listeners.lock().unwrap().clone();
+        for listener in listeners {
             listener(event.clone());
         }
     }
@@ -278,6 +295,7 @@ impl AgentSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn test_model() -> model::Model {
         model::Model {
@@ -321,5 +339,26 @@ mod tests {
         new_model.id = "new-model".into();
         session.set_model(new_model);
         assert_eq!(session.model().id, "new-model");
+    }
+
+    #[test]
+    fn test_event_sink_forwards_agent_events_to_subscribers() {
+        let mut session = AgentSession::in_memory(test_model(), vec![]);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = Arc::clone(&events);
+
+        session.subscribe(move |event| {
+            captured_events.lock().unwrap().push(event);
+        });
+
+        let emit = session.build_event_sink();
+        emit(AgentEvent::AgentStart);
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AgentSessionEvent::Agent(AgentEvent::AgentStart) => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }
