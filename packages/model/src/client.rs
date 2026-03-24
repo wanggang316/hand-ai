@@ -56,11 +56,25 @@ impl Client {
     }
 
     fn register_builtin_providers(&self) {
+        use crate::providers::anthropic_messages::AnthropicMessagesProvider;
+        use crate::providers::google_generative_ai::GoogleGenerativeAiProvider;
         use crate::providers::openai_completions::OpenAICompletionsProvider;
+
+        self.registry.register(
+            crate::types::Api::AnthropicMessages,
+            Box::new(AnthropicMessagesProvider::new()),
+            Some("builtin".to_string()),
+        );
 
         self.registry.register(
             crate::types::Api::OpenAICompletions,
             Box::new(OpenAICompletionsProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        self.registry.register(
+            crate::types::Api::GoogleGenerativeAi,
+            Box::new(GoogleGenerativeAiProvider::new()),
             Some("builtin".to_string()),
         );
     }
