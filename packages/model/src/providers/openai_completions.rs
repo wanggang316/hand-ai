@@ -273,8 +273,8 @@ async fn handle_delta(
             }
             Content::Array(parts) => {
                 for part in parts {
-                    if let ContentPart::Text { text } = part {
-                        if !text.is_empty() {
+                    if let ContentPart::Text { text } = part
+                        && !text.is_empty() {
                             if !matches!(current_block, Some(CurrentBlock::Text(_))) {
                                 finish_current_block(current_block, output).await;
                                 *current_block =
@@ -289,7 +289,6 @@ async fn handle_delta(
                                 text_block.text.push_str(text);
                             }
                         }
-                    }
                 }
             }
             _ => {}
@@ -297,8 +296,8 @@ async fn handle_delta(
     }
 
     // Handle reasoning/thinking
-    if let Some(reasoning) = &delta.reasoning {
-        if !reasoning.is_empty() {
+    if let Some(reasoning) = &delta.reasoning
+        && !reasoning.is_empty() {
             if !matches!(current_block, Some(CurrentBlock::Thinking(_))) {
                 finish_current_block(current_block, output).await;
                 let thinking = ThinkingContent::new(reasoning);
@@ -312,7 +311,6 @@ async fn handle_delta(
                 thinking_block.thinking.push_str(reasoning);
             }
         }
-    }
 
     // Handle tool calls
     if let Some(tool_calls) = &delta.tool_calls {
@@ -331,8 +329,8 @@ async fn handle_delta(
                 output.content.push(AssistantContentBlock::ToolCall(tc));
             }
 
-            if let Some(CurrentBlock::ToolCall(tc, partial_args)) = current_block {
-                if let Some(function) = &tool_call.function {
+            if let Some(CurrentBlock::ToolCall(tc, partial_args)) = current_block
+                && let Some(function) = &tool_call.function {
                     if let Some(name) = &function.name {
                         tc.name = name.clone();
                     }
@@ -340,7 +338,6 @@ async fn handle_delta(
                         partial_args.push_str(args);
                     }
                 }
-            }
         }
     }
 
@@ -497,10 +494,10 @@ fn build_params(
         builder = builder.reasoning_effort(options.reasoning_effort.unwrap());
     }
 
-    if model.base_url.contains("openrouter.ai") {
-        if let Some(crate::types::Compat::OpenAICompletions(compat_settings)) = &model.compat {
-            if let Some(router_routing) = &compat_settings.open_router_routing {
-                if router_routing.only.is_some() || router_routing.order.is_some() {
+    if model.base_url.contains("openrouter.ai")
+        && let Some(crate::types::Compat::OpenAICompletions(compat_settings)) = &model.compat
+            && let Some(router_routing) = &compat_settings.open_router_routing
+                && (router_routing.only.is_some() || router_routing.order.is_some()) {
                     let mut extra = HashMap::new();
                     extra.insert(
                         "provider".to_string(),
@@ -511,9 +508,6 @@ fn build_params(
                     );
                     builder = builder.extra_params(extra);
                 }
-            }
-        }
-    }
 
     builder.build().map_err(|e| e.to_string())
 }

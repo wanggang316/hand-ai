@@ -561,9 +561,14 @@ pub enum UserContentBlock {
 /// A message from the user.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserMessage {
+    #[serde(skip, default = "default_user_role")]
     pub role: String,
     pub content: UserContent,
     pub timestamp: u64,
+}
+
+fn default_user_role() -> String {
+    "user".to_string()
 }
 
 impl UserMessage {
@@ -596,6 +601,7 @@ pub enum AssistantContentBlock {
 /// A message from the assistant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(skip, default = "default_assistant_role")]
     pub role: String,
     pub content: Vec<AssistantContentBlock>,
     pub api: Api,
@@ -609,6 +615,10 @@ pub struct AssistantMessage {
     pub timestamp: u64,
 }
 
+fn default_assistant_role() -> String {
+    "assistant".to_string()
+}
+
 /// Tool result content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -620,6 +630,7 @@ pub enum ToolResultContent {
 /// A tool result message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResultMessage {
+    #[serde(skip, default = "default_tool_result_role")]
     pub role: String,
     #[serde(rename = "toolCallId")]
     pub tool_call_id: String,
@@ -631,6 +642,10 @@ pub struct ToolResultMessage {
     #[serde(rename = "isError")]
     pub is_error: bool,
     pub timestamp: u64,
+}
+
+fn default_tool_result_role() -> String {
+    "toolResult".to_string()
 }
 
 impl ToolResultMessage {
