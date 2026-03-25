@@ -501,8 +501,10 @@ fn handle_slash_command(
             if args.is_empty() {
                 println!("Usage: /thinking <off|minimal|low|medium|high|xhigh>");
             } else if let Some(level) = model_resolver::parse_thinking_level(args) {
+                let mut opts = session.stream_options().clone();
+                opts.reasoning = Some(level);
+                session.set_stream_options(opts);
                 println!("Thinking level set to: {:?}", level);
-                // Note: would need to update stream_options on the session
             } else {
                 println!(
                     "Invalid thinking level: {}. Use: off, minimal, low, medium, high, xhigh",

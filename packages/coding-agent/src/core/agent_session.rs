@@ -215,17 +215,21 @@ impl AgentSession {
         let file_ops = compaction::extract_file_operations(&to_compact);
         let summary_prompt = compaction::build_compaction_prompt(&to_compact, &file_ops);
 
-        // For now, use the compaction prompt as the summary
-        // In production, this would call the LLM to generate a summary
-        let summary = format!(
-            "[Compacted {} messages. Files read: {}. Files edited: {}.]",
-            to_compact.len(),
-            file_ops.read.join(", "),
-            file_ops.edited.join(", "),
-        );
+        // Call LLM to generate a compaction summary
+        let summary = match self.generate_compaction_summary(&summary_prompt).await {
+            Ok(s) => s,
+            Err(_) => {
+                // Fallback to a structured summary if LLM call fails
+                format!(
+                    "[Compacted {} messages. Files read: {}. Files edited: {}.]",
+                    to_compact.len(),
+                    file_ops.read.join(", "),
+                    file_ops.edited.join(", "),
+                )
+            }
+        };
 
         // Record compaction in session
-        // Use the first kept message's entry ID (simplified)
         let first_kept_id = format!("compaction_{}", chrono::Utc::now().timestamp_millis());
         self.session_manager
             .append_compaction(&summary, &first_kept_id)?;
@@ -233,9 +237,6 @@ impl AgentSession {
         self.emit(AgentSessionEvent::CompactionEnd {
             summary: summary.clone(),
         });
-
-        // Drop the summary_prompt to avoid unused warning
-        let _ = summary_prompt;
 
         Ok(())
     }
@@ -270,9 +271,54 @@ impl AgentSession {
         &self.settings_manager
     }
 
+    /// Get the stream options.
+    pub fn stream_options(&self) -> &SimpleStreamOptions {
+        &self.config.stream_options
+    }
+
+    /// Update the stream options (e.g. after changing thinking level).
+    pub fn set_stream_options(&mut self, options: SimpleStreamOptions) {
+        self.config.stream_options = options;
+    }
+
     /// Get message count.
     pub fn message_count(&self) -> usize {
         self.session_manager.message_count()
+    }
+
+    /// Generate a compaction summary using the LLM.
+    async fn generate_compaction_summary(&self, prompt: &str) -> Result<String, CodingAgentError> {
+        use futures::StreamExt;
+
+        let context = model::Context {
+            system_prompt: Some(
+                "You are a conversation summarizer. Produce a concise summary of the conversation \
+                 that preserves all important context, decisions, and file operations."
+                    .to_string(),
+            ),
+            messages: vec![Message::User(model::UserMessage::new_text(prompt))],
+            tools: None,
+        };
+
+        let mut stream = self
+            .client
+            .stream_simple(&self.config.model, context, None)
+            .map_err(|e| CodingAgentError::Other(format!("Compaction LLM error: {e}")))?;
+
+        let mut summary = String::new();
+        while let Some(event) = stream.next().await {
+            if let model::AssistantMessageEvent::TextDelta { delta, .. } = event {
+                summary.push_str(&delta);
+            }
+        }
+
+        if summary.is_empty() {
+            return Err(CodingAgentError::Other(
+                "Empty compaction summary from LLM".into(),
+            ));
+        }
+
+        Ok(summary)
     }
 
     fn emit(&self, event: AgentSessionEvent) {

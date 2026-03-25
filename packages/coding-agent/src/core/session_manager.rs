@@ -60,7 +60,6 @@ pub struct SessionInfo {
 /// Manages session files (JSONL format).
 pub struct SessionManager {
     path: PathBuf,
-    #[allow(dead_code)]
     session_dir: PathBuf,
     header: SessionHeader,
     entries: Vec<SessionEntry>,
@@ -157,6 +156,11 @@ impl SessionManager {
     /// Get the session file path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Get the session directory.
+    pub fn session_dir(&self) -> &Path {
+        &self.session_dir
     }
 
     /// Append a message entry.
