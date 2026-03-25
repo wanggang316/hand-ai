@@ -261,6 +261,67 @@ impl SessionManager {
             .count()
     }
 
+    /// Continue the most recent session in the given working directory.
+    pub fn continue_recent(cwd: &Path) -> Result<Self, CodingAgentError> {
+        let sessions = Self::list(cwd)?;
+        let most_recent = sessions
+            .into_iter()
+            .next()
+            .ok_or_else(|| CodingAgentError::Session("No sessions found to continue".into()))?;
+        Self::open(&most_recent.path)
+    }
+
+    /// Fork a session from an existing session file.
+    pub fn fork_from(source_path: &Path, cwd: &Path) -> Result<Self, CodingAgentError> {
+        let source = Self::open(source_path)?;
+        let session_dir = Self::default_session_dir(cwd);
+        std::fs::create_dir_all(&session_dir)?;
+
+        let id = generate_session_id();
+        let header = SessionHeader {
+            version: 3,
+            id: id.clone(),
+            timestamp: Utc::now().timestamp_millis(),
+            cwd: cwd.to_string_lossy().to_string(),
+            parent_session: Some(source.header.id.clone()),
+        };
+
+        let mut entries = vec![SessionEntry::Session(header.clone())];
+        // Copy all message entries from source
+        for entry in &source.entries {
+            if let SessionEntry::Message { message, .. } = entry {
+                entries.push(SessionEntry::Message {
+                    id: generate_entry_id(),
+                    message: message.clone(),
+                    timestamp: Utc::now().timestamp_millis(),
+                });
+            }
+        }
+
+        let path = session_dir.join(format!("{}.jsonl", id));
+
+        let mgr = Self {
+            path: path.clone(),
+            session_dir,
+            header,
+            entries,
+            in_memory: false,
+        };
+
+        mgr.flush()?;
+        Ok(mgr)
+    }
+
+    /// Get the session display name or ID.
+    pub fn display_name(&self) -> &str {
+        &self.header.id
+    }
+
+    /// Get the session header.
+    pub fn header(&self) -> &SessionHeader {
+        &self.header
+    }
+
     /// List all sessions in a directory.
     pub fn list(cwd: &Path) -> Result<Vec<SessionInfo>, CodingAgentError> {
         let session_dir = Self::default_session_dir(cwd);
