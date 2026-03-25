@@ -3,9 +3,15 @@
 pub mod agent_session;
 pub mod bash_executor;
 pub mod compaction;
+pub mod diagnostics;
 pub mod error;
 pub mod export;
+pub mod extensions;
+pub mod git_utils;
+pub mod keybindings;
 pub mod model_resolver;
+pub mod package_manager;
 pub mod session_manager;
 pub mod settings;
+pub mod slash_commands;
 pub mod system_prompt;
