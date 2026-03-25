@@ -198,6 +198,9 @@ async fn test_provider_not_found_error() {
     // This test always runs - no API needed
     let client = Client::new();
 
+    // Clear all providers to test "not found" behavior
+    client.registry.clear();
+
     // Create a model for an API without a registered provider
     let model = model::types::Model {
         id: "test-model".to_string(),

@@ -57,8 +57,10 @@ impl Client {
 
     fn register_builtin_providers(&self) {
         use crate::providers::anthropic_messages::AnthropicMessagesProvider;
+        use crate::providers::bedrock::BedrockProvider;
         use crate::providers::google_generative_ai::GoogleGenerativeAiProvider;
         use crate::providers::openai_completions::OpenAICompletionsProvider;
+        use crate::providers::openai_responses::OpenAIResponsesProvider;
 
         self.registry.register(
             crate::types::Api::AnthropicMessages,
@@ -75,6 +77,48 @@ impl Client {
         self.registry.register(
             crate::types::Api::GoogleGenerativeAi,
             Box::new(GoogleGenerativeAiProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // Google Vertex and Gemini CLI use the same provider with different base URLs.
+        // The model's base_url field determines the actual endpoint.
+        self.registry.register(
+            crate::types::Api::GoogleVertex,
+            Box::new(GoogleGenerativeAiProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        self.registry.register(
+            crate::types::Api::GoogleGeminiCli,
+            Box::new(GoogleGenerativeAiProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // OpenAI Responses API (o1, o3, and newer models)
+        self.registry.register(
+            crate::types::Api::OpenAIResponses,
+            Box::new(OpenAIResponsesProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // Azure OpenAI Responses uses the same provider with different base URL
+        self.registry.register(
+            crate::types::Api::AzureOpenAiResponses,
+            Box::new(OpenAIResponsesProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // OpenAI Codex Responses uses the same provider
+        self.registry.register(
+            crate::types::Api::OpenAICodexResponses,
+            Box::new(OpenAIResponsesProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // AWS Bedrock ConverseStream
+        self.registry.register(
+            crate::types::Api::BedrockConverseStream,
+            Box::new(BedrockProvider::new()),
             Some("builtin".to_string()),
         );
     }

@@ -42,9 +42,9 @@ pub use env_api_keys::{clear_vertex_adc_cache, get_env_api_key, get_env_api_key_
 
 // Re-export from providers
 pub use providers::{
-    AnthropicMessagesProvider, GoogleGenerativeAiProvider, OpenAICompletionsOptions,
-    OpenAICompletionsProvider, ResolvedCompat, convert_messages, normalize_mistral_tool_id,
-    stream_openai_completions,
+    AnthropicMessagesProvider, BedrockProvider, GoogleGenerativeAiProvider,
+    OpenAICompletionsOptions, OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat,
+    convert_messages, normalize_mistral_tool_id, stream_openai_completions,
 };
 
 // Re-export from overflow
@@ -52,5 +52,5 @@ pub use overflow::is_context_overflow;
 
 // Re-export from transform
 pub use transform::{
-    normalize_tool_call_id_for_anthropic, transform_messages, NormalizeToolCallIdFn,
+    NormalizeToolCallIdFn, normalize_tool_call_id_for_anthropic, transform_messages,
 };
