@@ -23,10 +23,10 @@ impl ToastLevel {
 
     fn style(self) -> &'static str {
         match self {
-            ToastLevel::Info => "\x1b[36m",     // cyan
-            ToastLevel::Success => "\x1b[32m",  // green
-            ToastLevel::Warning => "\x1b[33m",  // yellow
-            ToastLevel::Error => "\x1b[31m",    // red
+            ToastLevel::Info => "\x1b[36m",    // cyan
+            ToastLevel::Success => "\x1b[32m", // green
+            ToastLevel::Warning => "\x1b[33m", // yellow
+            ToastLevel::Error => "\x1b[31m",   // red
         }
     }
 }

@@ -124,17 +124,13 @@ impl Component for SelectListComponent {
             let label = utils::pad_to_width(&item.label, max_label_width);
 
             let line = if let Some(desc) = &item.description {
-                let desc_width = (width as usize)
-                    .saturating_sub(max_label_width + 5); // indicator + gap
+                let desc_width = (width as usize).saturating_sub(max_label_width + 5); // indicator + gap
                 let truncated_desc = if utils::visible_width(desc) > desc_width {
                     utils::truncate_to_width(desc, desc_width)
                 } else {
                     desc.clone()
                 };
-                format!(
-                    "{}{}  \x1b[90m{}\x1b[0m",
-                    indicator, label, truncated_desc
-                )
+                format!("{}{}  \x1b[90m{}\x1b[0m", indicator, label, truncated_desc)
             } else {
                 format!("{}{}", indicator, label)
             };
@@ -148,11 +144,7 @@ impl Component for SelectListComponent {
 
         // Scroll indicator
         if self.items.len() > self.visible_count {
-            let info = format!(
-                " {}/{} ",
-                self.selected + 1,
-                self.items.len()
-            );
+            let info = format!(" {}/{} ", self.selected + 1, self.items.len());
             lines.push(format!("\x1b[90m{}\x1b[0m", info));
         }
 
@@ -166,11 +158,15 @@ impl Component for SelectListComponent {
         }
 
         match &key.name {
-            KeyName::Up | KeyName::Char('k') if key.modifiers.ctrl || matches!(key.name, KeyName::Up) => {
+            KeyName::Up | KeyName::Char('k')
+                if key.modifiers.ctrl || matches!(key.name, KeyName::Up) =>
+            {
                 self.move_up();
                 HandleResult::Handled
             }
-            KeyName::Down | KeyName::Char('j') if key.modifiers.ctrl || matches!(key.name, KeyName::Down) => {
+            KeyName::Down | KeyName::Char('j')
+                if key.modifiers.ctrl || matches!(key.name, KeyName::Down) =>
+            {
                 self.move_down();
                 HandleResult::Handled
             }
@@ -200,9 +196,10 @@ impl Component for SelectListComponent {
             }
             KeyName::Enter => {
                 if let Some(cb) = &self.on_select
-                    && let Some(item) = self.items.get(self.selected) {
-                        cb(item);
-                    }
+                    && let Some(item) = self.items.get(self.selected)
+                {
+                    cb(item);
+                }
                 HandleResult::Handled
             }
             KeyName::Escape => {

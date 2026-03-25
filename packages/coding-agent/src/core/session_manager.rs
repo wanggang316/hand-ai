@@ -116,13 +116,10 @@ impl SessionManager {
             }
         }
 
-        let header = header
-            .ok_or_else(|| CodingAgentError::Session("No session header found".into()))?;
+        let header =
+            header.ok_or_else(|| CodingAgentError::Session("No session header found".into()))?;
 
-        let session_dir = path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
+        let session_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -218,21 +215,17 @@ impl SessionManager {
     /// Build the message list for LLM context.
     pub fn build_context(&self) -> Vec<Message> {
         // Find the latest compaction and start from there
-        let start_id = self
-            .entries
-            .iter()
-            .rev()
-            .find_map(|e| {
-                if let SessionEntry::Compaction {
-                    first_kept_entry_id,
-                    ..
-                } = e
-                {
-                    Some(first_kept_entry_id.clone())
-                } else {
-                    None
-                }
-            });
+        let start_id = self.entries.iter().rev().find_map(|e| {
+            if let SessionEntry::Compaction {
+                first_kept_entry_id,
+                ..
+            } = e
+            {
+                Some(first_kept_entry_id.clone())
+            } else {
+                None
+            }
+        });
 
         let mut messages = Vec::new();
         let mut found_start = start_id.is_none();
@@ -334,15 +327,16 @@ impl SessionManager {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|ext| ext == "jsonl")
-                && let Ok(mgr) = Self::open(&path) {
-                    sessions.push(SessionInfo {
-                        path: path.clone(),
-                        id: mgr.header.id.clone(),
-                        cwd: mgr.header.cwd.clone(),
-                        timestamp: mgr.header.timestamp,
-                        message_count: mgr.message_count(),
-                    });
-                }
+                && let Ok(mgr) = Self::open(&path)
+            {
+                sessions.push(SessionInfo {
+                    path: path.clone(),
+                    id: mgr.header.id.clone(),
+                    cwd: mgr.header.cwd.clone(),
+                    timestamp: mgr.header.timestamp,
+                    message_count: mgr.message_count(),
+                });
+            }
         }
 
         sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));

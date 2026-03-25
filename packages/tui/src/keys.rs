@@ -267,24 +267,25 @@ fn parse_csi_sequence(seq: &str) -> Key {
 
     // F keys: CSI <n> ~
     if let Some(num_str) = seq.strip_suffix('~')
-        && let Ok(num) = num_str.parse::<u8>() {
-            let name = match num {
-                15 => KeyName::F(5),
-                17 => KeyName::F(6),
-                18 => KeyName::F(7),
-                19 => KeyName::F(8),
-                20 => KeyName::F(9),
-                21 => KeyName::F(10),
-                23 => KeyName::F(11),
-                24 => KeyName::F(12),
-                _ => KeyName::Unknown(seq.to_string()),
-            };
-            return Key {
-                name,
-                modifiers: KeyModifiers::none(),
-                is_release: false,
-            };
-        }
+        && let Ok(num) = num_str.parse::<u8>()
+    {
+        let name = match num {
+            15 => KeyName::F(5),
+            17 => KeyName::F(6),
+            18 => KeyName::F(7),
+            19 => KeyName::F(8),
+            20 => KeyName::F(9),
+            21 => KeyName::F(10),
+            23 => KeyName::F(11),
+            24 => KeyName::F(12),
+            _ => KeyName::Unknown(seq.to_string()),
+        };
+        return Key {
+            name,
+            modifiers: KeyModifiers::none(),
+            is_release: false,
+        };
+    }
 
     Key {
         name: KeyName::Unknown(seq.to_string()),
@@ -467,7 +468,11 @@ mod tests {
     fn test_matches_key() {
         assert!(matches_key("a", KeyName::Char('a'), KeyModifiers::none()));
         assert!(!matches_key("b", KeyName::Char('a'), KeyModifiers::none()));
-        assert!(matches_key("\x03", KeyName::Char('c'), KeyModifiers::ctrl()));
+        assert!(matches_key(
+            "\x03",
+            KeyName::Char('c'),
+            KeyModifiers::ctrl()
+        ));
     }
 
     #[test]

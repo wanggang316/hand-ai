@@ -9,7 +9,7 @@ use crate::core::session_manager::SessionManager;
 use crate::core::settings::SettingsManager;
 use crate::core::system_prompt::{self, BuildSystemPromptOptions};
 use hand_agent::types::{AgentContext, AgentEvent, AgentLoopConfig, AgentTool};
-use hand_agent::{agent_loop, AgentEventSink};
+use hand_agent::{AgentEventSink, agent_loop};
 use model::{Message, SimpleStreamOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -110,10 +110,7 @@ impl AgentSession {
     }
 
     /// Create an in-memory session (for testing).
-    pub fn in_memory(
-        model: model::Model,
-        tools: Vec<AgentTool>,
-    ) -> Self {
+    pub fn in_memory(model: model::Model, tools: Vec<AgentTool>) -> Self {
         let context = AgentContext {
             system_prompt: "You are a helpful coding assistant.".into(),
             messages: vec![],

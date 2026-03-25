@@ -536,15 +536,16 @@ async fn prepare_tool_call<'a>(
             args: &args,
         };
         if let Some(before_result) = hook(ctx).await
-            && before_result.block {
-                let reason = before_result
-                    .reason
-                    .unwrap_or_else(|| "Tool execution was blocked".to_string());
-                return ToolCallPreparation::Immediate {
-                    result: ToolResult::error(reason),
-                    is_error: true,
-                };
-            }
+            && before_result.block
+        {
+            let reason = before_result
+                .reason
+                .unwrap_or_else(|| "Tool execution was blocked".to_string());
+            return ToolCallPreparation::Immediate {
+                result: ToolResult::error(reason),
+                is_error: true,
+            };
+        }
     }
 
     ToolCallPreparation::Prepared { tool, args }

@@ -172,10 +172,7 @@ impl Component for InputComponent {
         };
 
         let line = if self.text.is_empty() && !self.placeholder.is_empty() {
-            format!(
-                "{}\x1b[90m{}\x1b[0m",
-                self.prefix, text_to_show
-            )
+            format!("{}\x1b[90m{}\x1b[0m", self.prefix, text_to_show)
         } else {
             format!("{}{}", self.prefix, text_to_show)
         };

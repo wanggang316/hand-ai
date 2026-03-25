@@ -67,7 +67,10 @@ fn execute_grep(cwd: &Path, args: serde_json::Value) -> ToolResult {
         .unwrap_or_else(|| cwd.to_path_buf());
 
     let include = args.get("include").and_then(|v| v.as_str());
-    let context = args.get("context").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let context = args
+        .get("context")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
     let max_matches = args
         .get("max_matches")
         .and_then(|v| v.as_u64())
@@ -160,7 +163,9 @@ fn try_grep(
     case_insensitive: bool,
 ) -> Option<String> {
     let mut cmd = Command::new("grep");
-    cmd.arg("-r").arg("-n").arg("--max-count")
+    cmd.arg("-r")
+        .arg("-n")
+        .arg("--max-count")
         .arg(max_matches.to_string());
 
     if case_insensitive {
@@ -186,11 +191,7 @@ fn try_grep(
 
 fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
+    if p.is_absolute() { p } else { cwd.join(p) }
 }
 
 #[cfg(test)]
@@ -208,7 +209,11 @@ mod tests {
     #[test]
     fn test_grep_basic() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("test.txt"), "hello world\nfoo bar\nhello again").unwrap();
+        std::fs::write(
+            dir.path().join("test.txt"),
+            "hello world\nfoo bar\nhello again",
+        )
+        .unwrap();
 
         let result = execute_grep(&dir.path().to_path_buf(), json!({"pattern": "hello"}));
         let text = get_text(&result);

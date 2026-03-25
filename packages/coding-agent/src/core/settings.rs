@@ -120,10 +120,7 @@ impl SettingsManager {
 
     /// Get compaction settings with defaults.
     pub fn compaction_settings(&self) -> CompactionSettings {
-        self.merged
-            .compaction
-            .clone()
-            .unwrap_or_default()
+        self.merged.compaction.clone().unwrap_or_default()
     }
 
     /// Get retry settings with defaults.
@@ -133,10 +130,7 @@ impl SettingsManager {
 
     /// Get shell path.
     pub fn shell_path(&self) -> &str {
-        self.merged
-            .shell_path
-            .as_deref()
-            .unwrap_or("/bin/bash")
+        self.merged.shell_path.as_deref().unwrap_or("/bin/bash")
     }
 
     /// Save a setting to the global file.
@@ -254,9 +248,6 @@ mod tests {
         };
         let json = serde_json::to_string(&settings).unwrap();
         let parsed: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            parsed.default_provider.as_deref(),
-            Some("anthropic")
-        );
+        assert_eq!(parsed.default_provider.as_deref(), Some("anthropic"));
     }
 }

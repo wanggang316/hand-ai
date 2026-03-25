@@ -7,24 +7,24 @@ use crate::types::{AssistantMessage, StopReason};
 
 /// Regex-like patterns for context overflow error messages from various providers.
 const OVERFLOW_PATTERNS: &[&str] = &[
-    "prompt is too long",                  // Anthropic
+    "prompt is too long",                    // Anthropic
     "input is too long for requested model", // Amazon Bedrock
-    "exceeds the context window",          // OpenAI (Completions & Responses API)
-    "input token count",                   // Google (Gemini) - partial, checked with "exceeds the maximum"
-    "maximum prompt length is",            // xAI (Grok)
-    "reduce the length of the messages",   // Groq
-    "maximum context length is",           // OpenRouter
-    "exceeds the limit of",               // GitHub Copilot
-    "exceeds the available context size",  // llama.cpp server
-    "greater than the context length",     // LM Studio
-    "context window exceeds limit",        // MiniMax
-    "exceeded model token limit",          // Kimi For Coding
-    "too large for model with",            // Mistral
-    "model_context_window_exceeded",       // z.ai
-    "context length exceeded",             // Generic fallback
-    "context_length_exceeded",             // Generic fallback (underscore variant)
-    "too many tokens",                     // Generic fallback
-    "token limit exceeded",                // Generic fallback
+    "exceeds the context window",            // OpenAI (Completions & Responses API)
+    "input token count", // Google (Gemini) - partial, checked with "exceeds the maximum"
+    "maximum prompt length is", // xAI (Grok)
+    "reduce the length of the messages", // Groq
+    "maximum context length is", // OpenRouter
+    "exceeds the limit of", // GitHub Copilot
+    "exceeds the available context size", // llama.cpp server
+    "greater than the context length", // LM Studio
+    "context window exceeds limit", // MiniMax
+    "exceeded model token limit", // Kimi For Coding
+    "too large for model with", // Mistral
+    "model_context_window_exceeded", // z.ai
+    "context length exceeded", // Generic fallback
+    "context_length_exceeded", // Generic fallback (underscore variant)
+    "too many tokens",   // Generic fallback
+    "token limit exceeded", // Generic fallback
 ];
 
 /// Check if an assistant message represents a context overflow error.
@@ -38,29 +38,29 @@ const OVERFLOW_PATTERNS: &[&str] = &[
 pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u64>) -> bool {
     // Case 1: Check error message patterns
     if message.stop_reason == StopReason::Error
-        && let Some(error_msg) = &message.error_message {
-            let lower = error_msg.to_lowercase();
+        && let Some(error_msg) = &message.error_message
+    {
+        let lower = error_msg.to_lowercase();
 
-            if OVERFLOW_PATTERNS.iter().any(|p| lower.contains(p)) {
-                return true;
-            }
-
-            // Cerebras returns 400/413 with no body for context overflow
-            if (lower.starts_with("400") || lower.starts_with("413"))
-                && lower.contains("(no body)")
-            {
-                return true;
-            }
+        if OVERFLOW_PATTERNS.iter().any(|p| lower.contains(p)) {
+            return true;
         }
+
+        // Cerebras returns 400/413 with no body for context overflow
+        if (lower.starts_with("400") || lower.starts_with("413")) && lower.contains("(no body)") {
+            return true;
+        }
+    }
 
     // Case 2: Silent overflow - successful but usage exceeds context
     if let Some(cw) = context_window
-        && message.stop_reason == StopReason::Stop {
-            let input_tokens = message.usage.input + message.usage.cache_read;
-            if input_tokens > cw {
-                return true;
-            }
+        && message.stop_reason == StopReason::Stop
+    {
+        let input_tokens = message.usage.input + message.usage.cache_read;
+        if input_tokens > cw {
+            return true;
         }
+    }
 
     false
 }

@@ -10,7 +10,7 @@ use crate::types::{
     ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolResultContent, Usage, UserContentBlock,
 };
 use crate::{calculate_cost, env_api_keys};
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -110,8 +110,7 @@ fn build_google_options(model: &Model, options: Option<&SimpleStreamOptions>) ->
             google_opts.thinking_enabled = true;
 
             if is_gemini3_pro_model(&model.id) || is_gemini3_flash_model(&model.id) {
-                google_opts.thinking_level =
-                    Some(get_gemini3_thinking_level(effort, &model.id));
+                google_opts.thinking_level = Some(get_gemini3_thinking_level(effort, &model.id));
             } else {
                 google_opts.thinking_budget_tokens = Some(get_google_budget(
                     &model.id,
@@ -258,9 +257,10 @@ fn build_request_body(
     // Generation config
     let mut generation_config = serde_json::Map::new();
     if let Some(temp) = options.base.temperature
-        && let Some(n) = serde_json::Number::from_f64(temp as f64) {
-            generation_config.insert("temperature".to_string(), Value::Number(n));
-        }
+        && let Some(n) = serde_json::Number::from_f64(temp as f64)
+    {
+        generation_config.insert("temperature".to_string(), Value::Number(n));
+    }
     if let Some(max_tokens) = options.base.max_tokens {
         generation_config.insert(
             "maxOutputTokens".to_string(),
@@ -276,39 +276,42 @@ fn build_request_body(
 
     // System instruction
     if let Some(system_prompt) = &context.system_prompt
-        && !system_prompt.is_empty() {
-            body.insert(
-                "systemInstruction".to_string(),
-                serde_json::json!({
-                    "parts": [{"text": system_prompt}]
-                }),
-            );
-        }
+        && !system_prompt.is_empty()
+    {
+        body.insert(
+            "systemInstruction".to_string(),
+            serde_json::json!({
+                "parts": [{"text": system_prompt}]
+            }),
+        );
+    }
 
     // Tools
     if let Some(tools) = &context.tools
-        && !tools.is_empty() {
-            let tool_defs = convert_tools(tools);
-            body.insert("tools".to_string(), Value::Array(vec![tool_defs]));
-        }
+        && !tools.is_empty()
+    {
+        let tool_defs = convert_tools(tools);
+        body.insert("tools".to_string(), Value::Array(vec![tool_defs]));
+    }
 
     // Tool choice
     if let Some(tools) = &context.tools
         && !tools.is_empty()
-            && let Some(choice) = &options.tool_choice {
-                let mode = match choice.as_str() {
-                    "auto" => "AUTO",
-                    "none" => "NONE",
-                    "any" => "ANY",
-                    _ => "AUTO",
-                };
-                body.insert(
-                    "toolConfig".to_string(),
-                    serde_json::json!({
-                        "functionCallingConfig": {"mode": mode}
-                    }),
-                );
-            }
+        && let Some(choice) = &options.tool_choice
+    {
+        let mode = match choice.as_str() {
+            "auto" => "AUTO",
+            "none" => "NONE",
+            "any" => "ANY",
+            _ => "AUTO",
+        };
+        body.insert(
+            "toolConfig".to_string(),
+            serde_json::json!({
+                "functionCallingConfig": {"mode": mode}
+            }),
+        );
+    }
 
     // Thinking config
     if options.thinking_enabled && model.reasoning {
@@ -321,10 +324,7 @@ fn build_request_body(
                 Value::String(level.as_str().to_string()),
             );
         } else if let Some(budget) = options.thinking_budget_tokens {
-            thinking_config.insert(
-                "thinkingBudget".to_string(),
-                Value::Number(budget.into()),
-            );
+            thinking_config.insert("thinkingBudget".to_string(), Value::Number(budget.into()));
         }
 
         // Insert into generationConfig
@@ -332,10 +332,7 @@ fn build_request_body(
             .entry("generationConfig")
             .or_insert_with(|| Value::Object(serde_json::Map::new()));
         if let Value::Object(gc) = gen_config {
-            gc.insert(
-                "thinkingConfig".to_string(),
-                Value::Object(thinking_config),
-            );
+            gc.insert("thinkingConfig".to_string(), Value::Object(thinking_config));
         }
     } else if model.reasoning && !options.thinking_enabled {
         // Disable thinking for reasoning models
@@ -422,11 +419,14 @@ fn convert_messages(messages: &[Message], model: &Model) -> Vec<Value> {
                             let mut part =
                                 serde_json::json!({"text": sanitize_surrogates(&t.text)});
                             if let Some(sig) = &t.text_signature
-                                && is_same_provider_and_model && is_valid_thought_signature(sig) {
-                                    part.as_object_mut()
-                                        .unwrap()
-                                        .insert("thoughtSignature".to_string(), Value::String(sig.clone()));
-                                }
+                                && is_same_provider_and_model
+                                && is_valid_thought_signature(sig)
+                            {
+                                part.as_object_mut().unwrap().insert(
+                                    "thoughtSignature".to_string(),
+                                    Value::String(sig.clone()),
+                                );
+                            }
                             parts.push(part);
                         }
                         AssistantContentBlock::Thinking(t) => {
@@ -439,12 +439,13 @@ fn convert_messages(messages: &[Message], model: &Model) -> Vec<Value> {
                                     "text": sanitize_surrogates(&t.thinking),
                                 });
                                 if let Some(sig) = &t.thinking_signature
-                                    && is_valid_thought_signature(sig) {
-                                        part.as_object_mut().unwrap().insert(
-                                            "thoughtSignature".to_string(),
-                                            Value::String(sig.clone()),
-                                        );
-                                    }
+                                    && is_valid_thought_signature(sig)
+                                {
+                                    part.as_object_mut().unwrap().insert(
+                                        "thoughtSignature".to_string(),
+                                        Value::String(sig.clone()),
+                                    );
+                                }
                                 parts.push(part);
                             } else {
                                 // Convert thinking to plain text for cross-provider replay
@@ -469,12 +470,13 @@ fn convert_messages(messages: &[Message], model: &Model) -> Vec<Value> {
                             // Handle thought signatures for Gemini 3
                             if is_same_provider_and_model
                                 && let Some(sig) = &tc.thought_signature
-                                    && is_valid_thought_signature(sig) {
-                                        part.as_object_mut().unwrap().insert(
-                                            "thoughtSignature".to_string(),
-                                            Value::String(sig.clone()),
-                                        );
-                                    }
+                                && is_valid_thought_signature(sig)
+                            {
+                                part.as_object_mut().unwrap().insert(
+                                    "thoughtSignature".to_string(),
+                                    Value::String(sig.clone()),
+                                );
+                            }
                             if model.id.to_lowercase().contains("gemini-3") {
                                 // Gemini 3 requires thoughtSignature on all function calls
                                 if part.get("thoughtSignature").is_none() {
@@ -527,10 +529,10 @@ fn convert_messages(messages: &[Message], model: &Model) -> Vec<Value> {
                     "response": response,
                 });
                 if requires_tool_call_id(&model.id) {
-                    fc_response.as_object_mut().unwrap().insert(
-                        "id".to_string(),
-                        Value::String(tr.tool_call_id.clone()),
-                    );
+                    fc_response
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("id".to_string(), Value::String(tr.tool_call_id.clone()));
                 }
 
                 let part = serde_json::json!({"functionResponse": fc_response});
@@ -538,20 +540,18 @@ fn convert_messages(messages: &[Message], model: &Model) -> Vec<Value> {
                 // Merge tool results into the same user turn
                 if let Some(last) = contents.last_mut()
                     && last.get("role").and_then(|r| r.as_str()) == Some("user")
-                        && let Some(parts) = last.get("parts").and_then(|p| p.as_array())
-                            && parts
-                                .iter()
-                                .any(|p| p.get("functionResponse").is_some())
-                            {
-                                last.as_object_mut()
-                                    .unwrap()
-                                    .get_mut("parts")
-                                    .unwrap()
-                                    .as_array_mut()
-                                    .unwrap()
-                                    .push(part);
-                                continue;
-                            }
+                    && let Some(parts) = last.get("parts").and_then(|p| p.as_array())
+                    && parts.iter().any(|p| p.get("functionResponse").is_some())
+                {
+                    last.as_object_mut()
+                        .unwrap()
+                        .get_mut("parts")
+                        .unwrap()
+                        .as_array_mut()
+                        .unwrap()
+                        .push(part);
+                    continue;
+                }
 
                 contents.push(serde_json::json!({
                     "role": "user",
@@ -631,116 +631,26 @@ async fn parse_sse_stream(
 
         // Process candidates
         if let Some(candidates) = chunk.get("candidates").and_then(|c| c.as_array())
-            && let Some(candidate) = candidates.first() {
-                if let Some(parts) = candidate
-                    .get("content")
-                    .and_then(|c| c.get("parts"))
-                    .and_then(|p| p.as_array())
-                {
-                    for part in parts {
-                        if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                            let is_thinking = part
-                                .get("thought")
-                                .and_then(|t| t.as_bool())
-                                .unwrap_or(false);
+            && let Some(candidate) = candidates.first()
+        {
+            if let Some(parts) = candidate
+                .get("content")
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array())
+            {
+                for part in parts {
+                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                        let is_thinking = part
+                            .get("thought")
+                            .and_then(|t| t.as_bool())
+                            .unwrap_or(false);
 
-                            let block_type = if is_thinking { "thinking" } else { "text" };
+                        let block_type = if is_thinking { "thinking" } else { "text" };
 
-                            // Handle block transitions
-                            if current_block_type != Some(block_type) {
-                                // End previous block
-                                if let Some(prev_type) = current_block_type {
-                                    let idx = (output.content.len() - 1) as u32;
-                                    match prev_type {
-                                        "text" => {
-                                            let content = get_last_text_content(&output);
-                                            events.push(AssistantMessageEvent::TextEnd {
-                                                content_index: idx,
-                                                content,
-                                                partial: output.clone(),
-                                            });
-                                        }
-                                        "thinking" => {
-                                            let content = get_last_thinking_content(&output);
-                                            events.push(AssistantMessageEvent::ThinkingEnd {
-                                                content_index: idx,
-                                                content,
-                                                partial: output.clone(),
-                                            });
-                                        }
-                                        _ => {}
-                                    }
-                                }
-
-                                // Start new block
-                                if is_thinking {
-                                    output.content.push(AssistantContentBlock::Thinking(
-                                        ThinkingContent::new(""),
-                                    ));
-                                    let idx = (output.content.len() - 1) as u32;
-                                    events.push(AssistantMessageEvent::ThinkingStart {
-                                        content_index: idx,
-                                        partial: output.clone(),
-                                    });
-                                } else {
-                                    output
-                                        .content
-                                        .push(AssistantContentBlock::Text(TextContent::new("")));
-                                    let idx = (output.content.len() - 1) as u32;
-                                    events.push(AssistantMessageEvent::TextStart {
-                                        content_index: idx,
-                                        partial: output.clone(),
-                                    });
-                                }
-                                current_block_type = Some(if is_thinking {
-                                    "thinking"
-                                } else {
-                                    "text"
-                                });
-                            }
-
-                            // Append delta
-                            let idx = (output.content.len() - 1) as u32;
-                            if is_thinking {
-                                if let Some(AssistantContentBlock::Thinking(t)) =
-                                    output.content.last_mut()
-                                {
-                                    t.thinking.push_str(text);
-                                    // Retain thought signature
-                                    if let Some(sig) =
-                                        part.get("thoughtSignature").and_then(|s| s.as_str())
-                                        && !sig.is_empty() {
-                                            t.thinking_signature = Some(sig.to_string());
-                                        }
-                                }
-                                events.push(AssistantMessageEvent::ThinkingDelta {
-                                    content_index: idx,
-                                    delta: text.to_string(),
-                                    partial: output.clone(),
-                                });
-                            } else {
-                                if let Some(AssistantContentBlock::Text(t)) =
-                                    output.content.last_mut()
-                                {
-                                    t.text.push_str(text);
-                                    if let Some(sig) =
-                                        part.get("thoughtSignature").and_then(|s| s.as_str())
-                                        && !sig.is_empty() {
-                                            t.text_signature = Some(sig.to_string());
-                                        }
-                                }
-                                events.push(AssistantMessageEvent::TextDelta {
-                                    content_index: idx,
-                                    delta: text.to_string(),
-                                    partial: output.clone(),
-                                });
-                            }
-                        }
-
-                        // Handle function calls
-                        if let Some(fc) = part.get("functionCall") {
-                            // End any current text/thinking block
-                            if let Some(prev_type) = current_block_type.take() {
+                        // Handle block transitions
+                        if current_block_type != Some(block_type) {
+                            // End previous block
+                            if let Some(prev_type) = current_block_type {
                                 let idx = (output.content.len() - 1) as u32;
                                 match prev_type {
                                     "text" => {
@@ -763,83 +673,171 @@ async fn parse_sse_stream(
                                 }
                             }
 
-                            let name = fc
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let args = fc
-                                .get("args")
-                                .cloned()
-                                .unwrap_or(Value::Object(serde_json::Map::new()));
-
-                            // Generate unique tool call ID
-                            let provided_id =
-                                fc.get("id").and_then(|id| id.as_str()).map(String::from);
-                            let needs_new_id = provided_id.is_none()
-                                || output.content.iter().any(|b| {
-                                    if let AssistantContentBlock::ToolCall(tc) = b {
-                                        Some(tc.id.as_str()) == provided_id.as_deref()
-                                    } else {
-                                        false
-                                    }
+                            // Start new block
+                            if is_thinking {
+                                output.content.push(AssistantContentBlock::Thinking(
+                                    ThinkingContent::new(""),
+                                ));
+                                let idx = (output.content.len() - 1) as u32;
+                                events.push(AssistantMessageEvent::ThinkingStart {
+                                    content_index: idx,
+                                    partial: output.clone(),
                                 });
-
-                            let tool_call_id = if needs_new_id {
-                                let counter = TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
-                                format!("{}_{}", name, counter)
                             } else {
-                                provided_id.unwrap()
-                            };
+                                output
+                                    .content
+                                    .push(AssistantContentBlock::Text(TextContent::new("")));
+                                let idx = (output.content.len() - 1) as u32;
+                                events.push(AssistantMessageEvent::TextStart {
+                                    content_index: idx,
+                                    partial: output.clone(),
+                                });
+                            }
+                            current_block_type =
+                                Some(if is_thinking { "thinking" } else { "text" });
+                        }
 
-                            let thought_signature = part
-                                .get("thoughtSignature")
-                                .and_then(|s| s.as_str())
-                                .map(String::from);
-
-                            let tool_call = ToolCall {
-                                content_type: "toolCall".to_string(),
-                                id: tool_call_id,
-                                name,
-                                arguments: args.clone(),
-                                thought_signature,
-                            };
-
-                            output
-                                .content
-                                .push(AssistantContentBlock::ToolCall(tool_call.clone()));
-                            let idx = (output.content.len() - 1) as u32;
-
-                            events.push(AssistantMessageEvent::ToolCallStart {
+                        // Append delta
+                        let idx = (output.content.len() - 1) as u32;
+                        if is_thinking {
+                            if let Some(AssistantContentBlock::Thinking(t)) =
+                                output.content.last_mut()
+                            {
+                                t.thinking.push_str(text);
+                                // Retain thought signature
+                                if let Some(sig) =
+                                    part.get("thoughtSignature").and_then(|s| s.as_str())
+                                    && !sig.is_empty()
+                                {
+                                    t.thinking_signature = Some(sig.to_string());
+                                }
+                            }
+                            events.push(AssistantMessageEvent::ThinkingDelta {
                                 content_index: idx,
+                                delta: text.to_string(),
                                 partial: output.clone(),
                             });
-                            events.push(AssistantMessageEvent::ToolCallDelta {
+                        } else {
+                            if let Some(AssistantContentBlock::Text(t)) = output.content.last_mut()
+                            {
+                                t.text.push_str(text);
+                                if let Some(sig) =
+                                    part.get("thoughtSignature").and_then(|s| s.as_str())
+                                    && !sig.is_empty()
+                                {
+                                    t.text_signature = Some(sig.to_string());
+                                }
+                            }
+                            events.push(AssistantMessageEvent::TextDelta {
                                 content_index: idx,
-                                delta: serde_json::to_string(&args).unwrap_or_default(),
-                                partial: output.clone(),
-                            });
-                            events.push(AssistantMessageEvent::ToolCallEnd {
-                                content_index: idx,
-                                tool_call,
+                                delta: text.to_string(),
                                 partial: output.clone(),
                             });
                         }
                     }
-                }
 
-                // Check finish reason
-                if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str()) {
-                    output.stop_reason = map_stop_reason(reason);
-                    if output
-                        .content
-                        .iter()
-                        .any(|b| matches!(b, AssistantContentBlock::ToolCall(_)))
-                    {
-                        output.stop_reason = StopReason::ToolUse;
+                    // Handle function calls
+                    if let Some(fc) = part.get("functionCall") {
+                        // End any current text/thinking block
+                        if let Some(prev_type) = current_block_type.take() {
+                            let idx = (output.content.len() - 1) as u32;
+                            match prev_type {
+                                "text" => {
+                                    let content = get_last_text_content(&output);
+                                    events.push(AssistantMessageEvent::TextEnd {
+                                        content_index: idx,
+                                        content,
+                                        partial: output.clone(),
+                                    });
+                                }
+                                "thinking" => {
+                                    let content = get_last_thinking_content(&output);
+                                    events.push(AssistantMessageEvent::ThinkingEnd {
+                                        content_index: idx,
+                                        content,
+                                        partial: output.clone(),
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        let name = fc
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let args = fc
+                            .get("args")
+                            .cloned()
+                            .unwrap_or(Value::Object(serde_json::Map::new()));
+
+                        // Generate unique tool call ID
+                        let provided_id = fc.get("id").and_then(|id| id.as_str()).map(String::from);
+                        let needs_new_id = provided_id.is_none()
+                            || output.content.iter().any(|b| {
+                                if let AssistantContentBlock::ToolCall(tc) = b {
+                                    Some(tc.id.as_str()) == provided_id.as_deref()
+                                } else {
+                                    false
+                                }
+                            });
+
+                        let tool_call_id = if needs_new_id {
+                            let counter = TOOL_CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+                            format!("{}_{}", name, counter)
+                        } else {
+                            provided_id.unwrap()
+                        };
+
+                        let thought_signature = part
+                            .get("thoughtSignature")
+                            .and_then(|s| s.as_str())
+                            .map(String::from);
+
+                        let tool_call = ToolCall {
+                            content_type: "toolCall".to_string(),
+                            id: tool_call_id,
+                            name,
+                            arguments: args.clone(),
+                            thought_signature,
+                        };
+
+                        output
+                            .content
+                            .push(AssistantContentBlock::ToolCall(tool_call.clone()));
+                        let idx = (output.content.len() - 1) as u32;
+
+                        events.push(AssistantMessageEvent::ToolCallStart {
+                            content_index: idx,
+                            partial: output.clone(),
+                        });
+                        events.push(AssistantMessageEvent::ToolCallDelta {
+                            content_index: idx,
+                            delta: serde_json::to_string(&args).unwrap_or_default(),
+                            partial: output.clone(),
+                        });
+                        events.push(AssistantMessageEvent::ToolCallEnd {
+                            content_index: idx,
+                            tool_call,
+                            partial: output.clone(),
+                        });
                     }
                 }
             }
+
+            // Check finish reason
+            if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str()) {
+                output.stop_reason = map_stop_reason(reason);
+                if output
+                    .content
+                    .iter()
+                    .any(|b| matches!(b, AssistantContentBlock::ToolCall(_)))
+                {
+                    output.stop_reason = StopReason::ToolUse;
+                }
+            }
+        }
 
         // Update usage
         if let Some(usage) = chunk.get("usageMetadata") {
@@ -1188,12 +1186,18 @@ mod tests {
 
     #[test]
     fn test_get_google_budget() {
-        assert_eq!(get_google_budget("gemini-2.5-pro", ThinkingLevel::Low, None), 2048);
+        assert_eq!(
+            get_google_budget("gemini-2.5-pro", ThinkingLevel::Low, None),
+            2048
+        );
         assert_eq!(
             get_google_budget("gemini-2.5-flash", ThinkingLevel::High, None),
             24576
         );
-        assert_eq!(get_google_budget("gemini-2.5-pro", ThinkingLevel::Minimal, None), 128);
+        assert_eq!(
+            get_google_budget("gemini-2.5-pro", ThinkingLevel::Minimal, None),
+            128
+        );
 
         // Custom budgets override
         let budgets = crate::types::ThinkingBudgets {
@@ -1246,7 +1250,10 @@ mod tests {
 
         assert!(body.get("contents").is_some());
         assert!(body.get("systemInstruction").is_some());
-        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "You are helpful.");
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            "You are helpful."
+        );
     }
 
     #[test]

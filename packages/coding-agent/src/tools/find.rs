@@ -89,10 +89,7 @@ fn execute_find(cwd: &Path, args: serde_json::Value) -> ToolResult {
                 let truncated = results.len() >= max_results;
                 let mut output = results.join("\n");
                 if truncated {
-                    output.push_str(&format!(
-                        "\n[Results truncated at {} entries]",
-                        max_results
-                    ));
+                    output.push_str(&format!("\n[Results truncated at {} entries]", max_results));
                 }
                 ToolResult::text(output)
             }
@@ -103,11 +100,7 @@ fn execute_find(cwd: &Path, args: serde_json::Value) -> ToolResult {
 
 fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
+    if p.is_absolute() { p } else { cwd.join(p) }
 }
 
 #[cfg(test)]

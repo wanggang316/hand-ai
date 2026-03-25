@@ -5,13 +5,12 @@
 
 use crate::api_registry::AssistantMessageEventStream;
 use crate::types::{
-    Api, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Context,
-    InputType, Message, Model, Provider, SimpleStreamOptions, StopReason, StreamOptions,
-    TextContent, ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolResultContent,
-    UserContentBlock,
+    Api, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Context, InputType,
+    Message, Model, Provider, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
+    ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolResultContent, UserContentBlock,
 };
 use crate::{env_api_keys, supports_xhigh};
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -145,10 +144,7 @@ async fn stream_anthropic_inner(
         "x-api-key",
         HeaderValue::from_str(&api_key).map_err(|e| e.to_string())?,
     );
-    headers.insert(
-        "anthropic-version",
-        HeaderValue::from_static("2023-06-01"),
-    );
+    headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
 
     // Add beta features
     let mut betas = vec!["fine-grained-tool-streaming-2025-05-14"];
@@ -162,16 +158,17 @@ async fn stream_anthropic_inner(
 
     // Add custom headers from options
     if let Some(opts) = &options
-        && let Some(custom_headers) = &opts.headers {
-            for (key, value) in custom_headers {
-                if let (Ok(name), Ok(val)) = (
-                    reqwest::header::HeaderName::from_bytes(key.as_bytes()),
-                    HeaderValue::from_str(value),
-                ) {
-                    headers.insert(name, val);
-                }
+        && let Some(custom_headers) = &opts.headers
+    {
+        for (key, value) in custom_headers {
+            if let (Ok(name), Ok(val)) = (
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, val);
             }
         }
+    }
 
     // Send request
     let client = reqwest::Client::new();
@@ -215,21 +212,23 @@ fn build_request_body(
 
     // System prompt
     if let Some(system_prompt) = &context.system_prompt
-        && !system_prompt.is_empty() {
-            body.insert("system".to_string(), Value::String(system_prompt.clone()));
-        }
+        && !system_prompt.is_empty()
+    {
+        body.insert("system".to_string(), Value::String(system_prompt.clone()));
+    }
 
     // Temperature
     if let Some(opts) = options
-        && let Some(temp) = opts.temperature {
-            body.insert(
-                "temperature".to_string(),
-                Value::Number(
-                    serde_json::Number::from_f64(temp as f64)
-                        .unwrap_or_else(|| serde_json::Number::from(0)),
-                ),
-            );
-        }
+        && let Some(temp) = opts.temperature
+    {
+        body.insert(
+            "temperature".to_string(),
+            Value::Number(
+                serde_json::Number::from_f64(temp as f64)
+                    .unwrap_or_else(|| serde_json::Number::from(0)),
+            ),
+        );
+    }
 
     // Messages
     let messages = convert_messages_to_anthropic(&context.messages, model);
@@ -237,17 +236,19 @@ fn build_request_body(
 
     // Tools
     if let Some(tools) = &context.tools
-        && !tools.is_empty() {
-            let tool_defs: Vec<Value> = tools.iter().map(convert_tool_to_anthropic).collect();
-            body.insert("tools".to_string(), Value::Array(tool_defs));
-        }
+        && !tools.is_empty()
+    {
+        let tool_defs: Vec<Value> = tools.iter().map(convert_tool_to_anthropic).collect();
+        body.insert("tools".to_string(), Value::Array(tool_defs));
+    }
 
     // Thinking/reasoning configuration
     if let Some(level) = reasoning
-        && model.reasoning {
-            let thinking_config = build_thinking_config(level, model);
-            body.insert("thinking".to_string(), thinking_config);
-        }
+        && model.reasoning
+    {
+        let thinking_config = build_thinking_config(level, model);
+        body.insert("thinking".to_string(), thinking_config);
+    }
 
     Ok(Value::Object(body))
 }
@@ -361,9 +362,7 @@ fn convert_messages_to_anthropic(messages: &[Message], model: &Model) -> Vec<Val
 
 fn convert_user_content(user_msg: &crate::types::UserMessage, supports_images: bool) -> Value {
     match &user_msg.content {
-        crate::types::UserContent::Text(text) => {
-            Value::String(sanitize_surrogates(text))
-        }
+        crate::types::UserContent::Text(text) => Value::String(sanitize_surrogates(text)),
         crate::types::UserContent::Blocks(blocks) => {
             let content_blocks: Vec<Value> = blocks
                 .iter()
@@ -410,7 +409,8 @@ fn convert_assistant_content(asst_msg: &AssistantMessage, model: &Model) -> Vec<
                     if let Some(sig) = &tc.thinking_signature {
                         if !sig.is_empty() {
                             // Redacted thinking or normal thinking with signature
-                            if tc.thinking.contains("[Reasoning redacted]") || tc.thinking.is_empty()
+                            if tc.thinking.contains("[Reasoning redacted]")
+                                || tc.thinking.is_empty()
                             {
                                 blocks.push(serde_json::json!({
                                     "type": "redacted_thinking",
@@ -559,8 +559,10 @@ async fn parse_sse_stream(
                     if let Some(msg) = event.get("message") {
                         // Parse usage from message_start
                         if let Some(usage) = msg.get("usage") {
-                            output.usage.input =
-                                usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            output.usage.input = usage
+                                .get("input_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
                             output.usage.cache_read = usage
                                 .get("cache_read_input_tokens")
                                 .and_then(|v| v.as_u64())
@@ -583,10 +585,7 @@ async fn parse_sse_stream(
                 }
 
                 "content_block_start" => {
-                    let index = event
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
+                    let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                     let content_block = event.get("content_block").unwrap_or(&Value::Null);
                     let block_type = content_block
                         .get("type")
@@ -601,10 +600,8 @@ async fn parse_sse_stream(
                                 .unwrap_or("")
                                 .to_string();
                             let text_content = TextContent::new(&text);
-                            content_blocks.insert(
-                                index,
-                                ContentBlockState::Text(text_content.clone()),
-                            );
+                            content_blocks
+                                .insert(index, ContentBlockState::Text(text_content.clone()));
                             output
                                 .content
                                 .push(AssistantContentBlock::Text(text_content));
@@ -638,8 +635,7 @@ async fn parse_sse_stream(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let mut thinking_content =
-                                ThinkingContent::new("[Reasoning redacted]");
+                            let mut thinking_content = ThinkingContent::new("[Reasoning redacted]");
                             thinking_content.thinking_signature = Some(data);
                             content_blocks.insert(
                                 index,
@@ -664,8 +660,7 @@ async fn parse_sse_stream(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("")
                                 .to_string();
-                            let tool_call =
-                                ToolCall::new(&id, &name, serde_json::json!({}));
+                            let tool_call = ToolCall::new(&id, &name, serde_json::json!({}));
                             content_blocks.insert(
                                 index,
                                 ContentBlockState::ToolCall(tool_call.clone(), String::new()),
@@ -683,20 +678,13 @@ async fn parse_sse_stream(
                 }
 
                 "content_block_delta" => {
-                    let index = event
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
+                    let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                     let delta = event.get("delta").unwrap_or(&Value::Null);
-                    let delta_type =
-                        delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
                     match delta_type {
                         "text_delta" => {
-                            let text = delta
-                                .get("text")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or("");
                             if let Some(ContentBlockState::Text(tc)) =
                                 content_blocks.get_mut(&index)
                             {
@@ -715,10 +703,8 @@ async fn parse_sse_stream(
                             });
                         }
                         "thinking_delta" => {
-                            let thinking = delta
-                                .get("thinking")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let thinking =
+                                delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
                             if let Some(ContentBlockState::Thinking(tc)) =
                                 content_blocks.get_mut(&index)
                             {
@@ -776,10 +762,7 @@ async fn parse_sse_stream(
                 }
 
                 "content_block_stop" => {
-                    let index = event
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
+                    let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
                     if let Some(block_state) = content_blocks.remove(&index) {
                         match block_state {
@@ -832,8 +815,7 @@ async fn parse_sse_stream(
 
                 "message_delta" => {
                     if let Some(delta) = event.get("delta") {
-                        let stop_reason_str =
-                            delta.get("stop_reason").and_then(|v| v.as_str());
+                        let stop_reason_str = delta.get("stop_reason").and_then(|v| v.as_str());
                         current_stop_reason = match stop_reason_str {
                             Some("end_turn") => StopReason::Stop,
                             Some("max_tokens") => StopReason::Length,
@@ -939,9 +921,7 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        AssistantContentBlock, Cost, InputType, ToolResultMessage, UserMessage,
-    };
+    use crate::types::{AssistantContentBlock, Cost, InputType, ToolResultMessage, UserMessage};
 
     fn test_model() -> Model {
         Model {
@@ -969,7 +949,10 @@ mod tests {
     fn test_normalize_tool_call_id() {
         assert_eq!(normalize_tool_call_id("call_123"), "call_123");
         assert_eq!(normalize_tool_call_id("call.123"), "call_123");
-        assert_eq!(normalize_tool_call_id("a".repeat(100).as_str()), "a".repeat(64));
+        assert_eq!(
+            normalize_tool_call_id("a".repeat(100).as_str()),
+            "a".repeat(64)
+        );
     }
 
     #[test]
@@ -1079,8 +1062,7 @@ mod tests {
             messages: vec![Message::User(UserMessage::new_text("Hello"))],
             tools: None,
         };
-        let body =
-            build_request_body(&model, &context, 4096, None, &None).unwrap();
+        let body = build_request_body(&model, &context, 4096, None, &None).unwrap();
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
         assert_eq!(body["max_tokens"], 4096);
         assert_eq!(body["stream"], true);
@@ -1118,7 +1100,7 @@ mod tests {
                 "Let me think...",
             ))],
             api: Api::OpenAICompletions, // Different API
-            provider: Provider::OpenAI,   // Different provider
+            provider: Provider::OpenAI,  // Different provider
             model: "gpt-4".to_string(),
             usage: crate::types::Usage::default(),
             stop_reason: StopReason::Stop,

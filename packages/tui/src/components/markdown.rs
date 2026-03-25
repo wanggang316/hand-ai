@@ -55,7 +55,9 @@ impl MarkdownComponent {
                     Tag::CodeBlock(_) => {
                         in_code_block = true;
                         flush_line(&mut current_line, &mut lines);
-                        lines.push("\x1b[90m┌───────────────────────────────────┐\x1b[0m".to_string());
+                        lines.push(
+                            "\x1b[90m┌───────────────────────────────────┐\x1b[0m".to_string(),
+                        );
                     }
                     Tag::Paragraph => {
                         if !lines.is_empty() && !lines.last().is_none_or(|l| l.is_empty()) {
@@ -108,7 +110,9 @@ impl MarkdownComponent {
                     TagEnd::CodeBlock => {
                         in_code_block = false;
                         flush_line(&mut current_line, &mut lines);
-                        lines.push("\x1b[90m└───────────────────────────────────┘\x1b[0m".to_string());
+                        lines.push(
+                            "\x1b[90m└───────────────────────────────────┘\x1b[0m".to_string(),
+                        );
                     }
                     TagEnd::Paragraph => {
                         flush_line(&mut current_line, &mut lines);
@@ -189,9 +193,11 @@ fn flush_line(current: &mut String, lines: &mut Vec<String>) {
 impl Component for MarkdownComponent {
     fn render(&self, width: u16) -> Vec<String> {
         if let Some((cached_src, cached_w, cached_lines)) = &self.cache
-            && cached_src == &self.source && *cached_w == width {
-                return cached_lines.clone();
-            }
+            && cached_src == &self.source
+            && *cached_w == width
+        {
+            return cached_lines.clone();
+        }
         self.render_markdown(width)
     }
 

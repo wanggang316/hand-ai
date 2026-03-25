@@ -68,7 +68,12 @@ impl Component for BoxComponent {
         for child_line in &child_lines {
             let line = format!("{}{}", padding, child_line);
             if let Some(bg) = &self.bg_code {
-                lines.push(utils::apply_background(&line, width as usize, bg, "\x1b[0m"));
+                lines.push(utils::apply_background(
+                    &line,
+                    width as usize,
+                    bg,
+                    "\x1b[0m",
+                ));
             } else {
                 lines.push(line);
             }

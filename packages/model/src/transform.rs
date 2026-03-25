@@ -4,7 +4,8 @@
 //! tool results for orphaned tool calls across provider boundaries.
 
 use crate::types::{
-    AssistantContentBlock, AssistantMessage, Message, Model, StopReason, TextContent, ToolCall, ToolResultMessage,
+    AssistantContentBlock, AssistantMessage, Message, Model, StopReason, TextContent, ToolCall,
+    ToolResultMessage,
 };
 use std::collections::HashSet;
 
@@ -66,9 +67,7 @@ pub fn transform_messages(
                                 Some(block.clone())
                             } else {
                                 // Convert to plain text for cross-provider
-                                Some(AssistantContentBlock::Text(TextContent::new(
-                                    &t.thinking,
-                                )))
+                                Some(AssistantContentBlock::Text(TextContent::new(&t.thinking)))
                             }
                         }
 
@@ -90,15 +89,13 @@ pub fn transform_messages(
                             }
 
                             // Normalize tool call ID for cross-model
-                            if !is_same_model
-                                && let Some(normalizer) = normalize_tool_call_id {
-                                    let normalized = normalizer(&tc.id, model, assistant);
-                                    if normalized != tc.id {
-                                        tool_call_id_map
-                                            .insert(tc.id.clone(), normalized.clone());
-                                        new_tc.id = normalized;
-                                    }
+                            if !is_same_model && let Some(normalizer) = normalize_tool_call_id {
+                                let normalized = normalizer(&tc.id, model, assistant);
+                                if normalized != tc.id {
+                                    tool_call_id_map.insert(tc.id.clone(), normalized.clone());
+                                    new_tc.id = normalized;
                                 }
+                            }
 
                             Some(AssistantContentBlock::ToolCall(new_tc))
                         }
@@ -219,8 +216,8 @@ pub fn normalize_tool_call_id_for_anthropic(id: &str) -> String {
 mod tests {
     use super::*;
     use crate::types::{
-        Api, AssistantMessage, Provider, StopReason, TextContent, ThinkingContent, ToolResultContent,
-        Usage, UserMessage,
+        Api, AssistantMessage, Provider, StopReason, TextContent, ThinkingContent,
+        ToolResultContent, Usage, UserMessage,
     };
 
     fn test_model() -> Model {
@@ -302,7 +299,9 @@ mod tests {
         assert_eq!(result.len(), 1);
         if let Message::Assistant(a) = &result[0] {
             // Thinking should be converted to text
-            assert!(matches!(&a.content[0], AssistantContentBlock::Text(t) if t.text == "reasoning"));
+            assert!(
+                matches!(&a.content[0], AssistantContentBlock::Text(t) if t.text == "reasoning")
+            );
             assert!(matches!(&a.content[1], AssistantContentBlock::Text(_)));
         }
     }
@@ -369,7 +368,9 @@ mod tests {
         let result = transform_messages(&messages, &model, None);
         assert_eq!(result.len(), 3);
         assert!(matches!(&result[0], Message::Assistant(_)));
-        assert!(matches!(&result[1], Message::ToolResult(tr) if tr.tool_call_id == "tc1" && tr.is_error));
+        assert!(
+            matches!(&result[1], Message::ToolResult(tr) if tr.tool_call_id == "tc1" && tr.is_error)
+        );
         assert!(matches!(&result[2], Message::User(_)));
     }
 

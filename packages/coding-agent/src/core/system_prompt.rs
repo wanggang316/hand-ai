@@ -51,9 +51,7 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
         let has_write = options.tools.iter().any(|t| t == "write");
 
         if has_read {
-            tool_section.push_str(
-                "- Use `read` to examine file contents before making changes.\n",
-            );
+            tool_section.push_str("- Use `read` to examine file contents before making changes.\n");
         }
         if has_bash && has_grep {
             tool_section.push_str(
@@ -61,14 +59,10 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
             );
         }
         if has_bash && has_find {
-            tool_section.push_str(
-                "- Prefer `find` over `bash` with find/fd for locating files.\n",
-            );
+            tool_section.push_str("- Prefer `find` over `bash` with find/fd for locating files.\n");
         }
         if has_bash && has_ls {
-            tool_section.push_str(
-                "- Prefer `ls` over `bash` with ls for listing directories.\n",
-            );
+            tool_section.push_str("- Prefer `ls` over `bash` with ls for listing directories.\n");
         }
         if has_edit && has_write {
             tool_section.push_str(

@@ -19,7 +19,7 @@ impl LoaderComponent {
             message: message.into(),
             frame: 0,
             spinner_color: "\x1b[36m".to_string(), // cyan
-            message_color: "\x1b[90m".to_string(),  // dim
+            message_color: "\x1b[90m".to_string(), // dim
         }
     }
 

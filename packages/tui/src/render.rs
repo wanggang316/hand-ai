@@ -52,8 +52,7 @@ impl DiffRenderer {
             .position(|(a, b)| a != b)
             .unwrap_or(0);
 
-        let needs_update = first_changed < std::cmp::min(prev_len, new_len)
-            || prev_len != new_len;
+        let needs_update = first_changed < std::cmp::min(prev_len, new_len) || prev_len != new_len;
 
         if !needs_update {
             return String::new();
@@ -78,7 +77,12 @@ impl DiffRenderer {
         };
 
         let render_end = end.min(new_len);
-        for (i, line) in new_lines.iter().enumerate().take(render_end).skip(first_changed) {
+        for (i, line) in new_lines
+            .iter()
+            .enumerate()
+            .take(render_end)
+            .skip(first_changed)
+        {
             commands.push_str("\x1b[2K"); // Clear line
             commands.push('\r');
             commands.push_str(line);

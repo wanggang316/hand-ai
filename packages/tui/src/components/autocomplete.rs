@@ -220,10 +220,7 @@ mod tests {
     #[test]
     fn test_autocomplete_prev_wraps() {
         let mut ac = AutocompleteComponent::new();
-        ac.set_suggestions(vec![
-            Suggestion::new("a"),
-            Suggestion::new("b"),
-        ]);
+        ac.set_suggestions(vec![Suggestion::new("a"), Suggestion::new("b")]);
 
         ac.select_prev(); // wraps to end
         assert_eq!(ac.selected().unwrap().value, "b");

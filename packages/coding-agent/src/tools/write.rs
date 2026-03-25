@@ -48,9 +48,10 @@ fn execute_write(cwd: &Path, args: serde_json::Value) -> ToolResult {
 
     // Create parent directories
     if let Some(parent) = path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent) {
-            return ToolResult::error(format!("Failed to create directories: {}", e));
-        }
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return ToolResult::error(format!("Failed to create directories: {}", e));
+    }
 
     let existed = path.exists();
     let line_count = content.lines().count();
@@ -71,11 +72,7 @@ fn execute_write(cwd: &Path, args: serde_json::Value) -> ToolResult {
 
 fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
+    if p.is_absolute() { p } else { cwd.join(p) }
 }
 
 #[cfg(test)]

@@ -368,8 +368,7 @@ fn handle_slash_command(
                 println!("Current model: \x1b[1m{}\x1b[0m", session.model().id);
                 println!("Provider: {}", session.model().provider.as_str());
             } else {
-                let resolved =
-                    model_resolver::resolve_model(None, args);
+                let resolved = model_resolver::resolve_model(None, args);
                 session.set_model(resolved.model.clone());
                 println!("Model changed to: \x1b[1m{}\x1b[0m", resolved.model.id);
             }
@@ -383,11 +382,15 @@ fn handle_slash_command(
         }
 
         "/compact" => {
-            println!("\x1b[33m[Manual compaction not yet implemented — auto-compact is active]\x1b[0m");
+            println!(
+                "\x1b[33m[Manual compaction not yet implemented — auto-compact is active]\x1b[0m"
+            );
         }
 
         "/new" => {
-            println!("\x1b[33m[Starting new session requires restarting. Use --no-session for ephemeral mode.]\x1b[0m");
+            println!(
+                "\x1b[33m[Starting new session requires restarting. Use --no-session for ephemeral mode.]\x1b[0m"
+            );
         }
 
         "/export" => {
@@ -476,31 +479,23 @@ fn handle_slash_command(
             println!("See the project repository for the full changelog.");
         }
 
-        "/resume" => {
-            match hand_coding_agent::SessionManager::list(cwd) {
-                Ok(sessions) => {
-                    if sessions.is_empty() {
-                        println!("No sessions found.");
-                    } else {
-                        println!("Recent sessions:");
-                        for (i, s) in sessions.iter().take(10).enumerate() {
-                            let dt = chrono::DateTime::from_timestamp_millis(s.timestamp)
-                                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                                .unwrap_or_default();
-                            println!(
-                                "  {}. {} ({} msgs, {})",
-                                i + 1,
-                                s.id,
-                                s.message_count,
-                                dt,
-                            );
-                        }
-                        println!("\nUse --resume <session-id> to resume.");
+        "/resume" => match hand_coding_agent::SessionManager::list(cwd) {
+            Ok(sessions) => {
+                if sessions.is_empty() {
+                    println!("No sessions found.");
+                } else {
+                    println!("Recent sessions:");
+                    for (i, s) in sessions.iter().take(10).enumerate() {
+                        let dt = chrono::DateTime::from_timestamp_millis(s.timestamp)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                            .unwrap_or_default();
+                        println!("  {}. {} ({} msgs, {})", i + 1, s.id, s.message_count, dt,);
                     }
+                    println!("\nUse --resume <session-id> to resume.");
                 }
-                Err(e) => eprintln!("\x1b[31mFailed to list sessions: {}\x1b[0m", e),
             }
-        }
+            Err(e) => eprintln!("\x1b[31mFailed to list sessions: {}\x1b[0m", e),
+        },
 
         "/thinking" => {
             if args.is_empty() {
@@ -509,7 +504,10 @@ fn handle_slash_command(
                 println!("Thinking level set to: {:?}", level);
                 // Note: would need to update stream_options on the session
             } else {
-                println!("Invalid thinking level: {}. Use: off, minimal, low, medium, high, xhigh", args);
+                println!(
+                    "Invalid thinking level: {}. Use: off, minimal, low, medium, high, xhigh",
+                    args
+                );
             }
         }
 
@@ -520,11 +518,7 @@ fn handle_slash_command(
                 println!("No models found.");
             } else {
                 for m in models.iter().take(20) {
-                    println!(
-                        "  {:<16} {}",
-                        m.provider.as_str(),
-                        m.id,
-                    );
+                    println!("  {:<16} {}", m.provider.as_str(), m.id,);
                 }
                 if models.len() > 20 {
                     println!("  ... and {} more", models.len() - 20);
@@ -578,9 +572,7 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
                 eprintln!("\x1b[31m[{} failed]\x1b[0m", tool_name);
             }
         }
-        AgentEvent::ToolExecutionUpdate {
-            update, ..
-        } => {
+        AgentEvent::ToolExecutionUpdate { update, .. } => {
             // Show progress updates from tools (e.g., bash streaming output)
             if let Some(text) = update.as_str() {
                 eprint!("\x1b[2m{}\x1b[0m", text);
@@ -595,10 +587,7 @@ fn handle_export(
     session: &AgentSession,
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("html");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("html");
 
     match ext {
         "jsonl" => {
@@ -610,7 +599,12 @@ fn handle_export(
             .map_err(|e| format!("JSONL export not available for active session: {}", e))?;
         }
         _ => {
-            export::export_to_html(session.messages(), session.session_id(), &session.model().id, path)?;
+            export::export_to_html(
+                session.messages(),
+                session.session_id(),
+                &session.model().id,
+                path,
+            )?;
         }
     }
     Ok(())
@@ -691,9 +685,11 @@ fn resolve_session_path(cwd: &std::path::Path, source: &str) -> PathBuf {
         for entry in entries.flatten() {
             let name = entry.file_name();
             if let Some(name_str) = name.to_str()
-                && name_str.starts_with(source) && name_str.ends_with(".jsonl") {
-                    return entry.path();
-                }
+                && name_str.starts_with(source)
+                && name_str.ends_with(".jsonl")
+            {
+                return entry.path();
+            }
         }
     }
     path
@@ -701,10 +697,7 @@ fn resolve_session_path(cwd: &std::path::Path, source: &str) -> PathBuf {
 
 fn execute_shell(cmd: &str) {
     use std::process::Command;
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .status();
+    let status = Command::new("sh").arg("-c").arg(cmd).status();
     match status {
         Ok(s) => {
             if !s.success() {
@@ -742,14 +735,13 @@ fn copy_to_clipboard(text: &str) -> bool {
     use std::process::{Command, Stdio};
 
     // Try pbcopy (macOS)
-    if let Ok(mut child) = Command::new("pbcopy")
-        .stdin(Stdio::piped())
-        .spawn()
+    if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn()
         && let Some(mut stdin) = child.stdin.take()
-            && std::io::Write::write_all(&mut stdin, text.as_bytes()).is_ok() {
-                drop(stdin);
-                return child.wait().is_ok_and(|s| s.success());
-            }
+        && std::io::Write::write_all(&mut stdin, text.as_bytes()).is_ok()
+    {
+        drop(stdin);
+        return child.wait().is_ok_and(|s| s.success());
+    }
 
     // Try xclip (Linux)
     if let Ok(mut child) = Command::new("xclip")
@@ -757,10 +749,11 @@ fn copy_to_clipboard(text: &str) -> bool {
         .stdin(Stdio::piped())
         .spawn()
         && let Some(mut stdin) = child.stdin.take()
-            && std::io::Write::write_all(&mut stdin, text.as_bytes()).is_ok() {
-                drop(stdin);
-                return child.wait().is_ok_and(|s| s.success());
-            }
+        && std::io::Write::write_all(&mut stdin, text.as_bytes()).is_ok()
+    {
+        drop(stdin);
+        return child.wait().is_ok_and(|s| s.success());
+    }
 
     false
 }

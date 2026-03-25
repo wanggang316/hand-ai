@@ -302,8 +302,7 @@ impl std::fmt::Debug for AgentLoopConfig {
 // ---------------------------------------------------------------------------
 
 /// Current agent state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentState {
     pub system_prompt: String,
     pub model_id: String,
@@ -313,7 +312,6 @@ pub struct AgentState {
     /// Current thinking level for reasoning models.
     pub thinking_level: Option<model::ThinkingLevel>,
 }
-
 
 /// Extract tool calls from an assistant message's content blocks.
 pub fn extract_tool_calls(message: &AssistantMessage) -> Vec<&ToolCall> {

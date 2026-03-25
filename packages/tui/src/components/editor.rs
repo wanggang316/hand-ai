@@ -250,13 +250,13 @@ impl Component for EditorComponent {
 
         // Bottom border with line info
         if self.border {
-            let info = format!(
-                " {}:{} ",
-                self.cursor_line + 1,
-                self.cursor_col + 1
-            );
+            let info = format!(" {}:{} ", self.cursor_line + 1, self.cursor_col + 1);
             let remaining = (width as usize).saturating_sub(2 + info.len());
-            let border_line = format!("└{}{info}{}┘", "─".repeat(remaining / 2), "─".repeat(remaining - remaining / 2));
+            let border_line = format!(
+                "└{}{info}{}┘",
+                "─".repeat(remaining / 2),
+                "─".repeat(remaining - remaining / 2)
+            );
             output.push(border_line);
         }
 
@@ -480,7 +480,9 @@ mod tests {
 
     #[test]
     fn test_editor_render_with_border() {
-        let mut editor = EditorComponent::new().with_viewport_height(3).with_border(true);
+        let mut editor = EditorComponent::new()
+            .with_viewport_height(3)
+            .with_border(true);
         editor.set_text("line1\nline2\nline3");
         let lines = editor.render(40);
         assert!(lines[0].starts_with('┌'));
@@ -490,7 +492,9 @@ mod tests {
 
     #[test]
     fn test_editor_render_without_border() {
-        let mut editor = EditorComponent::new().with_viewport_height(3).with_border(false);
+        let mut editor = EditorComponent::new()
+            .with_viewport_height(3)
+            .with_border(false);
         editor.set_text("hello");
         let lines = editor.render(40);
         assert!(lines[0].contains("hello"));

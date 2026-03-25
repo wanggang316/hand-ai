@@ -42,10 +42,7 @@ async fn execute_bash(cwd: &Path, args: serde_json::Value) -> ToolResult {
         None => return ToolResult::error("Missing required parameter: command"),
     };
 
-    let timeout = args
-        .get("timeout")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(120);
+    let timeout = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(120);
 
     let options = bash_executor::BashExecutorOptions {
         timeout_secs: timeout,
@@ -59,9 +56,10 @@ async fn execute_bash(cwd: &Path, args: serde_json::Value) -> ToolResult {
                 output.push_str("\n[Output truncated]");
             }
             if let Some(code) = result.exit_code
-                && code != 0 {
-                    output.push_str(&format!("\n[Exit code: {}]", code));
-                }
+                && code != 0
+            {
+                output.push_str(&format!("\n[Exit code: {}]", code));
+            }
             ToolResult::text(output)
         }
         Err(e) => ToolResult::error(format!("Bash execution failed: {}", e)),
@@ -83,7 +81,8 @@ mod tests {
     #[tokio::test]
     async fn test_bash_echo() {
         let dir = TempDir::new().unwrap();
-        let result = execute_bash(&dir.path().to_path_buf(), json!({"command": "echo hello"})).await;
+        let result =
+            execute_bash(&dir.path().to_path_buf(), json!({"command": "echo hello"})).await;
         let text = get_text(&result);
         assert!(text.contains("hello"));
     }
@@ -91,8 +90,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_exit_code() {
         let dir = TempDir::new().unwrap();
-        let result =
-            execute_bash(&dir.path().to_path_buf(), json!({"command": "exit 1"})).await;
+        let result = execute_bash(&dir.path().to_path_buf(), json!({"command": "exit 1"})).await;
         let text = get_text(&result);
         assert!(text.contains("Exit code: 1"));
     }

@@ -44,9 +44,11 @@ impl Component for TextComponent {
     fn render(&self, width: u16) -> Vec<String> {
         // Check cache
         if let Some((cached_text, cached_width, cached_lines)) = &self.cache
-            && cached_text == &self.text && *cached_width == width {
-                return cached_lines.clone();
-            }
+            && cached_text == &self.text
+            && *cached_width == width
+        {
+            return cached_lines.clone();
+        }
 
         let available = width.saturating_sub(self.padding_x * 2) as usize;
         let padding = " ".repeat(self.padding_x as usize);

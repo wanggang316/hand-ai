@@ -48,10 +48,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
     };
 
     let path = resolve_path(cwd, path_str);
-    let offset = args
-        .get("offset")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1) as usize;
+    let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
     let limit = args
         .get("limit")
         .and_then(|v| v.as_u64())
@@ -89,11 +86,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
 
 fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
+    if p.is_absolute() { p } else { cwd.join(p) }
 }
 
 #[cfg(test)]

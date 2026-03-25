@@ -123,11 +123,7 @@ pub fn generate_diff(old: &str, new: &str, filename: &str) -> String {
 
 fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
+    if p.is_absolute() { p } else { cwd.join(p) }
 }
 
 #[cfg(test)]
@@ -218,7 +214,11 @@ mod tests {
 
     #[test]
     fn test_generate_diff() {
-        let diff = generate_diff("line1\nline2\nline3\n", "line1\nchanged\nline3\n", "test.txt");
+        let diff = generate_diff(
+            "line1\nline2\nline3\n",
+            "line1\nchanged\nline3\n",
+            "test.txt",
+        );
         assert!(diff.contains("-line2"));
         assert!(diff.contains("+changed"));
     }
