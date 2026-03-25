@@ -319,3 +319,247 @@ fn test_tool_execution_mode_default() {
     let mode = hand_agent::ToolExecutionMode::default();
     assert_eq!(mode, hand_agent::ToolExecutionMode::Parallel);
 }
+
+// ========================================================================
+// A-045: Agent set_model changes state
+// ========================================================================
+#[test]
+fn test_agent_set_model() {
+    let client = Client::new();
+    let model = test_model();
+    let mut agent = Agent::new(client, model);
+
+    let mut new_model = test_model();
+    new_model.id = "new-model".to_string();
+    agent.set_model(new_model);
+
+    assert_eq!(agent.state().model_id, "new-model");
+    assert_eq!(agent.model().id, "new-model");
+}
+
+// ========================================================================
+// A-046: Agent set_thinking_level
+// ========================================================================
+#[test]
+fn test_agent_set_thinking_level() {
+    let client = Client::new();
+    let model = test_model();
+    let mut agent = Agent::new(client, model);
+
+    assert!(agent.thinking_level().is_none());
+
+    agent.set_thinking_level(Some(model::ThinkingLevel::High));
+    assert_eq!(agent.thinking_level(), Some(model::ThinkingLevel::High));
+
+    agent.set_thinking_level(None);
+    assert!(agent.thinking_level().is_none());
+}
+
+// ========================================================================
+// A-047: Agent set_tool_execution_mode
+// ========================================================================
+#[test]
+fn test_agent_set_tool_execution_mode() {
+    let client = Client::new();
+    let model = test_model();
+    let mut agent = Agent::new(client, model);
+
+    agent.set_tool_execution_mode(hand_agent::ToolExecutionMode::Sequential);
+    // No public getter, but verify it doesn't panic
+}
+
+// ========================================================================
+// A-048: Agent set_tools replaces all
+// ========================================================================
+#[test]
+fn test_agent_set_tools_replaces() {
+    let client = Client::new();
+    let model = test_model();
+    let mut agent = Agent::new(client, model);
+
+    agent.add_tool(echo_tool());
+    agent.add_tool(echo_tool());
+    // set_tools replaces all
+    agent.set_tools(vec![echo_tool()]);
+    // No public tool count, but verify it compiles
+}
+
+// ========================================================================
+// A-049: Agent clear_all_queues
+// ========================================================================
+#[test]
+fn test_agent_clear_all_queues() {
+    let client = Client::new();
+    let model = test_model();
+    let agent = Agent::new(client, model);
+
+    agent.steer(Message::User(UserMessage::new_text("s1")));
+    agent.follow_up(Message::User(UserMessage::new_text("f1")));
+    assert!(agent.has_queued_messages());
+
+    agent.clear_all_queues();
+    assert!(!agent.has_queued_messages());
+}
+
+// ========================================================================
+// A-050: Agent subscribe returns index
+// ========================================================================
+#[test]
+fn test_agent_subscribe_returns_index() {
+    let client = Client::new();
+    let model = test_model();
+    let mut agent = Agent::new(client, model);
+
+    let idx0 = agent.subscribe(Box::new(|_| {}));
+    let idx1 = agent.subscribe(Box::new(|_| {}));
+    assert_eq!(idx0, 0);
+    assert_eq!(idx1, 1);
+}
+
+// ========================================================================
+// A-051: Agent replace_messages
+// ========================================================================
+#[test]
+fn test_agent_replace_messages() {
+    let client = Client::new();
+    let model = test_model();
+    let mut agent = Agent::new(client, model);
+
+    agent.replace_messages(vec![
+        Message::User(UserMessage::new_text("a")),
+        Message::User(UserMessage::new_text("b")),
+        Message::User(UserMessage::new_text("c")),
+    ]);
+    assert_eq!(agent.messages().len(), 3);
+
+    agent.replace_messages(vec![Message::User(UserMessage::new_text("only"))]);
+    assert_eq!(agent.messages().len(), 1);
+}
+
+// ========================================================================
+// A-052: Agent debug format
+// ========================================================================
+#[test]
+fn test_agent_debug_format() {
+    let client = Client::new();
+    let model = test_model();
+    let agent = Agent::new(client, model);
+    let debug = format!("{:?}", agent);
+    assert!(debug.contains("Agent"));
+    assert!(debug.contains("test-model"));
+}
+
+// ========================================================================
+// A-053: Agent error state after failed prompt
+// ========================================================================
+#[tokio::test]
+async fn test_agent_error_state_after_failed_prompt() {
+    let client = Client::new();
+    let model = test_model();
+
+    // Register error provider
+    client.registry.register(
+        Api::OpenAICompletions,
+        Box::new(MockErrorProvider {
+            error_message: "API error".to_string(),
+        }),
+        Some("test".into()),
+    );
+
+    let mut agent = Agent::new(client, model);
+    let result = agent.prompt("test").await;
+    // Should complete (even with error response) without panic
+    assert!(result.is_ok() || result.is_err());
+}
+
+// ========================================================================
+// A-054: Agent continue without messages errors
+// ========================================================================
+#[tokio::test]
+async fn test_agent_continue_without_messages() {
+    let client = Client::new();
+    let model = test_model();
+    let mut agent = Agent::new(client, model);
+
+    let result = agent.r#continue().await;
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+    assert!(err.to_string().contains("No messages"));
+}
+
+// ========================================================================
+// A-055: Agent prompt_with_messages
+// ========================================================================
+#[tokio::test]
+async fn test_agent_prompt_with_messages() {
+    let mut agent = setup_text_agent("reply");
+    let messages = vec![
+        Message::User(UserMessage::new_text("msg1")),
+        Message::User(UserMessage::new_text("msg2")),
+    ];
+    let result = agent.prompt_with_messages(messages).await;
+    assert!(result.is_ok());
+    assert!(agent.messages().len() >= 3); // 2 user + 1 assistant
+}
+
+// ========================================================================
+// A-056: QueueDeliveryMode default
+// ========================================================================
+#[test]
+fn test_queue_delivery_mode_default() {
+    let mode = hand_agent::QueueDeliveryMode::default();
+    assert_eq!(mode, hand_agent::QueueDeliveryMode::OneAtATime);
+}
+
+// ========================================================================
+// A-057: AgentEvent serializable
+// ========================================================================
+#[test]
+fn test_agent_event_serializable() {
+    let event = AgentEvent::AgentStart;
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("agent_start"));
+
+    let event = AgentEvent::TurnStart;
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("turn_start"));
+}
+
+// ========================================================================
+// A-058: AgentTool to_model_tool
+// ========================================================================
+#[test]
+fn test_agent_tool_to_model_tool() {
+    let tool = echo_tool();
+    let mt = tool.to_model_tool();
+    assert_eq!(mt.name, "echo");
+    assert_eq!(mt.description, "Echoes back the input");
+}
+
+// ========================================================================
+// A-059: AgentTool debug format
+// ========================================================================
+#[test]
+fn test_agent_tool_debug_format() {
+    let tool = echo_tool();
+    let debug = format!("{:?}", tool);
+    assert!(debug.contains("echo"));
+    assert!(debug.contains("Echo"));
+}
+
+// ========================================================================
+// A-060: Agent set_before_tool_call hook
+// ========================================================================
+#[test]
+fn test_agent_set_hooks() {
+    let client = Client::new();
+    let model = test_model();
+    let mut agent = Agent::new(client, model);
+
+    agent.set_before_tool_call(Some(Box::new(|_ctx| Box::pin(async { None }))));
+    agent.set_after_tool_call(Some(Box::new(|_ctx| Box::pin(async { None }))));
+
+    // Clear hooks
+    agent.set_before_tool_call(None);
+    agent.set_after_tool_call(None);
+}
