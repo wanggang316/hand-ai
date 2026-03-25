@@ -165,3 +165,72 @@ pub fn clear_vertex_adc_cache() {
     let mut cache = VERTEX_ADC_CACHE.lock().unwrap();
     *cache = None;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_env_api_key_returns_none_when_not_set() {
+        // Most CI environments won't have provider keys set
+        // This tests the fallback behavior
+        let result = get_env_api_key(&Provider::Zai);
+        // Zai is obscure enough that it's almost never set
+        if env::var("ZAI_API_KEY").is_err() {
+            assert!(result.is_none());
+        }
+    }
+
+    #[test]
+    fn test_get_env_api_key_by_str_invalid_provider() {
+        let result = get_env_api_key_by_str("nonexistent-provider");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_env_api_key_by_str_known_provider() {
+        // Should return None if env var not set, but should not panic
+        let result = get_env_api_key_by_str("openai");
+        if env::var("OPENAI_API_KEY").is_err() {
+            assert!(result.is_none());
+        }
+    }
+
+    #[test]
+    fn test_clear_vertex_adc_cache() {
+        // Should not panic
+        clear_vertex_adc_cache();
+    }
+
+    #[test]
+    fn test_bedrock_credentials_detection() {
+        // When no AWS env vars are set, should return None
+        if env::var("AWS_PROFILE").is_err()
+            && env::var("AWS_ACCESS_KEY_ID").is_err()
+            && env::var("AWS_BEARER_TOKEN_BEDROCK").is_err()
+            && env::var("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI").is_err()
+            && env::var("AWS_CONTAINER_CREDENTIALS_FULL_URI").is_err()
+            && env::var("AWS_WEB_IDENTITY_TOKEN_FILE").is_err()
+        {
+            assert!(get_env_api_key(&Provider::AmazonBedrock).is_none());
+        }
+    }
+
+    #[test]
+    fn test_github_copilot_key_sources() {
+        // Should check COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN
+        if env::var("COPILOT_GITHUB_TOKEN").is_err()
+            && env::var("GH_TOKEN").is_err()
+            && env::var("GITHUB_TOKEN").is_err()
+        {
+            assert!(get_env_api_key(&Provider::GitHubCopilot).is_none());
+        }
+    }
+
+    #[test]
+    fn test_anthropic_key_sources() {
+        if env::var("ANTHROPIC_OAUTH_TOKEN").is_err() && env::var("ANTHROPIC_API_KEY").is_err() {
+            assert!(get_env_api_key(&Provider::Anthropic).is_none());
+        }
+    }
+}

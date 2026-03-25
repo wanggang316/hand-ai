@@ -1040,3 +1040,235 @@ fn get_compat(model: &Model) -> ResolvedCompat {
 
     detected
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        Api, AssistantContentBlock, AssistantMessage, Cost, InputType, TextContent, ToolCall,
+        Usage, UserMessage,
+    };
+
+    fn test_model(provider: Provider) -> Model {
+        Model {
+            id: "test-model".to_string(),
+            name: "Test Model".to_string(),
+            api: Api::OpenAICompletions,
+            provider,
+            base_url: String::new(),
+            reasoning: false,
+            input: vec![InputType::Text],
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 128_000,
+            max_tokens: 4096,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    #[test]
+    fn test_normalize_mistral_tool_id_short() {
+        assert_eq!(normalize_mistral_tool_id("abc"), "abcABCDEF");
+    }
+
+    #[test]
+    fn test_normalize_mistral_tool_id_exact() {
+        assert_eq!(normalize_mistral_tool_id("123456789"), "123456789");
+    }
+
+    #[test]
+    fn test_normalize_mistral_tool_id_long() {
+        assert_eq!(normalize_mistral_tool_id("abcdefghijklmnop"), "abcdefghi");
+    }
+
+    #[test]
+    fn test_normalize_mistral_tool_id_strips_non_alnum() {
+        assert_eq!(normalize_mistral_tool_id("a-b_c!d@e"), "abcdeABCD");
+    }
+
+    #[test]
+    fn test_sanitize_surrogates_clean() {
+        assert_eq!(sanitize_surrogates("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_sanitize_surrogates_with_unicode() {
+        assert_eq!(sanitize_surrogates("你好世界"), "你好世界");
+    }
+
+    #[test]
+    fn test_parse_streaming_json_valid() {
+        let result = parse_streaming_json(r#"{"key": "value"}"#);
+        assert_eq!(result["key"], "value");
+    }
+
+    #[test]
+    fn test_parse_streaming_json_empty_object() {
+        let result = parse_streaming_json("{invalid");
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_parse_streaming_json_non_object() {
+        let result = parse_streaming_json("hello");
+        assert_eq!(result, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn test_map_stop_reason_stop() {
+        assert_eq!(map_stop_reason("stop"), StopReason::Stop);
+    }
+
+    #[test]
+    fn test_map_stop_reason_length() {
+        assert_eq!(map_stop_reason("length"), StopReason::Length);
+    }
+
+    #[test]
+    fn test_map_stop_reason_tool_calls() {
+        assert_eq!(map_stop_reason("tool_calls"), StopReason::ToolUse);
+        assert_eq!(map_stop_reason("function_call"), StopReason::ToolUse);
+    }
+
+    #[test]
+    fn test_map_stop_reason_unknown() {
+        assert_eq!(map_stop_reason("unknown_reason"), StopReason::Stop);
+    }
+
+    #[test]
+    fn test_detect_compat_openai() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        assert!(compat.supports_store);
+        assert!(compat.supports_developer_role);
+        assert!(compat.supports_reasoning_effort);
+        assert!(!compat.requires_mistral_tool_ids);
+    }
+
+    #[test]
+    fn test_detect_compat_mistral() {
+        let mut model = test_model(Provider::Mistral);
+        model.base_url = "https://api.mistral.ai".to_string();
+        let compat = detect_compat(&model);
+        assert!(!compat.supports_store);
+        assert!(compat.requires_tool_result_name);
+        assert!(compat.requires_thinking_as_text);
+        assert!(compat.requires_mistral_tool_ids);
+        assert_eq!(compat.max_tokens_field, Some("max_tokens".to_string()));
+    }
+
+    #[test]
+    fn test_detect_compat_xai() {
+        let model = test_model(Provider::Xai);
+        let compat = detect_compat(&model);
+        assert!(!compat.supports_store);
+        assert!(!compat.supports_reasoning_effort);
+    }
+
+    #[test]
+    fn test_convert_tool_creates_openai_tool() {
+        let tool = Tool {
+            name: "calculator".to_string(),
+            description: "A calculator".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let openai_tool = convert_tool(&tool);
+        assert_eq!(openai_tool.tool_type, "function");
+        assert_eq!(openai_tool.function.name, "calculator");
+    }
+
+    #[test]
+    fn test_has_tool_history_empty() {
+        assert!(!has_tool_history(&[]));
+    }
+
+    #[test]
+    fn test_has_tool_history_with_tool_result() {
+        let messages = vec![Message::ToolResult(crate::types::ToolResultMessage {
+            role: "tool".to_string(),
+            tool_call_id: "tc_1".to_string(),
+            tool_name: "test".to_string(),
+            content: vec![crate::types::ToolResultContent::Text(TextContent::new(
+                "result".to_string(),
+            ))],
+            details: None,
+            is_error: false,
+            timestamp: 0,
+        })];
+        assert!(has_tool_history(&messages));
+    }
+
+    #[test]
+    fn test_has_tool_history_with_tool_call_in_assistant() {
+        let messages = vec![Message::Assistant(AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::ToolCall(ToolCall::new(
+                "tc_1",
+                "test",
+                serde_json::json!({}),
+            ))],
+            api: Api::OpenAICompletions,
+            provider: Provider::OpenAI,
+            model: "test".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        })];
+        assert!(has_tool_history(&messages));
+    }
+
+    #[test]
+    fn test_clamp_reasoning_xhigh_to_high() {
+        assert_eq!(
+            clamp_reasoning(Some(ThinkingLevel::Xhigh)),
+            Some(ThinkingLevel::High)
+        );
+    }
+
+    #[test]
+    fn test_clamp_reasoning_low_unchanged() {
+        assert_eq!(
+            clamp_reasoning(Some(ThinkingLevel::Low)),
+            Some(ThinkingLevel::Low)
+        );
+    }
+
+    #[test]
+    fn test_clamp_reasoning_none() {
+        assert_eq!(clamp_reasoning(None), None);
+    }
+
+    #[test]
+    fn test_convert_messages_system_prompt() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        let context = Context {
+            system_prompt: Some("You are helpful.".to_string()),
+            messages: vec![Message::User(UserMessage::new_text("Hello"))],
+            tools: None,
+        };
+        let msgs = convert_messages(&model, &context, &compat);
+        assert_eq!(msgs.len(), 2);
+        assert!(matches!(msgs[0].role, Role::System));
+    }
+
+    #[test]
+    fn test_convert_messages_no_system_prompt() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("Hello"))],
+            tools: None,
+        };
+        let msgs = convert_messages(&model, &context, &compat);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0].role, Role::User));
+    }
+}
