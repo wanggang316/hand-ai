@@ -1,8 +1,26 @@
 # hand-coding-agent
 
-交互式编码代理，对外提供 `hand` 命令。
+Interactive terminal coding agent. Adapt it to your workflows with context files and settings.
 
-这个包提供终端交互、会话持久化、上下文压缩和内建文件工具。
+Runs in two modes: interactive REPL and non-interactive print. Built on `hand-agent` and `model`.
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Providers & Models](#providers--models)
+- [Interactive Mode](#interactive-mode)
+  - [Editor](#editor)
+  - [Commands](#commands)
+  - [Keyboard Shortcuts](#keyboard-shortcuts)
+  - [Message Queue](#message-queue)
+- [Sessions](#sessions)
+  - [Compaction](#compaction)
+- [Settings](#settings)
+- [Context Files](#context-files)
+- [Programmatic Usage](#programmatic-usage)
+- [CLI Reference](#cli-reference)
+
+---
 
 ## Quick Start
 
@@ -11,161 +29,323 @@ cd packages/coding-agent
 cargo run --bin hand
 ```
 
-单次执行：
+Authenticate with an API key:
 
 ```bash
-cargo run --bin hand -- --prompt "Explain the current project structure"
+export ANTHROPIC_API_KEY=sk-ant-...
+cargo run --bin hand
 ```
 
-非交互输出模式：
+Then just talk to `hand`. By default, it gives the model seven tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`. The model uses these to fulfill your requests.
+
+---
+
+## Providers & Models
+
+For each built-in provider, the model catalog maintains a list of tool-capable models. Authenticate via API key, then select any model via `/model` or `--model`.
 
 ```bash
-cargo run --bin hand -- --print --prompt "Summarize src/main.rs"
-printf 'Review this repo' | cargo run --bin hand -- --print
+# Use default (Anthropic Claude Sonnet)
+cargo run --bin hand
+
+# Use OpenAI
+cargo run --bin hand -- --provider openai --model gpt-4o
+
+# Model with provider prefix
+cargo run --bin hand -- --model openai/gpt-4o
+
+# Model with thinking level
+cargo run --bin hand -- --model sonnet:high
+
+# List available models
+cargo run --bin hand -- --list-models
+cargo run --bin hand -- --list-models openai
 ```
 
-## CLI 选项
+See [packages/model](../model) for supported providers and environment variables.
 
-当前 `hand` 支持以下参数：
+---
 
-- `-p`, `--prompt <TEXT>`：初始 prompt
-- `-m`, `--model <MODEL>`：模型 ID
-- `--provider <PROVIDER>`：provider 名称
-- `--resume <SESSION_ID>`：恢复会话
-- `-d`, `--cwd <DIR>`：工作目录
-- `-v`, `--verbose`：启用详细日志
-- `--print`：非交互模式
-- `--system-prompt <TEXT>`：覆盖默认 system prompt
+## Interactive Mode
 
-默认 provider 为 `anthropic`，默认模型为 `claude-sonnet-4-20250514`。实际可用性取决于 `packages/model` 中已注册的 provider 实现和本地环境变量配置。
+The interface from top to bottom:
+- **Messages** — Your messages, assistant responses, tool calls and results
+- **Editor** — Where you type
+- **Status** — Model, session, token usage
 
-## 运行模式
+### Editor
 
-### Interactive
+| Feature | How |
+|---------|-----|
+| File reference | Type `@path` to include file content |
+| Bash commands | `!command` runs and sends output to LLM, `!!command` runs without sending |
+| Multi-line | Shift+Enter |
 
-不传 `--print` 时，`hand` 会进入 REPL 风格交互模式。
+### Commands
 
-内建命令：
+Type `/` to trigger commands:
 
-- `/help`
-- `/quit` / `/exit` / `/q`
-- `/model`
-- `/session`
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/quit`, `/exit`, `/q` | Quit |
+| `/model [pattern]` | Switch model |
+| `/models [search]` | List available models |
+| `/session` | Show session info (path, tokens, cost) |
+| `/settings` | Show current settings |
+| `/thinking [level]` | Set thinking level |
+| `/compact [prompt]` | Manually compact context |
+| `/new` | Start a new session |
+| `/resume [id]` | Browse and select from past sessions |
+| `/name <name>` | Set session display name |
+| `/fork [id]` | Fork current session |
+| `/export [file]` | Export session to HTML |
+| `/copy` | Copy last assistant message to clipboard |
+| `/hotkeys` | Show keyboard shortcuts |
+| `/changelog` | Display version info |
 
-### Print
+### Keyboard Shortcuts
 
-传入 `--print` 后：
+| Key | Action |
+|-----|--------|
+| Ctrl+C | Clear editor / quit if empty |
+| Escape | Cancel/abort current operation |
+| Enter | Submit message |
 
-- 若提供 `--prompt`，处理单次输入后退出
-- 否则从标准输入读取全部内容并处理后退出
+### Message Queue
 
-## 内建工具
+Submit messages while the agent is working:
 
-当前默认注册 7 个工具：
+- **Enter** queues a *steering* message — delivered after the current turn's tool calls finish
+- Steering and follow-up queues are managed by the underlying agent runtime
 
-- `read`
-- `write`
-- `edit`
-- `bash`
-- `grep`
-- `find`
-- `ls`
+---
 
-系统提示词会根据已启用工具自动生成对应的使用约束，例如优先使用 `read` 查看文件、优先用 `edit` 修改已有文件、优先用 `grep`/`find`/`ls` 做搜索与遍历。
+## Sessions
 
-## 会话
+Sessions are stored as JSONL files with tree structure. Each entry has an `id` and `parentId`.
 
-会话由 `SessionManager` 以 JSONL 格式持久化。
-
-- 目录：`<cwd>/.hand/sessions/`
-- 文件名：`<session_id>.jsonl`
-- 记录类型：`session`、`message`、`model_change`、`compaction`、`label`
-
-恢复会话：
+### Management
 
 ```bash
+# Continue most recent session
+cargo run --bin hand -- --continue
+
+# Browse and select session
+cargo run --bin hand -- --resume
+
+# Specific session
 cargo run --bin hand -- --resume s_xxx_xxx
+
+# Fork a session
+cargo run --bin hand -- --fork s_xxx_xxx
+
+# Ephemeral mode
+cargo run --bin hand -- --no-session
 ```
 
-## 上下文压缩
+Sessions auto-save to `<cwd>/.hand/sessions/`.
 
-`AgentSession` 会在上下文过长时触发 compaction：
+### Compaction
 
-- 保留最近消息
-- 生成压缩摘要记录到 session
-- 从最近一次压缩点之后重建上下文
+Long sessions can exhaust context windows. Compaction summarizes older messages while keeping recent ones.
 
-相关配置由 `SettingsManager` 提供，默认启用。
+**Manual:** `/compact` or `/compact <custom instructions>`
 
-## 设置文件
+**Automatic:** Enabled by default. Triggers on context overflow or when approaching the limit.
 
-当前设置来源有两层：
+The full history remains in the JSONL file. Configure via settings.
 
-- 全局：`~/.hand/agent/settings.json`
-- 项目：`<cwd>/.hand/settings.json`
+---
 
-合并后的设置项包括：
+## Settings
 
-- `default_provider`
-- `default_model`
-- `default_thinking_level`
-- `shell_path`
-- `shell_command_prefix`
-- `theme`
-- `compaction`
-- `retry`
-- `quiet_startup`
+Edit JSON files directly:
 
-## 上下文文件
+| Location | Scope |
+|----------|-------|
+| `~/.hand/agent/settings.json` | Global (all projects) |
+| `<cwd>/.hand/settings.json` | Project (overrides global) |
 
-启动时会读取以下项目上下文文件，并注入 system prompt：
+Available settings:
 
-- `HAND.md`
-- `.hand/context.md`
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `default_provider` | Default provider | `"anthropic"` |
+| `default_model` | Default model ID | `"claude-sonnet-4-20250514"` |
+| `default_thinking_level` | Thinking level | `null` |
+| `shell_path` | Shell for bash tool | System default |
+| `shell_command_prefix` | Prefix for shell commands | `null` |
+| `theme` | Theme name | `"dark"` |
+| `compaction.enabled` | Enable auto-compaction | `true` |
+| `compaction.threshold` | Context % trigger | `0.8` |
+| `retry.max_retries` | Max retries on error | `3` |
+| `quiet_startup` | Suppress startup info | `false` |
 
-上下文文件加载路径为这两个位置。
+---
 
-## 输出事件
+## Context Files
 
-运行时，`AgentSession` 会把底层 `AgentEvent` 转发给订阅者，用于：
+`hand` loads context files at startup and injects them into the system prompt:
 
-- 实时输出文本流
-- 展示 thinking 片段
-- 展示工具执行开始/结束
-- 显示压缩开始/结束事件
+- `HAND.md` — Project instructions (from cwd)
+- `.hand/context.md` — Additional context
 
-CLI 主程序就是通过 `session.subscribe(...)` 渲染这些事件。
+Use these for project conventions, common commands, and instructions.
 
-## 作为库使用
+### System Prompt
+
+Override the default system prompt:
+
+```bash
+cargo run --bin hand -- --system-prompt "You are a Rust expert."
+```
+
+Or append to it:
+
+```bash
+cargo run --bin hand -- --append-system-prompt "Always use idiomatic Rust."
+```
+
+---
+
+## Programmatic Usage
 
 ```rust
 use hand_coding_agent::{AgentSession, AgentSessionEvent};
+
+// Create session with config
+let mut session = AgentSession::new(config);
+
+// Subscribe to events
+session.subscribe(|event| {
+    match event {
+        AgentSessionEvent::Agent(agent_event) => { /* handle */ }
+        AgentSessionEvent::CompactionStart => { /* ... */ }
+        AgentSessionEvent::CompactionEnd { .. } => { /* ... */ }
+    }
+});
+
+// Send a message
+session.send_message("What files are in this directory?").await?;
 ```
 
-你可以：
+You can:
+- Create `AgentSessionConfig` with custom settings
+- Reuse `tools::create_default_tools()` or provide custom tools
+- Subscribe to events for custom rendering
+- Drive the agent loop with `send_message()`
 
-- 自己创建 `AgentSessionConfig`
-- 复用 `tools::create_default_tools()` 或传入自定义工具
-- 通过 `subscribe()` 接管事件渲染
-- 调用 `send_message()` 驱动一次 agent loop
+---
 
-## 开发
+## CLI Reference
+
+```bash
+hand [options] [message]
+```
+
+### Modes
+
+| Flag | Description |
+|------|-------------|
+| (default) | Interactive mode |
+| `--print` | Print response and exit |
+
+In print mode, `hand` also reads piped stdin:
+
+```bash
+cat README.md | cargo run --bin hand -- --print --prompt "Summarize this"
+```
+
+### Model Options
+
+| Option | Description |
+|--------|-------------|
+| `--provider <name>` | Provider (anthropic, openai, google, etc.) |
+| `--model <pattern>` | Model pattern or ID (supports `provider/id` and `:<thinking>`) |
+| `--api-key <key>` | API key (overrides env vars) |
+| `--thinking <level>` | `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `--list-models [search]` | List available models |
+
+### Session Options
+
+| Option | Description |
+|--------|-------------|
+| `-c`, `--continue` | Continue most recent session |
+| `--resume [id]` | Browse/select session or specify ID |
+| `--fork [id]` | Fork a session |
+| `--no-session` | Ephemeral mode |
+
+### Tool Options
+
+| Option | Description |
+|--------|-------------|
+| `--tools <list>` | Enable specific tools (comma-separated) |
+| `--no-tools` | Disable all tools |
+
+Available tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`
+
+### Other Options
+
+| Option | Description |
+|--------|-------------|
+| `-p`, `--prompt <text>` | Initial prompt |
+| `-d`, `--cwd <dir>` | Working directory |
+| `--system-prompt <text>` | Override system prompt |
+| `--append-system-prompt <text>` | Append to system prompt |
+| `-v`, `--verbose` | Verbose logging |
+
+### Examples
+
+```bash
+# Interactive with initial prompt
+cargo run --bin hand -- "List all .rs files in src/"
+
+# Non-interactive
+cargo run --bin hand -- --print --prompt "Summarize this codebase"
+
+# Piped stdin
+cat README.md | cargo run --bin hand -- --print --prompt "Summarize"
+
+# Different model
+cargo run --bin hand -- --provider openai --model gpt-4o "Help me refactor"
+
+# Model with thinking
+cargo run --bin hand -- --model sonnet:high "Solve this complex problem"
+
+# Read-only mode
+cargo run --bin hand -- --tools read,grep,find,ls --print --prompt "Review the code"
+```
+
+---
+
+## Development
 
 ```bash
 cd packages/coding-agent
 cargo check
-cargo test
+cargo test   # 82 tests
 ```
 
-相关源码分布：
+Source layout:
+- `src/main.rs` — CLI entry, interactive/print modes
+- `src/core/agent_session.rs` — Session lifecycle, event forwarding
+- `src/core/session_manager.rs` — JSONL session storage
+- `src/core/settings.rs` — Global/project settings
+- `src/core/system_prompt.rs` — System prompt and context files
+- `src/core/compaction.rs` — Context compression
+- `src/core/model_resolver.rs` — Model pattern matching
+- `src/core/export.rs` — HTML/JSONL export
+- `src/tools/` — Built-in tool implementations
 
-- `src/main.rs`：CLI 入口
-- `src/core/agent_session.rs`：会话生命周期与事件转发
-- `src/core/session_manager.rs`：JSONL 会话存储
-- `src/core/settings.rs`：全局/项目设置加载与合并
-- `src/core/system_prompt.rs`：system prompt 与上下文文件加载
-- `src/tools/`：内建工具实现
+---
 
 ## License
 
 MIT
+
+## See Also
+
+- [model](../model) — Core LLM API
+- [hand-agent](../agent) — Agent runtime
+- [hand-tui](../tui) — Terminal UI components

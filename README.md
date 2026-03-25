@@ -1,41 +1,86 @@
-# hand-ai
+# Hand AI
 
-Rust 原生的 AI 工具集合，用于统一接入大模型、构建带工具调用的 Agent，以及实现交互式编码代理。
+> **Looking for the coding agent?** See **[packages/coding-agent](packages/coding-agent)** for installation and usage.
 
-编码代理使用说明见 `packages/coding-agent/README.md`。
+Rust-native tools for building AI agents and working with LLMs. A unified multi-provider API, a stateful agent runtime, and an interactive terminal coding agent.
 
 ## Packages
 
 | Package | Description |
 |---------|-------------|
-| `packages/model` | 统一的模型目录、消息类型、流式客户端和模型查询工具 |
-| `packages/agent` | Agent loop、工具执行、事件流和状态管理 |
-| `packages/coding-agent` | `hand` 命令行编码代理，带会话、上下文压缩和内建工具 |
-| `packages/tui` | Rust 终端 UI 组件库与差量渲染器 |
-| `packages/web-ui` | Web UI 说明文档 |
+| **[model](packages/model)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, Bedrock, etc.) |
+| **[hand-agent](packages/agent)** | Agent runtime with tool calling, steering, and event streaming |
+| **[hand-coding-agent](packages/coding-agent)** | Interactive terminal coding agent CLI |
+| **[hand-tui](packages/tui)** | Terminal UI component library with differential rendering |
+| **[web-ui](packages/web-ui)** | Web UI (documentation placeholder) |
+| **[examples](examples)** | Workspace examples |
 
-## 仓库结构
+## Architecture
 
-- `packages/model`：底层 LLM 抽象，定义 `Context`、`Message`、`Model`、`Client`
-- `packages/agent`：在 `model` 之上实现通用 agent loop 和工具调用
-- `packages/coding-agent`：面向终端用户的交互式 coding agent
-- `packages/tui`：供终端界面复用的组件与渲染基础设施
-- `examples`：工作区示例代码
+```
+hand-coding-agent (CLI binary)
+├── hand-agent (agent loop, tools, events)
+│   └── model (providers, streaming, model catalog)
+└── hand-tui (terminal UI components)
+```
 
-## 开发
+## Supported Providers
+
+**API keys:**
+- Anthropic
+- OpenAI
+- Azure OpenAI (Responses)
+- Google Gemini
+- Google Vertex
+- Amazon Bedrock
+- Groq
+- Cerebras
+- xAI
+- Mistral
+- OpenRouter
+- Vercel AI Gateway
+- ZAI
+- OpenCode
+- Hugging Face
+- Kimi For Coding
+- MiniMax
+
+See [packages/model](packages/model) for provider details.
+
+## Quick Start
 
 ```bash
-# 检查整个 workspace
+# Run the coding agent
+cd packages/coding-agent
+cargo run --bin hand
+
+# With a prompt
+cargo run --bin hand -- --prompt "Explain this codebase"
+
+# Non-interactive mode
+cargo run --bin hand -- --print --prompt "Summarize src/main.rs"
+```
+
+## Development
+
+```bash
+# Build all packages
 cargo check --workspace
 
-# 运行整个 workspace 的测试
+# Run all tests (396 tests)
 cargo test --workspace
 
-# 按仓库脚本执行检查
+# Lint
+cargo clippy --workspace
+
+# Format
+cargo fmt --all
+
+# Check everything
 ./check.sh
 ```
 
-按包检查：
+Per-package:
 
 ```bash
 cd packages/<name>
@@ -43,11 +88,9 @@ cargo check
 cargo test
 ```
 
-## 约定
+## Contributing
 
-- README 描述以当前代码实现为准
-- 代码与测试规则以仓库说明和当前任务要求为准
-- 修改功能时，优先同步更新对应包的 README
+See [AGENTS.md](AGENTS.md) for project conventions.
 
 ## License
 

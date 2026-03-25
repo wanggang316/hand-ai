@@ -2,6 +2,10 @@
 name = "hand-agent"
 version = "0.1.0"
 edition = "2024"
+description = "Stateful AI agent runtime with tool execution and event streaming"
+license = "MIT"
+keywords = ["agent", "ai", "tool-calling", "llm"]
+categories = ["asynchronous"]
 
 [dependencies]
 model = { path = "../model" }

@@ -2,6 +2,10 @@
 name = "hand-tui"
 version = "0.1.0"
 edition = "2024"
+description = "Terminal UI component library with differential rendering"
+license = "MIT"
+keywords = ["tui", "terminal", "ui", "components"]
+categories = ["command-line-interface"]
 
 [dependencies]
 crossterm = "0.28"

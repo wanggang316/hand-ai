@@ -1,18 +1,17 @@
 # hand-tui
 
-Rust 终端 UI 组件库，提供组件模型、差量渲染和一组可直接复用的内建组件。
-
-这个包聚焦于 Rust 终端场景。
+Terminal UI component library with differential rendering, theming, and a set of built-in components.
 
 ## Features
 
-- 组件化渲染模型：`Component`、`Focusable`、`Container`
-- 差量渲染：`DiffRenderer`
-- 终端抽象：`Terminal`、`TerminalCapabilities`
-- 常用组件：输入框、编辑器、Markdown、选择列表、加载器等
-- ANSI 宽度与文本换行工具
+- Component model: `Component`, `Focusable`, `Container`
+- Differential rendering: `DiffRenderer` minimizes terminal redraws
+- Theme system: `Theme`, `Style`, `Color` with dark/light presets
+- Key parsing: Kitty keyboard protocol, standard CSI, SS3
+- 12 built-in components
+- ANSI-aware text utilities (width, truncation, wrapping)
 
-## 安装
+## Installation
 
 ```toml
 [dependencies]
@@ -35,104 +34,197 @@ fn main() {
 }
 ```
 
-## Core API
+## Core Traits
 
 ### `Component`
 
-所有组件都实现这个 trait：
+All components implement this trait:
 
-- `render(width) -> Vec<String>`
-- `handle_input(data) -> HandleResult`
-- `invalidate()`
-- `wants_key_release()`
+```rust
+trait Component {
+    fn render(&self, width: usize) -> Vec<String>;
+    fn handle_input(&mut self, data: &str) -> HandleResult;
+    fn invalidate(&mut self);
+    fn wants_key_release(&self) -> bool;
+}
+```
 
 ### `Focusable`
 
-可获取焦点的组件在 `Component` 之上额外实现：
+Components that accept keyboard input:
 
-- `focused()`
-- `set_focused()`
-- `cursor_position()`
+```rust
+trait Focusable: Component {
+    fn focused(&self) -> bool;
+    fn set_focused(&mut self, focused: bool);
+    fn cursor_position(&self) -> Option<(usize, usize)>;
+}
+```
 
 ### `Container`
 
-用于管理子组件：
+Manages child components:
 
-- `add_child()`
-- `remove_child()`
-- `children()` / `children_mut()`
-- `child_count()`
-- `clear()`
+```rust
+let mut root = Container::new();
+root.add_child(Box::new(text));
+root.remove_child(0);
+root.clear();
+```
 
-### `Tui`
+## Built-in Components
 
-主引擎负责协调：
+| Component | Description |
+|-----------|-------------|
+| `TextComponent` | Static/dynamic text with optional padding |
+| `TruncatedTextComponent` | Text that truncates to width with ellipsis |
+| `InputComponent` | Single-line input with history, placeholder, prefix |
+| `EditorComponent` | Multi-line editor with undo/redo, viewport scrolling |
+| `MarkdownComponent` | Markdown rendering (headings, code blocks, lists, bold, italic) |
+| `LoaderComponent` | Animated spinner with configurable frames and colors |
+| `SelectListComponent` | Navigable list with selection, home/end support |
+| `BoxComponent` | Wrapper with padding and optional background color |
+| `SpacerComponent` | Empty space of configurable height |
+| `StatusBarComponent` | Left/center/right sections with configurable style |
+| `ProgressBarComponent` | Horizontal progress bar with label and percentage |
+| `ToastManager` | Notification stack with Info/Success/Warning/Error levels |
+| `AutocompleteComponent` | Suggestion dropdown with navigation and scrolling |
 
-- 根组件树
-- 终端输出
-- 差量渲染器
+### InputComponent
 
-## 内建组件
+```rust
+let mut input = InputComponent::new();
+input.set_placeholder("Type a message...");
+input.set_prefix("> ");
 
-当前导出的组件包括：
+// History support
+input.push_history("previous command");
 
-- `TextComponent`
-- `TruncatedTextComponent`
-- `InputComponent`
-- `EditorComponent`
-- `MarkdownComponent`
-- `LoaderComponent`
-- `SelectListComponent`
-- `SpacerComponent`
-- `BoxComponent`
+// Get current text
+let text = input.text();
+```
 
-这些组件都从 `packages/tui/src/components/` 导出，可直接复用。
+### EditorComponent
 
-## 差量渲染
+```rust
+let mut editor = EditorComponent::new();
+editor.set_text("Initial content");
+editor.set_show_border(true);
 
-`DiffRenderer` 用于减少终端重绘开销，只输出必要变更。
+// Undo/redo
+editor.undo();
+editor.redo();
+```
 
-对于持续刷新的交互式终端应用，优先通过差量渲染而不是整屏清空重画。
+### MarkdownComponent
 
-## 按键与文本工具
+```rust
+let md = MarkdownComponent::new("# Hello\n\nThis is **bold** and `code`.");
+let lines = md.render(80);
+```
 
-### 按键
+### SelectListComponent
 
-- `Key`
-- `KeyModifiers`
-- `parse_key()`
+```rust
+let items = vec!["Option A", "Option B", "Option C"];
+let mut list = SelectListComponent::new(items);
+list.next();  // Navigate down
+let selected = list.selected_item();
+```
 
-### 文本工具
+## Theme System
 
-- `visible_width()`
-- `truncate_to_width()`
-- `wrap_text()`
+```rust
+use hand_tui::theme::{Theme, Style, Color, NamedColor};
 
-这些工具专门处理 ANSI 转义序列和宽字符宽度问题。
+// Built-in themes
+let dark = Theme::dark();
+let light = Theme::light();
 
-## 终端抽象
+// Custom styles
+let style = Style::new()
+    .fg(Color::Named(NamedColor::Green))
+    .bold()
+    .apply("styled text");
 
-`Terminal` trait 用于隔离具体终端能力，`TerminalCapabilities` 用于描述功能支持情况。
+// Colors: Named, Index(u8), Rgb(u8,u8,u8), Hex(String)
+let color = Color::Hex("#ff6600".to_string());
+```
 
-这让 `hand-tui` 更容易做测试，也便于替换底层终端实现。
+## Differential Rendering
 
-## 适用场景
+`DiffRenderer` compares previous and current render output, only sending changes to the terminal:
 
-- 终端聊天界面
-- 终端编辑器或命令面板
-- 流式输出查看器
-- 轻量级 dashboard
+```rust
+use hand_tui::DiffRenderer;
 
-## 开发
+let mut renderer = DiffRenderer::new();
+
+// First render is always full
+let output = renderer.diff(&new_lines);
+
+// Subsequent renders only output changed lines
+let output = renderer.diff(&updated_lines);
+```
+
+## Key Parsing
+
+```rust
+use hand_tui::{parse_key, Key, KeyName, KeyModifiers};
+
+let key = parse_key("\x1b[A");  // Up arrow
+assert!(key.name == KeyName::Up);
+
+let key = parse_key("\x03");    // Ctrl+C
+assert!(key.modifiers.ctrl);
+```
+
+Supports: standard CSI sequences, SS3 function keys, Kitty keyboard protocol, Unicode input.
+
+## Text Utilities
+
+```rust
+use hand_tui::utils::*;
+
+// ANSI-aware visible width
+let width = visible_width("\x1b[31mhello\x1b[0m");  // 5
+
+// Truncate to width
+let truncated = truncate_to_width("long text here", 8);  // "long ..."
+
+// Wrap text at width
+let lines = wrap_text("long paragraph...", 40);
+
+// Strip ANSI codes
+let plain = strip_ansi("\x1b[1mbold\x1b[0m");  // "bold"
+```
+
+## Terminal Abstraction
+
+`Terminal` trait isolates terminal I/O for testability:
+
+```rust
+use hand_tui::{Terminal, TestTerminal, TerminalCapabilities};
+
+// For testing
+let mut term = TestTerminal::new(80, 24);
+
+// Check capabilities
+let caps = TerminalCapabilities::default();
+```
+
+## Development
 
 ```bash
 cd packages/tui
 cargo check
-cargo test
+cargo test   # 147 tests
 ```
-
-如果新增组件，请同步更新导出列表和 README 的组件章节。
 
 ## License
 
 MIT
+
+## See Also
+
+- [hand-coding-agent](../coding-agent) — Uses hand-tui for its terminal interface

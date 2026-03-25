@@ -2,6 +2,10 @@
 name = "hand-coding-agent"
 version = "0.1.0"
 edition = "2024"
+description = "Interactive terminal coding agent with session management and built-in tools"
+license = "MIT"
+keywords = ["coding-agent", "ai", "cli", "terminal"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "hand"

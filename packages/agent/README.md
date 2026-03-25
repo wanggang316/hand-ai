@@ -1,10 +1,8 @@
 # hand-agent
 
-通用 Agent 运行时，负责把模型调用、工具执行和消息状态组织成一个可复用的 agent loop。
+Stateful agent with tool execution and event streaming. Built on `model`.
 
-这个包基于 Rust 与 `model` 包实现。
-
-## 安装
+## Installation
 
 ```toml
 [dependencies]
@@ -21,129 +19,220 @@ use model::{Client, get_model};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
-    let model = get_model("openai", "gpt-4o").expect("model not found");
+    let model = get_model("anthropic", "claude-sonnet-4-20250514").expect("model not found");
 
     let mut agent = Agent::new(client, model);
-    agent.set_system_prompt("You are a coding assistant.");
+    agent.set_system_prompt("You are a helpful assistant.");
 
-    let result = agent.prompt("Explain Rust ownership in one paragraph.").await?;
+    let result = agent.prompt("Hello!").await?;
     println!("messages: {}", result.messages.len());
     Ok(())
 }
 ```
 
-## 核心概念
+## Core Concepts
 
-### `Agent`
+### AgentMessage vs LLM Message
 
-高层包装，管理：
+The agent works with standard LLM messages (`user`, `assistant`, `toolResult`). The `transform_context` callback can modify messages before each LLM call (e.g., pruning old messages, injecting context).
 
-- 当前消息状态
-- 选用的模型
-- 工具列表
-- 流式选项
-- steering / follow-up 队列
+### Message Flow
 
-### `run_agent_loop`
-
-低层 API，直接接受：
-
-- 初始 prompt 消息
-- `AgentContext`
-- 工具定义列表
-- `AgentLoopConfig`
-- `model::Client`
-- `AgentEventSink`
-
-如果你需要完全控制事件流或上下文拼接，优先使用这个低层接口。
-
-## 工具调用
-
-工具通过 `AgentTool` 描述：
-
-- `name`
-- `description`
-- `parameters`（JSON Schema 风格）
-- `execute`（异步执行函数）
-
-Agent loop 会根据模型产生的 tool call 执行对应工具，并把结果以 `ToolResult` / `ToolResultMessage` 形式回填到上下文。
-
-## 事件流
-
-`AgentEvent` 是 UI 和上层运行时的主要观察接口。当前事件类型包括：
-
-- `AgentStart` / `AgentEnd`
-- `TurnStart` / `TurnEnd`
-- `MessageStart` / `MessageUpdate` / `MessageEnd`
-- `ToolExecutionStart` / `ToolExecutionEnd`
-
-`coding-agent` 正是基于这套事件流来显示模型输出和工具执行状态。
-
-## 状态管理
-
-`AgentState` / `AgentContext` 持有：
-
-- `system_prompt`
-- `messages`
-- `model_id`
-- `is_streaming`
-
-高层 `Agent` 提供的常用方法包括：
-
-- `set_system_prompt()`
-- `set_model()`
-- `set_stream_options()`
-- `set_tool_execution_mode()`
-- `add_tool()` / `set_tools()`
-- `replace_messages()` / `clear_messages()`
-- `prompt()` / `prompt_with_messages()` / `continue()`
-- `steer()` / `follow_up()`
-
-## Steering 与 Follow-up
-
-Agent 在 loop 运行过程中支持两种额外消息来源：
-
-- steering：在运行中插入额外引导消息
-- follow-up：当模型原本准备停止时，再追加一轮消息
-
-这两个能力通过 `AgentLoopConfig` 中的异步回调提供，高层 `Agent` 则用内部队列进行管理。
-
-## Hook
-
-当前类型系统已经定义：
-
-- `BeforeToolCallHook`
-- `AfterToolCallHook`
-- `BeforeToolCallContext`
-- `AfterToolCallContext`
-
-这些接口用于工具调用前后的审计、拦截和结果改写。
-
-## 低层 API 示例
-
-自行收集事件时：
-
-```rust
-use hand_agent::{run_agent_loop, AgentEventSink, AgentLoopConfig};
+```
+messages → transform_context() → messages → LLM
+              (optional)
 ```
 
-然后构造 `AgentEventSink = Box::new(|event| { ... })` 即可接收实时事件。
+## Event Flow
 
-## 测试
+The agent emits events for UI updates.
 
-测试主要覆盖：
+### prompt() Event Sequence
 
-- agent 基本交互
-- loop 中的工具调用
-- 事件行为
-- 公共测试辅助工具
+```
+prompt("Hello")
+├─ AgentStart
+├─ TurnStart
+├─ MessageStart   { user message }
+├─ MessageEnd     { user message }
+├─ MessageStart   { assistant message }
+├─ MessageUpdate  { streaming chunks... }
+├─ MessageEnd     { assistant message }
+├─ TurnEnd
+└─ AgentEnd
+```
+
+### With Tool Calls
+
+```
+prompt("Read config.json")
+├─ AgentStart
+├─ TurnStart
+├─ MessageStart/End  { user message }
+├─ MessageStart      { assistant with tool call }
+├─ MessageUpdate...
+├─ MessageEnd
+├─ ToolExecutionStart  { tool_call_id, tool_name, args }
+├─ ToolExecutionEnd    { tool_call_id, result }
+├─ MessageStart/End  { tool result message }
+├─ TurnEnd
+│
+├─ TurnStart           ← next turn
+├─ MessageStart        { assistant responds to tool result }
+├─ MessageUpdate...
+├─ MessageEnd
+├─ TurnEnd
+└─ AgentEnd
+```
+
+Tool execution mode is configurable:
+- `parallel` (default): execute allowed tools concurrently
+- `sequential`: execute tool calls one by one
+
+### Event Types
+
+| Event | Description |
+|-------|-------------|
+| `AgentStart` | Agent begins processing |
+| `AgentEnd` | Agent completes with all new messages |
+| `TurnStart` | New turn begins (one LLM call + tool executions) |
+| `TurnEnd` | Turn completes |
+| `MessageStart` | Any message begins (user, assistant, toolResult) |
+| `MessageUpdate` | **Assistant only.** Includes streaming delta |
+| `MessageEnd` | Message completes |
+| `ToolExecutionStart` | Tool begins |
+| `ToolExecutionEnd` | Tool completes |
+
+## Agent Options
+
+```rust
+let mut agent = Agent::new(client, model);
+
+// System prompt
+agent.set_system_prompt("You are a coding assistant.");
+
+// Tools
+agent.add_tool(my_tool);
+agent.set_tools(vec![tool1, tool2]);
+
+// Thinking level
+agent.set_thinking_level(Some(ThinkingLevel::High));
+
+// Tool execution mode
+agent.set_tool_execution_mode(ToolExecutionMode::Sequential);
+
+// Stream options (temperature, max_tokens, api_key)
+agent.set_stream_options(Some(options));
+
+// Hooks
+agent.set_before_tool_call(Some(Box::new(|ctx| {
+    Box::pin(async move { BeforeToolCallResult::default() })
+})));
+```
+
+## Tools
+
+Define tools using `AgentTool`:
+
+```rust
+use hand_agent::{AgentTool, ToolResult};
+
+let read_file = AgentTool {
+    name: "read_file".to_string(),
+    description: "Read a file's contents".to_string(),
+    parameters: serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "string", "description": "File path" }
+        },
+        "required": ["path"]
+    }),
+    execute: Box::new(|_id, args, _signal| {
+        Box::pin(async move {
+            let path = args["path"].as_str().unwrap_or("");
+            match std::fs::read_to_string(path) {
+                Ok(content) => ToolResult::text(content),
+                Err(e) => ToolResult::error(format!("Failed to read: {e}")),
+            }
+        })
+    }),
+};
+
+agent.add_tool(read_file);
+```
+
+### Error Handling
+
+Return `ToolResult::error()` when a tool fails. The agent reports errors to the LLM with `is_error: true`.
+
+## State Management
+
+```rust
+agent.set_system_prompt("New prompt");
+agent.set_model(new_model);
+agent.set_thinking_level(Some(ThinkingLevel::Medium));
+agent.replace_messages(new_messages);
+agent.clear_messages();
+agent.reset();
+```
+
+## Steering and Follow-up
+
+Steering messages interrupt the agent while tools are running. Follow-up messages queue work after the agent would otherwise stop.
+
+```rust
+// While agent is running tools
+agent.steer(user_message);
+
+// After the agent finishes its current work
+agent.follow_up(user_message);
+
+// Clear queues
+agent.clear_steering_queue();
+agent.clear_follow_up_queue();
+agent.clear_all_queues();
+```
+
+When steering messages are detected after a turn completes:
+1. All tool calls from the current assistant message have finished
+2. Steering messages are injected
+3. The LLM responds on the next turn
+
+Follow-up messages are checked only when there are no more tool calls and no steering messages.
+
+## Low-Level API
+
+For direct control without the `Agent` class:
+
+```rust
+use hand_agent::{run_agent_loop, AgentContext, AgentLoopConfig, AgentEventSink};
+
+let context = AgentContext {
+    system_prompt: "You are helpful.".to_string(),
+    messages: vec![],
+    model_id: "gpt-4o".to_string(),
+    is_streaming: false,
+};
+
+let config = AgentLoopConfig { /* ... */ };
+let emit: AgentEventSink = Box::new(|event| { /* handle event */ });
+
+run_agent_loop(prompt_messages, &mut context, &tools, &config, &client, emit).await?;
+```
+
+## Development
 
 ```bash
 cd packages/agent
 cargo check
-cargo test
+cargo test   # 28 tests (agent_test + agent_loop_test)
 ```
 
 ## License
 
 MIT
+
+## See Also
+
+- [model](../model) — Unified LLM API
+- [hand-coding-agent](../coding-agent) — Terminal coding agent

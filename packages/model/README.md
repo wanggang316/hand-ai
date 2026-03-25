@@ -1,26 +1,46 @@
 # model
 
-统一的模型目录与流式推理客户端。
+Unified LLM API with automatic model discovery, provider configuration, token and cost tracking, and streaming across multiple providers.
 
-这个包提供：
+Only includes models that support tool calling (function calling), as this is essential for agentic workflows.
 
-- 跨 provider 统一的消息与上下文类型
-- 基于事件流的模型输出接口
-- 内置模型目录查询能力
-- API provider 注册表
-- `model-cli` / `generate_models` 两个命令行工具
+## Table of Contents
 
-## 功能概览
+- [Supported Providers](#supported-providers)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Tools](#tools)
+- [Streaming Events](#streaming-events)
+- [Thinking/Reasoning](#thinkingreasoning)
+- [Stop Reasons](#stop-reasons)
+- [APIs, Models, and Providers](#apis-models-and-providers)
+- [Cross-Provider Handoffs](#cross-provider-handoffs)
+- [Environment Variables](#environment-variables)
+- [CLI Tools](#cli-tools)
 
-- `Client`：统一的流式与非流式调用入口
-- `Context` / `Message` / `AssistantMessageEvent`：统一的数据结构
-- `models()` / `get_model()`：查询内置模型目录
-- `ApiProviderRegistry`：注册和管理底层 provider 实现
-- `env_api_keys`：统一检查环境变量中的 API Key
+## Supported Providers
 
-## 安装
+**API key providers:**
+- **OpenAI** — GPT-4o, o3, o4-mini, etc.
+- **Azure OpenAI** (Responses API)
+- **OpenAI Codex** (Responses API)
+- **Anthropic** — Claude Sonnet, Opus, Haiku
+- **Google** — Gemini 2.5 Pro, Flash
+- **Google Vertex** — Gemini via Vertex AI
+- **Amazon Bedrock** — Claude via ConverseStream
+- **Groq** — Llama, Mixtral
+- **Cerebras** — Llama (fast inference)
+- **xAI** — Grok
+- **Mistral** — Mistral Large, Codestral
+- **OpenRouter** — Multi-provider routing
+- **Vercel AI Gateway**
+- **MiniMax**
+- **Hugging Face**
+- **OpenCode** (Zen, Go)
+- **Kimi For Coding** (Moonshot AI)
+- **Any OpenAI-compatible API** — Ollama, vLLM, LM Studio, etc.
 
-在 workspace 内作为本地依赖使用：
+## Installation
 
 ```toml
 [dependencies]
@@ -30,7 +50,7 @@ model = { path = "../model" }
 ## Quick Start
 
 ```rust
-use model::{Client, Context, Message, UserMessage, get_model};
+use model::{Client, Context, Message, UserMessage, Tool, get_model};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,71 +59,197 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let context = Context {
         system_prompt: Some("You are a concise assistant.".into()),
-        messages: vec![Message::User(UserMessage::new_text("Say hello"))],
+        messages: vec![Message::User(UserMessage::new_text("What time is it?"))],
         tools: None,
     };
 
-    let message = client.complete_simple(&model, context, None).await?;
-    println!("{message:?}");
+    // Option 1: Streaming
+    let mut stream = client.stream_simple(&model, context.clone(), None)?;
+    use futures::StreamExt;
+    while let Some(event) = stream.next().await {
+        match event {
+            model::AssistantMessageEvent::TextDelta { delta, .. } => {
+                print!("{delta}");
+            }
+            model::AssistantMessageEvent::Done { message, .. } => {
+                println!("\nTokens: {} in, {} out", message.usage.input, message.usage.output);
+                println!("Cost: ${:.4}", message.usage.cost.total);
+            }
+            _ => {}
+        }
+    }
+
+    // Option 2: Complete response
+    let response = client.complete_simple(&model, context, None).await?;
+    println!("{:?}", response.content);
     Ok(())
 }
 ```
 
-## 核心 API
+## Tools
 
-### `Client`
+Define tools with JSON Schema parameters:
 
-- `Client::stream()`：返回底层 `AssistantMessageEvent` 流
-- `Client::stream_simple()`：使用简化参数的事件流接口
-- `Client::complete()`：消费完整事件流并返回最终 `AssistantMessage`
-- `Client::complete_simple()`：简化参数版本的完整调用
+```rust
+use model::Tool;
 
-### 模型目录
+let tools = vec![Tool {
+    name: "get_weather".to_string(),
+    description: "Get current weather for a location".to_string(),
+    parameters: serde_json::json!({
+        "type": "object",
+        "properties": {
+            "location": { "type": "string", "description": "City name" }
+        },
+        "required": ["location"]
+    }),
+}];
 
-- `models()`：读取内置 `src/models.json`
-- `get_provider_keys()`：列出 provider key
-- `get_models(provider)`：列出指定 provider 的模型
-- `get_model(provider, model_id)`：查询单个模型
-- `calculate_cost(model, usage)`：根据 token 用量估算成本
+let context = Context {
+    system_prompt: Some("You are helpful.".into()),
+    messages: vec![Message::User(UserMessage::new_text("What's the weather in Tokyo?"))],
+    tools: Some(tools),
+};
+```
 
-## 事件流
+Handle tool calls from the response:
 
-流式接口返回 `AssistantMessageEvent`，常见事件包括：
+```rust
+for block in &response.content {
+    match block {
+        AssistantContentBlock::Text(t) => println!("{}", t.text),
+        AssistantContentBlock::ToolCall(tc) => {
+            println!("Tool: {}({})", tc.name, tc.arguments);
+            // Execute tool, then add ToolResultMessage to context
+        }
+        _ => {}
+    }
+}
+```
 
-- `Start`
-- `TextStart` / `TextDelta` / `TextEnd`
-- `ThinkingStart` / `ThinkingDelta` / `ThinkingEnd`
-- `ToolCallStart` / `ToolCallDelta` / `ToolCallEnd`
-- `Done`
-- `Error`
+## Streaming Events
 
-这套事件模型是 `agent` 和 `coding-agent` 的基础。
+The stream returns `AssistantMessageEvent` variants:
 
-## Provider 与模型目录
+| Event | Description |
+|-------|-------------|
+| `Start` | Stream begins, includes initial partial message |
+| `TextStart` | Text content block started |
+| `TextDelta` | Incremental text chunk |
+| `TextEnd` | Text block complete |
+| `ThinkingStart` | Thinking/reasoning started |
+| `ThinkingDelta` | Incremental thinking chunk |
+| `ThinkingEnd` | Thinking complete |
+| `ToolCallStart` | Tool call started |
+| `ToolCallDelta` | Tool call arguments streaming |
+| `ToolCallEnd` | Tool call complete with parsed arguments |
+| `Done` | Stream complete with final `AssistantMessage` |
+| `Error` | Error occurred |
 
-这个包同时包含两层能力：
+## Thinking/Reasoning
 
-- 模型目录：`src/models.json` 中维护了多 provider 的模型定义
-- 运行时 provider：由 `ApiProviderRegistry` 注册具体实现
+Models that support reasoning (Claude, o3, Gemini 2.5) can be configured with thinking levels:
 
-`Client::new()` 会自动注册内置 provider。当前默认注册的 API 包括：
+```rust
+use model::{SimpleStreamOptions, ThinkingLevel};
 
-- `openai-completions`
-- `anthropic-messages`
+let mut options = SimpleStreamOptions::default();
+options.reasoning = Some(ThinkingLevel::High);
 
-其它 API 类型是否可用，以 `packages/model/src/client.rs` 中的注册逻辑为准。
+let stream = client.stream_simple(&model, context, Some(options))?;
+```
 
-## CLI
+Thinking levels: `Minimal`, `Low`, `Medium`, `High`, `Xhigh`
 
-### `model-cli`
+Thinking content streams via `ThinkingStart`/`ThinkingDelta`/`ThinkingEnd` events.
+
+## Stop Reasons
+
+| Reason | Description |
+|--------|-------------|
+| `Stop` | Model finished naturally |
+| `Length` | Max tokens reached |
+| `ToolUse` | Model wants to call tools |
+| `Error` | Error occurred |
+| `Aborted` | Request was aborted |
+
+## APIs, Models, and Providers
+
+### Querying the Model Catalog
+
+```rust
+use model::{models, get_model, get_models, get_provider_keys, calculate_cost};
+
+// List all provider keys
+let providers = get_provider_keys();
+
+// List models for a provider
+let openai_models = get_models("openai");
+
+// Get a specific model
+let model = get_model("anthropic", "claude-sonnet-4-20250514").unwrap();
+
+// Calculate cost
+let cost = calculate_cost(&model, &usage);
+```
+
+### Provider Architecture
+
+Each provider implements the `ApiProvider` trait and is registered with `ApiProviderRegistry`:
+
+| API | Provider Implementation |
+|-----|----------------------|
+| `openai-completions` | `OpenAICompletionsProvider` |
+| `openai-responses` | `OpenAIResponsesProvider` |
+| `azure-openai-responses` | `OpenAIResponsesProvider` |
+| `openai-codex-responses` | `OpenAIResponsesProvider` |
+| `anthropic-messages` | `AnthropicMessagesProvider` |
+| `bedrock-converse-stream` | `BedrockProvider` |
+| `google-generative-ai` | `GoogleGenerativeAiProvider` |
+| `google-gemini-cli` | `GoogleGenerativeAiProvider` |
+| `google-vertex` | `GoogleGenerativeAiProvider` |
+
+All 9 API types have registered providers. `Client::new()` registers them automatically.
+
+## Cross-Provider Handoffs
+
+Context (`Context`) is provider-agnostic. You can switch models mid-session:
+
+```rust
+let anthropic_model = get_model("anthropic", "claude-sonnet-4-20250514").unwrap();
+let response = client.complete_simple(&anthropic_model, context.clone(), None).await?;
+
+// Switch to OpenAI with the same context
+let openai_model = get_model("openai", "gpt-4o").unwrap();
+let response = client.complete_simple(&openai_model, context, None).await?;
+```
+
+The `transform` module handles cross-provider message normalization (thinking blocks, tool call IDs, etc.).
+
+## Environment Variables
+
+API key resolution (`env_api_keys`):
+
+| Provider | Environment Variable(s) |
+|----------|------------------------|
+| OpenAI | `OPENAI_API_KEY` |
+| Anthropic | `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` |
+| Google | `GEMINI_API_KEY` |
+| Vertex | `GOOGLE_APPLICATION_CREDENTIALS` + `GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION` |
+| Bedrock | `AWS_PROFILE` or `AWS_ACCESS_KEY_ID`+`AWS_SECRET_ACCESS_KEY` or `AWS_BEARER_TOKEN_BEDROCK` |
+| Groq | `GROQ_API_KEY` |
+| Cerebras | `CEREBRAS_API_KEY` |
+| xAI | `XAI_API_KEY` |
+| Mistral | `MISTRAL_API_KEY` |
+| OpenRouter | `OPENROUTER_API_KEY` |
+| GitHub Copilot | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` |
+
+## CLI Tools
+
+### model-cli
 
 ```bash
 cargo run --bin model-cli -- help
-```
-
-常用命令：
-
-```bash
 cargo run --bin model-cli -- list-providers
 cargo run --bin model-cli -- list-models
 cargo run --bin model-cli -- list-models openai
@@ -111,34 +257,29 @@ cargo run --bin model-cli -- check-keys
 cargo run --bin model-cli -- model-info openai gpt-4o
 ```
 
-更完整的命令说明见 `packages/model/CLI.md`。
+### generate_models
 
-### `generate_models`
-
-- 二进制：`packages/model/src/generate_models.rs`
-- 作用：抓取并合并模型列表后写入 `src/models.json`
+Fetches and merges model definitions into `src/models.json`:
 
 ```bash
 cargo run --bin generate_models
 ```
 
-## 环境变量
-
-API Key 解析逻辑位于 `src/env_api_keys.rs`。常见变量包括：
-
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `ANTHROPIC_OAUTH_TOKEN`
-- `GEMINI_API_KEY`
-- `GROQ_API_KEY`
-- `MISTRAL_API_KEY`
-
-## 开发
+## Development
 
 ```bash
 cd packages/model
 cargo check
-cargo test
+cargo test        # 97 unit + 42 integration tests
+cargo clippy
 ```
 
-如果修改了 provider、模型目录或消息协议，README、`CLI.md` 和测试应一起更新。
+## License
+
+MIT
+
+## See Also
+
+- [hand-agent](../agent) — Agent runtime
+- [hand-coding-agent](../coding-agent) — Terminal coding agent
+- [hand-tui](../tui) — Terminal UI components
