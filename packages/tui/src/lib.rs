@@ -10,7 +10,10 @@
 //! - ANSI-aware text utilities (width, wrapping, truncation)
 
 pub mod components;
+pub mod fuzzy;
 pub mod keys;
+pub mod kill_ring;
+pub mod overlay;
 pub mod render;
 pub mod terminal;
 pub mod theme;
@@ -19,12 +22,16 @@ pub mod utils;
 
 // Re-export commonly used items
 pub use components::{
-    AutocompleteComponent, BoxComponent, EditorComponent, InputComponent, LoaderComponent,
-    MarkdownComponent, ProgressBarComponent, SelectItem, SelectListComponent, SpacerComponent,
-    StatusBarComponent, Suggestion, TextComponent, ToastComponent, ToastLevel,
-    TruncatedTextComponent,
+    AutocompleteComponent, BoxComponent, CancellableLoaderComponent, EditorComponent,
+    ImageComponent, ImageProtocol, InputComponent, LoaderComponent, MarkdownComponent,
+    ProgressBarComponent, SelectItem, SelectListComponent, SettingEntry, SettingValue,
+    SettingsListComponent, SpacerComponent, StatusBarComponent, Suggestion, TextComponent,
+    ToastComponent, ToastLevel, TruncatedTextComponent,
 };
+pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 pub use keys::{Key, KeyModifiers, parse_key};
+pub use kill_ring::KillRing;
+pub use overlay::{Overlay, OverlayPosition, render_with_overlay};
 pub use render::DiffRenderer;
 pub use terminal::{Terminal, TerminalCapabilities};
 pub use theme::{Color, NamedColor, Style, Theme};
