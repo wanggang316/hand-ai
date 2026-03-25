@@ -19,3 +19,12 @@ pub use core::model_resolver::{self, ResolvedModel};
 pub use core::session_manager::SessionManager;
 pub use core::settings::SettingsManager;
 pub use core::system_prompt::build_system_prompt;
+
+// Extension system
+pub use core::extensions::{
+    ExtensionConfig, ExtensionError, ExtensionHookType, ExtensionManifest, ExtensionRunner,
+};
+
+// Slash commands and keybindings
+pub use core::keybindings::KeyBindingsConfig;
+pub use core::slash_commands::SlashCommandRegistry;
