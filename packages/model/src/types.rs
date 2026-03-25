@@ -664,6 +664,23 @@ impl ToolResultMessage {
             timestamp: current_timestamp_ms(),
         }
     }
+
+    /// Create a tool result that represents an error.
+    pub fn new_error(
+        tool_call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        error_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            role: "toolResult".to_string(),
+            tool_call_id: tool_call_id.into(),
+            tool_name: tool_name.into(),
+            content: vec![ToolResultContent::Text(TextContent::new(error_text))],
+            details: None,
+            is_error: true,
+            timestamp: current_timestamp_ms(),
+        }
+    }
 }
 
 /// Any message in a conversation.
