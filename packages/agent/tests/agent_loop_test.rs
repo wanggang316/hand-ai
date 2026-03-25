@@ -58,6 +58,11 @@ fn default_config() -> AgentLoopConfig {
         get_steering_messages: None,
         get_follow_up_messages: None,
         convert_to_llm: None,
+        transform_context: None,
+        get_api_key: None,
+        steering_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        follow_up_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        max_retry_delay_ms: None,
     }
 }
 
@@ -314,6 +319,11 @@ async fn test_steering_messages_injected() {
         })),
         get_follow_up_messages: None,
         convert_to_llm: None,
+        transform_context: None,
+        get_api_key: None,
+        steering_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        follow_up_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        max_retry_delay_ms: None,
     };
 
     let prompt = vec![Message::User(UserMessage::new_text("Hi"))];
@@ -348,6 +358,11 @@ async fn test_sequential_tool_execution() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         convert_to_llm: None,
+        transform_context: None,
+        get_api_key: None,
+        steering_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        follow_up_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        max_retry_delay_ms: None,
     };
 
     let tools = vec![echo_tool()];
@@ -393,6 +408,11 @@ async fn test_before_tool_call_hook_blocks() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         convert_to_llm: None,
+        transform_context: None,
+        get_api_key: None,
+        steering_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        follow_up_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        max_retry_delay_ms: None,
     };
 
     let tools = vec![echo_tool()];

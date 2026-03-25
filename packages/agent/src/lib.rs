@@ -15,5 +15,7 @@ pub use error::AgentError;
 pub use types::{
     AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentContext, AgentEvent,
     AgentLoopConfig, AgentState, AgentTool, BeforeToolCallContext, BeforeToolCallHook,
-    BeforeToolCallResult, BoxFuture, ToolExecuteFn, ToolExecutionMode, ToolResult,
+    BeforeToolCallResult, BoxFuture, ConvertToLlmFn, GetApiKeyFn, GetFollowUpMessagesFn,
+    GetSteeringMessagesFn, QueueDeliveryMode, ToolExecuteFn, ToolExecutionMode, ToolResult,
+    TransformContextFn,
 };

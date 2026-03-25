@@ -24,6 +24,17 @@ pub enum ToolExecutionMode {
     Parallel,
 }
 
+/// How queued steering/follow-up messages are dequeued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QueueDeliveryMode {
+    /// Send all queued messages at once.
+    All,
+    /// Send one message per turn.
+    #[default]
+    OneAtATime,
+}
+
 /// Result of a tool execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
@@ -162,6 +173,12 @@ pub enum AgentEvent {
         tool_name: String,
         args: serde_json::Value,
     },
+    /// Streaming update during tool execution.
+    ToolExecutionUpdate {
+        tool_call_id: String,
+        tool_name: String,
+        update: serde_json::Value,
+    },
     /// Tool execution ended.
     ToolExecutionEnd {
         tool_call_id: String,
@@ -230,6 +247,13 @@ pub type GetFollowUpMessagesFn = Box<dyn Fn() -> BoxFuture<'static, Vec<Message>
 /// Convert agent messages to LLM-compatible messages.
 pub type ConvertToLlmFn = Box<dyn Fn(&[Message]) -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
 
+/// Transform context before LLM call (applied before convertToLlm).
+pub type TransformContextFn =
+    Box<dyn Fn(Vec<Message>) -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
+
+/// Dynamic API key resolver (for OAuth tokens, etc.).
+pub type GetApiKeyFn = Box<dyn Fn(&str) -> BoxFuture<'static, Option<String>> + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // Agent loop configuration
 // ---------------------------------------------------------------------------
@@ -252,6 +276,16 @@ pub struct AgentLoopConfig {
     pub get_follow_up_messages: Option<GetFollowUpMessagesFn>,
     /// Convert messages before sending to LLM.
     pub convert_to_llm: Option<ConvertToLlmFn>,
+    /// Transform context before convertToLlm (two-phase transformation).
+    pub transform_context: Option<TransformContextFn>,
+    /// Dynamic API key resolver for OAuth tokens.
+    pub get_api_key: Option<GetApiKeyFn>,
+    /// How steering messages are dequeued.
+    pub steering_mode: QueueDeliveryMode,
+    /// How follow-up messages are dequeued.
+    pub follow_up_mode: QueueDeliveryMode,
+    /// Maximum retry delay in ms (for server-requested delays).
+    pub max_retry_delay_ms: Option<u64>,
 }
 
 impl std::fmt::Debug for AgentLoopConfig {
@@ -276,6 +310,8 @@ pub struct AgentState {
     pub messages: Vec<Message>,
     pub is_streaming: bool,
     pub error: Option<String>,
+    /// Current thinking level for reasoning models.
+    pub thinking_level: Option<model::ThinkingLevel>,
 }
 
 

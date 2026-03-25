@@ -218,12 +218,18 @@ async fn stream_assistant_response(
     client: &model::Client,
     emit: &AgentEventSink,
 ) -> Result<Message, AgentError> {
-    // Convert messages for LLM
-    let llm_messages = if let Some(convert) = &config.convert_to_llm {
-        convert(&context.messages).await
+    // Phase 1: transform context (optional)
+    let transformed = if let Some(transform) = &config.transform_context {
+        transform(context.messages.clone()).await
     } else {
-        // Default: pass through all standard messages
-        default_convert_to_llm(&context.messages)
+        context.messages.clone()
+    };
+
+    // Phase 2: convert to LLM messages
+    let llm_messages = if let Some(convert) = &config.convert_to_llm {
+        convert(&transformed).await
+    } else {
+        default_convert_to_llm(&transformed)
     };
 
     // Build LLM context
@@ -243,13 +249,18 @@ async fn stream_assistant_response(
         },
     };
 
+    // Resolve API key dynamically (for OAuth tokens, etc.)
+    let mut stream_opts = config.stream_options.clone();
+    if let Some(get_api_key) = &config.get_api_key {
+        let provider_str = config.model.provider.as_str();
+        if let Some(resolved_key) = get_api_key(provider_str).await {
+            stream_opts.base.api_key = Some(resolved_key);
+        }
+    }
+
     // Stream from client
     let mut stream = client
-        .stream_simple(
-            &config.model,
-            llm_context,
-            Some(config.stream_options.clone()),
-        )
+        .stream_simple(&config.model, llm_context, Some(stream_opts))
         .map_err(AgentError::Client)?;
 
     let mut final_message: Option<AssistantMessage> = None;

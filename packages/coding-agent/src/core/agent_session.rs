@@ -164,6 +164,11 @@ impl AgentSession {
             get_steering_messages: None,
             get_follow_up_messages: None,
             convert_to_llm: None,
+            transform_context: None,
+            get_api_key: None,
+            steering_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+            follow_up_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+            max_retry_delay_ms: None,
         };
 
         // Create event sink for the agent loop

@@ -4,9 +4,9 @@ use crate::agent_loop::{AgentEventSink, AgentLoopResult, run_agent_loop, run_age
 use crate::error::AgentError;
 use crate::types::{
     AfterToolCallHook, AgentContext, AgentEvent, AgentLoopConfig, AgentState, AgentTool,
-    BeforeToolCallHook, ToolExecutionMode,
+    BeforeToolCallHook, GetApiKeyFn, QueueDeliveryMode, ToolExecutionMode, TransformContextFn,
 };
-use model::{Client, Message, Model, SimpleStreamOptions, UserMessage};
+use model::{Client, Message, Model, SimpleStreamOptions, ThinkingLevel, UserMessage};
 use std::sync::{Arc, Mutex};
 
 /// High-level agent that manages state and wraps the agent loop.
@@ -33,6 +33,14 @@ pub struct Agent {
     before_tool_call: Option<BeforeToolCallHook>,
     /// After tool call hook.
     after_tool_call: Option<AfterToolCallHook>,
+    /// Steering message delivery mode.
+    steering_mode: QueueDeliveryMode,
+    /// Follow-up message delivery mode.
+    follow_up_mode: QueueDeliveryMode,
+    /// Context transformer (applied before convertToLlm).
+    transform_context: Option<TransformContextFn>,
+    /// Dynamic API key resolver.
+    get_api_key: Option<GetApiKeyFn>,
 }
 
 impl Agent {
@@ -53,6 +61,10 @@ impl Agent {
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             before_tool_call: None,
             after_tool_call: None,
+            steering_mode: QueueDeliveryMode::OneAtATime,
+            follow_up_mode: QueueDeliveryMode::OneAtATime,
+            transform_context: None,
+            get_api_key: None,
         }
     }
 
@@ -126,6 +138,41 @@ impl Agent {
         self.after_tool_call = hook;
     }
 
+    /// Set thinking level for reasoning models.
+    pub fn set_thinking_level(&mut self, level: Option<ThinkingLevel>) {
+        self.state.thinking_level = level;
+        if let Some(lvl) = level {
+            self.stream_options.reasoning = Some(lvl);
+        } else {
+            self.stream_options.reasoning = None;
+        }
+    }
+
+    /// Get current thinking level.
+    pub fn thinking_level(&self) -> Option<ThinkingLevel> {
+        self.state.thinking_level
+    }
+
+    /// Set steering delivery mode.
+    pub fn set_steering_mode(&mut self, mode: QueueDeliveryMode) {
+        self.steering_mode = mode;
+    }
+
+    /// Set follow-up delivery mode.
+    pub fn set_follow_up_mode(&mut self, mode: QueueDeliveryMode) {
+        self.follow_up_mode = mode;
+    }
+
+    /// Set context transformer.
+    pub fn set_transform_context(&mut self, transform: Option<TransformContextFn>) {
+        self.transform_context = transform;
+    }
+
+    /// Set dynamic API key resolver.
+    pub fn set_get_api_key(&mut self, resolver: Option<GetApiKeyFn>) {
+        self.get_api_key = resolver;
+    }
+
     // -- Event subscription --
 
     /// Subscribe to agent events. Returns an index that could be used for unsubscription.
@@ -160,6 +207,12 @@ impl Agent {
     pub fn has_queued_messages(&self) -> bool {
         !self.steering_queue.lock().unwrap().is_empty()
             || !self.follow_up_queue.lock().unwrap().is_empty()
+    }
+
+    /// Clear all queues.
+    pub fn clear_all_queues(&self) {
+        self.steering_queue.lock().unwrap().clear();
+        self.follow_up_queue.lock().unwrap().clear();
     }
 
     /// Reset the agent (clear messages, queues, errors).
@@ -280,6 +333,8 @@ impl Agent {
     fn build_config(&self) -> AgentLoopConfig {
         let steering_queue = self.steering_queue.clone();
         let follow_up_queue = self.follow_up_queue.clone();
+        let steering_mode = self.steering_mode;
+        let follow_up_mode = self.follow_up_mode;
 
         AgentLoopConfig {
             model: self.model.clone(),
@@ -291,19 +346,40 @@ impl Agent {
                 let queue = steering_queue.clone();
                 Box::pin(async move {
                     let mut q = queue.lock().unwrap();
-                    
-                    q.drain(..).collect()
+                    match steering_mode {
+                        QueueDeliveryMode::All => q.drain(..).collect(),
+                        QueueDeliveryMode::OneAtATime => {
+                            if q.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![q.remove(0)]
+                            }
+                        }
+                    }
                 })
             })),
             get_follow_up_messages: Some(Box::new(move || {
                 let queue = follow_up_queue.clone();
                 Box::pin(async move {
                     let mut q = queue.lock().unwrap();
-                    
-                    q.drain(..).collect()
+                    match follow_up_mode {
+                        QueueDeliveryMode::All => q.drain(..).collect(),
+                        QueueDeliveryMode::OneAtATime => {
+                            if q.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![q.remove(0)]
+                            }
+                        }
+                    }
                 })
             })),
             convert_to_llm: None,
+            transform_context: None,
+            get_api_key: None,
+            steering_mode,
+            follow_up_mode,
+            max_retry_delay_ms: None,
         }
     }
 
