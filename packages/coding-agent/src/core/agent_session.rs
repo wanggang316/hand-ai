@@ -271,6 +271,20 @@ impl AgentSession {
         &self.settings_manager
     }
 
+    /// Manually trigger compaction. Returns true if compaction was performed.
+    pub async fn compact(&mut self) -> Result<bool, CodingAgentError> {
+        let settings = self.settings_manager.compaction_settings();
+        let context_tokens = compaction::estimate_context_tokens(&self.context.messages);
+        let max_context_tokens = 200_000;
+
+        if !compaction::should_compact(context_tokens, max_context_tokens, &settings) {
+            return Ok(false);
+        }
+
+        self.maybe_compact().await?;
+        Ok(true)
+    }
+
     /// Get the stream options.
     pub fn stream_options(&self) -> &SimpleStreamOptions {
         &self.config.stream_options
@@ -279,6 +293,16 @@ impl AgentSession {
     /// Update the stream options (e.g. after changing thinking level).
     pub fn set_stream_options(&mut self, options: SimpleStreamOptions) {
         self.config.stream_options = options;
+    }
+
+    /// Get the session label (name).
+    pub fn label(&self) -> Option<&str> {
+        self.session_manager.label()
+    }
+
+    /// Set the session label (name).
+    pub fn set_label(&mut self, label: &str) -> Result<(), CodingAgentError> {
+        self.session_manager.append_label(label)
     }
 
     /// Get message count.

@@ -329,7 +329,7 @@ async fn run_interactive(
 
         // Handle slash commands
         if input.starts_with('/') {
-            if handle_slash_command(&input, session, cwd)? {
+            if handle_slash_command(&input, session, cwd).await? {
                 break;
             }
             continue;
@@ -347,7 +347,7 @@ async fn run_interactive(
 }
 
 /// Handle a slash command. Returns true if the session should quit.
-fn handle_slash_command(
+async fn handle_slash_command(
     input: &str,
     session: &mut AgentSession,
     cwd: &Path,
@@ -382,9 +382,14 @@ fn handle_slash_command(
         }
 
         "/compact" => {
-            println!(
-                "\x1b[33m[Manual compaction not yet implemented — auto-compact is active]\x1b[0m"
-            );
+            println!("\x1b[36mRunning compaction...\x1b[0m");
+            match session.compact().await {
+                Ok(true) => println!("\x1b[32mCompaction complete.\x1b[0m"),
+                Ok(false) => {
+                    println!("\x1b[33mNo compaction needed (context within limits).\x1b[0m")
+                }
+                Err(e) => eprintln!("\x1b[31mCompaction failed: {}\x1b[0m", e),
+            }
         }
 
         "/new" => {
@@ -407,9 +412,13 @@ fn handle_slash_command(
 
         "/name" => {
             if args.is_empty() {
-                println!("Session name: {}", session.session_id());
+                let label = session.label().unwrap_or("(unnamed)");
+                println!("Session: {} ({})", session.session_id(), label);
             } else {
-                println!("Session naming is stored in session metadata.");
+                match session.set_label(args) {
+                    Ok(()) => println!("Session named: \x1b[36m{}\x1b[0m", args),
+                    Err(e) => eprintln!("\x1b[31mFailed to set name: {}\x1b[0m", e),
+                }
             }
         }
 

@@ -216,6 +216,32 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Append a label entry (session name).
+    pub fn append_label(&mut self, label: &str) -> Result<(), CodingAgentError> {
+        let entry = SessionEntry::Label {
+            id: generate_entry_id(),
+            target_id: self.header.id.clone(),
+            label: Some(label.into()),
+            timestamp: Utc::now().timestamp_millis(),
+        };
+        self.entries.push(entry);
+        if !self.in_memory {
+            self.append_to_file(self.entries.last().unwrap())?;
+        }
+        Ok(())
+    }
+
+    /// Get the session label (name), if any.
+    pub fn label(&self) -> Option<&str> {
+        self.entries.iter().rev().find_map(|e| {
+            if let SessionEntry::Label { label, .. } = e {
+                label.as_deref()
+            } else {
+                None
+            }
+        })
+    }
+
     /// Build the message list for LLM context.
     pub fn build_context(&self) -> Vec<Message> {
         // Find the latest compaction and start from there
