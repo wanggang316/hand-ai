@@ -7,7 +7,9 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InputType {
+    /// Plain text input.
     Text,
+    /// Image input (base64-encoded).
     Image,
 }
 
@@ -30,22 +32,31 @@ pub struct Cost {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Api {
+    /// OpenAI Chat Completions API.
     #[serde(rename = "openai-completions")]
     OpenAICompletions,
+    /// OpenAI Responses API.
     #[serde(rename = "openai-responses")]
     OpenAIResponses,
+    /// Azure-hosted OpenAI Responses API.
     #[serde(rename = "azure-openai-responses")]
     AzureOpenAiResponses,
+    /// OpenAI Codex Responses API.
     #[serde(rename = "openai-codex-responses")]
     OpenAICodexResponses,
+    /// Anthropic Messages API.
     #[serde(rename = "anthropic-messages")]
     AnthropicMessages,
+    /// AWS Bedrock Converse Stream API.
     #[serde(rename = "bedrock-converse-stream")]
     BedrockConverseStream,
+    /// Google Generative AI API (Gemini).
     #[serde(rename = "google-generative-ai")]
     GoogleGenerativeAi,
+    /// Google Gemini CLI API.
     #[serde(rename = "google-gemini-cli")]
     GoogleGeminiCli,
+    /// Google Vertex AI API.
     #[serde(rename = "google-vertex")]
     GoogleVertex,
 }
@@ -220,14 +231,20 @@ pub enum Compat {
 /// Token usage and cost for a completion.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
+    /// Number of input (prompt) tokens.
     pub input: u64,
+    /// Number of output (completion) tokens.
     pub output: u64,
+    /// Tokens read from cache.
     #[serde(rename = "cacheRead")]
     pub cache_read: u64,
+    /// Tokens written to cache.
     #[serde(rename = "cacheWrite")]
     pub cache_write: u64,
+    /// Total tokens (input + output + cache).
     #[serde(rename = "totalTokens")]
     pub total_tokens: u64,
+    /// Cost breakdown in USD.
     pub cost: UsageCost,
 }
 
@@ -246,19 +263,30 @@ pub struct UsageCost {
 /// Model interface for the unified model system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
+    /// Unique model identifier (e.g. "gpt-4o", "claude-sonnet-4-20250514").
     pub id: String,
+    /// Human-readable model name.
     pub name: String,
+    /// Which API this model uses.
     pub api: Api,
+    /// Which provider hosts this model.
     pub provider: Provider,
+    /// Base URL for API requests.
     #[serde(rename = "baseUrl")]
     pub base_url: String,
+    /// Whether the model supports reasoning/thinking.
     pub reasoning: bool,
+    /// Supported input modalities.
     pub input: Vec<InputType>,
+    /// Cost per million tokens.
     pub cost: Cost,
+    /// Maximum context window size in tokens.
     #[serde(rename = "contextWindow")]
     pub context_window: u64,
+    /// Maximum output tokens per request.
     #[serde(rename = "maxTokens")]
     pub max_tokens: u64,
+    /// Custom headers to include in API requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
     /// Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from base_url.
@@ -292,10 +320,15 @@ pub struct VercelGatewayRouting {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
+    /// Minimal reasoning (1024 token budget).
     Minimal,
+    /// Low reasoning (2048 token budget).
     Low,
+    /// Medium reasoning (8192 token budget).
     Medium,
+    /// High reasoning (16384 token budget).
     High,
+    /// Extra high reasoning (clamped to High for most providers).
     Xhigh,
 }
 
@@ -535,10 +568,15 @@ impl ToolCall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StopReason {
+    /// Model finished naturally.
     Stop,
+    /// Max tokens reached.
     Length,
+    /// Model wants to call tools.
     ToolUse,
+    /// An error occurred.
     Error,
+    /// Request was aborted by the caller.
     Aborted,
 }
 

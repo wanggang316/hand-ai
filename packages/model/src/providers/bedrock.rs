@@ -498,38 +498,18 @@ fn compute_sigv4_auth(
 
 /// SHA-256 hash as hex string.
 fn sha256_hex(data: &[u8]) -> String {
-    use std::fmt::Write;
-    // Simple SHA-256 using ring or a manual implementation
-    // For now, we use a basic hash placeholder — in production, use the `ring` or `sha2` crate
-    let hash = simple_sha256(data);
-    let mut hex = String::new();
-    for byte in &hash {
-        write!(&mut hex, "{:02x}", byte).unwrap();
-    }
-    hex
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(data);
+    hex::encode(hash)
 }
 
 /// HMAC-SHA256.
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    // In production, use the `hmac` and `sha2` crates.
-    // This is a placeholder that returns a deterministic but non-cryptographic result.
-    // The actual SigV4 signing requires real HMAC-SHA256.
-    let mut result = vec![0u8; 32];
-    for (i, byte) in data.iter().enumerate() {
-        let k = key.get(i % key.len()).copied().unwrap_or(0);
-        result[i % 32] ^= byte ^ k;
-    }
-    result
-}
-
-/// Simple SHA-256 placeholder.
-fn simple_sha256(data: &[u8]) -> Vec<u8> {
-    // Placeholder — in production use ring::digest or sha2 crate
-    let mut hash = vec![0u8; 32];
-    for (i, byte) in data.iter().enumerate() {
-        hash[i % 32] ^= byte;
-    }
-    hash
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<sha2::Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
 }
 
 fn current_timestamp_ms() -> u64 {

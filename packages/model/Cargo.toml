@@ -27,6 +27,9 @@ google-genai-rust = { git = "https://github.com/wanggang316/google-genai-rust", 
 futures = "0.3"
 chrono = "0.4"
 dirs = "5"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
