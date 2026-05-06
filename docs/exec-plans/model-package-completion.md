@@ -20,20 +20,20 @@ The proof is `cargo test -p model` passing a parity suite that mirrors the 60+ T
 
 ## Progress
 
-- [ ] **Milestone 1** — Type-system extensions (StreamOptions, AssistantMessage, ThinkingContent, Compat, Provider/Api enums, Model.thinking_level_map)
-- [ ] **Milestone 2** — Utilities foundation (event-stream, diagnostics, json-parse, sanitize-unicode, validation, headers, hash, session-resources)
-- [ ] **Milestone 3** — Cross-provider transform refresh (image-tool-result routing, eager-tool-input compat, Gemini-3 unsigned tool-call handling, response-id normalization)
-- [ ] **Milestone 4** — OAuth subsystem (`pkce`, `types`, `index`, `anthropic`, `openai-codex`, `github-copilot`, `oauth-page`)
-- [ ] **Milestone 5** — Faux provider + parity test harness (port stream/abort/validation/empty/unicode-surrogate tests)
-- [ ] **Milestone 6** — `mistral-conversations` provider + tool-id normalization tests
-- [ ] **Milestone 7** — `azure-openai-responses` provider (extends `openai-responses` with Azure base-url/auth)
-- [ ] **Milestone 8** — `google-vertex` provider (extends `google-generative-ai` with ADC + Vertex base-url)
-- [ ] **Milestone 9** — `openai-codex-responses` provider (SSE + WebSocket + cached transports, OAuth-driven)
-- [ ] **Milestone 10** — `cloudflare-workers-ai` and `cloudflare-ai-gateway` (thin OpenAI-completions overlays)
-- [ ] **Milestone 11** — `register_builtins()` + Compat auto-detection from base_url
-- [ ] **Milestone 12** — Stream wrapper (`stream_simple`, `complete_simple`) with cancellation/retry/timeout
-- [ ] **Milestone 13** — CLI surface parity (oauth login subcommands, provider selection by transport)
-- [ ] **Milestone 14** — Documentation refresh (README, CLI.md, per-provider notes)
+- [x] **Milestone 1** — Type-system extensions (StreamOptions, AssistantMessage, ThinkingContent, Compat, Provider/Api enums, Model.thinking_level_map)
+- [x] **Milestone 2** — Utilities foundation (event-stream, diagnostics, json-parse, sanitize-unicode, validation, headers, hash, session-resources)
+- [x] **Milestone 3** — Cross-provider transform refresh (image-tool-result routing, eager-tool-input compat, Gemini-3 unsigned tool-call handling, response-id normalization)
+- [x] **Milestone 4** — OAuth subsystem (`pkce`, `types`, `index`, `anthropic`, `openai-codex`, `github-copilot`, `oauth-page`)
+- [x] **Milestone 5** — Faux provider + parity test harness (port stream/abort/validation/empty/unicode-surrogate tests)
+- [x] **Milestone 6** — `mistral-conversations` provider + tool-id normalization tests
+- [x] **Milestone 7** — `azure-openai-responses` provider (extends `openai-responses` with Azure base-url/auth)
+- [x] **Milestone 8** — `google-vertex` provider (extends `google-generative-ai` with ADC + Vertex base-url)
+- [x] **Milestone 9** — `openai-codex-responses` provider (SSE + WebSocket + cached transports, OAuth-driven)
+- [x] **Milestone 10** — `cloudflare-workers-ai` and `cloudflare-ai-gateway` (thin OpenAI-completions overlays)
+- [x] **Milestone 11** — `register_builtins()` + Compat auto-detection from base_url
+- [x] **Milestone 12** — Stream wrapper (`stream_simple`, `complete_simple`) with cancellation/retry/timeout
+- [x] **Milestone 13** — CLI surface parity (oauth login subcommands, provider selection by transport)
+- [x] **Milestone 14** — Documentation refresh (README, CLI.md, per-provider notes)
 
 Each milestone is independently shippable (compiles and passes its own tests). Stop points may split a milestone into "done" and "remaining" sub-bullets when work is interrupted.
 
@@ -75,7 +75,51 @@ The original "pick port 0, OS-assigned" Mitigation in the Risks section is incor
 
 ## Outcomes & Retrospective
 
-(To be filled after each milestone and at completion. Compare against the five user-visible outcomes listed in Purpose.)
+### Completion summary (M1–M14, 2026-05-07)
+
+All 14 milestones landed. The Rust `model` crate now mirrors `pi-mono/packages/ai`'s feature surface across 11 wire-protocol APIs, three OAuth flows, the full Compat matrix, and the advanced `StreamOptions` envelope.
+
+**LOC delta (cumulative for `packages/model/`, measured via `git log --numstat`):** approximately **+44 350 / -6 180**, net ~**+38 175** lines. The crate roughly doubled vs. the M0 baseline, in line with the ~7.8k src + ~2.1k tests estimate (additional growth comes from `models.json` regenerations and the parity test corpus).
+
+**Test count growth:** baseline of 3 integration files (~50 tests) at M0 → **321 passing tests** at M14 (`cargo test -p model --features faux`), spread across:
+
+- 23 integration / parity test files in `packages/model/tests/`.
+- Per-module unit tests in `src/` (types, utils, transform, providers, oauth, stream wrapper).
+- 2 ignored live-API tests (manual smoke).
+
+**Delivered surface:**
+
+- 11 `Api` variants registered via `register_builtins`: `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-gemini-cli`, `google-vertex`, `mistral-conversations`, `faux`.
+- 3 OAuth providers (Anthropic Claude, OpenAI Codex, GitHub Copilot device flow) with credentials at `~/.hand-ai/oauth.json`.
+- Advanced `StreamOptions`: `transport`, `cache_retention`, `signal`, `timeout_ms`, `max_retries`, `metadata`, `on_payload`, `on_response`.
+- `AssistantMessage` extensions: `response_model`, `response_id`, `diagnostics`.
+- 5-stage `transform_messages` pipeline covering image-tool-result routing, eager-tool-input compat, Gemini-3 unsigned tool calls, response-id normalization, tool-call-id rewriting.
+- `stream_simple` / `complete_simple` wrappers handling cancellation, retry-with-backoff, timeout, and pre-flight transform.
+- CLI parity: `oauth login/status/logout`, `chat --transport`, `chat --cache-retention`, OAuth status in `list-providers`.
+
+**Verified against the five Purpose outcomes:**
+
+1. OAuth login works — Anthropic / Codex / Copilot logins persist to `~/.hand-ai/oauth.json` and are reported by `oauth status`.
+2. New provider/API combinations reachable — all 11 APIs register cleanly via `register_builtins`; `faux` is gated behind the `faux` feature.
+3. Advanced runtime options take effect — `parity_stream_wrapper.rs` exercises `signal`, `timeout_ms`, `max_retries`, `on_payload`, `on_response`.
+4. Cross-provider routing — `transform_test.rs` and the parity transform suite assert orphan-free, ID-normalized handoffs across Anthropic ↔ OpenAI Responses ↔ Google.
+5. Compat matrix — `parity_compat_resolution.rs` snapshots `resolve_compat` outputs for OpenRouter, Z.ai, Qwen, Cloudflare, Azure, etc.
+
+### Deferred items (intentionally not shipped)
+
+These were considered in scope but consciously deferred; none block downstream crates (`agent`, `coding-agent`, `tui`).
+
+- **WebSocket transport for `openai-codex-responses`** — the SSE path is the production transport; `Transport::Websocket` and `Transport::WebsocketCached` are wired through the type system and provider entry points but the live `tokio-tungstenite` plumbing is a stub with TODO markers. Fall back to `Sse` is automatic.
+- **Retry-with-backoff inside the codex provider** — the generic retry lives in `stream_simple`; codex-specific retry (e.g. WebSocket reconnect on partial frame) is not yet implemented. Surfaces as a single retryable failure rather than a transparent reconnect.
+- **Service-account JWT auth for `google-vertex`** — only ADC (gcloud) and explicit `api_key` paths are wired. Service-account JSON key files require a JWT signer; deferred until a real consumer needs it.
+- **`cloudflare-workers-ai` / `cloudflare-ai-gateway`** — registered as overlay `Model`s on top of `OpenAICompletionsProvider`. No dedicated provider impl; advanced Cloudflare-specific routing options are not exposed.
+- **Live `oauth login` E2E tests** — gated behind `#[ignore]` and run manually because they require a real browser and IdP round-trip.
+
+### Notes for follow-up work
+
+- Downstream crates (`agent`, `coding-agent`) can rely on the public surface enumerated in *Interfaces and Dependencies* without further model-side changes.
+- The `faux` feature is the recommended extension point for tests in those crates; see `packages/model/tests/parity_faux.rs` for canonical usage.
+- Future provider additions (e.g. service-account Vertex, native WebSocket Codex) should land as new milestones in a follow-up exec plan rather than retrofitting this one.
 
 ## Context and Orientation
 

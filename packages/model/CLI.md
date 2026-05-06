@@ -8,6 +8,26 @@
 cargo build --bin model-cli
 ```
 
+## Provider Matrix
+
+CLI 可访问 11 个内建 API 协议（由 `register_builtins` 注册）。下表概括各 provider 在 CLI 流程中的角色与凭证来源：
+
+| Api 标识                   | Provider 用途                                                          | 凭证来源 |
+|---------------------------|-----------------------------------------------------------------------|---------|
+| `openai-completions`      | OpenAI 及一切 OpenAI 兼容主机（Groq、Cerebras、xAI、OpenRouter、Vercel AI Gateway、Cloudflare Workers AI、Cloudflare AI Gateway、Z.ai、Qwen / Moonshot / Xiaomi / Deepseek、OpenCode、MiniMax、HuggingFace 等） | API Key |
+| `openai-responses`        | OpenAI Responses 原生 API                                              | API Key |
+| `openai-codex-responses`  | OpenAI Codex（支持 SSE / WebSocket / WebsocketCached）                | OAuth (PKCE) |
+| `azure-openai-responses`  | Azure OpenAI Responses（`api-key` header）                             | API Key |
+| `anthropic-messages`      | Anthropic Claude；GitHub Copilot 也通过该 API 反代                     | API Key 或 OAuth |
+| `bedrock-converse-stream` | AWS Bedrock                                                           | AWS SigV4 / Bearer |
+| `google-generative-ai`    | Google AI Studio (Gemini)、Antigravity、Gemini CLI                    | API Key 或 OAuth |
+| `google-gemini-cli`       | Google Gemini CLI                                                     | OAuth |
+| `google-vertex`           | Google Vertex AI（ADC 优先）                                           | ADC 或 API Key |
+| `mistral-conversations`   | Mistral La Plateforme（推理模式与 9 字符 tool-id 规范化）              | API Key |
+| `faux`                    | 测试 / 冒烟用的 in-process provider，需开启 `--features faux`         | 无 |
+
+> Compat（OpenRouter routing、Z.ai tool streaming、Qwen thinking format 等）由 `model.base_url` 自动检测，可通过 `Model.compat` 覆盖。
+
 ## 命令
 
 ### 列出所有可用的 providers
