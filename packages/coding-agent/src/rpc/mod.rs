@@ -13,8 +13,10 @@
 //! surface is defined here so handlers can be filled in incrementally
 //! without changing the public types.
 
+pub mod jsonl;
 pub mod types;
 
+pub use jsonl::{JsonlReadError, read_jsonl, write_jsonl};
 pub use types::{
     RpcCommand, RpcExtensionUiRequest, RpcExtensionUiResponse, RpcResponse, RpcResponseBody,
     RpcResultEmpty, RpcResultWithData, RpcSessionState, RpcSlashCommand, ResponseTag,
