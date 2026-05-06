@@ -55,6 +55,8 @@ For `openai-codex-responses`, the TS code uses `ws` and a custom websocket-cache
 ### D-04: Faux provider is gated behind `#[cfg(test)]` plus a `faux` feature
 The TS `faux.ts` is part of the public API (used by downstream test suites). We expose it the same way: under `cfg(feature = "faux")` so production builds don't carry the mock helpers but `cargo test` and downstream `dev-dependencies` can opt in.
 
+**Update (M5):** The `faux` feature is no longer in `default`. Verification commands explicitly enable it with `--features faux`. Production builds without the feature do not compile the mock helpers.
+
 ### D-05: Compat auto-detection happens at provider entry, not in `Model`
 TS detects compat from `baseUrl` lazily inside each provider. We follow the same pattern: each provider has a `resolve_compat(model: &Model) -> ResolvedCompat` helper that consults `model.compat` overrides, then falls back to URL-based detection. Keeping detection inside the provider avoids polluting `types.rs` with provider-specific URL strings.
 
@@ -362,11 +364,17 @@ Expected: clean build; 3 existing test files (`integration_test.rs`, `client_tes
 After each milestone, run:
 
 ```bash
-cargo build -p model --all-features
-cargo test -p model --all-features
-cargo clippy -p model --all-targets --all-features -- -D warnings
+cargo build -p model --features faux
+cargo test -p model --features faux
+cargo clippy -p model --all-targets --features faux -- -D warnings
 cargo fmt -p model -- --check
 ```
+
+The `faux` feature is required because integration tests under
+`packages/model/tests/parity_*.rs` import `model::FauxProvider` and friends,
+which are gated behind `cfg(any(test, feature = "faux"))`. The lib's own
+`cfg(test)` does not extend to integration test crates, so the feature must
+be opted in explicitly.
 
 Expected output (tail):
 
@@ -394,7 +402,7 @@ Expected: streamed text deltas; `responseId` printed in trailing usage line.
 ### Final acceptance
 
 ```bash
-cargo test -p model --all-features --release
+cargo test -p model --features faux --release
 cargo run -p model --bin model-cli -- list-providers
 ```
 

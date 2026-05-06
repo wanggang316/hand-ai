@@ -8,11 +8,11 @@ keywords = ["llm", "ai", "openai", "anthropic", "streaming"]
 categories = ["api-bindings", "asynchronous"]
 
 [features]
-# Enables test-only constructors (e.g. `EventStream::with_default_provenance`).
-# Defaulted on for now because no production caller takes a hit from it; we can
-# strip it from the default set once consumers migrate to provenance-aware
-# `EventStream::new`.
-default = ["faux"]
+# Enables test-only constructors (e.g. `EventStream::with_default_provenance`)
+# and the in-memory `FauxProvider`/`FauxScriptStep` harness types. Off by
+# default per Decision Log D-04 — production builds do not carry the mock
+# helpers. Tests/harness consumers must opt in with `--features faux`.
+default = []
 faux = []
 
 [[bin]]

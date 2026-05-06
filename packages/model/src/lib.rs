@@ -56,6 +56,8 @@ pub use providers::{
     OpenAICompletionsOptions, OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat,
     convert_messages, normalize_mistral_tool_id, stream_openai_completions,
 };
+#[cfg(any(test, feature = "faux"))]
+pub use providers::{FauxProvider, FauxScriptStep, faux_model};
 
 // Re-export from oauth
 pub use oauth::{

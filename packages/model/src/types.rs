@@ -98,6 +98,11 @@ pub enum Api {
     /// Mistral Conversations API.
     #[serde(rename = "mistral-conversations")]
     MistralConversations,
+    /// In-memory faux API used by the test/parity harness. Gated behind the
+    /// `faux` Cargo feature in callers; the variant itself lives in the core
+    /// type so registrations can key on it.
+    #[serde(rename = "faux")]
+    Faux,
 }
 
 /// Provider identifiers.
