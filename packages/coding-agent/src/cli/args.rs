@@ -76,6 +76,10 @@ pub struct Args {
     #[arg(long)]
     pub print: bool,
 
+    /// Run in headless RPC mode (JSONL on stdin/stdout). Mutually exclusive with --print.
+    #[arg(long, conflicts_with = "print")]
+    pub rpc: bool,
+
     /// Export session to file (HTML or JSONL based on extension)
     #[arg(long)]
     pub export: Option<PathBuf>,
@@ -111,6 +115,7 @@ mod tests {
         assert!(!args.no_tools);
         assert!(!args.no_session);
         assert!(!args.print);
+        assert!(!args.rpc);
         assert!(args.export.is_none());
         assert!(args.list_models.is_none());
         assert!(!args.verbose);
@@ -153,5 +158,21 @@ mod tests {
     fn rejects_unknown_flag() {
         let result = Args::try_parse_from(["hand", "--unknown-flag"]);
         assert!(result.is_err(), "unknown flag should be rejected by clap");
+    }
+
+    #[test]
+    fn parses_rpc_flag() {
+        let args = Args::try_parse_from(["hand", "--rpc"]).expect("--rpc should parse");
+        assert!(args.rpc);
+        assert!(!args.print);
+    }
+
+    #[test]
+    fn rpc_and_print_are_mutually_exclusive() {
+        let result = Args::try_parse_from(["hand", "--rpc", "--print"]);
+        assert!(
+            result.is_err(),
+            "--rpc and --print should be mutually exclusive"
+        );
     }
 }

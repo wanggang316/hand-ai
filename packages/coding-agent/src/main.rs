@@ -41,6 +41,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    // Headless RPC dispatch loop: takes precedence over interactive/print modes.
+    if cli.rpc {
+        return run_rpc(cli).await;
+    }
+
     // Determine working directory
     let cwd = cli
         .cwd
@@ -190,6 +195,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_interactive(&mut session, &cwd).await?;
     }
 
+    Ok(())
+}
+
+/// Run in headless RPC mode: JSONL frames on stdin/stdout, no terminal UI.
+///
+/// Honors `--no-session` (in-memory session) and `--cwd`/`--model`/`--tools`
+/// in the same way as interactive/print modes. SIGINT (Ctrl-C) cancels the
+/// dispatcher future cleanly via `tokio::select!`; the writer task exits
+/// when its sender is dropped, and the process returns `Ok`.
+async fn run_rpc(cli: Args) -> Result<(), Box<dyn std::error::Error>> {
+    // Resolve working directory.
+    let cwd = cli
+        .cwd
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Resolve model (mirrors the default-resolution logic in interactive mode).
+    let provider = cli.provider.as_deref().unwrap_or("anthropic");
+    let model_pattern = cli
+        .model
+        .as_deref()
+        .unwrap_or_else(|| model_resolver::default_model_for_provider(provider));
+    let resolved = model_resolver::resolve_model(Some(provider), model_pattern);
+
+    // Resolve tools (same selection logic as interactive mode).
+    let agent_tools = if cli.no_tools {
+        vec![]
+    } else if let Some(ref tool_list) = cli.tools {
+        create_selected_tools(&cwd, tool_list)
+    } else {
+        tools::create_default_tools(&cwd)
+    };
+
+    // Build the session: persisted to disk by default, in-memory under --no-session.
+    let session = if cli.no_session {
+        AgentSession::in_memory_with_client(resolved.model, agent_tools, model::Client::new())
+    } else {
+        // Parse thinking level (CLI flag overrides model pattern suffix).
+        let thinking_level = cli
+            .thinking
+            .as_deref()
+            .and_then(model_resolver::parse_thinking_level)
+            .or(resolved.thinking_level);
+
+        let mut stream_options = SimpleStreamOptions::default();
+        if let Some(level) = thinking_level {
+            stream_options.reasoning = Some(level);
+        }
+
+        let config = AgentSessionConfig {
+            cwd: cwd.clone(),
+            model: resolved.model,
+            stream_options,
+            custom_system_prompt: cli.system_prompt,
+            custom_guidelines: cli.append_system_prompt,
+            resume_session: cli.resume,
+        };
+        AgentSession::new(config, agent_tools)?
+    };
+
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let stdout = tokio::io::stdout();
+
+    tokio::select! {
+        result = hand_coding_agent::rpc::run_rpc_server(stdin, stdout, session) => result?,
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("rpc: received SIGINT, shutting down");
+            // Dropping the dispatcher future closes its mpsc senders; the
+            // writer task drains and exits.
+        }
+    }
     Ok(())
 }
 
