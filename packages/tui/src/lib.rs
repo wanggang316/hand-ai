@@ -35,7 +35,8 @@ pub use components::{
     LoaderComponent, LoaderIndicatorOptions, MarkdownComponent,
     PasteContent, ProgressBarComponent, SelectItem, SelectListComponent,
     SelectListLayoutOptions, SelectListTheme, SettingEntry,
-    SettingValue, SettingsListComponent, SlashCommand, SlashCommandProvider, SpacerComponent,
+    SettingValue, SettingsListComponent, SettingsListTheme, SlashCommand, SlashCommandProvider,
+    SpacerComponent,
     StatusBarComponent, Suggestion, TextComponent, ToastComponent, ToastLevel,
     TruncatedTextComponent, UndoEntry, UndoOp,
 };

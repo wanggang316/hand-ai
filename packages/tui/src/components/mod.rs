@@ -37,7 +37,9 @@ pub use select_list::{
     DEFAULT_PRIMARY_COLUMN_WIDTH, SelectItem, SelectListComponent, SelectListLayoutOptions,
     SelectListTheme,
 };
-pub use settings_list::{SettingEntry, SettingValue, SettingsListComponent};
+pub use settings_list::{
+    SettingEntry, SettingValue, SettingsListComponent, SettingsListTheme,
+};
 pub use spacer::SpacerComponent;
 pub use status_bar::StatusBarComponent;
 pub use text::TextComponent;
