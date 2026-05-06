@@ -52,8 +52,23 @@ pub enum ResourceLoaderError {
 /// How to derive the canonical name for a discovered file.
 #[derive(Debug, Clone, Copy)]
 pub enum NameResolver {
-    /// Use the parent directory's file name.
+    /// Use the parent directory's file name (e.g., for `<dir>/SKILL.md`).
     ParentDirName,
+    /// Use the file stem of the discovered file itself (e.g., for `<dir>/<name>.md`).
+    FileStem,
+}
+
+/// On-disk layout of resources under a root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutKind {
+    /// Each immediate subdirectory of the root is one resource and contains
+    /// a fixed-name file (e.g., `<root>/<dir>/SKILL.md`). This is the
+    /// historical layout used by Skills.
+    PerDirectory,
+    /// Each `.md` file directly under the root is one resource. The
+    /// `resource_filename` field is ignored under this layout. Used by
+    /// prompt templates.
+    Flat,
 }
 
 /// Configuration for a single resource-discovery walk.
@@ -63,9 +78,24 @@ pub struct ResourceLoaderConfig {
     /// A scope appearing later in the list shadows earlier ones with the same name.
     pub roots: Vec<(PathBuf, SourceScope)>,
     /// File name to match within each per-resource subdirectory (e.g., "SKILL.md").
+    /// Ignored when `layout` is [`LayoutKind::Flat`].
     pub resource_filename: &'static str,
     /// How the canonical name is derived for each discovered file.
     pub name_resolver: NameResolver,
+    /// On-disk layout. Defaults to `PerDirectory` for backward compatibility
+    /// with callers that omit it via `..Default::default()`.
+    pub layout: LayoutKind,
+}
+
+impl Default for ResourceLoaderConfig {
+    fn default() -> Self {
+        Self {
+            roots: Vec::new(),
+            resource_filename: "",
+            name_resolver: NameResolver::ParentDirName,
+            layout: LayoutKind::PerDirectory,
+        }
+    }
 }
 
 /// Discover and parse all resources under the configured roots.
@@ -132,8 +162,6 @@ pub fn discover_resources_lenient<T: DeserializeOwned>(
 
             let entry_path = entry.path();
 
-            // Only consider immediate subdirectories of the root as candidate
-            // resources. Files (e.g., a stray README.md) are ignored.
             let file_type = match entry.file_type() {
                 Ok(ft) => ft,
                 Err(err) => {
@@ -147,14 +175,32 @@ pub fn discover_resources_lenient<T: DeserializeOwned>(
                     continue;
                 }
             };
-            if !file_type.is_dir() {
-                continue;
-            }
 
-            let resource_file = entry_path.join(config.resource_filename);
-            if !resource_file.is_file() {
-                continue;
-            }
+            let resource_file = match config.layout {
+                LayoutKind::PerDirectory => {
+                    // Only consider immediate subdirectories of the root as
+                    // candidate resources. Files (e.g., a stray README.md)
+                    // are ignored.
+                    if !file_type.is_dir() {
+                        continue;
+                    }
+                    let candidate = entry_path.join(config.resource_filename);
+                    if !candidate.is_file() {
+                        continue;
+                    }
+                    candidate
+                }
+                LayoutKind::Flat => {
+                    // Only consider `.md` files directly under the root.
+                    if !file_type.is_file() {
+                        continue;
+                    }
+                    if entry_path.extension().and_then(|s| s.to_str()) != Some("md") {
+                        continue;
+                    }
+                    entry_path
+                }
+            };
 
             match load_resource_file::<T>(&resource_file, *scope, config.name_resolver) {
                 Ok(Some(resource)) => {
@@ -194,6 +240,11 @@ fn load_resource_file<T: DeserializeOwned>(
             // No parent directory or non-UTF-8 dir name — skip silently.
             None => return Ok(None),
         },
+        NameResolver::FileStem => match file_stem_name(path) {
+            Some(name) => name,
+            // No file stem or non-UTF-8 stem — skip silently.
+            None => return Ok(None),
+        },
     };
 
     let source = match scope {
@@ -223,6 +274,11 @@ fn parent_dir_name(path: &Path) -> Option<String> {
     path.parent()
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
+}
+
+fn file_stem_name(path: &Path) -> Option<String> {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -258,6 +314,7 @@ mod tests {
             roots,
             resource_filename: "SKILL.md",
             name_resolver: NameResolver::ParentDirName,
+            layout: LayoutKind::PerDirectory,
         }
     }
 
@@ -489,6 +546,40 @@ mod tests {
         let cfg = config(vec![(builtin, SourceScope::Builtin)]);
         let result = discover_resources::<TestMeta>(&cfg).unwrap();
         assert!(result.is_empty());
+    }
+
+    // Flat layout + FileStem resolver: each `<root>/<name>.md` is one resource.
+    #[test]
+    fn flat_layout_with_file_stem_resolver() {
+        let tmp = TempDir::new().unwrap();
+        let builtin = tmp.path().join("templates");
+        fs::create_dir_all(&builtin).unwrap();
+        fs::write(
+            builtin.join("alpha.md"),
+            "---\ndescription: a\n---\nalpha body",
+        )
+        .unwrap();
+        fs::write(
+            builtin.join("beta.md"),
+            "---\ndescription: b\n---\nbeta body",
+        )
+        .unwrap();
+        // Subdir and non-md file should be ignored under Flat layout.
+        fs::create_dir_all(builtin.join("subdir")).unwrap();
+        fs::write(builtin.join("README.txt"), "ignored").unwrap();
+
+        let cfg = ResourceLoaderConfig {
+            roots: vec![(builtin, SourceScope::Builtin)],
+            resource_filename: "",
+            name_resolver: NameResolver::FileStem,
+            layout: LayoutKind::Flat,
+        };
+        let result = discover_resources::<TestMeta>(&cfg).unwrap();
+
+        let names: Vec<_> = result.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+        assert_eq!(result[0].body, "alpha body");
+        assert_eq!(result[1].body, "beta body");
     }
 
     // 10. A non-directory entry directly under the root is ignored.
