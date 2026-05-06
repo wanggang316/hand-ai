@@ -24,7 +24,7 @@ pub use autocomplete::{
 };
 pub use box_component::BoxComponent;
 pub use cancellable_loader::CancellableLoaderComponent;
-pub use editor::EditorComponent;
+pub use editor::{AutocompleteState, EditorComponent, PasteContent, UndoEntry, UndoOp};
 pub use image::{ImageComponent, ImageProtocol};
 pub use input::InputComponent;
 pub use loader::LoaderComponent;
