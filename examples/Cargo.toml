@@ -8,7 +8,12 @@ rust-version = "1.85"
 name = "client-test"
 path = "src/main.rs"
 
+[[bin]]
+name = "tui-demo"
+path = "src/tui_demo.rs"
+
 [dependencies]
 model = { path = "../packages/model" }
+hand-tui = { path = "../packages/tui" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
