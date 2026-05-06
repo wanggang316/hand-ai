@@ -17,14 +17,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time;
 
-use crate::error::{TuiError, TuiResult};
+use crate::error::TuiResult;
 use crate::overlay::{OverlayHandle, OverlayOptions, compose_overlays};
 use crate::render::DiffRenderer;
-use crate::stdin_buffer::{StdinBuffer, StdinBufferEvent};
+use crate::stdin_buffer::StdinBufferEvent;
 use crate::terminal::Terminal;
 
 /// Result of handling user input.
@@ -368,12 +367,17 @@ pub struct Tui {
     show_hardware_cursor: bool,
     overlays: Vec<(OverlayHandle, Box<dyn Component>, OverlayOptions)>,
     next_overlay_id: u64,
+    /// Shutdown signal for background tasks (e.g. the stdin reader). The
+    /// receiver is handed to [`crate::terminal::run_stdin_reader`]; flipping
+    /// this to `true` cancels the reader's parked `read().await`.
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl Tui {
     /// Create a new TUI with the given terminal backend.
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
         let (cols, rows) = (terminal.columns(), terminal.rows());
+        let (shutdown_tx, _) = watch::channel(false);
         Self {
             terminal,
             root: Container::new(),
@@ -391,6 +395,7 @@ impl Tui {
             show_hardware_cursor: false,
             overlays: Vec::new(),
             next_overlay_id: 0,
+            shutdown_tx,
         }
     }
 
@@ -449,9 +454,19 @@ impl Tui {
     }
 
     /// When true, the hardware cursor is left visible after each render.
-    /// Defaults to off (cursor hidden).
+    /// Defaults to off (cursor hidden). The change is applied to the
+    /// terminal immediately so callers don't have to wait for the next
+    /// render tick.
     pub fn set_show_hardware_cursor(&mut self, enabled: bool) {
+        if self.show_hardware_cursor == enabled {
+            return;
+        }
         self.show_hardware_cursor = enabled;
+        if enabled {
+            self.terminal.show_cursor();
+        } else {
+            self.terminal.hide_cursor();
+        }
     }
 
     /// Show an overlay on top of the component tree. Returns a handle that can
@@ -502,9 +517,13 @@ impl Tui {
         self.overlays.len()
     }
 
-    /// Stop the run loop. Safe to call from any thread.
+    /// Stop the run loop. Safe to call from any thread. Also signals the
+    /// stdin reader so it unblocks from a parked `read().await`.
     pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
+        // Best-effort: receiver may already be gone (no reader spawned, or
+        // the run loop has already exited).
+        let _ = self.shutdown_tx.send(true);
     }
 
     /// Get terminal dimensions `(columns, rows)` from the latest snapshot.
@@ -517,9 +536,12 @@ impl Tui {
     pub async fn run(&mut self) -> TuiResult<()> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         self.running.store(true, Ordering::Relaxed);
-        let running = self.running.clone();
+        // Reset the shutdown channel for this run — `stop()` may have flipped
+        // it on a previous run.
+        let _ = self.shutdown_tx.send(false);
+        let shutdown_rx = self.shutdown_tx.subscribe();
         tokio::spawn(async move {
-            let _ = run_stdin_reader(event_tx, running).await;
+            let _ = crate::terminal::run_stdin_reader(event_tx, shutdown_rx).await;
         });
         self.run_with_events(event_rx).await
     }
@@ -539,8 +561,12 @@ impl Tui {
         let mut tick = time::interval(Duration::from_millis(RENDER_TICK_MS));
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
-        // Force the first frame.
+        // First-frame guarantee: paint at least once even if stdin closes
+        // immediately. Without this synchronous render, an immediate-EOF
+        // input source would cause the loop to break before the timer fires
+        // and the user would see a blank screen on a degenerate run.
         self.request_render_force();
+        self.maybe_render();
 
         while self.running.load(Ordering::Relaxed) {
             tokio::select! {
@@ -695,35 +721,6 @@ fn build_input_event(data: &str) -> InputEvent {
     } else {
         InputEvent::Raw(data.to_string())
     }
-}
-
-/// Stdin reader task: pumps bytes from `tokio::io::stdin()` through a
-/// [`StdinBuffer`] and forwards each [`StdinBufferEvent`] over the channel.
-async fn run_stdin_reader(
-    sender: mpsc::UnboundedSender<StdinBufferEvent>,
-    running: Arc<AtomicBool>,
-) -> TuiResult<()> {
-    let mut buffer = StdinBuffer::new();
-    let mut stdin = tokio::io::stdin();
-    let mut buf = [0u8; 4096];
-    loop {
-        if !running.load(Ordering::Relaxed) {
-            break;
-        }
-        let n = stdin
-            .read(&mut buf)
-            .await
-            .map_err(TuiError::Io)?;
-        if n == 0 {
-            break; // EOF
-        }
-        for event in buffer.push(&buf[..n]) {
-            if sender.send(event).is_err() {
-                return Ok(()); // receiver dropped — clean shutdown
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1323,5 +1320,121 @@ mod tests {
         // No assertion on diff bytes here (the test would be brittle); the
         // behavior under test is "no panic + render path uses compose path
         // when overlays exist" which is exercised by reaching this line.
+    }
+
+    // ---------- first-frame guarantee + hardware cursor wiring ----------
+
+    /// Test terminal with shared output — lets the test inspect what was
+    /// written even after the [`Tui`] has consumed the boxed instance.
+    struct SharedTerminal {
+        output: Arc<Mutex<Vec<String>>>,
+        capabilities: TerminalCapabilities,
+    }
+
+    impl SharedTerminal {
+        fn new() -> (Self, Arc<Mutex<Vec<String>>>) {
+            let output = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    output: output.clone(),
+                    capabilities: TerminalCapabilities::default(),
+                },
+                output,
+            )
+        }
+    }
+
+    impl Terminal for SharedTerminal {
+        fn write(&mut self, data: &str) {
+            self.output.lock().unwrap().push(data.to_string());
+        }
+        fn columns(&self) -> u16 { 80 }
+        fn rows(&self) -> u16 { 24 }
+        fn hide_cursor(&mut self) { self.write("\x1b[?25l"); }
+        fn show_cursor(&mut self) { self.write("\x1b[?25h"); }
+        fn clear_line(&mut self) { self.write("\x1b[2K\r"); }
+        fn clear_from_cursor(&mut self) { self.write("\x1b[J"); }
+        fn clear_screen(&mut self) { self.write("\x1b[2J\x1b[H"); }
+        fn move_by(&mut self, lines: i32) {
+            if lines > 0 {
+                self.write(&format!("\x1b[{}B", lines));
+            } else if lines < 0 {
+                self.write(&format!("\x1b[{}A", -lines));
+            }
+        }
+        fn set_title(&mut self, title: &str) { self.write(&format!("\x1b]0;{}\x07", title)); }
+        fn capabilities(&self) -> &TerminalCapabilities { &self.capabilities }
+    }
+
+    use crate::terminal::TerminalCapabilities;
+
+    #[tokio::test]
+    async fn test_first_frame_rendered_even_on_immediate_stdin_close() {
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec!["FIRST"])));
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        // Drop the sender immediately so events.recv() returns None on first
+        // poll. Without the first-frame guarantee, the loop would break
+        // before any tick fires and `output` would stay empty.
+        drop(tx);
+
+        let result = tokio::time::timeout(Duration::from_millis(200), tui.run_with_events(rx))
+            .await
+            .expect("run did not exit on stdin close");
+        assert!(result.is_ok());
+
+        let out = output.lock().unwrap();
+        assert!(
+            !out.is_empty(),
+            "first-frame guarantee violated: no writes recorded after run"
+        );
+        // The very first frame must contain the rendered component output.
+        let joined: String = out.iter().cloned().collect();
+        assert!(
+            joined.contains("FIRST"),
+            "expected rendered content in first frame, got: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn test_set_show_hardware_cursor_writes_show_sequence() {
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        // Default is hidden; flipping to true must emit the show-cursor escape.
+        tui.set_show_hardware_cursor(true);
+        let out = output.lock().unwrap();
+        assert!(
+            out.iter().any(|s| s == "\x1b[?25h"),
+            "expected show-cursor sequence, got: {:?}",
+            *out
+        );
+    }
+
+    #[test]
+    fn test_set_show_hardware_cursor_writes_hide_sequence() {
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        // Toggle on, then off — the off transition must emit hide-cursor.
+        tui.set_show_hardware_cursor(true);
+        output.lock().unwrap().clear();
+        tui.set_show_hardware_cursor(false);
+        let out = output.lock().unwrap();
+        assert!(
+            out.iter().any(|s| s == "\x1b[?25l"),
+            "expected hide-cursor sequence, got: {:?}",
+            *out
+        );
+    }
+
+    #[test]
+    fn test_set_show_hardware_cursor_idempotent_no_writes() {
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        // Already false; calling false again must not write.
+        tui.set_show_hardware_cursor(false);
+        assert!(output.lock().unwrap().is_empty());
     }
 }

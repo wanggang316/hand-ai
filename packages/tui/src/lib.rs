@@ -48,7 +48,7 @@ pub use overlay::{
 };
 pub use render::DiffRenderer;
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
-pub use terminal::{Terminal, TerminalCapabilities};
+pub use terminal::{ProcessTerminal, Terminal, TerminalCapabilities, run_stdin_reader};
 pub use theme::{Color, NamedColor, Style, Theme};
 pub use error::{TuiError, TuiResult};
 pub use tui::{
