@@ -11,6 +11,7 @@ pub mod models;
 pub mod oauth;
 pub mod providers;
 pub mod session_resources;
+pub mod stream;
 pub mod transform;
 pub mod types;
 pub mod utils;
@@ -47,6 +48,9 @@ pub use api_registry::{
 
 // Re-export from client
 pub use client::{Client, ClientError};
+
+// Re-export from stream
+pub use stream::{complete_simple, stream_simple};
 
 // Re-export from env_api_keys
 pub use env_api_keys::{clear_vertex_adc_cache, get_env_api_key, get_env_api_key_by_str};

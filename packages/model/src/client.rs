@@ -88,6 +88,11 @@ impl Client {
 
     /// Stream a simple response from the model.
     ///
+    /// Delegates to [`crate::stream::stream_simple`] so callers automatically
+    /// pick up cancellation, timeout, and retry semantics. The returned
+    /// `EventStream` is converted back to the trait-level
+    /// `AssistantMessageEventStream` boxed alias for backwards compatibility.
+    ///
     /// # Errors
     ///
     /// Returns `ClientError::ProviderNotFound` if no provider is registered for the model's API.
@@ -97,13 +102,8 @@ impl Client {
         context: Context,
         options: Option<SimpleStreamOptions>,
     ) -> Result<AssistantMessageEventStream<'static>, ClientError> {
-        match self.registry.get(&model.api) {
-            Some(provider) => Ok(provider.stream_simple(model.clone(), context, options)),
-            None => Err(ClientError::ProviderNotFound {
-                api: model.api,
-                model_id: model.id.clone(),
-            }),
-        }
+        let event_stream = crate::stream::stream_simple(&self.registry, model, context, options)?;
+        Ok(Box::pin(event_stream))
     }
 
     /// Complete a request and return the full message.
@@ -133,6 +133,8 @@ impl Client {
 
     /// Complete a simple request and return the full message.
     ///
+    /// Delegates to [`crate::stream::complete_simple`].
+    ///
     /// # Errors
     ///
     /// Returns `ClientError::ProviderNotFound` if no provider is registered.
@@ -143,17 +145,7 @@ impl Client {
         context: Context,
         options: Option<SimpleStreamOptions>,
     ) -> Result<AssistantMessage, ClientError> {
-        let mut s = self.stream_simple(model, context, options)?;
-
-        while let Some(event) = s.next().await {
-            match event {
-                AssistantMessageEvent::Done { message, .. } => return Ok(message),
-                AssistantMessageEvent::Error { error, .. } => return Ok(error),
-                _ => {}
-            }
-        }
-
-        Err(ClientError::StreamEndedWithoutResult)
+        crate::stream::complete_simple(&self.registry, model, context, options).await
     }
 }
 
