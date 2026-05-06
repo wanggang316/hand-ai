@@ -152,6 +152,9 @@ fn stream_google(
                     stop_reason: StopReason::Error,
                     error_message: Some(e),
                     timestamp: current_timestamp_ms(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 };
                 yield AssistantMessageEvent::Error {
                     reason: StopReason::Error,
@@ -599,6 +602,9 @@ async fn parse_sse_stream(
         stop_reason: StopReason::Stop,
         error_message: None,
         timestamp: current_timestamp_ms(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
     };
 
     events.push(AssistantMessageEvent::Start {
@@ -1083,6 +1089,7 @@ mod tests {
             max_tokens: 65536,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 
@@ -1109,6 +1116,9 @@ mod tests {
             usage: Usage::default(),
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         })];
         let contents = convert_messages(&messages, &model);
         assert_eq!(contents.len(), 1);
@@ -1292,6 +1302,9 @@ mod tests {
             usage: Usage::default(),
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         })];
         let contents = convert_messages(&messages, &model);
         // Should convert thinking to plain text since different provider

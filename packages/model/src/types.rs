@@ -2,6 +2,42 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Transport mechanism for streaming responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transport {
+    /// Server-Sent Events (streaming).
+    Sse,
+    /// WebSocket connection.
+    Websocket,
+    /// WebSocket with caching support.
+    WebsocketCached,
+    /// Auto-detect best transport.
+    Auto,
+}
+
+/// Cache retention policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheRetention {
+    /// No caching.
+    None,
+    /// Short-term cache.
+    Short,
+    /// Long-term cache.
+    Long,
+}
+
+/// HTTP response metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers.
+    pub headers: HashMap<String, String>,
+}
 
 /// Supported input modalities for a model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +95,9 @@ pub enum Api {
     /// Google Vertex AI API.
     #[serde(rename = "google-vertex")]
     GoogleVertex,
+    /// Mistral Conversations API.
+    #[serde(rename = "mistral-conversations")]
+    MistralConversations,
 }
 
 /// Provider identifiers.
@@ -97,6 +136,24 @@ pub enum Provider {
     Opencode,
     #[serde(rename = "kimi-coding")]
     KimiCoding,
+    #[serde(rename = "cloudflare-workers-ai")]
+    CloudflareWorkersAi,
+    #[serde(rename = "cloudflare-ai-gateway")]
+    CloudflareAiGateway,
+    Fireworks,
+    Moonshotai,
+    #[serde(rename = "moonshotai-cn")]
+    MoonshotaiCn,
+    Xiaomi,
+    #[serde(rename = "xiaomi-token-plan-cn")]
+    XiaomiTokenPlanCn,
+    #[serde(rename = "xiaomi-token-plan-ams")]
+    XiaomiTokenPlanAms,
+    #[serde(rename = "xiaomi-token-plan-sgp")]
+    XiaomiTokenPlanSgp,
+    #[serde(rename = "opencode-go")]
+    OpencodeGo,
+    Deepseek,
 }
 
 impl Provider {
@@ -125,6 +182,17 @@ impl Provider {
             Provider::Huggingface => "huggingface",
             Provider::Opencode => "opencode",
             Provider::KimiCoding => "kimi-coding",
+            Provider::CloudflareWorkersAi => "cloudflare-workers-ai",
+            Provider::CloudflareAiGateway => "cloudflare-ai-gateway",
+            Provider::Fireworks => "fireworks",
+            Provider::Moonshotai => "moonshotai",
+            Provider::MoonshotaiCn => "moonshotai-cn",
+            Provider::Xiaomi => "xiaomi",
+            Provider::XiaomiTokenPlanCn => "xiaomi-token-plan-cn",
+            Provider::XiaomiTokenPlanAms => "xiaomi-token-plan-ams",
+            Provider::XiaomiTokenPlanSgp => "xiaomi-token-plan-sgp",
+            Provider::OpencodeGo => "opencode-go",
+            Provider::Deepseek => "deepseek",
         }
     }
 
@@ -154,6 +222,17 @@ impl Provider {
             "huggingface" => Some(Provider::Huggingface),
             "opencode" => Some(Provider::Opencode),
             "kimi-coding" => Some(Provider::KimiCoding),
+            "cloudflare-workers-ai" => Some(Provider::CloudflareWorkersAi),
+            "cloudflare-ai-gateway" => Some(Provider::CloudflareAiGateway),
+            "fireworks" => Some(Provider::Fireworks),
+            "moonshotai" => Some(Provider::Moonshotai),
+            "moonshotai-cn" => Some(Provider::MoonshotaiCn),
+            "xiaomi" => Some(Provider::Xiaomi),
+            "xiaomi-token-plan-cn" => Some(Provider::XiaomiTokenPlanCn),
+            "xiaomi-token-plan-ams" => Some(Provider::XiaomiTokenPlanAms),
+            "xiaomi-token-plan-sgp" => Some(Provider::XiaomiTokenPlanSgp),
+            "opencode-go" => Some(Provider::OpencodeGo),
+            "deepseek" => Some(Provider::Deepseek),
             _ => None,
         }
     }
@@ -210,12 +289,52 @@ pub struct OpenAICompletionsCompat {
         rename = "vercelGatewayRouting"
     )]
     pub vercel_gateway_routing: Option<VercelGatewayRouting>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "supportsStrictMode")]
+    pub supports_strict_mode: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "cacheControlFormat")]
+    pub cache_control_format: Option<String>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "sendSessionAffinityHeaders"
+    )]
+    pub send_session_affinity_headers: Option<bool>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "supportsLongCacheRetention"
+    )]
+    pub supports_long_cache_retention: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "zaiToolStream")]
+    pub zai_tool_stream: Option<bool>,
 }
 
 /// Compatibility overrides for OpenAI Responses API.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenAIResponsesCompat {
-    // Reserved for future use
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "sendSessionIdHeader"
+    )]
+    pub send_session_id_header: Option<bool>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "supportsLongCacheRetention"
+    )]
+    pub supports_long_cache_retention: Option<bool>,
+}
+
+/// Compatibility overrides for Anthropic Messages API.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnthropicMessagesCompat {
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "supportsEagerToolInputStreaming"
+    )]
+    pub supports_eager_tool_input_streaming: Option<bool>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "supportsLongCacheRetention"
+    )]
+    pub supports_long_cache_retention: Option<bool>,
 }
 
 /// API-specific compatibility overrides.
@@ -223,9 +342,11 @@ pub struct OpenAIResponsesCompat {
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Compat {
     #[serde(rename = "openai-completions")]
-    OpenAICompletions(OpenAICompletionsCompat),
+    OpenAICompletions(Box<OpenAICompletionsCompat>),
     #[serde(rename = "openai-responses")]
     OpenAIResponses(OpenAIResponsesCompat),
+    #[serde(rename = "anthropic-messages")]
+    AnthropicMessages(AnthropicMessagesCompat),
 }
 
 /// Token usage and cost for a completion.
@@ -292,6 +413,9 @@ pub struct Model {
     /// Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from base_url.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compat: Option<Compat>,
+    /// Mapping of thinking levels to provider-specific format strings.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingLevelMap")]
+    pub thinking_level_map: Option<ThinkingLevelMap>,
 }
 
 /// OpenRouter provider routing preferences.
@@ -301,6 +425,12 @@ pub struct OpenRouterRouting {
     pub only: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "allowFallbacks")]
+    pub allow_fallbacks: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "dataCollection")]
+    pub data_collection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
 }
 
 /// Vercel AI Gateway routing preferences.
@@ -341,8 +471,17 @@ pub struct ThinkingBudgets {
     pub high: Option<u32>,
 }
 
+/// Mapping of thinking levels to format strings.
+pub type ThinkingLevelMap = HashMap<String, Option<String>>;
+
+/// Callback invoked with each outbound request payload before it is sent.
+pub type OnPayloadCallback = Arc<dyn Fn(serde_json::Value, &Model) + Send + Sync>;
+
+/// Callback invoked with the HTTP response status and headers from the provider.
+pub type OnResponseCallback = Arc<dyn Fn(u16, HashMap<String, String>, &Model) + Send + Sync>;
+
 /// Base options all providers share.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -356,6 +495,50 @@ pub struct StreamOptions {
     pub headers: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retry_delay_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<Transport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_retention: Option<CacheRetention>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    #[serde(skip)]
+    pub signal: Option<tokio_util::sync::CancellationToken>,
+    /// TODO(M12): revisit return type when wiring up SSE pipeline — TS equivalent
+    /// returns `Promise<unknown>` for async payload mutation; this Rust signature
+    /// is sync-only and can be upgraded to `-> Pin<Box<dyn Future<Output = ()>>>`
+    /// when the streaming pipeline lands.
+    #[serde(skip)]
+    pub on_payload: Option<OnPayloadCallback>,
+    #[serde(skip)]
+    pub on_response: Option<OnResponseCallback>,
+}
+
+impl std::fmt::Debug for StreamOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamOptions")
+            .field("temperature", &self.temperature)
+            .field("max_tokens", &self.max_tokens)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("session_id", &self.session_id)
+            .field("headers", &self.headers)
+            .field("max_retry_delay_ms", &self.max_retry_delay_ms)
+            .field("transport", &self.transport)
+            .field("cache_retention", &self.cache_retention)
+            .field("metadata", &self.metadata)
+            .field("timeout_ms", &self.timeout_ms)
+            .field("max_retries", &self.max_retries)
+            .field(
+                "signal",
+                &self.signal.as_ref().map(|_| "<CancellationToken>"),
+            )
+            .field("on_payload", &self.on_payload.as_ref().map(|_| "<Fn>"))
+            .field("on_response", &self.on_response.as_ref().map(|_| "<Fn>"))
+            .finish()
+    }
 }
 
 /// Provider-specific stream options.
@@ -411,6 +594,14 @@ impl SimpleStreamOptions {
             session_id: self.base.session_id.clone(),
             headers: self.base.headers.clone(),
             max_retry_delay_ms: self.base.max_retry_delay_ms,
+            transport: self.base.transport,
+            cache_retention: self.base.cache_retention,
+            metadata: self.base.metadata.clone(),
+            timeout_ms: self.base.timeout_ms,
+            max_retries: self.base.max_retries,
+            signal: self.base.signal.clone(),
+            on_payload: self.base.on_payload.clone(),
+            on_response: self.base.on_response.clone(),
         }
     }
 
@@ -505,6 +696,8 @@ pub struct ThinkingContent {
     pub thinking: String,
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingSignature")]
     pub thinking_signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redacted: Option<bool>,
 }
 
 impl ThinkingContent {
@@ -513,6 +706,7 @@ impl ThinkingContent {
             content_type: "thinking".to_string(),
             thinking: thinking.into(),
             thinking_signature: None,
+            redacted: None,
         }
     }
 }
@@ -627,6 +821,11 @@ impl UserMessage {
     }
 }
 
+/// Diagnostic information for assistant messages. Fields land in M2.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AssistantMessageDiagnostic {}
+
 /// Assistant content block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -651,6 +850,12 @@ pub struct AssistantMessage {
     #[serde(skip_serializing_if = "Option::is_none", rename = "errorMessage")]
     pub error_message: Option<String>,
     pub timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "responseModel")]
+    pub response_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "responseId")]
+    pub response_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Vec<AssistantMessageDiagnostic>>,
 }
 
 fn default_assistant_role() -> String {
@@ -858,6 +1063,17 @@ mod types_tests {
             Provider::Huggingface,
             Provider::Opencode,
             Provider::KimiCoding,
+            Provider::CloudflareWorkersAi,
+            Provider::CloudflareAiGateway,
+            Provider::Fireworks,
+            Provider::Moonshotai,
+            Provider::MoonshotaiCn,
+            Provider::Xiaomi,
+            Provider::XiaomiTokenPlanCn,
+            Provider::XiaomiTokenPlanAms,
+            Provider::XiaomiTokenPlanSgp,
+            Provider::OpencodeGo,
+            Provider::Deepseek,
         ];
         for provider in providers {
             let key = provider.as_str();

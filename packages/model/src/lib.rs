@@ -15,12 +15,14 @@ pub mod types;
 
 // Re-export commonly used items from types
 pub use types::{
-    Api, AssistantContentBlock, AssistantContentBlock as AssistantContent, AssistantMessage,
-    AssistantMessageEvent, Compat, Context, Cost, ImageContent, InputType, Message, Model,
-    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting, ProviderStreamOptions,
-    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingBudgets, ThinkingContent,
-    ThinkingLevel, Tool, ToolCall, ToolResultContent, ToolResultMessage, Usage, UsageCost,
-    UserContent, UserContentBlock, UserMessage, VercelGatewayRouting,
+    AnthropicMessagesCompat, Api, AssistantContentBlock, AssistantContentBlock as AssistantContent,
+    AssistantMessage, AssistantMessageDiagnostic, AssistantMessageEvent, CacheRetention, Compat,
+    Context, Cost, ImageContent, InputType, Message, Model, OnPayloadCallback, OnResponseCallback,
+    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting, ProviderResponse,
+    ProviderStreamOptions, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
+    ThinkingBudgets, ThinkingContent, ThinkingLevel, ThinkingLevelMap, Tool, ToolCall,
+    ToolResultContent, ToolResultMessage, Transport, Usage, UsageCost, UserContent,
+    UserContentBlock, UserMessage, VercelGatewayRouting,
 };
 
 // Re-export from models module

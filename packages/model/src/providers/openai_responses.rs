@@ -90,6 +90,9 @@ fn make_error_stream(
                 error_message: Some(error_msg),
                 timestamp: current_timestamp_ms(),
                 content: vec![],
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
             },
         };
     })
@@ -230,6 +233,9 @@ fn stream_openai_responses(
             usage: Usage::default(),
             error_message: None,
             timestamp: current_timestamp_ms(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         };
 
         yield AssistantMessageEvent::Start {
@@ -440,6 +446,7 @@ fn stream_openai_responses(
                 content_type: "thinking".to_string(),
                 thinking: thinking_buffer,
                 thinking_signature: None,
+                redacted: None,
             }));
         }
 
@@ -490,6 +497,7 @@ mod tests {
             max_tokens: 100_000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 

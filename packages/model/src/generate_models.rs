@@ -254,6 +254,7 @@ async fn fetch_openrouter_models(client: &reqwest::Client) -> Vec<Model> {
                 .unwrap_or(4096),
             headers: None,
             compat: None,
+            thinking_level_map: None,
         });
     }
     println!(
@@ -304,6 +305,7 @@ async fn fetch_ai_gateway_models(client: &reqwest::Client) -> Vec<Model> {
             max_tokens: m.max_tokens.unwrap_or(4096),
             headers: None,
             compat: None,
+            thinking_level_map: None,
         });
     }
     println!(
@@ -416,6 +418,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             };
             models.push(bedrock_model.clone());
             if model_id.starts_with("anthropic.claude-haiku-4-5")
@@ -454,6 +457,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             });
         }
     }
@@ -481,6 +485,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             });
         }
     }
@@ -508,6 +513,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             });
         }
     }
@@ -535,6 +541,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             });
         }
     }
@@ -562,6 +569,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             });
         }
     }
@@ -589,6 +597,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             });
         }
     }
@@ -615,13 +624,16 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 context_window: limit_context(m),
                 max_tokens: limit_output(m),
                 headers: None,
-                compat: Some(Compat::OpenAICompletions(OpenAICompletionsCompat {
-                    supports_store: None,
-                    supports_developer_role: Some(false),
-                    supports_reasoning_effort: None,
-                    thinking_format: Some("zai".to_string()),
-                    ..Default::default()
-                })),
+                compat: Some(Compat::OpenAICompletions(Box::new(
+                    OpenAICompletionsCompat {
+                        supports_store: None,
+                        supports_developer_role: Some(false),
+                        supports_reasoning_effort: None,
+                        thinking_format: Some("zai".to_string()),
+                        ..Default::default()
+                    },
+                ))),
+                thinking_level_map: None,
             });
         }
     }
@@ -649,6 +661,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             });
         }
     }
@@ -675,13 +688,16 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 context_window: limit_context(m),
                 max_tokens: limit_output(m),
                 headers: None,
-                compat: Some(Compat::OpenAICompletions(OpenAICompletionsCompat {
-                    supports_store: None,
-                    supports_developer_role: Some(false),
-                    supports_reasoning_effort: None,
-                    thinking_format: None,
-                    ..Default::default()
-                })),
+                compat: Some(Compat::OpenAICompletions(Box::new(
+                    OpenAICompletionsCompat {
+                        supports_store: None,
+                        supports_developer_role: Some(false),
+                        supports_reasoning_effort: None,
+                        thinking_format: None,
+                        ..Default::default()
+                    },
+                ))),
+                thinking_level_map: None,
             });
         }
     }
@@ -718,6 +734,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             });
         }
     }
@@ -750,13 +767,15 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             let compat = if needs_responses_api {
                 None
             } else {
-                Some(Compat::OpenAICompletions(OpenAICompletionsCompat {
-                    supports_store: Some(false),
-                    supports_developer_role: Some(false),
-                    supports_reasoning_effort: Some(false),
-                    thinking_format: None,
-                    ..Default::default()
-                }))
+                Some(Compat::OpenAICompletions(Box::new(
+                    OpenAICompletionsCompat {
+                        supports_store: Some(false),
+                        supports_developer_role: Some(false),
+                        supports_reasoning_effort: Some(false),
+                        thinking_format: None,
+                        ..Default::default()
+                    },
+                )))
             };
             models.push(Model {
                 id: model_id.clone(),
@@ -775,6 +794,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: m.limit.as_ref().and_then(|l| l.output).unwrap_or(8192),
                 headers: Some(copilot_headers.clone()),
                 compat,
+                thinking_level_map: None,
             });
         }
     }
@@ -819,6 +839,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                     max_tokens: limit_output(m),
                     headers: None,
                     compat: None,
+                    thinking_level_map: None,
                 });
             }
         }
@@ -847,6 +868,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 max_tokens: limit_output(m),
                 headers: None,
                 compat: None,
+                thinking_level_map: None,
             });
         }
     }
@@ -882,6 +904,17 @@ fn provider_key(p: Provider) -> &'static str {
         Provider::Huggingface => "huggingface",
         Provider::Opencode => "opencode",
         Provider::KimiCoding => "kimi-coding",
+        Provider::CloudflareWorkersAi => "cloudflare-workers-ai",
+        Provider::CloudflareAiGateway => "cloudflare-ai-gateway",
+        Provider::Fireworks => "fireworks",
+        Provider::Moonshotai => "moonshotai",
+        Provider::MoonshotaiCn => "moonshotai-cn",
+        Provider::Xiaomi => "xiaomi",
+        Provider::XiaomiTokenPlanCn => "xiaomi-token-plan-cn",
+        Provider::XiaomiTokenPlanAms => "xiaomi-token-plan-ams",
+        Provider::XiaomiTokenPlanSgp => "xiaomi-token-plan-sgp",
+        Provider::OpencodeGo => "opencode-go",
+        Provider::Deepseek => "deepseek",
     }
 }
 
@@ -908,6 +941,7 @@ fn static_codex_models() -> Vec<Model> {
             max_tokens: CODEX_MAX_TOKENS,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gpt-5.1-codex-max".to_string(),
@@ -922,6 +956,7 @@ fn static_codex_models() -> Vec<Model> {
             max_tokens: CODEX_MAX_TOKENS,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gpt-5.1-codex-mini".to_string(),
@@ -936,6 +971,7 @@ fn static_codex_models() -> Vec<Model> {
             max_tokens: CODEX_MAX_TOKENS,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gpt-5.2".to_string(),
@@ -950,6 +986,7 @@ fn static_codex_models() -> Vec<Model> {
             max_tokens: CODEX_MAX_TOKENS,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gpt-5.2-codex".to_string(),
@@ -964,6 +1001,7 @@ fn static_codex_models() -> Vec<Model> {
             max_tokens: CODEX_MAX_TOKENS,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
     ]
 }
@@ -987,6 +1025,7 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
             max_tokens: 65535,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-2.5-flash".to_string(),
@@ -1001,6 +1040,7 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
             max_tokens: 65535,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-2.0-flash".to_string(),
@@ -1015,6 +1055,7 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
             max_tokens: 8192,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-3-pro-preview".to_string(),
@@ -1029,6 +1070,7 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
             max_tokens: 65535,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-3-flash-preview".to_string(),
@@ -1043,6 +1085,7 @@ fn static_cloud_code_assist_models() -> Vec<Model> {
             max_tokens: 65535,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
     ]
 }
@@ -1066,6 +1109,7 @@ fn static_antigravity_models() -> Vec<Model> {
             max_tokens: 65535,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-3-pro-low".to_string(),
@@ -1080,6 +1124,7 @@ fn static_antigravity_models() -> Vec<Model> {
             max_tokens: 65535,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-3-flash".to_string(),
@@ -1094,6 +1139,7 @@ fn static_antigravity_models() -> Vec<Model> {
             max_tokens: 65535,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "claude-sonnet-4-5".to_string(),
@@ -1108,6 +1154,7 @@ fn static_antigravity_models() -> Vec<Model> {
             max_tokens: 64000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "claude-sonnet-4-5-thinking".to_string(),
@@ -1122,6 +1169,7 @@ fn static_antigravity_models() -> Vec<Model> {
             max_tokens: 64000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "claude-opus-4-5-thinking".to_string(),
@@ -1136,6 +1184,7 @@ fn static_antigravity_models() -> Vec<Model> {
             max_tokens: 64000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gpt-oss-120b-medium".to_string(),
@@ -1150,6 +1199,7 @@ fn static_antigravity_models() -> Vec<Model> {
             max_tokens: 32768,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
     ]
 }
@@ -1171,6 +1221,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 64000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-3-flash-preview".to_string(),
@@ -1185,6 +1236,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 65536,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-2.0-flash".to_string(),
@@ -1199,6 +1251,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 8192,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-2.0-flash-lite".to_string(),
@@ -1213,6 +1266,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 65536,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-2.5-pro".to_string(),
@@ -1227,6 +1281,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 65536,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-2.5-flash".to_string(),
@@ -1241,6 +1296,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 65536,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-2.5-flash-lite-preview-09-2025".to_string(),
@@ -1255,6 +1311,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 65536,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-2.5-flash-lite".to_string(),
@@ -1269,6 +1326,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 65536,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-1.5-pro".to_string(),
@@ -1283,6 +1341,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 8192,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-1.5-flash".to_string(),
@@ -1297,6 +1356,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 8192,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "gemini-1.5-flash-8b".to_string(),
@@ -1311,6 +1371,7 @@ fn static_vertex_models() -> Vec<Model> {
             max_tokens: 8192,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
     ]
 }
@@ -1334,6 +1395,7 @@ fn static_kimi_coding_models() -> Vec<Model> {
             max_tokens: 32768,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
         Model {
             id: "k2p5".to_string(),
@@ -1348,6 +1410,7 @@ fn static_kimi_coding_models() -> Vec<Model> {
             max_tokens: 32768,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         },
     ]
 }
@@ -1417,6 +1480,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tokens: 16384,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         });
     }
 
@@ -1437,6 +1501,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tokens: 128000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         });
     }
 
@@ -1457,6 +1522,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tokens: 128000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         });
     }
 
@@ -1483,6 +1549,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tokens: 8192,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         });
     }
 
@@ -1504,6 +1571,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_tokens: 30000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         });
     }
 

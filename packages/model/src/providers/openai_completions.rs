@@ -142,6 +142,9 @@ fn make_error_stream(
                 error_message: Some(error_msg),
                 timestamp: current_timestamp_ms(),
                 content: vec![],
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
             },
         };
     })
@@ -179,6 +182,9 @@ pub fn stream_openai_completions(
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp: current_timestamp_ms(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         };
 
         yield AssistantMessageEvent::Start { partial: output.clone() };
@@ -1068,6 +1074,7 @@ mod tests {
             max_tokens: 4096,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 
@@ -1219,6 +1226,9 @@ mod tests {
             stop_reason: StopReason::ToolUse,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         })];
         assert!(has_tool_history(&messages));
     }

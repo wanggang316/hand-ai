@@ -239,6 +239,7 @@ mod tests {
             max_tokens: 16384,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 
@@ -258,6 +259,9 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         }
     }
 
@@ -401,10 +405,10 @@ mod tests {
         ];
 
         let result = transform_messages(&messages, &model, Some(&normalizer));
-        if let Message::Assistant(a) = &result[0] {
-            if let AssistantContentBlock::ToolCall(tc) = &a.content[0] {
-                assert_eq!(tc.id, "call_with_special_chars");
-            }
+        if let Message::Assistant(a) = &result[0]
+            && let AssistantContentBlock::ToolCall(tc) = &a.content[0]
+        {
+            assert_eq!(tc.id, "call_with_special_chars");
         }
         if let Message::ToolResult(tr) = &result[1] {
             assert_eq!(tr.tool_call_id, "call_with_special_chars");
@@ -432,10 +436,10 @@ mod tests {
         ))];
 
         let result = transform_messages(&messages, &model, None);
-        if let Message::Assistant(a) = &result[0] {
-            if let AssistantContentBlock::ToolCall(tc) = &a.content[0] {
-                assert!(tc.thought_signature.is_none());
-            }
+        if let Message::Assistant(a) = &result[0]
+            && let AssistantContentBlock::ToolCall(tc) = &a.content[0]
+        {
+            assert!(tc.thought_signature.is_none());
         }
     }
 }

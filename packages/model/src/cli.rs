@@ -211,6 +211,9 @@ fn model_info(provider: &str, model_id: &str) {
                     Compat::OpenAIResponses(oai_resp_compat) => {
                         println!("  OpenAI Responses: {oai_resp_compat:?}");
                     }
+                    Compat::AnthropicMessages(anth_compat) => {
+                        println!("  Anthropic Messages: {anth_compat:?}");
+                    }
                 }
             }
 
