@@ -11,6 +11,7 @@
 
 pub mod components;
 pub mod fuzzy;
+pub mod keybindings;
 pub mod keys;
 pub mod kill_ring;
 pub mod overlay;
@@ -30,6 +31,10 @@ pub use components::{
     ToastComponent, ToastLevel, TruncatedTextComponent,
 };
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
+pub use keybindings::{
+    Keybinding, KeybindingConflict, KeybindingDefinition, KeybindingsConfig, KeybindingsManager,
+    TUI_KEYBINDINGS, get_keybindings, set_keybindings,
+};
 pub use keys::{
     Key, KeyEventType, KeyId, KeyModifiers, KeyName, decode_kitty_printable, decode_printable_key,
     is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key, parse_key_id,
