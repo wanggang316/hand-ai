@@ -61,82 +61,9 @@ pub struct Client {
 impl Client {
     /// Create a new client with all built-in providers registered.
     pub fn new() -> Self {
-        let client = Self {
-            registry: Arc::new(ApiProviderRegistry::new()),
-        };
-        client.register_builtin_providers();
-        client
-    }
-
-    fn register_builtin_providers(&self) {
-        use crate::providers::anthropic_messages::AnthropicMessagesProvider;
-        use crate::providers::bedrock::BedrockProvider;
-        use crate::providers::google_generative_ai::GoogleGenerativeAiProvider;
-        use crate::providers::google_vertex::GoogleVertexProvider;
-        use crate::providers::openai_codex_responses::OpenAICodexResponsesProvider;
-        use crate::providers::openai_completions::OpenAICompletionsProvider;
-        use crate::providers::openai_responses::OpenAIResponsesProvider;
-
-        self.registry.register(
-            crate::types::Api::AnthropicMessages,
-            Box::new(AnthropicMessagesProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        self.registry.register(
-            crate::types::Api::OpenAICompletions,
-            Box::new(OpenAICompletionsProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        self.registry.register(
-            crate::types::Api::GoogleGenerativeAi,
-            Box::new(GoogleGenerativeAiProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // Google Vertex authenticates via ADC + project/location and shares the
-        // Gemini wire format through `google_shared`.
-        self.registry.register(
-            crate::types::Api::GoogleVertex,
-            Box::new(GoogleVertexProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        self.registry.register(
-            crate::types::Api::GoogleGeminiCli,
-            Box::new(GoogleGenerativeAiProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // OpenAI Responses API (o1, o3, and newer models)
-        self.registry.register(
-            crate::types::Api::OpenAIResponses,
-            Box::new(OpenAIResponsesProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // Azure OpenAI Responses uses the same provider with different base URL
-        self.registry.register(
-            crate::types::Api::AzureOpenAiResponses,
-            Box::new(OpenAIResponsesProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // OpenAI Codex Responses gets its own provider — different
-        // endpoint, ChatGPT-account-scoped headers, OAuth credentials.
-        self.registry.register(
-            crate::types::Api::OpenAICodexResponses,
-            Box::new(OpenAICodexResponsesProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // AWS Bedrock ConverseStream
-        self.registry.register(
-            crate::types::Api::BedrockConverseStream,
-            Box::new(BedrockProvider::new()),
-            Some("builtin".to_string()),
-        );
+        let registry = Arc::new(ApiProviderRegistry::new());
+        crate::providers::register_builtins(&registry);
+        Self { registry }
     }
 
     /// Stream a response from the model.

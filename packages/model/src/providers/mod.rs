@@ -14,6 +14,7 @@ pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod openai_responses;
 pub(crate) mod openai_responses_shared;
+pub mod register_builtins;
 
 pub use anthropic_messages::AnthropicMessagesProvider;
 pub use azure_openai_responses::{AzureOpenAIResponsesOptions, AzureOpenAIResponsesProvider};
@@ -32,6 +33,9 @@ pub use openai_codex_responses::{
 };
 pub use openai_completions::{
     OpenAICompletionsOptions, OpenAICompletionsProvider, ResolvedCompat, convert_messages,
-    normalize_mistral_tool_id, stream_openai_completions,
+    normalize_mistral_tool_id, resolve_compat, stream_openai_completions,
 };
 pub use openai_responses::OpenAIResponsesProvider;
+pub use register_builtins::register_builtins;
+#[cfg(any(test, feature = "faux"))]
+pub use register_builtins::register_builtins_with_faux;
