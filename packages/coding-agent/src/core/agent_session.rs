@@ -111,6 +111,20 @@ impl AgentSession {
 
     /// Create an in-memory session (for testing).
     pub fn in_memory(model: model::Model, tools: Vec<AgentTool>) -> Self {
+        Self::in_memory_with_client(model, tools, model::Client::new())
+    }
+
+    /// Create an in-memory session with a custom `Client` (for testing).
+    ///
+    /// This allows tests to register mock providers on the client without
+    /// going through env vars or an [`AgentSessionConfig`]. The dispatcher
+    /// unit tests in `rpc::server` use this to wire `mock_text_provider`
+    /// directly into the session that drives a `prompt` turn.
+    pub fn in_memory_with_client(
+        model: model::Model,
+        tools: Vec<AgentTool>,
+        client: model::Client,
+    ) -> Self {
         let context = AgentContext {
             system_prompt: "You are a helpful coding assistant.".into(),
             messages: vec![],
@@ -129,7 +143,7 @@ impl AgentSession {
             settings_manager: SettingsManager::in_memory(),
             context,
             tools,
-            client: model::Client::new(),
+            client,
             event_listeners: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -254,6 +268,12 @@ impl AgentSession {
     /// Set the model.
     pub fn set_model(&mut self, model: model::Model) {
         self.config.model = model;
+    }
+
+    /// Borrow the underlying `model::Client`. Used by the RPC dispatcher
+    /// to preserve a session's provider registry across `new_session`.
+    pub fn client(&self) -> &model::Client {
+        &self.client
     }
 
     /// Get the working directory.

@@ -14,9 +14,11 @@
 //! without changing the public types.
 
 pub mod jsonl;
+pub mod server;
 pub mod types;
 
 pub use jsonl::{JsonlReadError, read_jsonl, write_jsonl};
+pub use server::{RpcServerError, run_rpc_server};
 pub use types::{
     RpcCommand, RpcExtensionUiRequest, RpcExtensionUiResponse, RpcResponse, RpcResponseBody,
     RpcResultEmpty, RpcResultWithData, RpcSessionState, RpcSlashCommand, ResponseTag,
