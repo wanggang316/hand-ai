@@ -33,7 +33,10 @@ pub use loader::{
 };
 pub use markdown::MarkdownComponent;
 pub use progress_bar::ProgressBarComponent;
-pub use select_list::{SelectItem, SelectListComponent};
+pub use select_list::{
+    DEFAULT_PRIMARY_COLUMN_WIDTH, SelectItem, SelectListComponent, SelectListLayoutOptions,
+    SelectListTheme,
+};
 pub use settings_list::{SettingEntry, SettingValue, SettingsListComponent};
 pub use spacer::SpacerComponent;
 pub use status_bar::StatusBarComponent;
