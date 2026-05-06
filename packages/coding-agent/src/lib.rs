@@ -15,6 +15,7 @@
 pub mod cli;
 pub mod core;
 pub mod prelude;
+pub mod rpc;
 pub mod tools;
 
 // Convenience re-exports at crate root for non-prelude consumers.
