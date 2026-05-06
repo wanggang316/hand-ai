@@ -44,6 +44,10 @@ rand = "0.8"
 base64 = "0.22"
 urlencoding = "2"
 tiny_http = "0.12"
+# Reserved for the OpenAI Codex Responses WebSocket transport (M9 follow-up).
+# Currently unused at the call site but pinned here so the surface lands
+# in one place when the WebSocket transport is wired up.
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 tempfile = "3"

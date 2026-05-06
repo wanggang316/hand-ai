@@ -10,6 +10,7 @@ pub mod env_api_keys;
 pub mod models;
 pub mod oauth;
 pub mod providers;
+pub mod session_resources;
 pub mod transform;
 pub mod types;
 pub mod utils;
@@ -54,9 +55,11 @@ pub use env_api_keys::{clear_vertex_adc_cache, get_env_api_key, get_env_api_key_
 pub use providers::{
     AnthropicMessagesProvider, AzureOpenAIResponsesOptions, AzureOpenAIResponsesProvider,
     BedrockProvider, GoogleGenerativeAiProvider, GoogleVertexOptions, GoogleVertexProvider,
-    GoogleVertexThinkingLevel, MistralOptions, MistralProvider, OpenAICompletionsOptions,
+    GoogleVertexThinkingLevel, MistralOptions, MistralProvider, OpenAICodexResponsesOptions,
+    OpenAICodexResponsesProvider, OpenAICodexWebSocketDebugStats, OpenAICompletionsOptions,
     OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat, VertexTokenProvider,
     convert_messages, normalize_mistral_tool_id, stream_openai_completions,
+    websocket_debug_stats as openai_codex_websocket_debug_stats,
 };
 #[cfg(any(test, feature = "faux"))]
 pub use providers::{FauxProvider, FauxScriptStep, faux_model};
@@ -66,6 +69,9 @@ pub use oauth::{
     OAuthAuthInfo, OAuthCredentials, OAuthError, OAuthLoginCallbacks, OAuthProvider,
     OAuthProviderId, OAuthRegistry,
 };
+
+// Re-export from session_resources
+pub use session_resources::{SessionResourceError, SessionResources, WebSocketHandle};
 
 // Re-export from transform
 pub use transform::{

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Transport mechanism for streaming responses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Transport {
     /// Server-Sent Events (streaming).

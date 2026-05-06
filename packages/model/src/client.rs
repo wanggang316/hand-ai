@@ -19,6 +19,13 @@ pub enum ClientError {
     },
     /// The stream ended without producing a result.
     StreamEndedWithoutResult,
+    /// An OAuth-backed provider has no credentials and the caller did
+    /// not supply an explicit `api_key`. Surfaced primarily through the
+    /// stream itself as an `Error` event; this variant is here for
+    /// callers that synthesize the error eagerly.
+    OAuthRequired {
+        provider: crate::oauth::OAuthProviderId,
+    },
 }
 
 impl fmt::Display for ClientError {
@@ -32,6 +39,12 @@ impl fmt::Display for ClientError {
             }
             ClientError::StreamEndedWithoutResult => {
                 write!(f, "Stream ended without producing a result")
+            }
+            ClientError::OAuthRequired { provider } => {
+                write!(
+                    f,
+                    "OAuth credentials required for provider {provider:?} (run `oauth login`)",
+                )
             }
         }
     }
@@ -60,6 +73,7 @@ impl Client {
         use crate::providers::bedrock::BedrockProvider;
         use crate::providers::google_generative_ai::GoogleGenerativeAiProvider;
         use crate::providers::google_vertex::GoogleVertexProvider;
+        use crate::providers::openai_codex_responses::OpenAICodexResponsesProvider;
         use crate::providers::openai_completions::OpenAICompletionsProvider;
         use crate::providers::openai_responses::OpenAIResponsesProvider;
 
@@ -109,10 +123,11 @@ impl Client {
             Some("builtin".to_string()),
         );
 
-        // OpenAI Codex Responses uses the same provider
+        // OpenAI Codex Responses gets its own provider — different
+        // endpoint, ChatGPT-account-scoped headers, OAuth credentials.
         self.registry.register(
             crate::types::Api::OpenAICodexResponses,
-            Box::new(OpenAIResponsesProvider::new()),
+            Box::new(OpenAICodexResponsesProvider::new()),
             Some("builtin".to_string()),
         );
 
