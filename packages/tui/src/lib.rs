@@ -20,6 +20,7 @@ pub mod render;
 pub mod resize;
 pub mod stdin_buffer;
 pub mod terminal;
+pub mod terminal_image;
 pub mod theme;
 pub mod tui;
 pub mod utils;
@@ -53,6 +54,14 @@ pub use render::DiffRenderer;
 pub use resize::watch_resizes;
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
 pub use terminal::{ProcessTerminal, Terminal, TerminalCapabilities, run_stdin_reader};
+pub use terminal_image::{
+    CellDimensions, ImageDimensions, ImageRenderOptions, TerminalImageCapabilities,
+    allocate_image_id, calculate_image_rows, delete_all_kitty_images, delete_kitty_image,
+    detect_capabilities, encode_iterm2, encode_kitty, get_capabilities, get_cell_dimensions,
+    get_gif_dimensions, get_image_dimensions, get_jpeg_dimensions, get_png_dimensions,
+    get_webp_dimensions, hyperlink, image_fallback, render_image, reset_capabilities_cache,
+    set_capabilities, set_cell_dimensions,
+};
 pub use theme::{Color, NamedColor, Style, Theme};
 pub use error::{TuiError, TuiResult};
 pub use tui::{
