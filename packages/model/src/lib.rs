@@ -58,7 +58,8 @@ pub use providers::{
     GoogleVertexThinkingLevel, MistralOptions, MistralProvider, OpenAICodexResponsesOptions,
     OpenAICodexResponsesProvider, OpenAICodexWebSocketDebugStats, OpenAICompletionsOptions,
     OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat, VertexTokenProvider,
-    convert_messages, normalize_mistral_tool_id, stream_openai_completions,
+    cloudflare_ai_gateway_model, cloudflare_workers_ai_model, convert_messages,
+    normalize_mistral_tool_id, stream_openai_completions,
     websocket_debug_stats as openai_codex_websocket_debug_stats,
 };
 #[cfg(any(test, feature = "faux"))]
