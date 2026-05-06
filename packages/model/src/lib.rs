@@ -8,6 +8,7 @@ pub mod cli;
 pub mod client;
 pub mod env_api_keys;
 pub mod models;
+pub mod oauth;
 pub mod providers;
 pub mod transform;
 pub mod types;
@@ -54,6 +55,12 @@ pub use providers::{
     AnthropicMessagesProvider, BedrockProvider, GoogleGenerativeAiProvider,
     OpenAICompletionsOptions, OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat,
     convert_messages, normalize_mistral_tool_id, stream_openai_completions,
+};
+
+// Re-export from oauth
+pub use oauth::{
+    OAuthAuthInfo, OAuthCredentials, OAuthError, OAuthLoginCallbacks, OAuthProvider,
+    OAuthProviderId, OAuthRegistry,
 };
 
 // Re-export from transform

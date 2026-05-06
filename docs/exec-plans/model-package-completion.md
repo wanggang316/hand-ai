@@ -65,6 +65,10 @@ Currently `pub type AssistantMessageEventStream<'a> = Pin<Box<dyn Stream<Item = 
 
 The original M3 spec bullet 3 ("synthesize a `thoughtSignature` placeholder when missing") was a misread of the pi-mono `google-shared.ts` reference. The TS source drops invalid/foreign signatures to undefined; pi-mono CHANGELOG entry 4032 documents that a previous `skip_thought_signature_validator` sentinel was removed because Vertex rejected it. The Rust implementation matches TS: cross-API replay to Google sets thought_signature to None; same-model replay preserves the original signature.
 
+### D-08: OAuth loopback uses fixed ports (53692 Anthropic, 1455 Codex)
+
+The original "pick port 0, OS-assigned" Mitigation in the Risks section is incorrect for production OAuth flows. Anthropic's and OpenAI Codex's OAuth client configurations whitelist exact `redirect_uri` strings including port. Using a dynamic port causes the IdP to reject the redirect. The Rust implementation uses the same fixed ports as the pi-mono TS reference. Trade-off: two concurrent logins against the same provider on the same host will collide on the listener bind; the second one returns a clear "address in use" error. This is acceptable because OAuth flows are user-driven and rare.
+
 (Append further decisions as the plan executes.)
 
 ## Outcomes & Retrospective
