@@ -10,6 +10,7 @@
 
 pub mod core;
 pub mod tools;
+pub mod tui_bridge;
 
 // Re-export commonly used items
 pub use core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
