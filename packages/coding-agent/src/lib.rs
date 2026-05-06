@@ -8,6 +8,7 @@
 //! - CLI entry point
 //! - Multiple run modes (interactive, print)
 
+pub mod cli;
 pub mod core;
 pub mod tools;
 

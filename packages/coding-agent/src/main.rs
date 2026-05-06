@@ -1,6 +1,7 @@
 //! Hand — interactive AI coding agent CLI.
 
 use clap::Parser;
+use hand_coding_agent::cli::Args;
 use hand_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 use hand_coding_agent::core::export;
 use hand_coding_agent::core::model_resolver;
@@ -12,90 +13,9 @@ use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Parser)]
-#[command(
-    name = "hand",
-    about = "Hand — AI coding agent",
-    version = VERSION,
-    long_about = "Hand is an interactive AI coding agent that helps you write, edit, and understand code."
-)]
-struct Cli {
-    /// Initial prompt (non-interactive mode)
-    #[arg(short, long)]
-    prompt: Option<String>,
-
-    /// Model pattern (e.g., "sonnet", "claude-sonnet:high", "openai/gpt-4o")
-    #[arg(short, long)]
-    model: Option<String>,
-
-    /// Provider (e.g., "anthropic", "openai", "google")
-    #[arg(long)]
-    provider: Option<String>,
-
-    /// API key override (not persisted)
-    #[arg(long)]
-    api_key: Option<String>,
-
-    /// Resume a previous session by ID
-    #[arg(short, long)]
-    resume: Option<String>,
-
-    /// Continue the most recent session
-    #[arg(short, long = "continue")]
-    continue_session: bool,
-
-    /// Fork from a session file path or ID prefix
-    #[arg(long)]
-    fork: Option<String>,
-
-    /// Working directory
-    #[arg(short = 'd', long)]
-    cwd: Option<PathBuf>,
-
-    /// Custom system prompt (overrides default)
-    #[arg(long)]
-    system_prompt: Option<String>,
-
-    /// Append text to the system prompt
-    #[arg(long)]
-    append_system_prompt: Option<String>,
-
-    /// Thinking level: off, minimal, low, medium, high, xhigh
-    #[arg(long)]
-    thinking: Option<String>,
-
-    /// Comma-separated tools to enable (read,write,edit,bash,grep,find,ls)
-    #[arg(long)]
-    tools: Option<String>,
-
-    /// Disable all tools
-    #[arg(long)]
-    no_tools: bool,
-
-    /// Run in ephemeral mode (don't save session)
-    #[arg(long)]
-    no_session: bool,
-
-    /// Non-interactive print mode
-    #[arg(long)]
-    print: bool,
-
-    /// Export session to file (HTML or JSONL based on extension)
-    #[arg(long)]
-    export: Option<PathBuf>,
-
-    /// List available models (optional search filter)
-    #[arg(long)]
-    list_models: Option<Option<String>>,
-
-    /// Enable verbose logging
-    #[arg(short, long)]
-    verbose: bool,
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let cli = Args::parse();
 
     // Handle --list-models
     if let Some(ref search) = cli.list_models {
