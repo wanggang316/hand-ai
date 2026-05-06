@@ -1611,6 +1611,18 @@ fn unknown_key(data: &str) -> Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialise tests that mutate process-global state
+    /// (`KITTY_PROTOCOL_ACTIVE`, env vars). Without this, parallel tests race
+    /// on the shared atomics/env and the suite flakes ~30% of the time.
+    static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire `GLOBAL_TEST_LOCK`, recovering transparently from poisoning so
+    /// a panicking test does not cascade into every subsequent test failing.
+    fn lock_global() -> std::sync::MutexGuard<'static, ()> {
+        GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Test guard ensuring `set_kitty_protocol_active` is reset on drop.
     struct KittyGuard;
@@ -1630,6 +1642,7 @@ mod tests {
 
     #[test]
     fn parse_single_char() {
+        let _guard = lock_global();
         let key = parse_key("a");
         assert_eq!(key.name, KeyName::Char('a'));
         assert_eq!(key.modifiers, KeyModifiers::none());
@@ -1637,6 +1650,7 @@ mod tests {
 
     #[test]
     fn parse_basic_specials() {
+        let _guard = lock_global();
         assert_eq!(parse_key("\r").name, KeyName::Enter);
         assert_eq!(parse_key("\t").name, KeyName::Tab);
         assert_eq!(parse_key("\x7f").name, KeyName::Backspace);
@@ -1645,6 +1659,7 @@ mod tests {
 
     #[test]
     fn parse_ctrl_letter() {
+        let _guard = lock_global();
         let key = parse_key("\x03");
         assert_eq!(key.name, KeyName::Char('c'));
         assert!(key.modifiers.ctrl);
@@ -1652,6 +1667,7 @@ mod tests {
 
     #[test]
     fn parse_arrow_keys_legacy() {
+        let _guard = lock_global();
         assert_eq!(parse_key("\x1b[A").name, KeyName::Up);
         assert_eq!(parse_key("\x1b[B").name, KeyName::Down);
         assert_eq!(parse_key("\x1b[C").name, KeyName::Right);
@@ -1660,6 +1676,7 @@ mod tests {
 
     #[test]
     fn parse_alt_key_legacy() {
+        let _guard = lock_global();
         // Default state: kitty inactive
         let key = parse_key("\x1ba");
         assert_eq!(key.name, KeyName::Char('a'));
@@ -1668,6 +1685,7 @@ mod tests {
 
     #[test]
     fn parse_kitty_basic() {
+        let _guard = lock_global();
         let key = parse_key("\x1b[97u");
         assert_eq!(key.name, KeyName::Char('a'));
         assert!(!key.is_release);
@@ -1676,6 +1694,7 @@ mod tests {
 
     #[test]
     fn parse_kitty_release_event() {
+        let _guard = lock_global();
         let key = parse_key("\x1b[97;1:3u");
         assert_eq!(key.name, KeyName::Char('a'));
         assert!(key.is_release);
@@ -1684,6 +1703,7 @@ mod tests {
 
     #[test]
     fn parse_kitty_repeat_event() {
+        let _guard = lock_global();
         let key = parse_key("\x1b[97;1:2u");
         assert_eq!(key.name, KeyName::Char('a'));
         assert_eq!(key.event_type, KeyEventType::Repeat);
@@ -1692,6 +1712,7 @@ mod tests {
 
     #[test]
     fn parse_kitty_with_base_layout_key() {
+        let _guard = lock_global();
         // Cyrillic 'с' codepoint 1089, Latin 'c' = 99. base_layout_key should be present.
         let key = parse_key("\x1b[1089::99;5u");
         assert_eq!(key.base_layout_key, Some(99));
@@ -1700,6 +1721,7 @@ mod tests {
 
     #[test]
     fn parse_kitty_kp_enter_normalized() {
+        let _guard = lock_global();
         let key = parse_key("\x1b[57414u");
         assert_eq!(key.name, KeyName::Enter);
     }
@@ -1708,12 +1730,14 @@ mod tests {
 
     #[test]
     fn matches_key_basic_letter() {
+        let _guard = lock_global();
         assert!(matches_key("a", "a"));
         assert!(!matches_key("b", "a"));
     }
 
     #[test]
     fn matches_key_legacy_ctrl_c() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x03", "ctrl+c"));
         assert!(matches_key("\x04", "ctrl+d"));
@@ -1721,12 +1745,14 @@ mod tests {
 
     #[test]
     fn matches_key_escape() {
+        let _guard = lock_global();
         assert!(matches_key("\x1b", "escape"));
         assert!(matches_key("\x1b", "esc"));
     }
 
     #[test]
     fn matches_key_kitty_super_combinations() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert!(matches_key("\x1b[107;9u", "super+k"));
         assert!(matches_key("\x1b[13;9u", "super+enter"));
@@ -1737,6 +1763,7 @@ mod tests {
 
     #[test]
     fn matches_key_kitty_ctrl_shift_letter() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         // ctrl+shift+p — Cyrillic-aware base layout match
         let cyrillic_ctrl_shift_p = "\x1b[1079::112;6u";
@@ -1747,6 +1774,7 @@ mod tests {
 
     #[test]
     fn matches_key_kitty_base_layout_non_latin() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         let cyrillic_ctrl_c = "\x1b[1089::99;5u";
         assert!(matches_key(cyrillic_ctrl_c, "ctrl+c"));
@@ -1756,6 +1784,7 @@ mod tests {
 
     #[test]
     fn matches_key_kitty_dvorak_codepoint_authoritative() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         // Dvorak Ctrl+K reports codepoint 'k' but base layout 'v' — codepoint wins.
         assert!(matches_key("\x1b[107::118;5u", "ctrl+k"));
@@ -1764,6 +1793,7 @@ mod tests {
 
     #[test]
     fn matches_key_kitty_digit() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert!(matches_key("\x1b[49u", "1"));
         assert!(matches_key("\x1b[49;5u", "ctrl+1"));
@@ -1772,6 +1802,7 @@ mod tests {
 
     #[test]
     fn matches_key_kitty_keypad_normalization() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert!(matches_key("\x1b[57400u", "1"));
         assert!(matches_key("\x1b[57410u", "/"));
@@ -1781,6 +1812,7 @@ mod tests {
 
     #[test]
     fn matches_key_kitty_release_still_matches() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         let release = "\x1b[1089::99;5:3u";
         assert!(matches_key(release, "ctrl+c"));
@@ -1788,6 +1820,7 @@ mod tests {
 
     #[test]
     fn matches_key_modify_other_keys_letters() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1b[27;5;99~", "ctrl+c"));
         assert!(matches_key("\x1b[27;5;100~", "ctrl+d"));
@@ -1796,6 +1829,7 @@ mod tests {
 
     #[test]
     fn matches_key_modify_other_keys_enter_variants() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1b[27;5;13~", "ctrl+enter"));
         assert!(matches_key("\x1b[27;2;13~", "shift+enter"));
@@ -1804,6 +1838,7 @@ mod tests {
 
     #[test]
     fn matches_key_modify_other_keys_tab_variants() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1b[27;2;9~", "shift+tab"));
         assert!(matches_key("\x1b[27;5;9~", "ctrl+tab"));
@@ -1812,6 +1847,7 @@ mod tests {
 
     #[test]
     fn matches_key_modify_other_keys_backspace_variants() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1b[27;1;127~", "backspace"));
         assert!(matches_key("\x1b[27;5;127~", "ctrl+backspace"));
@@ -1820,6 +1856,7 @@ mod tests {
 
     #[test]
     fn matches_key_modify_other_keys_shifted_uppercase() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1b[27;2;69~", "shift+e"));
         assert!(matches_key("\x1b[27;6;69~", "ctrl+shift+e"));
@@ -1827,6 +1864,7 @@ mod tests {
 
     #[test]
     fn matches_key_modify_other_keys_ctrl_alt_letter() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1b[104;7u", "ctrl+alt+h"));
         assert!(matches_key("\x1b[27;7;104~", "ctrl+alt+h"));
@@ -1834,6 +1872,7 @@ mod tests {
 
     #[test]
     fn matches_key_legacy_arrows_and_ss3() {
+        let _guard = lock_global();
         assert!(matches_key("\x1b[A", "up"));
         assert!(matches_key("\x1b[B", "down"));
         assert!(matches_key("\x1b[C", "right"));
@@ -1845,6 +1884,7 @@ mod tests {
 
     #[test]
     fn matches_key_function_keys_f1_to_f12() {
+        let _guard = lock_global();
         assert!(matches_key("\x1bOP", "f1"));
         assert!(matches_key("\x1bOQ", "f2"));
         assert!(matches_key("\x1bOR", "f3"));
@@ -1862,6 +1902,7 @@ mod tests {
 
     #[test]
     fn matches_key_legacy_ctrl_symbols() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1c", "ctrl+\\"));
         assert!(matches_key("\x1d", "ctrl+]"));
@@ -1871,6 +1912,7 @@ mod tests {
 
     #[test]
     fn matches_key_legacy_ctrl_alt_symbols() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1b\x1b", "ctrl+alt+["));
         assert!(matches_key("\x1b\x1c", "ctrl+alt+\\"));
@@ -1880,6 +1922,7 @@ mod tests {
 
     #[test]
     fn matches_key_alt_arrows() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert!(matches_key("\x1bp", "alt+up"));
         assert!(matches_key("\x1bn", "alt+down"));
@@ -1890,6 +1933,7 @@ mod tests {
 
     #[test]
     fn matches_key_rxvt_modifier_arrows() {
+        let _guard = lock_global();
         assert!(matches_key("\x1b[a", "shift+up"));
         assert!(matches_key("\x1bOa", "ctrl+up"));
         assert!(matches_key("\x1b[2$", "shift+insert"));
@@ -1899,6 +1943,7 @@ mod tests {
 
     #[test]
     fn matches_key_modifier_order_independence() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         let data = "\x1b[107;13u"; // ctrl+super+k
         assert!(matches_key(data, "ctrl+super+k"));
@@ -1907,6 +1952,7 @@ mod tests {
 
     #[test]
     fn matches_key_unknown_modifier_silently_ignored() {
+        let _guard = lock_global();
         // Unknown modifier names are stripped; remaining base key still matches.
         assert!(matches_key("a", "fakemod+a"));
         // Typo'd modifier is treated as unknown; base key "a" still matches.
@@ -1917,6 +1963,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_literal_plus_under_shift() {
+        let _guard = lock_global();
         // `shift++` round-trips: `format_key_name_with_modifiers("+", MOD_SHIFT)`
         // produces it, so parse must accept it.
         let parsed = parse_key_id_components("shift++").unwrap();
@@ -1926,6 +1973,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_plain_plus() {
+        let _guard = lock_global();
         let parsed = parse_key_id_components("+").unwrap();
         assert_eq!(parsed.key, "+");
         assert_eq!(parsed.modifier, 0);
@@ -1935,6 +1983,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_specials_and_letters() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert_eq!(parse_key_id("\x1b").as_deref(), Some("escape"));
         assert_eq!(parse_key_id("\t").as_deref(), Some("tab"));
@@ -1948,6 +1997,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_kitty_super_combinations() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert_eq!(parse_key_id("\x1b[107;9u").as_deref(), Some("super+k"));
         assert_eq!(parse_key_id("\x1b[13;9u").as_deref(), Some("super+enter"));
@@ -1963,6 +2013,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_kitty_keypad_to_logical() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert_eq!(parse_key_id("\x1b[57399u").as_deref(), Some("0"));
         assert_eq!(parse_key_id("\x1b[57409u").as_deref(), Some("."));
@@ -1982,6 +2033,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_modify_other_keys() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert_eq!(parse_key_id("\x1b[27;5;99~").as_deref(), Some("ctrl+c"));
         assert_eq!(parse_key_id("\x1b[27;5;13~").as_deref(), Some("ctrl+enter"));
@@ -1994,12 +2046,14 @@ mod tests {
 
     #[test]
     fn parse_key_id_kitty_unsupported_modifier_rejected() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert_eq!(parse_key_id("\x1b[99;17u"), None);
     }
 
     #[test]
     fn parse_key_id_dvorak_codepoint_authoritative() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert_eq!(parse_key_id("\x1b[107::118;5u").as_deref(), Some("ctrl+k"));
         assert_eq!(parse_key_id("\x1b[47::91;5u").as_deref(), Some("ctrl+/"));
@@ -2007,6 +2061,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_legacy_function_keys() {
+        let _guard = lock_global();
         assert_eq!(parse_key_id("\x1bOP").as_deref(), Some("f1"));
         assert_eq!(parse_key_id("\x1b[24~").as_deref(), Some("f12"));
         assert_eq!(parse_key_id("\x1b[E").as_deref(), Some("clear"));
@@ -2015,11 +2070,13 @@ mod tests {
 
     #[test]
     fn parse_key_id_double_bracket_pageup() {
+        let _guard = lock_global();
         assert_eq!(parse_key_id("\x1b[[5~").as_deref(), Some("pageUp"));
     }
 
     #[test]
     fn parse_key_id_alt_legacy_when_kitty_inactive() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         assert_eq!(parse_key_id("\x1b ").as_deref(), Some("alt+space"));
         assert_eq!(parse_key_id("\x1b\x08").as_deref(), Some("alt+backspace"));
@@ -2031,6 +2088,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_alt_legacy_suppressed_when_kitty_active() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert_eq!(parse_key_id("\x1b "), None);
         assert_eq!(parse_key_id("\x1b\x03"), None);
@@ -2042,6 +2100,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_kitty_active_linefeed_is_shift_enter() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert_eq!(parse_key_id("\n").as_deref(), Some("shift+enter"));
         assert!(matches_key("\n", "shift+enter"));
@@ -2050,6 +2109,7 @@ mod tests {
 
     #[test]
     fn parse_key_id_shifted_uppercase_letter() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         assert_eq!(parse_key_id("\x1b[69;2u").as_deref(), Some("shift+e"));
     }
@@ -2058,6 +2118,7 @@ mod tests {
 
     #[test]
     fn decode_kitty_printable_keypad() {
+        let _guard = lock_global();
         assert_eq!(decode_kitty_printable("\x1b[57399u").as_deref(), Some("0"));
         assert_eq!(decode_kitty_printable("\x1b[57400u").as_deref(), Some("1"));
         assert_eq!(decode_kitty_printable("\x1b[57409u").as_deref(), Some("."));
@@ -2073,6 +2134,7 @@ mod tests {
 
     #[test]
     fn decode_kitty_printable_rejects_ctrl_alt() {
+        let _guard = lock_global();
         // ctrl+a should not decode as printable
         assert_eq!(decode_kitty_printable("\x1b[97;5u"), None);
         // alt+a likewise
@@ -2081,6 +2143,7 @@ mod tests {
 
     #[test]
     fn decode_printable_key_modify_other_keys() {
+        let _guard = lock_global();
         assert_eq!(decode_printable_key("\x1b[27;2;69~").as_deref(), Some("E"));
         assert_eq!(decode_printable_key("\x1b[27;2;196~").as_deref(), Some("Ä"));
         assert_eq!(decode_printable_key("\x1b[27;2;32~").as_deref(), Some(" "));
@@ -2092,6 +2155,7 @@ mod tests {
 
     #[test]
     fn is_key_release_detects_csi_u_release() {
+        let _guard = lock_global();
         assert!(is_key_release("\x1b[97;1:3u"));
         assert!(is_key_release("\x1b[1;2:3A"));
         assert!(!is_key_release("\x1b[97u"));
@@ -2099,6 +2163,7 @@ mod tests {
 
     #[test]
     fn is_key_repeat_detects_csi_u_repeat() {
+        let _guard = lock_global();
         assert!(is_key_repeat("\x1b[97;1:2u"));
         assert!(is_key_repeat("\x1b[1;2:2C"));
         assert!(!is_key_repeat("\x1b[97u"));
@@ -2106,6 +2171,7 @@ mod tests {
 
     #[test]
     fn is_key_release_excludes_bracketed_paste() {
+        let _guard = lock_global();
         // Bracketed paste payload that happens to contain ":3F" must not be
         // misclassified as a release event.
         let pasted = "\x1b[200~90:62:3F:A5:00:01\x1b[201~";
@@ -2117,6 +2183,7 @@ mod tests {
 
     #[test]
     fn kitty_protocol_active_toggle() {
+        let _guard = lock_global();
         let prev = is_kitty_protocol_active();
         set_kitty_protocol_active(true);
         assert!(is_kitty_protocol_active());
@@ -2162,6 +2229,7 @@ mod tests {
 
     #[test]
     fn windows_terminal_raw_backspace_when_local() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         let _wt = EnvGuard::set("WT_SESSION", Some("test-session"));
         let _ssh1 = EnvGuard::set("SSH_CONNECTION", None);
@@ -2176,6 +2244,7 @@ mod tests {
 
     #[test]
     fn windows_terminal_raw_backspace_over_ssh_is_plain() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         let _wt = EnvGuard::set("WT_SESSION", Some("test-session"));
         let _ssh1 = EnvGuard::set("SSH_CONNECTION", Some("1 2 3 4"));
@@ -2187,6 +2256,7 @@ mod tests {
 
     #[test]
     fn raw_backspace_outside_windows_terminal() {
+        let _guard = lock_global();
         set_kitty_protocol_active(false);
         let _wt = EnvGuard::set("WT_SESSION", None);
         assert!(matches_key("\x7f", "backspace"));
@@ -2199,6 +2269,7 @@ mod tests {
 
     #[test]
     fn key_id_roundtrip_via_parse_key_id() {
+        let _guard = lock_global();
         let _g = KittyGuard::enable();
         // Generate a KeyId from input, then check matches_key accepts it back.
         let inputs = [

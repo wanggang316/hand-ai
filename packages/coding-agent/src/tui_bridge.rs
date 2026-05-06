@@ -6,6 +6,8 @@
 //! TUI integration.
 
 use hand_tui::{Component, MarkdownComponent};
+#[cfg(test)]
+use hand_tui::{ProcessTerminal, Tui};
 
 /// Default render width when the caller has no terminal context handy.
 const DEFAULT_WIDTH: u16 = 80;
@@ -47,5 +49,16 @@ mod tests {
         // Wide enough that the heading fits on one line.
         let lines = render_markdown_with_width("# title", 40);
         assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn smoke_test_tui_runtime_constructs_from_this_crate() {
+        // Proves the `Tui` runtime compiles and instantiates from a downstream
+        // crate (the actual run loop is exercised by the tui-demo example).
+        // Many CI runners lack a TTY, so we silently skip when the terminal
+        // cannot be opened — successful construction without panic IS the test.
+        if let Ok(term) = ProcessTerminal::new() {
+            let _t = Tui::new(Box::new(term));
+        }
     }
 }

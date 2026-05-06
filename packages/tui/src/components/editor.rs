@@ -242,7 +242,7 @@ impl EditorComponent {
         self.ensure_cursor_visible();
     }
 
-    /// Adjust [`Self::viewport_top`] so the cursor line is visible.
+    /// Adjust the viewport-top offset so the cursor line is visible.
     pub fn ensure_cursor_visible(&mut self) {
         if self.cursor_line < self.viewport_top {
             self.viewport_top = self.cursor_line;

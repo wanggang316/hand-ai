@@ -105,7 +105,7 @@ root.clear();
 | `ToastComponent` | Notification stack with Info/Success/Warning/Error levels |
 | `AutocompleteComponent` | Suggestion dropdown with navigation and scrolling |
 | `CancellableLoaderComponent` | Loader with cancel keybinding and timeout hooks |
-| `ImageComponent` | Inline image rendering via Kitty / iTerm / Sixel protocols |
+| `ImageComponent` | Inline image rendering via Kitty / iTerm2 with ASCII fallback |
 | `SettingsListComponent` | Settings rows (toggles, choices, text fields) |
 
 ### InputComponent
