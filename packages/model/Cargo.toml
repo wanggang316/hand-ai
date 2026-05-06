@@ -7,6 +7,14 @@ license = "MIT"
 keywords = ["llm", "ai", "openai", "anthropic", "streaming"]
 categories = ["api-bindings", "asynchronous"]
 
+[features]
+# Enables test-only constructors (e.g. `EventStream::with_default_provenance`).
+# Defaulted on for now because no production caller takes a hit from it; we can
+# strip it from the default set once consumers migrate to provenance-aware
+# `EventStream::new`.
+default = ["faux"]
+faux = []
+
 [[bin]]
 name = "generate_models"
 path = "src/generate_models.rs"

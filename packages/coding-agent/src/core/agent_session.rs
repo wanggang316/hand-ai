@@ -388,6 +388,7 @@ mod tests {
             max_tokens: 4096,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 

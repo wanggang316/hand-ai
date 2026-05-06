@@ -8,21 +8,28 @@ pub mod cli;
 pub mod client;
 pub mod env_api_keys;
 pub mod models;
-pub mod overflow;
 pub mod providers;
 pub mod transform;
 pub mod types;
+pub mod utils;
 
 // Re-export commonly used items from types
 pub use types::{
     AnthropicMessagesCompat, Api, AssistantContentBlock, AssistantContentBlock as AssistantContent,
-    AssistantMessage, AssistantMessageDiagnostic, AssistantMessageEvent, CacheRetention, Compat,
-    Context, Cost, ImageContent, InputType, Message, Model, OnPayloadCallback, OnResponseCallback,
-    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting, ProviderResponse,
-    ProviderStreamOptions, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
-    ThinkingBudgets, ThinkingContent, ThinkingLevel, ThinkingLevelMap, Tool, ToolCall,
-    ToolResultContent, ToolResultMessage, Transport, Usage, UsageCost, UserContent,
-    UserContentBlock, UserMessage, VercelGatewayRouting,
+    AssistantMessage, AssistantMessageEvent, CacheRetention, Compat, Context, Cost, ImageContent,
+    InputType, Message, Model, OnPayloadCallback, OnResponseCallback, OpenAICompletionsCompat,
+    OpenAIResponsesCompat, OpenRouterRouting, ProviderResponse, ProviderStreamOptions,
+    SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingBudgets, ThinkingContent,
+    ThinkingLevel, ThinkingLevelMap, Tool, ToolCall, ToolResultContent, ToolResultMessage,
+    Transport, Usage, UsageCost, UserContent, UserContentBlock, UserMessage, VercelGatewayRouting,
+};
+
+// Re-export from utils
+pub use utils::sanitize_unicode::{sanitize, sanitize_bytes};
+pub use utils::{
+    AssistantMessageDiagnostic, DiagnosticKind, EventStream, Provenance, ValidationIssue,
+    ValidationIssueKind, is_context_overflow, merge_headers, safe_parse_partial, sha256_hex,
+    try_parse_strict, validate_context,
 };
 
 // Re-export from models module
@@ -48,9 +55,6 @@ pub use providers::{
     OpenAICompletionsOptions, OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat,
     convert_messages, normalize_mistral_tool_id, stream_openai_completions,
 };
-
-// Re-export from overflow
-pub use overflow::is_context_overflow;
 
 // Re-export from transform
 pub use transform::{

@@ -821,10 +821,9 @@ impl UserMessage {
     }
 }
 
-/// Diagnostic information for assistant messages. Fields land in M2.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct AssistantMessageDiagnostic {}
+// `AssistantMessageDiagnostic` lives in `crate::utils::diagnostics`; it is
+// re-exported below for backwards compatibility with M1 callers.
+pub use crate::utils::diagnostics::{AssistantMessageDiagnostic, DiagnosticKind};
 
 /// Assistant content block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
