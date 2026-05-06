@@ -42,7 +42,10 @@ pub use keys::{
     set_kitty_protocol_active,
 };
 pub use kill_ring::KillRing;
-pub use overlay::{Overlay, OverlayPosition, render_with_overlay};
+pub use overlay::{
+    Overlay, OverlayAnchor, OverlayHandle, OverlayMargin, OverlayOptions, OverlayPosition,
+    compose_overlays, render_with_overlay,
+};
 pub use render::DiffRenderer;
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
 pub use terminal::{Terminal, TerminalCapabilities};
