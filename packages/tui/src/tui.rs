@@ -110,12 +110,14 @@ pub trait Focusable: Component {
 /// Container that manages child components.
 pub struct Container {
     children: Vec<Box<dyn Component>>,
+    hidden: bool,
 }
 
 impl Container {
     pub fn new() -> Self {
         Self {
             children: Vec::new(),
+            hidden: false,
         }
     }
 
@@ -183,6 +185,14 @@ impl Component for Container {
         for child in &mut self.children {
             child.invalidate();
         }
+    }
+
+    fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
+    }
+
+    fn is_hidden(&self) -> bool {
+        self.hidden
     }
 }
 
@@ -320,13 +330,35 @@ mod tests {
 
     #[test]
     fn test_container_skips_hidden_children() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        struct Counter(Arc<AtomicU32>);
+        impl Counter {
+            fn new() -> Self {
+                Self(Arc::new(AtomicU32::new(0)))
+            }
+            fn bump(&self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+            fn get(&self) -> u32 {
+                self.0.load(Ordering::Relaxed)
+            }
+        }
+
         struct HideableComponent {
             line: String,
             hidden: bool,
+            received: Counter,
         }
         impl Component for HideableComponent {
             fn render(&self, _w: u16) -> Vec<String> {
                 vec![self.line.clone()]
+            }
+            fn handle_input(&mut self, _e: &InputEvent) -> HandleResult {
+                self.received.bump();
+                HandleResult::Ignored
             }
             fn set_hidden(&mut self, hidden: bool) {
                 self.hidden = hidden;
@@ -336,17 +368,28 @@ mod tests {
             }
         }
 
+        let visible_count = Counter::new();
+        let hidden_count = Counter::new();
+
         let mut container = Container::new();
         container.add_child(Box::new(HideableComponent {
             line: "visible".into(),
             hidden: false,
+            received: visible_count.clone(),
         }));
         container.add_child(Box::new(HideableComponent {
             line: "hidden".into(),
             hidden: true,
+            received: hidden_count.clone(),
         }));
 
+        // Render skip
         let lines = container.render(80);
         assert_eq!(lines, vec!["visible"]);
+
+        // Input dispatch skip
+        container.handle_input(&InputEvent::Raw("x".into()));
+        assert_eq!(visible_count.get(), 1, "visible child must receive input");
+        assert_eq!(hidden_count.get(), 0, "hidden child must NOT receive input");
     }
 }

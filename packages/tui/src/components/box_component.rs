@@ -9,6 +9,7 @@ pub struct BoxComponent {
     padding_x: u16,
     padding_y: u16,
     bg_code: Option<String>,
+    hidden: bool,
 }
 
 impl BoxComponent {
@@ -18,6 +19,7 @@ impl BoxComponent {
             padding_x: 0,
             padding_y: 0,
             bg_code: None,
+            hidden: false,
         }
     }
 
@@ -89,6 +91,14 @@ impl Component for BoxComponent {
 
     fn invalidate(&mut self) {
         self.container.invalidate();
+    }
+
+    fn set_hidden(&mut self, hidden: bool) {
+        self.hidden = hidden;
+    }
+
+    fn is_hidden(&self) -> bool {
+        self.hidden
     }
 }
 
