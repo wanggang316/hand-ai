@@ -58,7 +58,7 @@ pub use overlay::{
 pub use render::DiffRenderer;
 pub use resize::watch_resizes;
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
-pub use terminal::{ProcessTerminal, Terminal, TerminalCapabilities, run_stdin_reader};
+pub use terminal::{ProcessTerminal, Terminal, TerminalCapabilities, TestTerminal, run_stdin_reader};
 pub use terminal_image::{
     CellDimensions, ImageDimensions, ImageRenderOptions, TerminalImageCapabilities,
     allocate_image_id, calculate_image_rows, delete_all_kitty_images, delete_kitty_image,
