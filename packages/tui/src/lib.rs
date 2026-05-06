@@ -29,7 +29,11 @@ pub use components::{
     ToastComponent, ToastLevel, TruncatedTextComponent,
 };
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
-pub use keys::{Key, KeyModifiers, parse_key};
+pub use keys::{
+    Key, KeyEventType, KeyId, KeyModifiers, KeyName, decode_kitty_printable, decode_printable_key,
+    is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key, parse_key_id,
+    set_kitty_protocol_active,
+};
 pub use kill_ring::KillRing;
 pub use overlay::{Overlay, OverlayPosition, render_with_overlay};
 pub use render::DiffRenderer;

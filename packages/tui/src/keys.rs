@@ -437,7 +437,6 @@ fn matches_legacy_modifier_sequence(data: &str, key: &str, modifier: u32) -> boo
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ParsedKittySequence {
     codepoint: i32,
-    #[allow(dead_code)]
     shifted_key: Option<u32>,
     base_layout_key: Option<u32>,
     /// Modifier bitmask (already 0-based, with lock bits cleared).
@@ -760,30 +759,39 @@ struct ParsedKeyId<'a> {
 }
 
 /// Parse a `KeyId` string into a `(<base>, <modifier-bitmask>)` pair.
-/// Modifier order is irrelevant; unknown modifier names are ignored (not
-/// flagged as errors), matching the upstream TS behavior.
+/// Modifier order is irrelevant; unknown modifier names are silently ignored
+/// (not flagged as errors), matching the upstream TS behavior.
 fn parse_key_id_components(key_id: &str) -> Option<ParsedKeyId<'_>> {
     let trimmed = key_id.trim();
     if trimmed.is_empty() {
         return None;
     }
-    // The base key is always the last `+`-separated segment. Modifier names
-    // are case-insensitive, so we look at each part as lowercase. We do *not*
-    // lowercase the base segment because `KeyId` for letters is always
-    // lowercase already and symbols (e.g. `+`, `[`) are case-insensitive.
-    let parts: Vec<&str> = trimmed.split('+').collect();
-    let key = parts.last()?;
+    // Trailing `++` means the base key is literally `+` (e.g. `shift++`),
+    // so we must split on the *last* `+` rather than on every `+`.
+    // The bare `"+"` is also the literal `+` key with no modifiers.
+    let (mod_section, key) = if trimmed == "+" {
+        ("", "+")
+    } else if let Some(rest) = trimmed.strip_suffix("++") {
+        (rest, "+")
+    } else {
+        match trimmed.rfind('+') {
+            Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
+            None => ("", trimmed),
+        }
+    };
     if key.is_empty() {
         return None;
     }
     let mut modifier = 0u32;
-    for raw in &parts[..parts.len() - 1] {
-        match raw.to_ascii_lowercase().as_str() {
-            "ctrl" => modifier |= MOD_CTRL,
-            "shift" => modifier |= MOD_SHIFT,
-            "alt" => modifier |= MOD_ALT,
-            "super" | "meta" | "cmd" => modifier |= MOD_SUPER,
-            _ => return None,
+    if !mod_section.is_empty() {
+        for raw in mod_section.split('+') {
+            match raw.to_ascii_lowercase().as_str() {
+                "ctrl" => modifier |= MOD_CTRL,
+                "shift" => modifier |= MOD_SHIFT,
+                "alt" => modifier |= MOD_ALT,
+                "super" | "meta" | "cmd" => modifier |= MOD_SUPER,
+                _ => {}
+            }
         }
     }
     Some(ParsedKeyId { key, modifier })
@@ -1895,9 +1903,29 @@ mod tests {
     }
 
     #[test]
-    fn matches_key_invalid_keyid_returns_false() {
-        assert!(!matches_key("a", "fakemod+a"));
+    fn matches_key_unknown_modifier_silently_ignored() {
+        // Unknown modifier names are stripped; remaining base key still matches.
+        assert!(matches_key("a", "fakemod+a"));
+        // Typo'd modifier is treated as unknown; base key "a" still matches.
+        assert!(matches_key("a", "ctrll+a"));
+        // Empty key id remains rejected.
         assert!(!matches_key("a", ""));
+    }
+
+    #[test]
+    fn parse_key_id_literal_plus_under_shift() {
+        // `shift++` round-trips: `format_key_name_with_modifiers("+", MOD_SHIFT)`
+        // produces it, so parse must accept it.
+        let parsed = parse_key_id_components("shift++").unwrap();
+        assert_eq!(parsed.key, "+");
+        assert_eq!(parsed.modifier, MOD_SHIFT);
+    }
+
+    #[test]
+    fn parse_key_id_plain_plus() {
+        let parsed = parse_key_id_components("+").unwrap();
+        assert_eq!(parsed.key, "+");
+        assert_eq!(parsed.modifier, 0);
     }
 
     // ---- New: parse_key_id (TS parseKey) tests -----------------------------
