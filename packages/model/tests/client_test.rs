@@ -1198,8 +1198,10 @@ async fn test_multi_turn() {
 async fn test_client_provider_not_found() {
     let client = Client::new();
 
-    // Create a model for an API that doesn't have a provider registered
-    let test_model = create_test_model(model::Api::AnthropicMessages);
+    // Clear all providers to test "not found" behavior
+    client.registry.clear();
+
+    let test_model = create_test_model(model::Api::BedrockConverseStream);
 
     let context = Context {
         system_prompt: None,
@@ -1207,13 +1209,13 @@ async fn test_client_provider_not_found() {
         tools: None,
     };
 
-    // Should return error because provider is not registered
+    // Should return error because provider was unregistered
     let result = client.stream_simple(&test_model, context, None);
     assert!(result.is_err());
 
     match result {
         Err(model::ClientError::ProviderNotFound { api, .. }) => {
-            assert_eq!(api, model::Api::AnthropicMessages);
+            assert_eq!(api, model::Api::BedrockConverseStream);
         }
         _ => panic!("Expected ProviderNotFound error"),
     }
@@ -1221,13 +1223,14 @@ async fn test_client_provider_not_found() {
 
 #[tokio::test]
 async fn test_complete_simple_returns_error_without_api_key() {
-    // This test verifies complete_simple returns an error when no provider is registered
-    let empty_client = Client::new();
+    let client = Client::new();
 
-    // Test with unregistered API
+    // Clear providers to test "not found" behavior
+    client.registry.clear();
+
     let unknown_model = Model {
-        api: model::Api::AnthropicMessages, // Not registered
-        ..create_test_model(model::Api::AnthropicMessages)
+        api: model::Api::BedrockConverseStream,
+        ..create_test_model(model::Api::BedrockConverseStream)
     };
 
     let context = Context {
@@ -1236,8 +1239,14 @@ async fn test_complete_simple_returns_error_without_api_key() {
         tools: None,
     };
 
-    let result = empty_client
-        .complete_simple(&unknown_model, context, None)
-        .await;
+    let result = client.complete_simple(&unknown_model, context, None).await;
     assert!(result.is_err(), "Should error when provider not found");
+}
+
+#[test]
+fn test_client_registers_anthropic_provider_by_default() {
+    let client = Client::new();
+
+    assert!(client.registry.has(&model::Api::AnthropicMessages));
+    assert!(client.registry.has(&model::Api::OpenAICompletions));
 }

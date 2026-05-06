@@ -56,11 +56,69 @@ impl Client {
     }
 
     fn register_builtin_providers(&self) {
+        use crate::providers::anthropic_messages::AnthropicMessagesProvider;
+        use crate::providers::bedrock::BedrockProvider;
+        use crate::providers::google_generative_ai::GoogleGenerativeAiProvider;
         use crate::providers::openai_completions::OpenAICompletionsProvider;
+        use crate::providers::openai_responses::OpenAIResponsesProvider;
+
+        self.registry.register(
+            crate::types::Api::AnthropicMessages,
+            Box::new(AnthropicMessagesProvider::new()),
+            Some("builtin".to_string()),
+        );
 
         self.registry.register(
             crate::types::Api::OpenAICompletions,
             Box::new(OpenAICompletionsProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        self.registry.register(
+            crate::types::Api::GoogleGenerativeAi,
+            Box::new(GoogleGenerativeAiProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // Google Vertex and Gemini CLI use the same provider with different base URLs.
+        // The model's base_url field determines the actual endpoint.
+        self.registry.register(
+            crate::types::Api::GoogleVertex,
+            Box::new(GoogleGenerativeAiProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        self.registry.register(
+            crate::types::Api::GoogleGeminiCli,
+            Box::new(GoogleGenerativeAiProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // OpenAI Responses API (o1, o3, and newer models)
+        self.registry.register(
+            crate::types::Api::OpenAIResponses,
+            Box::new(OpenAIResponsesProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // Azure OpenAI Responses uses the same provider with different base URL
+        self.registry.register(
+            crate::types::Api::AzureOpenAiResponses,
+            Box::new(OpenAIResponsesProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // OpenAI Codex Responses uses the same provider
+        self.registry.register(
+            crate::types::Api::OpenAICodexResponses,
+            Box::new(OpenAIResponsesProvider::new()),
+            Some("builtin".to_string()),
+        );
+
+        // AWS Bedrock ConverseStream
+        self.registry.register(
+            crate::types::Api::BedrockConverseStream,
+            Box::new(BedrockProvider::new()),
             Some("builtin".to_string()),
         );
     }
@@ -159,5 +217,110 @@ impl Client {
 impl Default for Client {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Api, Cost, InputType, Provider};
+
+    fn test_model(api: Api) -> Model {
+        Model {
+            id: "test-model".to_string(),
+            name: "Test Model".to_string(),
+            api,
+            provider: Provider::Anthropic,
+            base_url: String::new(),
+            reasoning: false,
+            input: vec![InputType::Text],
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 128_000,
+            max_tokens: 4096,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    #[test]
+    fn client_new_registers_all_builtin_providers() {
+        let client = Client::new();
+        // All 9 API types should have providers
+        let apis = [
+            Api::AnthropicMessages,
+            Api::OpenAICompletions,
+            Api::OpenAIResponses,
+            Api::AzureOpenAiResponses,
+            Api::OpenAICodexResponses,
+            Api::GoogleGenerativeAi,
+            Api::GoogleVertex,
+            Api::GoogleGeminiCli,
+            Api::BedrockConverseStream,
+        ];
+        for api in apis {
+            assert!(
+                client.registry.get(&api).is_some(),
+                "Provider missing for {api:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_default_same_as_new() {
+        let c1 = Client::new();
+        let c2 = Client::default();
+        // Both should have all providers registered
+        assert!(c1.registry.get(&Api::AnthropicMessages).is_some());
+        assert!(c2.registry.get(&Api::AnthropicMessages).is_some());
+    }
+
+    #[test]
+    fn stream_returns_error_for_cleared_registry() {
+        let client = Client::new();
+        client.registry.clear();
+        let model = test_model(Api::AnthropicMessages);
+        let ctx = Context::default();
+        let result = client.stream(&model, ctx, None);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(matches!(err, ClientError::ProviderNotFound { .. }));
+        assert!(err.to_string().contains("AnthropicMessages"));
+    }
+
+    #[test]
+    fn stream_simple_returns_error_for_cleared_registry() {
+        let client = Client::new();
+        client.registry.clear();
+        let model = test_model(Api::OpenAICompletions);
+        let ctx = Context::default();
+        let result = client.stream_simple(&model, ctx, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn client_error_display() {
+        let err = ClientError::ProviderNotFound {
+            api: Api::AnthropicMessages,
+            model_id: "claude-3".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("AnthropicMessages"));
+        assert!(msg.contains("claude-3"));
+
+        let err2 = ClientError::StreamEndedWithoutResult;
+        assert!(err2.to_string().contains("Stream ended"));
+    }
+
+    #[test]
+    fn client_is_clone() {
+        let client = Client::new();
+        let cloned = client.clone();
+        // Both share the same Arc registry
+        assert!(cloned.registry.get(&Api::AnthropicMessages).is_some());
     }
 }

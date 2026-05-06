@@ -198,12 +198,15 @@ async fn test_provider_not_found_error() {
     // This test always runs - no API needed
     let client = Client::new();
 
+    // Clear all providers to test "not found" behavior
+    client.registry.clear();
+
     // Create a model for an API without a registered provider
     let model = model::types::Model {
         id: "test-model".to_string(),
         name: "Test Model".to_string(),
-        provider: model::types::Provider::Anthropic,
-        api: model::types::Api::AnthropicMessages, // Not registered by default
+        provider: model::types::Provider::AmazonBedrock,
+        api: model::types::Api::BedrockConverseStream,
         base_url: "https://test.example.com".to_string(),
         reasoning: false,
         input: vec![model::types::InputType::Text],
@@ -229,7 +232,7 @@ async fn test_provider_not_found_error() {
 
     match result {
         Err(model::ClientError::ProviderNotFound { api, .. }) => {
-            assert_eq!(api, model::types::Api::AnthropicMessages);
+            assert_eq!(api, model::types::Api::BedrockConverseStream);
             println!("Got expected ProviderNotFound error");
         }
         _ => panic!("Expected ProviderNotFound error"),
