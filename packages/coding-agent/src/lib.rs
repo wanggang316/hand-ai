@@ -14,6 +14,7 @@
 
 pub mod cli;
 pub mod core;
+pub mod modes;
 pub mod prelude;
 pub mod rpc;
 pub mod tools;

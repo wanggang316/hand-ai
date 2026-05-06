@@ -31,6 +31,7 @@ pub enum AgentSessionEvent {
 }
 
 /// Configuration for creating an agent session.
+#[derive(Clone)]
 pub struct AgentSessionConfig {
     /// Working directory.
     pub cwd: PathBuf,

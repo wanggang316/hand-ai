@@ -5,8 +5,8 @@ use hand_coding_agent::cli::Args;
 use hand_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 use hand_coding_agent::core::export;
 use hand_coding_agent::core::model_resolver;
-use hand_coding_agent::tools;
-use model::SimpleStreamOptions;
+use hand_coding_agent::modes;
+use hand_coding_agent::modes::session_setup::SessionSetup;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
@@ -46,80 +46,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_rpc(cli).await;
     }
 
-    // Determine working directory
-    let cwd = cli
-        .cwd
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    // Resolve model
-    let provider = cli.provider.as_deref().unwrap_or("anthropic");
-    let model_pattern = cli
-        .model
-        .as_deref()
-        .unwrap_or_else(|| model_resolver::default_model_for_provider(provider));
-
-    let resolved = model_resolver::resolve_model(Some(provider), model_pattern);
-
-    // Parse thinking level (CLI flag overrides model pattern suffix)
-    let thinking_level = cli
-        .thinking
-        .as_deref()
-        .and_then(model_resolver::parse_thinking_level)
-        .or(resolved.thinking_level);
-
-    // Build stream options
-    let mut stream_options = SimpleStreamOptions::default();
-    if let Some(level) = thinking_level {
-        stream_options.reasoning = Some(level);
+    // Non-interactive print mode: single prompt + exit.
+    if cli.print {
+        return modes::print::run(cli).await;
     }
 
-    // Create tools
-    let agent_tools = if cli.no_tools {
-        vec![]
-    } else if let Some(ref tool_list) = cli.tools {
-        create_selected_tools(&cwd, tool_list)
-    } else {
-        tools::create_default_tools(&cwd)
-    };
+    // Interactive flow.
+    let setup = SessionSetup::resolve(&cli)?;
+    let cwd = setup.cwd.clone();
 
-    // Determine custom guidelines (append-system-prompt)
-    let custom_guidelines = cli.append_system_prompt;
-
-    // Create session config
+    // Determine resume id, mirroring the pre-extraction logic: --continue
+    // defers to `SessionManager::continue_recent` below; otherwise --resume
+    // is honoured directly.
     let resume_session = if cli.continue_session {
-        // Will be handled via continue_recent below
         None
     } else {
-        cli.resume
+        cli.resume.clone()
     };
 
-    let config = AgentSessionConfig {
-        cwd: cwd.clone(),
-        model: resolved.model,
-        stream_options,
-        custom_system_prompt: cli.system_prompt,
-        custom_guidelines,
-        resume_session,
-    };
+    let base_config = setup.to_config(resume_session);
+    let agent_tools = setup.agent_tools;
 
     let mut session = if cli.continue_session {
         // Continue most recent session
         match hand_coding_agent::SessionManager::continue_recent(&cwd) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
-                    cwd: cwd.clone(),
-                    model: config.model,
-                    stream_options: config.stream_options,
-                    custom_system_prompt: config.custom_system_prompt,
-                    custom_guidelines: config.custom_guidelines,
                     resume_session: Some(sm.id().to_string()),
+                    ..base_config.clone()
                 };
                 drop(sm);
                 AgentSession::new(config, agent_tools)?
             }
             Err(e) => {
                 eprintln!("No session to continue: {}. Starting new session.", e);
-                AgentSession::new(config, agent_tools)?
+                AgentSession::new(base_config, agent_tools)?
             }
         }
     } else if let Some(ref fork_source) = cli.fork {
@@ -128,23 +89,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match hand_coding_agent::SessionManager::fork_from(&fork_path, &cwd) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
-                    cwd: cwd.clone(),
-                    model: config.model,
-                    stream_options: config.stream_options,
-                    custom_system_prompt: config.custom_system_prompt,
-                    custom_guidelines: config.custom_guidelines,
                     resume_session: Some(sm.id().to_string()),
+                    ..base_config.clone()
                 };
                 drop(sm);
                 AgentSession::new(config, agent_tools)?
             }
             Err(e) => {
                 eprintln!("Failed to fork session: {}. Starting new session.", e);
-                AgentSession::new(config, agent_tools)?
+                AgentSession::new(base_config, agent_tools)?
             }
         }
     } else {
-        AgentSession::new(config, agent_tools)?
+        AgentSession::new(base_config, agent_tools)?
     };
 
     // Subscribe to events for output
@@ -168,24 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return handle_export(&session, &export_path);
     }
 
-    if cli.print {
-        // Non-interactive: process single prompt
-        if let Some(prompt) = cli.prompt {
-            session.send_message(&prompt).await?;
-        } else {
-            // Read from stdin
-            let stdin = io::stdin();
-            let input: String = stdin
-                .lock()
-                .lines()
-                .map_while(Result::ok)
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !input.is_empty() {
-                session.send_message(&input).await?;
-            }
-        }
-    } else if let Some(prompt) = cli.prompt {
+    if let Some(prompt) = cli.prompt {
         // Single prompt then interactive
         session.send_message(&prompt).await?;
         run_interactive(&mut session, &cwd).await?;
@@ -205,53 +145,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// dispatcher future cleanly via `tokio::select!`; the writer task exits
 /// when its sender is dropped, and the process returns `Ok`.
 async fn run_rpc(cli: Args) -> Result<(), Box<dyn std::error::Error>> {
-    // Resolve working directory.
-    let cwd = cli
-        .cwd
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    // Resolve model (mirrors the default-resolution logic in interactive mode).
-    let provider = cli.provider.as_deref().unwrap_or("anthropic");
-    let model_pattern = cli
-        .model
-        .as_deref()
-        .unwrap_or_else(|| model_resolver::default_model_for_provider(provider));
-    let resolved = model_resolver::resolve_model(Some(provider), model_pattern);
-
-    // Resolve tools (same selection logic as interactive mode).
-    let agent_tools = if cli.no_tools {
-        vec![]
-    } else if let Some(ref tool_list) = cli.tools {
-        create_selected_tools(&cwd, tool_list)
-    } else {
-        tools::create_default_tools(&cwd)
-    };
+    let setup = SessionSetup::resolve(&cli)?;
 
     // Build the session: persisted to disk by default, in-memory under --no-session.
     let session = if cli.no_session {
-        AgentSession::in_memory_with_client(resolved.model, agent_tools, model::Client::new())
+        AgentSession::in_memory_with_client(
+            setup.model.clone(),
+            setup.agent_tools,
+            model::Client::new(),
+        )
     } else {
-        // Parse thinking level (CLI flag overrides model pattern suffix).
-        let thinking_level = cli
-            .thinking
-            .as_deref()
-            .and_then(model_resolver::parse_thinking_level)
-            .or(resolved.thinking_level);
-
-        let mut stream_options = SimpleStreamOptions::default();
-        if let Some(level) = thinking_level {
-            stream_options.reasoning = Some(level);
-        }
-
-        let config = AgentSessionConfig {
-            cwd: cwd.clone(),
-            model: resolved.model,
-            stream_options,
-            custom_system_prompt: cli.system_prompt,
-            custom_guidelines: cli.append_system_prompt,
-            resume_session: cli.resume,
-        };
-        AgentSession::new(config, agent_tools)?
+        let config = setup.to_config(cli.resume.clone());
+        AgentSession::new(config, setup.agent_tools)?
     };
 
     let stdin = tokio::io::BufReader::new(tokio::io::stdin());
@@ -649,30 +554,6 @@ fn print_help() {
     println!("  !<command>           Run shell command (added to context)");
     println!("  !!<command>          Run shell command (not added to context)");
     println!("  @<filepath>          Include file contents in message");
-}
-
-fn create_selected_tools(
-    cwd: &std::path::Path,
-    tool_list: &str,
-) -> Vec<hand_agent::types::AgentTool> {
-    let cwd = cwd.to_path_buf();
-    let selected: Vec<&str> = tool_list.split(',').map(|s| s.trim()).collect();
-    let mut result = Vec::new();
-
-    for name in selected {
-        match name {
-            "read" => result.push(tools::read::create_read_tool(cwd.clone())),
-            "write" => result.push(tools::write::create_write_tool(cwd.clone())),
-            "edit" => result.push(tools::edit::create_edit_tool(cwd.clone())),
-            "bash" => result.push(tools::bash::create_bash_tool(cwd.clone())),
-            "grep" => result.push(tools::grep::create_grep_tool(cwd.clone())),
-            "find" => result.push(tools::find::create_find_tool(cwd.clone())),
-            "ls" => result.push(tools::ls::create_ls_tool(cwd.clone())),
-            other => eprintln!("Warning: unknown tool '{}'", other),
-        }
-    }
-
-    result
 }
 
 fn resolve_session_path(cwd: &std::path::Path, source: &str) -> PathBuf {
