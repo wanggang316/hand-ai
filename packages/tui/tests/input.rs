@@ -51,7 +51,7 @@ fn prefix_renders_before_text() {
 #[test]
 fn render_truncates_long_text_to_width() {
     let mut input = InputComponent::new();
-    input.set_text(&"x".repeat(100));
+    input.set_text("x".repeat(100));
     let lines = input.render(20);
     assert!(visible_width(&lines[0]) <= 20);
 }
