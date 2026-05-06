@@ -7,6 +7,7 @@ use crate::core::compaction;
 use crate::core::error::CodingAgentError;
 use crate::core::session_manager::SessionManager;
 use crate::core::settings::SettingsManager;
+use crate::core::skills::{self, Skill, SkillError};
 use crate::core::system_prompt::{self, BuildSystemPromptOptions};
 use hand_agent::types::{AgentContext, AgentEvent, AgentLoopConfig, AgentTool};
 use hand_agent::{AgentEventSink, agent_loop};
@@ -56,13 +57,41 @@ pub struct AgentSession {
     tools: Vec<AgentTool>,
     client: model::Client,
     event_listeners: EventListeners,
+    /// Skills discovered at construction time and advertised in the system
+    /// prompt. Empty for in-memory test sessions.
+    skills: Vec<Skill>,
+    /// Per-skill discovery errors. Surfaced via [`Self::skill_errors`] for
+    /// diagnostics; one bad skill never aborts session construction.
+    skill_errors: Vec<SkillError>,
 }
 
 impl AgentSession {
     /// Create a new agent session.
+    ///
+    /// Auto-discovers skills under `<cwd>/.hand/skills/` and (if it exists)
+    /// `~/.hand/skills/`. Per-skill errors are stored on the session and can
+    /// be inspected via [`Self::skill_errors`] for diagnostics — they never
+    /// abort construction.
     pub fn new(
         config: AgentSessionConfig,
         tools: Vec<AgentTool>,
+    ) -> Result<Self, CodingAgentError> {
+        let user_dir = dirs::home_dir().map(|h| h.join(".hand").join("skills"));
+        let user_dir = user_dir.filter(|p| p.exists());
+        Self::new_with_skill_dirs(config, tools, user_dir.as_deref(), None)
+    }
+
+    /// Create a new agent session with explicit skill discovery roots.
+    ///
+    /// Test entry point: lets callers pin `user_dir` to `None` (or a fixture
+    /// tempdir) so unit tests don't read the host's real `~/.hand/skills/`.
+    /// `builtin_dir` is reserved for Phase 2.x bundled defaults; pass `None`
+    /// in v1.
+    pub fn new_with_skill_dirs(
+        config: AgentSessionConfig,
+        tools: Vec<AgentTool>,
+        user_dir: Option<&Path>,
+        builtin_dir: Option<&Path>,
     ) -> Result<Self, CodingAgentError> {
         let settings_manager = SettingsManager::new(&config.cwd);
         let client = model::Client::new();
@@ -82,10 +111,15 @@ impl AgentSession {
         // Load context files
         let context_files = system_prompt::load_context_files(&config.cwd);
 
+        // Discover skills (project + user + optional builtin).
+        let (skills_discovered, skill_errors) =
+            skills::discover_skills(&config.cwd, user_dir, builtin_dir);
+
         // Build system prompt
         let system_prompt = system_prompt::build_system_prompt(BuildSystemPromptOptions {
             cwd: &config.cwd,
             tools: &tool_names,
+            skills: &skills_discovered,
             custom_guidelines: config.custom_guidelines.as_deref(),
             context_files,
             custom_prompt: config.custom_system_prompt.as_deref(),
@@ -107,6 +141,8 @@ impl AgentSession {
             tools,
             client,
             event_listeners: Arc::new(Mutex::new(Vec::new())),
+            skills: skills_discovered,
+            skill_errors,
         })
     }
 
@@ -146,6 +182,8 @@ impl AgentSession {
             tools,
             client,
             event_listeners: Arc::new(Mutex::new(Vec::new())),
+            skills: Vec::new(),
+            skill_errors: Vec::new(),
         }
     }
 
@@ -331,6 +369,21 @@ impl AgentSession {
         self.session_manager.message_count()
     }
 
+    /// Per-skill discovery errors collected at construction time.
+    ///
+    /// Returns an empty slice for in-memory sessions (which skip disk
+    /// discovery entirely). Used by `--diagnostics` and similar surfaces
+    /// to report malformed `SKILL.md` files without aborting the session.
+    pub fn skill_errors(&self) -> &[SkillError] {
+        &self.skill_errors
+    }
+
+    /// Skills successfully discovered at construction time and advertised
+    /// in the system prompt. Empty for in-memory sessions.
+    pub fn skills(&self) -> &[Skill] {
+        &self.skills
+    }
+
     /// Generate a compaction summary using the LLM.
     async fn generate_compaction_summary(&self, prompt: &str) -> Result<String, CodingAgentError> {
         use futures::StreamExt;
@@ -388,7 +441,9 @@ impl AgentSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
 
     fn test_model() -> model::Model {
         model::Model {
@@ -432,6 +487,92 @@ mod tests {
         new_model.id = "new-model".into();
         session.set_model(new_model);
         assert_eq!(session.model().id, "new-model");
+    }
+
+    fn test_config(cwd: PathBuf) -> AgentSessionConfig {
+        AgentSessionConfig {
+            cwd,
+            model: test_model(),
+            stream_options: SimpleStreamOptions::default(),
+            custom_system_prompt: None,
+            custom_guidelines: None,
+            resume_session: None,
+        }
+    }
+
+    /// `AgentSession::new_with_skill_dirs` discovers a project skill and
+    /// inserts it into the system prompt.
+    #[test]
+    fn agent_session_discovers_project_skill() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join(".hand").join("skills").join("foo");
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ndescription: A foo skill for tests.\n---\nfoo body",
+        )
+        .unwrap();
+
+        let session = AgentSession::new_with_skill_dirs(
+            test_config(tmp.path().to_path_buf()),
+            vec![],
+            None,
+            None,
+        )
+        .expect("session constructs");
+
+        assert!(
+            session.skill_errors().is_empty(),
+            "unexpected errors: {:?}",
+            session.skill_errors()
+        );
+        assert_eq!(session.skills().len(), 1);
+        assert_eq!(session.skills()[0].name, "foo");
+
+        let prompt = &session.context.system_prompt;
+        assert!(prompt.contains("<name>foo</name>"), "prompt missing skill name: {prompt}");
+        assert!(prompt.contains("A foo skill for tests."));
+    }
+
+    /// A malformed SKILL.md is recorded in `skill_errors()` but the session
+    /// itself still constructs cleanly. The bad skill is just absent from
+    /// the system prompt.
+    #[test]
+    fn agent_session_records_skill_errors() {
+        let tmp = TempDir::new().unwrap();
+        let bad = tmp.path().join(".hand").join("skills").join("bad");
+        fs::create_dir_all(&bad).unwrap();
+        // Frontmatter open with no close → loader-level frontmatter error.
+        fs::write(bad.join("SKILL.md"), "---\ndescription: oops\nbody without close\n").unwrap();
+
+        let session = AgentSession::new_with_skill_dirs(
+            test_config(tmp.path().to_path_buf()),
+            vec![],
+            None,
+            None,
+        )
+        .expect("session constructs even with a bad skill");
+
+        assert!(
+            !session.skill_errors().is_empty(),
+            "expected at least one error from malformed SKILL.md"
+        );
+        assert!(
+            session.skills().is_empty(),
+            "bad skill should not be advertised: {:?}",
+            session.skills()
+        );
+        // The bad skill name does not leak into the system prompt.
+        assert!(!session.context.system_prompt.contains("<name>bad</name>"));
+    }
+
+    /// In-memory sessions skip disk discovery entirely, so both the skills
+    /// list and the error list are empty.
+    #[test]
+    fn in_memory_session_has_no_skills() {
+        let session = AgentSession::in_memory(test_model(), vec![]);
+        assert!(session.skill_errors().is_empty());
+        assert!(session.skills().is_empty());
     }
 
     #[test]
