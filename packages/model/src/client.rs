@@ -59,6 +59,7 @@ impl Client {
         use crate::providers::anthropic_messages::AnthropicMessagesProvider;
         use crate::providers::bedrock::BedrockProvider;
         use crate::providers::google_generative_ai::GoogleGenerativeAiProvider;
+        use crate::providers::google_vertex::GoogleVertexProvider;
         use crate::providers::openai_completions::OpenAICompletionsProvider;
         use crate::providers::openai_responses::OpenAIResponsesProvider;
 
@@ -80,11 +81,11 @@ impl Client {
             Some("builtin".to_string()),
         );
 
-        // Google Vertex and Gemini CLI use the same provider with different base URLs.
-        // The model's base_url field determines the actual endpoint.
+        // Google Vertex authenticates via ADC + project/location and shares the
+        // Gemini wire format through `google_shared`.
         self.registry.register(
             crate::types::Api::GoogleVertex,
-            Box::new(GoogleGenerativeAiProvider::new()),
+            Box::new(GoogleVertexProvider::new()),
             Some("builtin".to_string()),
         );
 

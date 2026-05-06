@@ -166,6 +166,106 @@ pub fn clear_vertex_adc_cache() {
     *cache = None;
 }
 
+/// Fetch a Google Cloud OAuth2 access token from Application Default
+/// Credentials.
+///
+/// Resolution order mirrors the canonical ADC flow:
+///
+/// 1. `GOOGLE_APPLICATION_CREDENTIALS` — path to a JSON credentials file.
+/// 2. `~/.config/gcloud/application_default_credentials.json` — written by
+///    `gcloud auth application-default login`.
+///
+/// Only the `authorized_user` credential type (refresh-token grant) is
+/// implemented here; service-account JWT signing is out of scope for the
+/// initial M8 milestone. Callers that need service-account auth can supply
+/// an explicit `api_key` on `StreamOptions` or pre-mint a token through
+/// `gcloud auth application-default print-access-token`.
+pub async fn vertex_access_token() -> Result<String, String> {
+    let creds_path = if let Ok(path) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+        PathBuf::from(path)
+    } else if let Some(home_dir) = dirs::home_dir() {
+        home_dir.join(".config/gcloud/application_default_credentials.json")
+    } else {
+        return Err("Cannot locate Application Default Credentials: $HOME is not set".to_string());
+    };
+
+    if !creds_path.exists() {
+        return Err(format!(
+            "Application Default Credentials not found at {}. Run `gcloud auth application-default login` or set GOOGLE_APPLICATION_CREDENTIALS.",
+            creds_path.display(),
+        ));
+    }
+
+    let raw = std::fs::read_to_string(&creds_path)
+        .map_err(|e| format!("Failed to read ADC file {}: {e}", creds_path.display()))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Failed to parse ADC JSON: {e}"))?;
+
+    let cred_type = parsed
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("authorized_user");
+
+    match cred_type {
+        "authorized_user" => exchange_refresh_token(&parsed).await,
+        "service_account" => Err(
+            "service_account ADC type is not yet supported by vertex_access_token; \
+             use `gcloud auth application-default print-access-token` and pass it via api_key."
+                .to_string(),
+        ),
+        other => Err(format!("Unsupported ADC credential type: {other}")),
+    }
+}
+
+async fn exchange_refresh_token(creds: &serde_json::Value) -> Result<String, String> {
+    let client_id = creds
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "ADC file missing client_id".to_string())?;
+    let client_secret = creds
+        .get("client_secret")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "ADC file missing client_secret".to_string())?;
+    let refresh_token = creds
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "ADC file missing refresh_token".to_string())?;
+
+    let form = [
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("refresh_token", refresh_token),
+        ("grant_type", "refresh_token"),
+    ];
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to exchange refresh token: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no body>".to_string());
+        return Err(format!("Refresh-token exchange failed ({status}): {body}"));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse token response: {e}"))?;
+
+    json.get("access_token")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "Token response missing access_token field".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

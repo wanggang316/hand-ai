@@ -53,8 +53,9 @@ pub use env_api_keys::{clear_vertex_adc_cache, get_env_api_key, get_env_api_key_
 // Re-export from providers
 pub use providers::{
     AnthropicMessagesProvider, AzureOpenAIResponsesOptions, AzureOpenAIResponsesProvider,
-    BedrockProvider, GoogleGenerativeAiProvider, MistralOptions, MistralProvider,
-    OpenAICompletionsOptions, OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat,
+    BedrockProvider, GoogleGenerativeAiProvider, GoogleVertexOptions, GoogleVertexProvider,
+    GoogleVertexThinkingLevel, MistralOptions, MistralProvider, OpenAICompletionsOptions,
+    OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat, VertexTokenProvider,
     convert_messages, normalize_mistral_tool_id, stream_openai_completions,
 };
 #[cfg(any(test, feature = "faux"))]
