@@ -26,11 +26,13 @@ pub mod utils;
 
 // Re-export commonly used items
 pub use components::{
-    AutocompleteComponent, BoxComponent, CancellableLoaderComponent, EditorComponent,
-    ImageComponent, ImageProtocol, InputComponent, LoaderComponent, MarkdownComponent,
-    ProgressBarComponent, SelectItem, SelectListComponent, SettingEntry, SettingValue,
-    SettingsListComponent, SpacerComponent, StatusBarComponent, Suggestion, TextComponent,
-    ToastComponent, ToastLevel, TruncatedTextComponent,
+    AutocompleteComponent, AutocompleteContext, AutocompleteFuture, AutocompleteItem,
+    AutocompleteItemKind, AutocompleteProvider, AutocompleteTrigger, BoxComponent,
+    CancellableLoaderComponent, CombinedAutocompleteProvider, EditorComponent, ImageComponent,
+    ImageProtocol, InputComponent, LoaderComponent, MarkdownComponent, ProgressBarComponent,
+    SelectItem, SelectListComponent, SettingEntry, SettingValue, SettingsListComponent,
+    SlashCommand, SlashCommandProvider, SpacerComponent, StatusBarComponent, Suggestion,
+    TextComponent, ToastComponent, ToastLevel, TruncatedTextComponent,
 };
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 pub use keybindings::{

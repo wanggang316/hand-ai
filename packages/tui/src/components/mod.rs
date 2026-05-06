@@ -17,7 +17,11 @@ pub mod text;
 pub mod toast;
 pub mod truncated_text;
 
-pub use autocomplete::{AutocompleteComponent, Suggestion};
+pub use autocomplete::{
+    AutocompleteComponent, AutocompleteContext, AutocompleteFuture, AutocompleteItem,
+    AutocompleteItemKind, AutocompleteProvider, AutocompleteTrigger, CombinedAutocompleteProvider,
+    SlashCommand, SlashCommandProvider, Suggestion,
+};
 pub use box_component::BoxComponent;
 pub use cancellable_loader::CancellableLoaderComponent;
 pub use editor::EditorComponent;
