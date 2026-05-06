@@ -15,6 +15,7 @@ pub mod keys;
 pub mod kill_ring;
 pub mod overlay;
 pub mod render;
+pub mod stdin_buffer;
 pub mod terminal;
 pub mod theme;
 pub mod tui;
@@ -37,6 +38,7 @@ pub use keys::{
 pub use kill_ring::KillRing;
 pub use overlay::{Overlay, OverlayPosition, render_with_overlay};
 pub use render::DiffRenderer;
+pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
 pub use terminal::{Terminal, TerminalCapabilities};
 pub use theme::{Color, NamedColor, Style, Theme};
 pub use tui::{Component, Container, Focusable, Tui};
