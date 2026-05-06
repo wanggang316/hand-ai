@@ -15,7 +15,13 @@ fn png_dimensions_parsed_from_signature() {
     data.extend_from_slice(&100u32.to_be_bytes()); // width
     data.extend_from_slice(&50u32.to_be_bytes()); // height
     let dims = get_png_dimensions(&data).unwrap();
-    assert_eq!(dims, ImageDimensions { width: 100, height: 50 });
+    assert_eq!(
+        dims,
+        ImageDimensions {
+            width: 100,
+            height: 50
+        }
+    );
 }
 
 #[test]
@@ -39,7 +45,13 @@ fn gif_dimensions_parsed_from_header() {
     data.extend_from_slice(&200u16.to_le_bytes());
     data.extend_from_slice(&150u16.to_le_bytes());
     let dims = get_gif_dimensions(&data).unwrap();
-    assert_eq!(dims, ImageDimensions { width: 200, height: 150 });
+    assert_eq!(
+        dims,
+        ImageDimensions {
+            width: 200,
+            height: 150
+        }
+    );
 }
 
 #[test]
@@ -50,7 +62,10 @@ fn get_image_dimensions_dispatches_by_format() {
     png.extend_from_slice(&20u32.to_be_bytes());
     assert_eq!(
         get_image_dimensions(&png),
-        Some(ImageDimensions { width: 10, height: 20 })
+        Some(ImageDimensions {
+            width: 10,
+            height: 20
+        })
     );
     assert_eq!(get_image_dimensions(b"not an image"), None);
 }
@@ -64,13 +79,19 @@ fn allocate_image_id_returns_unique_values() {
 
 #[test]
 fn calculate_image_rows_handles_zero_dimensions() {
-    let zero = ImageDimensions { width: 0, height: 0 };
+    let zero = ImageDimensions {
+        width: 0,
+        height: 0,
+    };
     assert_eq!(calculate_image_rows(&zero, None), 1);
 }
 
 #[test]
 fn calculate_image_rows_clamps_to_max() {
-    let big = ImageDimensions { width: 1000, height: 100_000 };
+    let big = ImageDimensions {
+        width: 1000,
+        height: 100_000,
+    };
     assert!(calculate_image_rows(&big, Some(20)) <= 20);
 }
 

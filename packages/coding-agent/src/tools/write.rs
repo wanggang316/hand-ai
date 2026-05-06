@@ -93,7 +93,7 @@ mod tests {
         let file = dir.path().join("new.txt");
 
         let result = execute_write(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({"path": file.to_str().unwrap(), "content": "hello\nworld"}),
         );
         let text = get_text(&result);
@@ -108,7 +108,7 @@ mod tests {
         std::fs::write(&file, "old").unwrap();
 
         let result = execute_write(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({"path": file.to_str().unwrap(), "content": "new"}),
         );
         let text = get_text(&result);
@@ -122,7 +122,7 @@ mod tests {
         let file = dir.path().join("a").join("b").join("c.txt");
 
         let result = execute_write(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({"path": file.to_str().unwrap(), "content": "deep"}),
         );
         let text = get_text(&result);
@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn test_write_missing_params() {
         let dir = TempDir::new().unwrap();
-        let result = execute_write(&dir.path().to_path_buf(), json!({"path": "foo.txt"}));
+        let result = execute_write(dir.path(), json!({"path": "foo.txt"}));
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter: content"));
     }

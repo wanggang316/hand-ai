@@ -16,7 +16,11 @@ fn fits_unchanged_when_within_width() {
 fn truncates_long_input_with_ellipsis() {
     let s = "hello world this is long";
     let out = truncate_to_width(s, 10);
-    assert!(visible_width(&out) <= 10, "got width {}", visible_width(&out));
+    assert!(
+        visible_width(&out) <= 10,
+        "got width {}",
+        visible_width(&out)
+    );
     assert!(out.ends_with('…') || out.ends_with("…\x1b[0m"));
 }
 

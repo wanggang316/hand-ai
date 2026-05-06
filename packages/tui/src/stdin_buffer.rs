@@ -361,7 +361,11 @@ pub(crate) fn is_complete_csi_sequence(data: &str) -> Completeness {
             if last == 'M' || last == 'm' {
                 let inner = &payload[1..payload.len() - last.len_utf8()];
                 let parts: Vec<&str> = inner.split(';').collect();
-                if parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) {
+                if parts.len() == 3
+                    && parts
+                        .iter()
+                        .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+                {
                     return Completeness::Complete;
                 }
                 return Completeness::Incomplete;
@@ -578,10 +582,7 @@ mod tests {
     fn unicode_passthrough_per_codepoint() {
         let mut buf = StdinBuffer::new();
         let events = buf.push("hi 世界".as_bytes());
-        assert_eq!(
-            data_strings(&events),
-            vec!["h", "i", " ", "世", "界"]
-        );
+        assert_eq!(data_strings(&events), vec!["h", "i", " ", "世", "界"]);
     }
 
     #[test]
@@ -630,10 +631,7 @@ mod tests {
             ..Default::default()
         });
         let events = buf.push(b"abc\x1b[Adef");
-        assert_eq!(
-            data_strings(&events),
-            vec!["abc", "\x1b[A", "def"]
-        );
+        assert_eq!(data_strings(&events), vec!["abc", "\x1b[A", "def"]);
     }
 
     #[test]
@@ -645,7 +643,11 @@ mod tests {
         // Single push that exceeds the cap with an unterminated OSC
         // so the remainder must be retained but cannot be.
         let events = buf.push(b"\x1b]52;abcdefghijklmn");
-        assert!(events.iter().any(|e| matches!(e, StdinBufferEvent::Overflow)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, StdinBufferEvent::Overflow))
+        );
         assert!(buf.remainder_len() <= 8);
     }
 
@@ -657,15 +659,7 @@ mod tests {
         let events = buf.push(b"\x1b[200~hello\x1b[201~");
         assert_eq!(
             data_strings(&events),
-            vec![
-                "\x1b[200~",
-                "h",
-                "e",
-                "l",
-                "l",
-                "o",
-                "\x1b[201~",
-            ]
+            vec!["\x1b[200~", "h", "e", "l", "l", "o", "\x1b[201~",]
         );
     }
 
@@ -678,10 +672,19 @@ mod tests {
 
     #[test]
     fn kitty_printable_codepoint_helper() {
-        assert_eq!(parse_unmodified_kitty_printable_codepoint("\x1b[97u"), Some(97));
-        assert_eq!(parse_unmodified_kitty_printable_codepoint("\x1b[224u"), Some(224));
+        assert_eq!(
+            parse_unmodified_kitty_printable_codepoint("\x1b[97u"),
+            Some(97)
+        );
+        assert_eq!(
+            parse_unmodified_kitty_printable_codepoint("\x1b[224u"),
+            Some(224)
+        );
         // Modifier present → not unmodified printable.
-        assert_eq!(parse_unmodified_kitty_printable_codepoint("\x1b[97;3u"), None);
+        assert_eq!(
+            parse_unmodified_kitty_printable_codepoint("\x1b[97;3u"),
+            None
+        );
         // Control codepoint → rejected.
         assert_eq!(parse_unmodified_kitty_printable_codepoint("\x1b[27u"), None);
         // Not a CSI-u shape.
@@ -753,10 +756,7 @@ mod tests {
     fn multiple_complete_sequences_in_one_chunk() {
         let mut buf = StdinBuffer::new();
         let events = buf.push(b"\x1b[A\x1b[B\x1b[C");
-        assert_eq!(
-            data_strings(&events),
-            vec!["\x1b[A", "\x1b[B", "\x1b[C"]
-        );
+        assert_eq!(data_strings(&events), vec!["\x1b[A", "\x1b[B", "\x1b[C"]);
     }
 
     #[test]

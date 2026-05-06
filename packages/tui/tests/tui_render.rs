@@ -68,7 +68,9 @@ fn container_lookup_returns_none_after_removal() {
 fn tui_with_test_terminal_exposes_size_and_root() {
     let term = TestTerminal::new(60, 20);
     let mut tui = Tui::new(Box::new(term));
-    let id = tui.root_mut().add_child_with_id(Box::new(TextComponent::new("hi")));
+    let id = tui
+        .root_mut()
+        .add_child_with_id(Box::new(TextComponent::new("hi")));
     assert_eq!(tui.size(), (60, 20));
     assert_eq!(tui.root().child_count(), 1);
     tui.set_focus(Some(id));

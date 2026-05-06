@@ -512,18 +512,12 @@ mod tests {
         let m = KeybindingsManager::with_config(&cfg);
         assert_eq!(m.get(Keybinding::InputSubmit), &["ctrl+enter".to_string()]);
         // Other bindings untouched.
-        assert_eq!(
-            m.get(Keybinding::SelectConfirm),
-            &["enter".to_string()]
-        );
+        assert_eq!(m.get(Keybinding::SelectConfirm), &["enter".to_string()]);
     }
 
     #[test]
     fn override_with_multiple_keys() {
-        let cfg = make_config(&[(
-            "tui.input.submit",
-            Some(vec!["enter", "ctrl+enter"]),
-        )]);
+        let cfg = make_config(&[("tui.input.submit", Some(vec!["enter", "ctrl+enter"]))]);
         let m = KeybindingsManager::with_config(&cfg);
         assert_eq!(
             m.get(Keybinding::InputSubmit),

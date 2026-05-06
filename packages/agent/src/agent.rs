@@ -9,6 +9,9 @@ use crate::types::{
 use model::{Client, Message, Model, SimpleStreamOptions, ThinkingLevel, UserMessage};
 use std::sync::{Arc, Mutex};
 
+/// Listener callback invoked for each `AgentEvent`.
+type EventListener = Box<dyn Fn(AgentEvent) + Send + Sync>;
+
 /// High-level agent that manages state and wraps the agent loop.
 pub struct Agent {
     /// The model client.
@@ -24,7 +27,7 @@ pub struct Agent {
     /// Tool execution mode.
     tool_execution: ToolExecutionMode,
     /// Event listeners.
-    listeners: Vec<Box<dyn Fn(AgentEvent) + Send + Sync>>,
+    listeners: Vec<EventListener>,
     /// Steering message queue.
     steering_queue: Arc<Mutex<Vec<Message>>>,
     /// Follow-up message queue.
@@ -176,7 +179,7 @@ impl Agent {
     // -- Event subscription --
 
     /// Subscribe to agent events. Returns an index that could be used for unsubscription.
-    pub fn subscribe(&mut self, listener: Box<dyn Fn(AgentEvent) + Send + Sync>) -> usize {
+    pub fn subscribe(&mut self, listener: EventListener) -> usize {
         self.listeners.push(listener);
         self.listeners.len() - 1
     }
@@ -406,7 +409,7 @@ impl Agent {
     /// Build the event sink that forwards to listeners.
     fn build_event_sink(&self) -> AgentEventSink {
         // Collect listeners into an Arc<Vec<...>> so the closure can own them.
-        let listeners: Arc<Vec<Box<dyn Fn(AgentEvent) + Send + Sync>>> = Arc::new(
+        let listeners: Arc<Vec<EventListener>> = Arc::new(
             // We can't move self.listeners, so we need to wrap them.
             // Since we can't clone Box<dyn Fn>, we use a no-op if no listeners.
             Vec::new(),

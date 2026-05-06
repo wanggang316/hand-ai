@@ -90,7 +90,8 @@ fn regression_image_fallback_emits_no_image_escapes() {
 /// arbitrary user input adjacent to image escape bytes must remain bounded.
 #[test]
 fn regression_image_fallback_handles_user_text_with_image_escape_bytes() {
-    let mut sneaky = String::from("Read image file [image/jpeg]\x1b]1337;File=size=800,600;inline=1:");
+    let mut sneaky =
+        String::from("Read image file [image/jpeg]\x1b]1337;File=size=800,600;inline=1:");
     sneaky.push_str(&"A".repeat(2_000));
     sneaky.push('\x07');
 

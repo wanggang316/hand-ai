@@ -8,8 +8,7 @@
 use crate::tui::Component;
 
 /// Default braille spinner frames.
-pub const DEFAULT_SPINNER_FRAMES: &[&str] =
-    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub const DEFAULT_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Default frame interval in milliseconds (mirrors the TS default).
 pub const DEFAULT_INDICATOR_INTERVAL_MS: u64 = 80;
@@ -30,7 +29,10 @@ pub struct LoaderIndicatorOptions {
 impl Default for LoaderIndicatorOptions {
     fn default() -> Self {
         Self {
-            frames: DEFAULT_SPINNER_FRAMES.iter().map(|s| s.to_string()).collect(),
+            frames: DEFAULT_SPINNER_FRAMES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             interval_ms: DEFAULT_INDICATOR_INTERVAL_MS,
             render_verbatim: false,
         }
@@ -55,7 +57,10 @@ impl LoaderComponent {
             frame: 0,
             spinner_color: "\x1b[36m".to_string(), // cyan
             message_color: "\x1b[90m".to_string(), // dim
-            frames: DEFAULT_SPINNER_FRAMES.iter().map(|s| s.to_string()).collect(),
+            frames: DEFAULT_SPINNER_FRAMES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             interval_ms: DEFAULT_INDICATOR_INTERVAL_MS,
             render_verbatim: false,
         }
@@ -123,10 +128,7 @@ impl LoaderComponent {
 impl Component for LoaderComponent {
     fn render(&self, _width: u16) -> Vec<String> {
         if self.frames.is_empty() {
-            return vec![format!(
-                "{}{}\x1b[0m",
-                self.message_color, self.message
-            )];
+            return vec![format!("{}{}\x1b[0m", self.message_color, self.message)];
         }
         let spinner = &self.frames[self.frame % self.frames.len()];
         let rendered_spinner = if self.render_verbatim {

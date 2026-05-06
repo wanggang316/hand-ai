@@ -32,14 +32,13 @@ pub use components::{
     BoxComponent, CancellableLoaderComponent, CombinedAutocompleteProvider,
     DEFAULT_INDICATOR_INTERVAL_MS, DEFAULT_PRIMARY_COLUMN_WIDTH, DEFAULT_SPINNER_FRAMES,
     EditorComponent, ImageComponent, ImageOptions, ImageProtocol, ImageTheme, InputComponent,
-    LoaderComponent, LoaderIndicatorOptions, MarkdownComponent,
-    PasteContent, ProgressBarComponent, SelectItem, SelectListComponent,
-    SelectListLayoutOptions, SelectListTheme, SettingEntry,
+    LoaderComponent, LoaderIndicatorOptions, MarkdownComponent, PasteContent, ProgressBarComponent,
+    SelectItem, SelectListComponent, SelectListLayoutOptions, SelectListTheme, SettingEntry,
     SettingValue, SettingsListComponent, SettingsListTheme, SlashCommand, SlashCommandProvider,
-    SpacerComponent,
-    StatusBarComponent, Suggestion, TextComponent, ToastComponent, ToastLevel,
+    SpacerComponent, StatusBarComponent, Suggestion, TextComponent, ToastComponent, ToastLevel,
     TruncatedTextComponent, UndoEntry, UndoOp,
 };
+pub use error::{TuiError, TuiResult};
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 pub use keybindings::{
     Keybinding, KeybindingConflict, KeybindingDefinition, KeybindingsConfig, KeybindingsManager,
@@ -58,7 +57,9 @@ pub use overlay::{
 pub use render::DiffRenderer;
 pub use resize::watch_resizes;
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
-pub use terminal::{ProcessTerminal, Terminal, TerminalCapabilities, TestTerminal, run_stdin_reader};
+pub use terminal::{
+    ProcessTerminal, Terminal, TerminalCapabilities, TestTerminal, run_stdin_reader,
+};
 pub use terminal_image::{
     CellDimensions, ImageDimensions, ImageRenderOptions, TerminalImageCapabilities,
     allocate_image_id, calculate_image_rows, delete_all_kitty_images, delete_kitty_image,
@@ -68,7 +69,6 @@ pub use terminal_image::{
     set_capabilities, set_cell_dimensions,
 };
 pub use theme::{Color, NamedColor, Style, Theme};
-pub use error::{TuiError, TuiResult};
 pub use tui::{
     Component, ComponentId, Container, Focusable, HandleResult, InputEvent, InputListener,
     ListenerId, ListenerResult, Tui, input_event_from_str,

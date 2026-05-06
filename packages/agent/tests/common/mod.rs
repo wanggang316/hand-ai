@@ -235,6 +235,7 @@ pub fn echo_tool() -> AgentTool {
 }
 
 /// Create a calculator tool for testing.
+#[allow(dead_code)] // Used by some integration tests; not all targets see it.
 pub fn calculator_tool() -> AgentTool {
     AgentTool::new(
         "calculate",
@@ -260,6 +261,7 @@ pub fn calculator_tool() -> AgentTool {
 }
 
 /// Collect events from an AgentEventSink into a shared vec.
+#[allow(dead_code)] // Used by some integration tests; not all targets see it.
 pub fn collecting_event_sink() -> (
     hand_agent::AgentEventSink,
     std::sync::Arc<std::sync::Mutex<Vec<AgentEvent>>>,

@@ -476,7 +476,9 @@ mod tests {
     #[tokio::test]
     async fn test_slash_command_provider_no_match() {
         let provider = SlashCommandProvider::new(cmds(&["help", "model"]));
-        let items = provider.query(&ctx("zzz", AutocompleteTrigger::Slash)).await;
+        let items = provider
+            .query(&ctx("zzz", AutocompleteTrigger::Slash))
+            .await;
         assert!(items.is_empty());
     }
 

@@ -29,7 +29,11 @@ impl Component for Short {
 struct OverlayBlock;
 impl Component for OverlayBlock {
     fn render(&self, _w: u16) -> Vec<String> {
-        vec!["OVERLAY_TOP".into(), "OVERLAY_MID".into(), "OVERLAY_BOT".into()]
+        vec![
+            "OVERLAY_TOP".into(),
+            "OVERLAY_MID".into(),
+            "OVERLAY_BOT".into(),
+        ]
     }
     fn handle_input(&mut self, _e: &InputEvent) -> HandleResult {
         HandleResult::Ignored

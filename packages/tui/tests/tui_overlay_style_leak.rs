@@ -129,10 +129,13 @@ async fn regression_overlay_style_leak_clears_red_after_hide() {
     let (_tx, rx) = mpsc::unbounded_channel();
     drop(_tx); // close stdin -> loop exits cleanly after first frame
 
-    tokio::time::timeout(std::time::Duration::from_millis(200), tui.run_with_events(rx))
-        .await
-        .expect("first show-frame run did not exit")
-        .expect("run errored");
+    tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        tui.run_with_events(rx),
+    )
+    .await
+    .expect("first show-frame run did not exit")
+    .expect("run errored");
 
     // Sanity: the show frame did emit the red SGR somewhere in the writes.
     {
@@ -151,10 +154,13 @@ async fn regression_overlay_style_leak_clears_red_after_hide() {
 
     let (_tx2, rx2) = mpsc::unbounded_channel();
     drop(_tx2);
-    tokio::time::timeout(std::time::Duration::from_millis(200), tui.run_with_events(rx2))
-        .await
-        .expect("post-hide run did not exit")
-        .expect("run errored");
+    tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        tui.run_with_events(rx2),
+    )
+    .await
+    .expect("post-hide run did not exit")
+    .expect("run errored");
 
     let post: String = output.lock().unwrap().iter().cloned().collect();
     assert!(

@@ -1123,7 +1123,7 @@ async fn test_multi_turn() {
         let message = client
             .complete_simple(&test_model, context.clone(), None)
             .await
-            .expect(&format!("Complete should succeed on turn {}", turn));
+            .unwrap_or_else(|_| panic!("Complete should succeed on turn {}", turn));
 
         // Add assistant response to context
         context.messages.push(Message::Assistant(message.clone()));

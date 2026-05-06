@@ -6,12 +6,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use hand_tui::tui::InputEvent;
 use hand_tui::{
     EditorComponent, KeyName, ListenerResult, MarkdownComponent, OverlayAnchor, OverlayMargin,
     OverlayOptions, ProcessTerminal, SlashCommand, SlashCommandProvider, TextComponent, Tui,
     TuiError,
 };
-use hand_tui::tui::InputEvent;
 
 #[tokio::main]
 async fn main() -> Result<(), TuiError> {
@@ -54,10 +54,8 @@ async fn main() -> Result<(), TuiError> {
     tui.add_input_listener(Box::new(move |event: &InputEvent| {
         if let InputEvent::Key(key) = event {
             // Reset the Ctrl+C counter on any non-Ctrl-C key.
-            let is_ctrl_c =
-                matches!(key.name, KeyName::Char('c')) && key.modifiers.ctrl;
-            let is_ctrl_o =
-                matches!(key.name, KeyName::Char('o')) && key.modifiers.ctrl;
+            let is_ctrl_c = matches!(key.name, KeyName::Char('c')) && key.modifiers.ctrl;
+            let is_ctrl_o = matches!(key.name, KeyName::Char('o')) && key.modifiers.ctrl;
 
             if is_ctrl_c {
                 let n = ctrl_c_count_for_listener.fetch_add(1, Ordering::Relaxed) + 1;
@@ -94,9 +92,7 @@ async fn main() -> Result<(), TuiError> {
     // front so the overlay rendering path is exercised at least once.
     let _ = overlay_visible; // silence unused warning when not wired further.
     tui.show_overlay(
-        Box::new(TextComponent::new(
-            "[overlay] Ctrl+C twice to quit",
-        )),
+        Box::new(TextComponent::new("[overlay] Ctrl+C twice to quit")),
         OverlayOptions {
             anchor: OverlayAnchor::BottomRight,
             margin: OverlayMargin::uniform(1),

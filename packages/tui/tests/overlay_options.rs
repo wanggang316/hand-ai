@@ -45,7 +45,9 @@ fn opts(anchor: OverlayAnchor, margin: OverlayMargin, border: bool, dim: bool) -
 }
 
 fn empty_base(width: u16, height: u16) -> Vec<String> {
-    (0..height as usize).map(|_| " ".repeat(width as usize)).collect()
+    (0..height as usize)
+        .map(|_| " ".repeat(width as usize))
+        .collect()
 }
 
 #[test]
@@ -117,9 +119,9 @@ fn regression_margin_offsets_overlay_from_anchor_edge() {
     let o = opts(OverlayAnchor::TopLeft, m, false, false);
     let result = compose_overlays(&empty_base(80, 24), &[(&comp, &o)], 80, 24);
     let row2 = strip_ansi(&result[2]);
-    let col = row2.find("MARGIN").unwrap_or_else(|| {
-        panic!("MARGIN text must land on row 2 (top: 2), full row: {row2:?}")
-    });
+    let col = row2
+        .find("MARGIN")
+        .unwrap_or_else(|| panic!("MARGIN text must land on row 2 (top: 2), full row: {row2:?}"));
     assert_eq!(col, 3, "MARGIN must start at left margin col 3, got {col}");
     // Earlier rows must NOT contain the overlay.
     for (i, row) in result.iter().enumerate().take(2) {
@@ -247,12 +249,7 @@ fn regression_overlays_at_disjoint_positions_do_not_interfere() {
         false,
         false,
     );
-    let result = compose_overlays(
-        &empty_base(80, 24),
-        &[(&tl, &o_tl), (&br, &o_br)],
-        80,
-        24,
-    );
+    let result = compose_overlays(&empty_base(80, 24), &[(&tl, &o_tl), (&br, &o_br)], 80, 24);
     let row0 = strip_ansi(&result[0]);
     let row23 = strip_ansi(&result[23]);
     assert!(

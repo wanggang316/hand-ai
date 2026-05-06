@@ -49,5 +49,9 @@ fn theme_color_wraps_placeholder_lines() {
         });
     let lines = comp.render(80);
     assert!(lines.iter().any(|l| l.contains("photo.png")));
-    assert!(lines.iter().all(|l| l.contains("\x1b[35m") && l.ends_with("\x1b[0m")));
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.contains("\x1b[35m") && l.ends_with("\x1b[0m"))
+    );
 }

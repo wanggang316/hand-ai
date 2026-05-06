@@ -3,9 +3,8 @@
 mod common;
 
 use common::*;
-use hand_agent::{Agent, AgentEvent, AgentTool, BoxFuture, ToolResult};
+use hand_agent::{Agent, AgentEvent, AgentTool, ToolResult};
 use model::{Api, Client, Message, UserMessage};
-use std::sync::{Arc, Mutex};
 
 fn setup_text_agent(response: &str) -> Agent {
     let client = Client::new();
@@ -145,7 +144,7 @@ async fn test_agent_run_multi_turn() {
     let count_after_first = agent.messages().len();
 
     // Replace provider with new response for second turn
-    agent.model().clone(); // just to verify model is accessible
+    let _ = agent.model().clone(); // just to verify model is accessible
 
     // Second prompt
     let r2 = agent.prompt("Second message").await;

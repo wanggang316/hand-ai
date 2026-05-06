@@ -374,9 +374,9 @@ fn start_tag(tag: Tag<'_>, state: &mut RenderState, ctx: &mut RenderCtx) {
             if let Some(lang) = lang {
                 state.lines.push(format!("{border}# lang: {lang}\x1b[0m"));
             }
-            state
-                .lines
-                .push(format!("{border}┌───────────────────────────────────┐\x1b[0m"));
+            state.lines.push(format!(
+                "{border}┌───────────────────────────────────┐\x1b[0m"
+            ));
         }
         Tag::List(start) => {
             state.flush_paragraph_line();
@@ -489,9 +489,9 @@ fn end_tag(tag: TagEnd, state: &mut RenderState, ctx: &mut RenderCtx) {
             state.in_code_block = false;
             state.flush_paragraph_line();
             let border = code_border(ctx);
-            state
-                .lines
-                .push(format!("{border}└───────────────────────────────────┘\x1b[0m"));
+            state.lines.push(format!(
+                "{border}└───────────────────────────────────┘\x1b[0m"
+            ));
         }
         TagEnd::List(_) => {
             state.flush_paragraph_line();
@@ -660,7 +660,11 @@ fn render_table(t: &TableState, ctx: &RenderCtx) -> Vec<String> {
         .as_ref()
         .map(|c| c.to_fg_ansi())
         .unwrap_or_default();
-    let border_reset = if border_color.is_empty() { "" } else { "\x1b[0m" };
+    let border_reset = if border_color.is_empty() {
+        ""
+    } else {
+        "\x1b[0m"
+    };
 
     let make_border = |left: char, mid: char, right: char| -> String {
         let parts: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
@@ -672,7 +676,13 @@ fn render_table(t: &TableState, ctx: &RenderCtx) -> Vec<String> {
 
     let mut out = Vec::new();
     out.push(make_border('┌', '┬', '┐'));
-    out.push(render_table_row(&t.header, &widths, &t.alignments, true, ctx));
+    out.push(render_table_row(
+        &t.header,
+        &widths,
+        &t.alignments,
+        true,
+        ctx,
+    ));
     out.push(make_border('├', '┼', '┤'));
     for row in &t.rows {
         out.push(render_table_row(row, &widths, &t.alignments, false, ctx));
@@ -694,7 +704,11 @@ fn render_table_row(
         .as_ref()
         .map(|c| c.to_fg_ansi())
         .unwrap_or_default();
-    let border_reset = if border_color.is_empty() { "" } else { "\x1b[0m" };
+    let border_reset = if border_color.is_empty() {
+        ""
+    } else {
+        "\x1b[0m"
+    };
     let pipe = format!("{border_color}│{border_reset}");
 
     let mut s = String::new();
@@ -829,9 +843,8 @@ mod tests {
 
     #[test]
     fn test_table_alignment() {
-        let md = MarkdownComponent::new(
-            "| L | C | R |\n|:---|:---:|---:|\n| left | center | right |",
-        );
+        let md =
+            MarkdownComponent::new("| L | C | R |\n|:---|:---:|---:|\n| left | center | right |");
         let lines = md.render(80);
         let row = lines
             .iter()

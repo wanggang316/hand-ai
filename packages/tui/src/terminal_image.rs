@@ -155,8 +155,8 @@ pub fn detect_capabilities() -> TerminalImageCapabilities {
         || std::env::var("WEZTERM_PANE").is_ok()
         || term_program == "wezterm";
 
-    let iterm2 = !kitty
-        && (std::env::var("ITERM_SESSION_ID").is_ok() || term_program == "iterm.app");
+    let iterm2 =
+        !kitty && (std::env::var("ITERM_SESSION_ID").is_ok() || term_program == "iterm.app");
 
     TerminalImageCapabilities {
         kitty,
@@ -297,11 +297,7 @@ pub fn image_fallback(opts: &ImageRenderOptions) -> Vec<String> {
             let pad = inner_w.saturating_sub(text_w);
             let left = pad / 2;
             let right = pad - left;
-            lines.push(format!(
-                "│{}{text}{}│",
-                " ".repeat(left),
-                " ".repeat(right)
-            ));
+            lines.push(format!("│{}{text}{}│", " ".repeat(left), " ".repeat(right)));
         } else {
             lines.push(format!("│{}│", " ".repeat(inner_w)));
         }
@@ -413,14 +409,10 @@ pub fn get_webp_dimensions(data: &[u8]) -> Option<ImageDimensions> {
         Some(ImageDimensions { width, height })
     } else if chunk == b"VP8X" {
         // Extended: 24-bit canvas dimensions at offsets 24 and 27, biased by 1.
-        let width = (u32::from(data[24])
-            | (u32::from(data[25]) << 8)
-            | (u32::from(data[26]) << 16))
-            + 1;
-        let height = (u32::from(data[27])
-            | (u32::from(data[28]) << 8)
-            | (u32::from(data[29]) << 16))
-            + 1;
+        let width =
+            (u32::from(data[24]) | (u32::from(data[25]) << 8) | (u32::from(data[26]) << 16)) + 1;
+        let height =
+            (u32::from(data[27]) | (u32::from(data[28]) << 8) | (u32::from(data[29]) << 16)) + 1;
         Some(ImageDimensions { width, height })
     } else {
         None

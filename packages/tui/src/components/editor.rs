@@ -247,8 +247,7 @@ impl EditorComponent {
         if self.cursor_line < self.viewport_top {
             self.viewport_top = self.cursor_line;
         }
-        if self.viewport_height > 0
-            && self.cursor_line >= self.viewport_top + self.viewport_height
+        if self.viewport_height > 0 && self.cursor_line >= self.viewport_top + self.viewport_height
         {
             self.viewport_top = self.cursor_line + 1 - self.viewport_height;
         }
@@ -1593,7 +1592,10 @@ mod tests {
     #[test]
     fn paste_many_lines_creates_marker() {
         let mut editor = EditorComponent::new();
-        let big = (0..15).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let big = (0..15)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         editor.paste(&big);
         assert!(editor.text().contains("[paste #1 +15 lines]"));
         assert_eq!(editor.paste_markers().len(), 1);
@@ -1614,7 +1616,10 @@ mod tests {
     fn paste_marker_round_trips_with_surrounding_text() {
         let mut editor = EditorComponent::new();
         editor.insert_text("hello ");
-        let big = (0..15).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        let big = (0..15)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         editor.paste(&big);
         editor.insert_text(" world");
         let submitted = editor.submit_text();
@@ -1626,7 +1631,10 @@ mod tests {
     #[test]
     fn input_event_paste_uses_marker_path() {
         let mut editor = EditorComponent::new();
-        let big = (0..20).map(|i| format!("row {i}")).collect::<Vec<_>>().join("\n");
+        let big = (0..20)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         editor.handle_input(&InputEvent::Paste(big.clone()));
         assert!(editor.text().contains("[paste #1"));
         assert_eq!(editor.submit_text(), big);
@@ -1732,10 +1740,7 @@ mod tests {
         items: Vec<AutocompleteItem>,
     }
     impl AutocompleteProvider for StaticProvider {
-        fn query<'a>(
-            &'a self,
-            _ctx: &'a AutocompleteContext,
-        ) -> AutocompleteFuture<'a> {
+        fn query<'a>(&'a self, _ctx: &'a AutocompleteContext) -> AutocompleteFuture<'a> {
             let items = self.items.clone();
             Box::pin(async move { items })
         }
@@ -1857,10 +1862,7 @@ mod tests {
 
     #[test]
     fn detect_trigger_slash() {
-        assert_eq!(
-            detect_trigger("/he"),
-            Some((AutocompleteTrigger::Slash, 1))
-        );
+        assert_eq!(detect_trigger("/he"), Some((AutocompleteTrigger::Slash, 1)));
     }
 
     #[test]

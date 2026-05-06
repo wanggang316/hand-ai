@@ -84,10 +84,13 @@ async fn regression_non_capturing_overlay_lets_input_pass_through() {
         .unwrap();
     drop(tx);
 
-    tokio::time::timeout(std::time::Duration::from_millis(200), tui.run_with_events(rx))
-        .await
-        .expect("run did not exit on stdin close")
-        .expect("run errored");
+    tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        tui.run_with_events(rx),
+    )
+    .await
+    .expect("run did not exit on stdin close")
+    .expect("run errored");
 
     let root_received = root_events.lock().unwrap().clone();
     let overlay_received = overlay_events.lock().unwrap().clone();
@@ -131,10 +134,13 @@ async fn regression_capturing_overlay_blocks_input_to_root() {
         .unwrap();
     drop(tx);
 
-    tokio::time::timeout(std::time::Duration::from_millis(200), tui.run_with_events(rx))
-        .await
-        .expect("run did not exit on stdin close")
-        .expect("run errored");
+    tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        tui.run_with_events(rx),
+    )
+    .await
+    .expect("run did not exit on stdin close")
+    .expect("run errored");
 
     assert!(
         root_events.lock().unwrap().is_empty(),
@@ -173,13 +179,20 @@ async fn regression_stack_with_non_capturing_below_still_routes_to_capturing() {
         .unwrap();
     drop(tx);
 
-    tokio::time::timeout(std::time::Duration::from_millis(200), tui.run_with_events(rx))
-        .await
-        .expect("run did not exit on stdin close")
-        .expect("run errored");
+    tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        tui.run_with_events(rx),
+    )
+    .await
+    .expect("run did not exit on stdin close")
+    .expect("run errored");
 
     assert!(
-        cap_events.lock().unwrap().iter().any(|e| matches!(e, InputEvent::Raw(s) if s == "z")),
+        cap_events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, InputEvent::Raw(s) if s == "z")),
         "topmost capturing overlay must receive input: {:?}",
         cap_events.lock().unwrap()
     );

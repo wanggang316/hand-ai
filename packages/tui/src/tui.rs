@@ -735,7 +735,7 @@ impl Tui {
 fn build_input_event(data: &str) -> InputEvent {
     let bytes = data.as_bytes();
     let parse_as_key = match bytes.first() {
-        Some(0x1b) => true,                      // ESC-prefixed sequence
+        Some(0x1b) => true, // ESC-prefixed sequence
         Some(b) if bytes.len() == 1 && (*b < 0x20 || *b == 0x7f) => true, // ctrl/del
         _ => false,
     };
@@ -1010,7 +1010,10 @@ mod tests {
         tui.add_input_listener(Box::new(|_e| ListenerResult::consume()));
         tui.dispatch_event(raw_event("blocked"));
 
-        assert!(events.lock().unwrap().is_empty(), "consumed event should not reach component");
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "consumed event should not reach component"
+        );
     }
 
     #[test]
@@ -1043,7 +1046,11 @@ mod tests {
         tui.remove_input_listener(id);
         tui.dispatch_event(raw_event("x"));
 
-        assert_eq!(events.lock().unwrap().len(), 1, "after removal, event reaches component");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            1,
+            "after removal, event reaches component"
+        );
     }
 
     // ---------- render flag ----------
@@ -1186,14 +1193,8 @@ mod tests {
     #[test]
     fn test_hide_overlay_by_handle() {
         let mut tui = make_tui();
-        let h1 = tui.show_overlay(
-            Box::new(TestComponent::new(vec!["A"])),
-            overlay_opts(false),
-        );
-        let h2 = tui.show_overlay(
-            Box::new(TestComponent::new(vec!["B"])),
-            overlay_opts(false),
-        );
+        let h1 = tui.show_overlay(Box::new(TestComponent::new(vec!["A"])), overlay_opts(false));
+        let h2 = tui.show_overlay(Box::new(TestComponent::new(vec!["B"])), overlay_opts(false));
         tui.hide_overlay(h1);
         assert_eq!(tui.overlay_count(), 1);
         // Hiding an already-removed handle is a no-op.
@@ -1207,10 +1208,7 @@ mod tests {
     fn test_has_overlay_reflects_state() {
         let mut tui = make_tui();
         assert!(!tui.has_overlay());
-        let h = tui.show_overlay(
-            Box::new(TestComponent::new(vec!["x"])),
-            overlay_opts(false),
-        );
+        let h = tui.show_overlay(Box::new(TestComponent::new(vec!["x"])), overlay_opts(false));
         assert!(tui.has_overlay());
         tui.hide_overlay(h);
         assert!(!tui.has_overlay());
@@ -1219,14 +1217,8 @@ mod tests {
     #[test]
     fn test_hide_all_overlays() {
         let mut tui = make_tui();
-        tui.show_overlay(
-            Box::new(TestComponent::new(vec!["a"])),
-            overlay_opts(false),
-        );
-        tui.show_overlay(
-            Box::new(TestComponent::new(vec!["b"])),
-            overlay_opts(false),
-        );
+        tui.show_overlay(Box::new(TestComponent::new(vec!["a"])), overlay_opts(false));
+        tui.show_overlay(Box::new(TestComponent::new(vec!["b"])), overlay_opts(false));
         tui.hide_all_overlays();
         assert!(!tui.has_overlay());
     }
@@ -1402,13 +1394,27 @@ mod tests {
         fn write(&mut self, data: &str) {
             self.output.lock().unwrap().push(data.to_string());
         }
-        fn columns(&self) -> u16 { 80 }
-        fn rows(&self) -> u16 { 24 }
-        fn hide_cursor(&mut self) { self.write("\x1b[?25l"); }
-        fn show_cursor(&mut self) { self.write("\x1b[?25h"); }
-        fn clear_line(&mut self) { self.write("\x1b[2K\r"); }
-        fn clear_from_cursor(&mut self) { self.write("\x1b[J"); }
-        fn clear_screen(&mut self) { self.write("\x1b[2J\x1b[H"); }
+        fn columns(&self) -> u16 {
+            80
+        }
+        fn rows(&self) -> u16 {
+            24
+        }
+        fn hide_cursor(&mut self) {
+            self.write("\x1b[?25l");
+        }
+        fn show_cursor(&mut self) {
+            self.write("\x1b[?25h");
+        }
+        fn clear_line(&mut self) {
+            self.write("\x1b[2K\r");
+        }
+        fn clear_from_cursor(&mut self) {
+            self.write("\x1b[J");
+        }
+        fn clear_screen(&mut self) {
+            self.write("\x1b[2J\x1b[H");
+        }
         fn move_by(&mut self, lines: i32) {
             if lines > 0 {
                 self.write(&format!("\x1b[{}B", lines));
@@ -1416,8 +1422,12 @@ mod tests {
                 self.write(&format!("\x1b[{}A", -lines));
             }
         }
-        fn set_title(&mut self, title: &str) { self.write(&format!("\x1b]0;{}\x07", title)); }
-        fn capabilities(&self) -> &TerminalCapabilities { &self.capabilities }
+        fn set_title(&mut self, title: &str) {
+            self.write(&format!("\x1b]0;{}\x07", title));
+        }
+        fn capabilities(&self) -> &TerminalCapabilities {
+            &self.capabilities
+        }
     }
 
     use crate::terminal::TerminalCapabilities;
@@ -1727,9 +1737,8 @@ mod tests {
         let (_event_tx, event_rx) = mpsc::unbounded_channel();
         let (resize_tx, resize_rx) = mpsc::unbounded_channel();
 
-        let handle = tokio::spawn(async move {
-            tui.run_with_events_and_resizes(event_rx, resize_rx).await
-        });
+        let handle =
+            tokio::spawn(async move { tui.run_with_events_and_resizes(event_rx, resize_rx).await });
 
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -1745,9 +1754,15 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
 
         let received = events.lock().unwrap();
-        let resize_seen = received
-            .iter()
-            .any(|e| matches!(e, InputEvent::Resize { cols: 100, rows: 40 }));
+        let resize_seen = received.iter().any(|e| {
+            matches!(
+                e,
+                InputEvent::Resize {
+                    cols: 100,
+                    rows: 40
+                }
+            )
+        });
         assert!(
             resize_seen,
             "root must receive a Resize event from the resize channel: {received:?}"

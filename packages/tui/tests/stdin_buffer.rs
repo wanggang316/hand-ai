@@ -78,5 +78,9 @@ fn overflow_emits_signal_when_remainder_cap_exceeded() {
     });
     // Push more than 8 bytes of an incomplete escape sequence.
     let events = buf.push(b"\x1b[1234567890");
-    assert!(events.iter().any(|e| matches!(e, StdinBufferEvent::Overflow)));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, StdinBufferEvent::Overflow))
+    );
 }

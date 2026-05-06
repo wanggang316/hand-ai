@@ -207,9 +207,7 @@ impl Component for ImageComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal_image::{
-        CellDimensions, TerminalImageCapabilities, set_capabilities,
-    };
+    use crate::terminal_image::{CellDimensions, TerminalImageCapabilities, set_capabilities};
     use std::sync::Mutex;
 
     /// Serializes tests that mutate the global capability cache.

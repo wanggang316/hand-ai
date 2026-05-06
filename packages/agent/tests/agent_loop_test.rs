@@ -4,12 +4,10 @@ mod common;
 
 use common::*;
 use hand_agent::{
-    AgentContext, AgentEvent, AgentLoopConfig, ToolExecutionMode, ToolResult, run_agent_loop,
+    AgentContext, AgentEvent, AgentLoopConfig, ToolExecutionMode, run_agent_loop,
     run_agent_loop_continue,
 };
-use model::{
-    Api, AssistantContentBlock, Client, Message, SimpleStreamOptions, StopReason, UserMessage,
-};
+use model::{Api, Client, Message, SimpleStreamOptions, UserMessage};
 use std::sync::{Arc, Mutex};
 
 fn setup_client_with_text(text: &str) -> Client {
@@ -139,7 +137,7 @@ async fn test_agent_loop_single_turn_tool_call() {
 #[tokio::test]
 async fn test_agent_loop_continue_until_stop() {
     let client = setup_client_with_tool("echo", serde_json::json!({"message": "hi"}), "All done");
-    let (emit, events) = collecting_event_sink();
+    let (emit, _events) = collecting_event_sink();
 
     let mut context = AgentContext {
         system_prompt: String::new(),
@@ -292,7 +290,7 @@ async fn test_tool_not_found_emits_error_result() {
 #[tokio::test]
 async fn test_steering_messages_injected() {
     let client = setup_client_with_text("ok");
-    let (emit, events) = collecting_event_sink();
+    let (emit, _events) = collecting_event_sink();
 
     let mut context = AgentContext {
         system_prompt: String::new(),

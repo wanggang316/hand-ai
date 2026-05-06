@@ -73,12 +73,11 @@ fn spawn_watcher(tx: mpsc::UnboundedSender<(u16, u16)>, mut shutdown: watch::Rec
 
             // crossterm's poll/read are blocking — defer to a thread so the
             // tokio runtime stays responsive.
-            let polled =
-                tokio::task::spawn_blocking(|| match poll(Duration::from_millis(50)) {
-                    Ok(true) => read().ok(),
-                    _ => None,
-                })
-                .await;
+            let polled = tokio::task::spawn_blocking(|| match poll(Duration::from_millis(50)) {
+                Ok(true) => read().ok(),
+                _ => None,
+            })
+            .await;
 
             match polled {
                 Ok(Some(Event::Resize(cols, rows))) => {

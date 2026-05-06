@@ -82,7 +82,6 @@ impl KeyModifiers {
             super_key: mask & MOD_SUPER != 0,
         }
     }
-
 }
 
 /// Kitty event type. Only meaningful when Kitty keyboard protocol with flag 2
@@ -736,9 +735,7 @@ fn matches_raw_backspace(data: &str, expected_mod: u32) -> bool {
 fn raw_ctrl_char(key: char) -> Option<char> {
     let lower = key.to_ascii_lowercase();
     let code = lower as u32;
-    if (97..=122).contains(&code)
-        || matches!(lower, '[' | '\\' | ']' | '_')
-    {
+    if (97..=122).contains(&code) || matches!(lower, '[' | '\\' | ']' | '_') {
         char::from_u32(code & 0x1f)
     } else if lower == '-' {
         // `-` shares its physical key with `_` on US keyboards.
@@ -1016,7 +1013,8 @@ fn match_printable_key(data: &str, key: &str, modifier: u32) -> bool {
     let raw_ctrl = raw_ctrl_char(lower);
 
     // Legacy ctrl+alt+letter/symbol = ESC + control char.
-    if modifier == (MOD_CTRL | MOD_ALT) && !is_kitty_protocol_active()
+    if modifier == (MOD_CTRL | MOD_ALT)
+        && !is_kitty_protocol_active()
         && let Some(rc) = raw_ctrl
     {
         let mut s = String::with_capacity(2);
@@ -1068,7 +1066,8 @@ fn match_printable_key(data: &str, key: &str, modifier: u32) -> bool {
     }
 
     // No modifiers — accept the raw key character or a Kitty CSI-u press.
-    (data.len() == 1 && data.starts_with(lower)) || matches_kitty_sequence(data, codepoint as i32, 0)
+    (data.len() == 1 && data.starts_with(lower))
+        || matches_kitty_sequence(data, codepoint as i32, 0)
 }
 
 // =============================================================================
@@ -1124,7 +1123,11 @@ fn codepoint_to_key_name(cp: i32) -> Option<&'static str> {
     })
 }
 
-fn format_parsed_key(codepoint: i32, modifier: u32, base_layout_key: Option<u32>) -> Option<String> {
+fn format_parsed_key(
+    codepoint: i32,
+    modifier: u32,
+    base_layout_key: Option<u32>,
+) -> Option<String> {
     let normalized_cp = normalize_kitty_functional_codepoint(codepoint);
     let identity_cp = normalize_shifted_letter_identity_codepoint(normalized_cp, modifier);
 
@@ -1948,7 +1951,10 @@ mod tests {
         let _g = KittyGuard::enable();
         assert_eq!(parse_key_id("\x1b[107;9u").as_deref(), Some("super+k"));
         assert_eq!(parse_key_id("\x1b[13;9u").as_deref(), Some("super+enter"));
-        assert_eq!(parse_key_id("\x1b[107;13u").as_deref(), Some("ctrl+super+k"));
+        assert_eq!(
+            parse_key_id("\x1b[107;13u").as_deref(),
+            Some("ctrl+super+k")
+        );
         assert_eq!(
             parse_key_id("\x1b[107;14u").as_deref(),
             Some("shift+ctrl+super+k")
@@ -1979,7 +1985,10 @@ mod tests {
         set_kitty_protocol_active(false);
         assert_eq!(parse_key_id("\x1b[27;5;99~").as_deref(), Some("ctrl+c"));
         assert_eq!(parse_key_id("\x1b[27;5;13~").as_deref(), Some("ctrl+enter"));
-        assert_eq!(parse_key_id("\x1b[27;2;13~").as_deref(), Some("shift+enter"));
+        assert_eq!(
+            parse_key_id("\x1b[27;2;13~").as_deref(),
+            Some("shift+enter")
+        );
         assert_eq!(parse_key_id("\x1b[27;1;127~").as_deref(), Some("backspace"));
     }
 

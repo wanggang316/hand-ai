@@ -361,11 +361,7 @@ pub fn compose_overlays(
             continue;
         }
 
-        let content_width = lines
-            .iter()
-            .map(|l| visible_width(l))
-            .max()
-            .unwrap_or(0);
+        let content_width = lines.iter().map(|l| visible_width(l)).max().unwrap_or(0);
         let raw_w = if options.border {
             content_width + 2
         } else {

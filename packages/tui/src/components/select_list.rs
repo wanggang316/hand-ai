@@ -317,8 +317,11 @@ impl Component for SelectListComponent {
                 } else {
                     desc_single
                 };
-                let desc_styled =
-                    apply_ansi(self.theme.description.as_deref(), &truncated_desc, "\x1b[90m");
+                let desc_styled = apply_ansi(
+                    self.theme.description.as_deref(),
+                    &truncated_desc,
+                    "\x1b[90m",
+                );
                 format!("{indicator}{label}  {desc_styled}")
             } else {
                 format!("{indicator}{label}")
@@ -338,7 +341,11 @@ impl Component for SelectListComponent {
         // Scroll indicator
         if self.filtered.len() > self.visible_count {
             let info = format!("  ({}/{})", self.selected + 1, self.filtered.len());
-            lines.push(apply_ansi(self.theme.scroll_info.as_deref(), &info, "\x1b[90m"));
+            lines.push(apply_ansi(
+                self.theme.scroll_info.as_deref(),
+                &info,
+                "\x1b[90m",
+            ));
         }
 
         lines

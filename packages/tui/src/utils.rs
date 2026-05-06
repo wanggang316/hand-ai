@@ -872,7 +872,11 @@ pub fn truncate_to_width_with(text: &str, max_width: usize, ellipsis: &str, pad:
         }
         let clipped = truncate_fragment_to_width(ellipsis, max_width);
         if clipped.width == 0 {
-            return if pad { " ".repeat(max_width) } else { String::new() };
+            return if pad {
+                " ".repeat(max_width)
+            } else {
+                String::new()
+            };
         }
         return finalize_truncated("", 0, &clipped.text, clipped.width, max_width, pad);
     }
@@ -1052,7 +1056,10 @@ fn truncate_fragment_to_width(text: &str, max_width: usize) -> ClippedFragment {
             result.push_str(g);
             width += w;
         }
-        return ClippedFragment { text: result, width };
+        return ClippedFragment {
+            text: result,
+            width,
+        };
     }
 
     let mut result = String::new();
@@ -1105,7 +1112,10 @@ fn truncate_fragment_to_width(text: &str, max_width: usize) -> ClippedFragment {
         }
         i = end;
     }
-    ClippedFragment { text: result, width }
+    ClippedFragment {
+        text: result,
+        width,
+    }
 }
 
 fn finalize_truncated(
@@ -1189,7 +1199,10 @@ pub fn slice_with_width(
             if extract_ansi_code_at(line, text_end).is_some() {
                 break;
             }
-            let ch = line[text_end..].chars().next().expect("non-empty remainder");
+            let ch = line[text_end..]
+                .chars()
+                .next()
+                .expect("non-empty remainder");
             text_end += ch.len_utf8();
         }
 
@@ -1228,11 +1241,7 @@ pub fn slice_with_width(
 /// total visible width equals `width`. The `bg` callback receives the padded
 /// content and returns the styled string (typically wrapping it with SGR
 /// background open + reset).
-pub fn apply_background_to_line(
-    line: &str,
-    width: usize,
-    bg: impl Fn(&str) -> String,
-) -> String {
+pub fn apply_background_to_line(line: &str, width: usize, bg: impl Fn(&str) -> String) -> String {
     let visible = visible_width(line);
     let padding_needed = width.saturating_sub(visible);
     let mut padded = line.to_string();
@@ -1302,7 +1311,10 @@ pub fn extract_segments(
             if extract_ansi_code_at(line, text_end).is_some() {
                 break;
             }
-            let ch = line[text_end..].chars().next().expect("non-empty remainder");
+            let ch = line[text_end..]
+                .chars()
+                .next()
+                .expect("non-empty remainder");
             text_end += ch.len_utf8();
         }
 
@@ -1512,7 +1524,10 @@ mod tests {
     #[test]
     fn visible_width_zwj_emoji_sequence() {
         // 👨‍👩‍👧 (man, ZWJ, woman, ZWJ, girl) → one cluster, width 2.
-        assert_eq!(visible_width("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), 2);
+        assert_eq!(
+            visible_width("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            2
+        );
     }
 
     #[test]
@@ -1684,7 +1699,10 @@ mod tests {
         let lines = wrap_text_with_ansi(&text, 10);
 
         for line in lines.iter().skip(1) {
-            assert!(line.starts_with(red), "continuation line missing red: {line:?}");
+            assert!(
+                line.starts_with(red),
+                "continuation line missing red: {line:?}"
+            );
         }
         for line in lines.iter().take(lines.len() - 1) {
             assert!(

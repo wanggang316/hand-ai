@@ -122,7 +122,7 @@ mod tests {
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
 
-        let result = execute_find(&dir.path().to_path_buf(), json!({"pattern": "*.rs"}));
+        let result = execute_find(dir.path(), json!({"pattern": "*.rs"}));
         let text = get_text(&result);
         assert!(text.contains("a.rs"));
         assert!(text.contains("b.rs"));
@@ -136,7 +136,7 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         std::fs::write(dir.path().join("sub").join("b.rs"), "").unwrap();
 
-        let result = execute_find(&dir.path().to_path_buf(), json!({"pattern": "**/*.rs"}));
+        let result = execute_find(dir.path(), json!({"pattern": "**/*.rs"}));
         let text = get_text(&result);
         assert!(text.contains("a.rs"));
         assert!(text.contains("b.rs"));
@@ -145,10 +145,7 @@ mod tests {
     #[test]
     fn test_find_no_matches() {
         let dir = TempDir::new().unwrap();
-        let result = execute_find(
-            &dir.path().to_path_buf(),
-            json!({"pattern": "*.nonexistent"}),
-        );
+        let result = execute_find(dir.path(), json!({"pattern": "*.nonexistent"}));
         let text = get_text(&result);
         assert!(text.contains("No files found"));
     }
@@ -156,7 +153,7 @@ mod tests {
     #[test]
     fn test_find_missing_pattern() {
         let dir = TempDir::new().unwrap();
-        let result = execute_find(&dir.path().to_path_buf(), json!({}));
+        let result = execute_find(dir.path(), json!({}));
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
     }
