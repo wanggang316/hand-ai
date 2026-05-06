@@ -1,7 +1,7 @@
 //! Editor component — multi-line text editor with cursor, scrolling, and undo.
 
-use crate::keys::{KeyName, parse_key};
-use crate::tui::{Component, Focusable, HandleResult};
+use crate::keys::{Key, KeyName, parse_key};
+use crate::tui::{Component, Focusable, HandleResult, InputEvent};
 use crate::utils;
 
 /// Multi-line text editor with scrolling, word wrap, and basic editing.
@@ -263,12 +263,22 @@ impl Component for EditorComponent {
         output
     }
 
-    fn handle_input(&mut self, data: &str) -> HandleResult {
+    fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
         if !self.focused {
             return HandleResult::Ignored;
         }
+        match event {
+            InputEvent::Key(key) => self.handle_key(key),
+            InputEvent::Raw(data) | InputEvent::Paste(data) => self.handle_key(&parse_key(data)),
+            _ => HandleResult::Ignored,
+        }
+    }
 
-        let key = parse_key(data);
+    fn invalidate(&mut self) {}
+}
+
+impl EditorComponent {
+    fn handle_key(&mut self, key: &Key) -> HandleResult {
         if key.is_release {
             return HandleResult::Ignored;
         }
@@ -365,8 +375,6 @@ impl Component for EditorComponent {
             _ => HandleResult::Ignored,
         }
     }
-
-    fn invalidate(&mut self) {}
 }
 
 impl Focusable for EditorComponent {
@@ -412,8 +420,8 @@ mod tests {
     #[test]
     fn test_editor_insert_char() {
         let mut editor = EditorComponent::new();
-        editor.handle_input("h");
-        editor.handle_input("i");
+        editor.handle_input(&InputEvent::Raw("h".into()));
+        editor.handle_input(&InputEvent::Raw("i".into()));
         assert_eq!(editor.text(), "hi");
         assert_eq!(editor.cursor(), (0, 2));
     }
@@ -421,9 +429,9 @@ mod tests {
     #[test]
     fn test_editor_newline() {
         let mut editor = EditorComponent::new();
-        editor.handle_input("a");
-        editor.handle_input("\r"); // Enter
-        editor.handle_input("b");
+        editor.handle_input(&InputEvent::Raw("a".into()));
+        editor.handle_input(&InputEvent::Raw("\r".into())); // Enter
+        editor.handle_input(&InputEvent::Raw("b".into()));
         assert_eq!(editor.line_count(), 2);
         assert_eq!(editor.text(), "a\nb");
     }
@@ -433,7 +441,7 @@ mod tests {
         let mut editor = EditorComponent::new();
         editor.set_text("hello");
         editor.cursor_col = 5;
-        editor.handle_input("\x7f"); // Backspace
+        editor.handle_input(&InputEvent::Raw("\x7f".into())); // Backspace
         assert_eq!(editor.text(), "hell");
     }
 
@@ -443,7 +451,7 @@ mod tests {
         editor.set_text("line1\nline2");
         editor.cursor_line = 1;
         editor.cursor_col = 0;
-        editor.handle_input("\x7f");
+        editor.handle_input(&InputEvent::Raw("\x7f".into()));
         assert_eq!(editor.text(), "line1line2");
         assert_eq!(editor.line_count(), 1);
     }
@@ -455,18 +463,18 @@ mod tests {
         editor.cursor_line = 0;
         editor.cursor_col = 2;
 
-        editor.handle_input("\x1b[B"); // Down
+        editor.handle_input(&InputEvent::Raw("\x1b[B".into())); // Down
         assert_eq!(editor.cursor(), (1, 2));
 
-        editor.handle_input("\x1b[A"); // Up
+        editor.handle_input(&InputEvent::Raw("\x1b[A".into())); // Up
         assert_eq!(editor.cursor(), (0, 2));
     }
 
     #[test]
     fn test_editor_undo_redo() {
         let mut editor = EditorComponent::new();
-        editor.handle_input("a");
-        editor.handle_input("b");
+        editor.handle_input(&InputEvent::Raw("a".into()));
+        editor.handle_input(&InputEvent::Raw("b".into()));
         assert_eq!(editor.text(), "ab");
 
         // Undo the "b" insertion
@@ -517,11 +525,11 @@ mod tests {
         editor.cursor_line = 5;
         editor.cursor_col = 0;
 
-        editor.handle_input("\x1b[5~"); // PageUp
+        editor.handle_input(&InputEvent::Raw("\x1b[5~".into())); // PageUp
         assert!(editor.cursor_line < 5);
 
         editor.cursor_line = 0;
-        editor.handle_input("\x1b[6~"); // PageDown
+        editor.handle_input(&InputEvent::Raw("\x1b[6~".into())); // PageDown
         assert!(editor.cursor_line > 0);
     }
 
@@ -530,7 +538,7 @@ mod tests {
         let mut editor = EditorComponent::new();
         editor.set_text("hello");
         editor.cursor_col = 0;
-        editor.handle_input("\x1b[3~"); // Delete
+        editor.handle_input(&InputEvent::Raw("\x1b[3~".into())); // Delete
         assert_eq!(editor.text(), "ello");
     }
 
@@ -540,6 +548,9 @@ mod tests {
         assert!(editor.focused());
         editor.set_focused(false);
         assert!(!editor.focused());
-        assert_eq!(editor.handle_input("a"), HandleResult::Ignored);
+        assert_eq!(
+            editor.handle_input(&InputEvent::Raw("a".into())),
+            HandleResult::Ignored
+        );
     }
 }

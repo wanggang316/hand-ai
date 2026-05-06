@@ -1,6 +1,6 @@
 //! Box component — container with padding and optional background.
 
-use crate::tui::{Component, Container, HandleResult};
+use crate::tui::{Component, Container, HandleResult, InputEvent};
 use crate::utils;
 
 /// Container that applies padding and optional background to children.
@@ -83,8 +83,8 @@ impl Component for BoxComponent {
         lines
     }
 
-    fn handle_input(&mut self, data: &str) -> HandleResult {
-        self.container.handle_input(data)
+    fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
+        self.container.handle_input(event)
     }
 
     fn invalidate(&mut self) {

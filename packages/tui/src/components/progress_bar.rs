@@ -1,6 +1,6 @@
 //! Progress bar component — renders a horizontal progress indicator.
 
-use crate::tui::{Component, HandleResult};
+use crate::tui::Component;
 
 /// A horizontal progress bar.
 pub struct ProgressBarComponent {
@@ -100,10 +100,6 @@ impl Component for ProgressBarComponent {
         };
 
         vec![line]
-    }
-
-    fn handle_input(&mut self, _data: &str) -> HandleResult {
-        HandleResult::Ignored
     }
 }
 

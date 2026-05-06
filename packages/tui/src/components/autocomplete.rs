@@ -1,6 +1,6 @@
 //! Autocomplete component — suggestion dropdown for input fields.
 
-use crate::tui::{Component, HandleResult};
+use crate::tui::Component;
 
 /// A single autocomplete suggestion.
 #[derive(Debug, Clone)]
@@ -166,10 +166,6 @@ impl Component for AutocompleteComponent {
                 }
             })
             .collect()
-    }
-
-    fn handle_input(&mut self, _data: &str) -> HandleResult {
-        HandleResult::Ignored
     }
 }
 

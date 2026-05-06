@@ -151,10 +151,6 @@ impl Component for ImageComponent {
         }
     }
 
-    fn handle_input(&mut self, _data: &str) -> crate::tui::HandleResult {
-        crate::tui::HandleResult::Ignored
-    }
-
     fn invalidate(&mut self) {}
 }
 

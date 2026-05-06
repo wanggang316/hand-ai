@@ -46,5 +46,5 @@ pub use render::DiffRenderer;
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
 pub use terminal::{Terminal, TerminalCapabilities};
 pub use theme::{Color, NamedColor, Style, Theme};
-pub use tui::{Component, Container, Focusable, Tui};
+pub use tui::{Component, Container, Focusable, HandleResult, InputEvent, Tui, input_event_from_str};
 pub use utils::{truncate_to_width, visible_width, wrap_text};

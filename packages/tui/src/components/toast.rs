@@ -1,6 +1,6 @@
 //! Toast/notification component — transient messages.
 
-use crate::tui::{Component, HandleResult};
+use crate::tui::Component;
 
 /// Toast severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,10 +117,6 @@ impl Component for ToastComponent {
                 format!("{}[{}]\x1b[0m {}", style, icon, truncated)
             })
             .collect()
-    }
-
-    fn handle_input(&mut self, _data: &str) -> HandleResult {
-        HandleResult::Ignored
     }
 }
 

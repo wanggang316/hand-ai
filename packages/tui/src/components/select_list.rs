@@ -1,7 +1,7 @@
 //! Select list component — scrollable selection list.
 
-use crate::keys::{KeyName, parse_key};
-use crate::tui::{Component, HandleResult};
+use crate::keys::{Key, KeyName, parse_key};
+use crate::tui::{Component, HandleResult, InputEvent};
 use crate::utils;
 
 /// An item in the select list.
@@ -151,8 +151,17 @@ impl Component for SelectListComponent {
         lines
     }
 
-    fn handle_input(&mut self, data: &str) -> HandleResult {
-        let key = parse_key(data);
+    fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
+        match event {
+            InputEvent::Key(key) => self.handle_key(key),
+            InputEvent::Raw(data) | InputEvent::Paste(data) => self.handle_key(&parse_key(data)),
+            _ => HandleResult::Ignored,
+        }
+    }
+}
+
+impl SelectListComponent {
+    fn handle_key(&mut self, key: &Key) -> HandleResult {
         if key.is_release {
             return HandleResult::Ignored;
         }
@@ -237,16 +246,16 @@ mod tests {
         let mut list = SelectListComponent::new(test_items());
         assert_eq!(list.selected_index(), 0);
 
-        list.handle_input("\x1b[B"); // Down
+        list.handle_input(&InputEvent::Raw("\x1b[B".into())); // Down
         assert_eq!(list.selected_index(), 1);
 
-        list.handle_input("\x1b[B"); // Down
+        list.handle_input(&InputEvent::Raw("\x1b[B".into())); // Down
         assert_eq!(list.selected_index(), 2);
 
-        list.handle_input("\x1b[B"); // Down (at end)
+        list.handle_input(&InputEvent::Raw("\x1b[B".into())); // Down (at end)
         assert_eq!(list.selected_index(), 2);
 
-        list.handle_input("\x1b[A"); // Up
+        list.handle_input(&InputEvent::Raw("\x1b[A".into())); // Up
         assert_eq!(list.selected_index(), 1);
     }
 
@@ -268,17 +277,17 @@ mod tests {
     #[test]
     fn test_select_list_home_end() {
         let mut list = SelectListComponent::new(test_items());
-        list.handle_input("\x1b[F"); // End
+        list.handle_input(&InputEvent::Raw("\x1b[F".into())); // End
         assert_eq!(list.selected_index(), 2);
 
-        list.handle_input("\x1b[H"); // Home
+        list.handle_input(&InputEvent::Raw("\x1b[H".into())); // Home
         assert_eq!(list.selected_index(), 0);
     }
 
     #[test]
     fn test_select_list_set_items() {
         let mut list = SelectListComponent::new(test_items());
-        list.handle_input("\x1b[B"); // Move down
+        list.handle_input(&InputEvent::Raw("\x1b[B".into())); // Move down
         assert_eq!(list.selected_index(), 1);
 
         list.set_items(vec![SelectItem::new("x", "X")]);

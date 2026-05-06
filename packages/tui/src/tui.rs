@@ -14,14 +14,41 @@ pub enum HandleResult {
     Ignored,
 }
 
+/// Structured input event delivered to components.
+///
+/// Bridges the M1 input layer (`stdin_buffer` + `keys`) with the component model.
+/// Components that previously dispatched on raw `&str` should match on `Raw`/`Paste`.
+#[derive(Debug, Clone)]
+pub enum InputEvent {
+    /// A semantic key from the parser. Use `keys::matches_key` or
+    /// `KeybindingsManager::matches` to dispatch.
+    Key(crate::keys::Key),
+    /// Raw bytes from stdin — useful for components that want to consume escape
+    /// sequences the parser didn't classify (terminal-image protocol replies,
+    /// mouse events, etc.).
+    Raw(String),
+    /// A synthetic paste event (multi-byte payload pre-classified by `stdin_buffer`).
+    Paste(String),
+    /// Terminal was resized.
+    Resize { cols: u16, rows: u16 },
+    /// Periodic tick — used for animations and debounced timers.
+    Tick,
+}
+
+/// Wrap a `&str` payload as `InputEvent::Raw`. Convenience helper for migration
+/// callsites and tests that previously passed raw escape sequences directly.
+pub fn input_event_from_str(data: &str) -> InputEvent {
+    InputEvent::Raw(data.to_string())
+}
+
 /// Core component trait — all UI elements implement this.
 pub trait Component: Send {
     /// Render the component to a list of terminal lines.
     /// `width` is the available terminal width in columns.
     fn render(&self, width: u16) -> Vec<String>;
 
-    /// Handle keyboard input. Returns whether the input was consumed.
-    fn handle_input(&mut self, _data: &str) -> HandleResult {
+    /// Handle a structured input event. Returns whether the input was consumed.
+    fn handle_input(&mut self, _event: &InputEvent) -> HandleResult {
         HandleResult::Ignored
     }
 
@@ -30,6 +57,25 @@ pub trait Component: Send {
 
     /// Whether this component wants key release events.
     fn wants_key_release(&self) -> bool {
+        false
+    }
+
+    /// Hide this component (skipped by container rendering).
+    fn hide(&mut self) {
+        self.set_hidden(true);
+    }
+
+    /// Show this component (default visible state).
+    fn show(&mut self) {
+        self.set_hidden(false);
+    }
+
+    /// Set the hidden flag. Default impl is a no-op for components that are
+    /// always visible.
+    fn set_hidden(&mut self, _hidden: bool) {}
+
+    /// Whether this component is currently hidden.
+    fn is_hidden(&self) -> bool {
         false
     }
 }
@@ -44,6 +90,21 @@ pub trait Focusable: Component {
 
     /// Cursor position relative to the component (col, row), if visible.
     fn cursor_position(&self) -> Option<(u16, u16)>;
+
+    /// Convenience: focus this component.
+    fn focus(&mut self) {
+        self.set_focused(true);
+    }
+
+    /// Convenience: unfocus this component.
+    fn unfocus(&mut self) {
+        self.set_focused(false);
+    }
+
+    /// Alias for `focused()` to mirror the pi-tui TS API.
+    fn is_focused(&self) -> bool {
+        self.focused()
+    }
 }
 
 /// Container that manages child components.
@@ -97,15 +158,21 @@ impl Component for Container {
     fn render(&self, width: u16) -> Vec<String> {
         let mut lines = Vec::new();
         for child in &self.children {
+            if child.is_hidden() {
+                continue;
+            }
             lines.extend(child.render(width));
         }
         lines
     }
 
-    fn handle_input(&mut self, data: &str) -> HandleResult {
-        // Try each child in reverse order (last child = topmost)
+    fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
+        // Try each child in reverse order (last child = topmost). Skip hidden.
         for child in self.children.iter_mut().rev() {
-            if child.handle_input(data) == HandleResult::Handled {
+            if child.is_hidden() {
+                continue;
+            }
+            if child.handle_input(event) == HandleResult::Handled {
                 return HandleResult::Handled;
             }
         }
@@ -237,6 +304,49 @@ mod tests {
     #[test]
     fn test_handle_result_default_ignored() {
         let mut comp = TestComponent::new(vec!["test"]);
-        assert_eq!(comp.handle_input("x"), HandleResult::Ignored);
+        assert_eq!(
+            comp.handle_input(&InputEvent::Raw("x".into())),
+            HandleResult::Ignored
+        );
+    }
+
+    #[test]
+    fn test_input_event_from_str() {
+        match input_event_from_str("\x1b[A") {
+            InputEvent::Raw(s) => assert_eq!(s, "\x1b[A"),
+            _ => panic!("expected Raw"),
+        }
+    }
+
+    #[test]
+    fn test_container_skips_hidden_children() {
+        struct HideableComponent {
+            line: String,
+            hidden: bool,
+        }
+        impl Component for HideableComponent {
+            fn render(&self, _w: u16) -> Vec<String> {
+                vec![self.line.clone()]
+            }
+            fn set_hidden(&mut self, hidden: bool) {
+                self.hidden = hidden;
+            }
+            fn is_hidden(&self) -> bool {
+                self.hidden
+            }
+        }
+
+        let mut container = Container::new();
+        container.add_child(Box::new(HideableComponent {
+            line: "visible".into(),
+            hidden: false,
+        }));
+        container.add_child(Box::new(HideableComponent {
+            line: "hidden".into(),
+            hidden: true,
+        }));
+
+        let lines = container.render(80);
+        assert_eq!(lines, vec!["visible"]);
     }
 }
