@@ -1254,43 +1254,73 @@ mod tests {
     }
 
     /// Component whose render output contains a red SGR escape, used to verify
-    /// that compose_overlays' style-leak fix prevents that red from bleeding
-    /// into post-hide frames.
+    /// that the overlay style-leak fix prevents that red from bleeding into
+    /// post-hide frames.
     struct StyledOverlay;
 
     impl Component for StyledOverlay {
         fn render(&self, _w: u16) -> Vec<String> {
-            vec!["\x1b[31mfoo\x1b[0m".to_string()]
+            vec!["\x1b[31moverlay\x1b[0m".to_string()]
         }
     }
 
     #[test]
     fn test_overlay_style_leak_fix() {
-        // The post-hide frame must NOT contain any red SGR escape. We verify
-        // by checking the final composed lines after the overlay is gone.
-        let base: Vec<String> = (0..6).map(|_| " ".repeat(20)).collect();
+        // End-to-end: drive Tui::show_overlay -> render -> hide_overlay ->
+        // render through DiffRenderer and assert the post-hide write log
+        // contains no red SGR. Without `hide_overlay` forcing a full re-render
+        // (renderer.reset()), the cached prev_lines would still hold the
+        // overlay-composed strings and could leak `\x1b[31m` into the next
+        // frame.
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec!["base"])));
 
-        // Frame 1: with overlay.
-        let comp = StyledOverlay;
-        let opts = overlay_opts(false);
-        let overlays_with: Vec<(&dyn Component, &OverlayOptions)> = vec![(&comp, &opts)];
-        let with = compose_overlays(&base, &overlays_with, 20, 6);
-        // Sanity: overlay frame DOES contain red.
-        assert!(with.iter().any(|l| l.contains("\x1b[31m")));
+        // Frame 1: show overlay and render. show_overlay already calls
+        // request_render_force, so maybe_render will produce output.
+        let handle = tui.show_overlay(Box::new(StyledOverlay), overlay_opts(false));
+        tui.maybe_render();
 
-        // Frame 2: overlay hidden — pass an empty overlay slice.
-        let post = compose_overlays(
-            &base,
-            &Vec::<(&dyn Component, &OverlayOptions)>::new(),
-            20,
-            6,
-        );
-        for line in &post {
+        // Sanity: the overlay frame did emit red SGR somewhere in the writes.
+        {
+            let writes: String = output.lock().unwrap().iter().cloned().collect();
             assert!(
-                !line.contains("\x1b[31m"),
-                "post-hide line leaked red SGR: {line:?}"
+                writes.contains("\x1b[31m"),
+                "expected overlay render to write red SGR, got: {writes:?}"
             );
         }
+
+        // Drain the write log so the post-hide assertion only inspects what
+        // the second render emitted.
+        output.lock().unwrap().clear();
+
+        // Frame 2: hide the overlay and render again. hide_overlay must set
+        // the force-render flag (so maybe_render actually runs even though no
+        // input arrived) and reset the diff renderer (so cached overlay lines
+        // cannot bleed forward).
+        tui.hide_overlay(handle);
+        tui.maybe_render();
+
+        let post: String = output.lock().unwrap().iter().cloned().collect();
+
+        // The mere fact that the second render produced output proves that
+        // hide_overlay armed the render-requested flag.
+        assert!(
+            !post.is_empty(),
+            "hide_overlay must arm a re-render, but no writes were emitted"
+        );
+        // The core regression: no red SGR escape may appear in the post-hide
+        // frame.
+        assert!(
+            !post.contains("\x1b[31m"),
+            "post-hide frame leaked red SGR: {post:?}"
+        );
+        // And the base content must be present in the post-hide frame.
+        assert!(
+            post.contains("base"),
+            "post-hide frame missing base content: {post:?}"
+        );
     }
 
     #[test]

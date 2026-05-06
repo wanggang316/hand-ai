@@ -292,8 +292,10 @@ pub struct OverlayOptions {
     /// When true, input is delivered to the overlay component before falling
     /// through to listeners and the focused child.
     pub capture_input: bool,
-    /// When true, lines underneath the overlay are wrapped with `\x1b[2m` /
-    /// `\x1b[22m` to dim them.
+    /// When true, the entire base frame is dimmed (each non-empty row wrapped
+    /// with `\x1b[2m` / `\x1b[22m`) before the overlay is stamped on top. The
+    /// overlay's own cells are stamped after dimming, so they remain at full
+    /// brightness. This matches typical modal-dialog UX.
     pub dim_background: bool,
     /// When true, draw a single-cell border around the overlay's content.
     pub border: bool,
@@ -388,7 +390,8 @@ pub fn compose_overlays(
 
         let (start_row, start_col) = anchor_position(options.anchor, w, h, ov_w, ov_h, m);
 
-        // Dim base (only the part of `result` covered by this overlay's rows).
+        // Dim the entire base frame; the overlay is stamped on top afterwards
+        // so its own cells stay at full brightness.
         if options.dim_background {
             for row in result.iter_mut().take(h) {
                 if !row.is_empty() {
