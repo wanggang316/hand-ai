@@ -1,4 +1,10 @@
 //! Cancellable loader — animated spinner with progress and cancel support.
+//
+// audit: M3.T5 — surface superset of pi-tui/cancellable-loader.ts on 2026-05-07.
+// TS `CancellableLoader` extends `Loader` and exposes an `AbortController`/
+// `signal` for upstream tasks. The Rust port surfaces an `is_cancelled()` flag
+// instead — async cancellation is the host's concern (e.g. `tokio::select!`
+// against the application's own `CancellationToken`).
 
 use crate::tui::{Component, HandleResult, InputEvent};
 

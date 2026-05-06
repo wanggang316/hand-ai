@@ -1,4 +1,12 @@
 //! Input component — single-line text input with cursor and history.
+//
+// audit: M3.T5 — parity reviewed against pi-tui/input.ts on 2026-05-07.
+// non-goal: TS's `Input` ships with kill-ring (yank/yank-pop), per-input undo
+// stack, bracketed-paste buffering, IME `CURSOR_MARKER`, Kitty CSI-u
+// printable decoding, and word-aware deletes. The Rust port keeps `Input` as
+// a lightweight single-line widget; the heavyweight surface lives on
+// `EditorComponent` (which already implements those features in Rust). Adding
+// them here would duplicate ~400 lines of editor logic for marginal gain.
 
 use crate::keys::{Key, KeyName, parse_key};
 use crate::tui::{Component, Focusable, HandleResult, InputEvent};

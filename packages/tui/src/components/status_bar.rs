@@ -1,4 +1,6 @@
 //! Status bar component — renders a fixed-width status line.
+//
+// audit: M3.T5 — Rust-original (no TS counterpart in pi-tui as of 2026-05-07).
 
 use crate::tui::Component;
 
