@@ -543,20 +543,30 @@ impl Tui {
         tokio::spawn(async move {
             let _ = crate::terminal::run_stdin_reader(event_tx, shutdown_rx).await;
         });
-        self.run_with_events(event_rx).await
+        let resize_rx = crate::resize::watch_resizes(self.shutdown_tx.subscribe());
+        self.run_with_events_and_resizes(event_rx, resize_rx).await
     }
 
-    /// Test-friendly entry point: run with a pre-built event source. Production
-    /// callers use [`Self::run`] which spawns its own stdin reader.
+    /// Test-friendly entry point: run with a pre-built stdin event source. The
+    /// resize channel is empty (never fires). Production callers use
+    /// [`Self::run`], which wires up both stdin and the platform resize watcher.
     pub async fn run_with_events(
         &mut self,
+        events: mpsc::UnboundedReceiver<StdinBufferEvent>,
+    ) -> TuiResult<()> {
+        let (_, resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
+        self.run_with_events_and_resizes(events, resize_rx).await
+    }
+
+    /// Test-friendly entry point: run with both pre-built stdin and resize
+    /// channels. Lets tests synthesise terminal resizes without touching the
+    /// platform watcher.
+    pub async fn run_with_events_and_resizes(
+        &mut self,
         mut events: mpsc::UnboundedReceiver<StdinBufferEvent>,
+        mut resize_rx: mpsc::UnboundedReceiver<(u16, u16)>,
     ) -> TuiResult<()> {
         self.running.store(true, Ordering::Relaxed);
-
-        // Resize channel — populated by M2.T4. Holding the sender keeps the
-        // receiver open without ever firing.
-        let (_resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
 
         let mut tick = time::interval(Duration::from_millis(RENDER_TICK_MS));
         tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -646,6 +656,9 @@ impl Tui {
     }
 
     fn process_resize(&mut self, cols: u16, rows: u16) {
+        // Refresh the cached size on backends that snapshot it (e.g.
+        // `ProcessTerminal`). Test backends are no-ops here.
+        self.terminal.refresh_size();
         if cols != self.previous_width || rows != self.previous_height {
             self.force_render.store(true, Ordering::Relaxed);
             self.render_requested.store(true, Ordering::Relaxed);
@@ -659,17 +672,28 @@ impl Tui {
         if !self.render_requested.swap(false, Ordering::Relaxed) {
             return;
         }
-        let force = self.force_render.swap(false, Ordering::Relaxed);
+        let mut force = self.force_render.swap(false, Ordering::Relaxed);
 
         let (width, height) = (self.terminal.columns(), self.terminal.rows());
-        let size_changed = width != self.previous_width || height != self.previous_height;
-        let force = force || size_changed;
+
+        // Width changes invalidate the cached diff lines because wrapping
+        // shifts; force a full repaint.
+        if width != self.previous_width {
+            force = true;
+        }
+
+        // When the terminal shrinks below the high-water mark of content
+        // we've ever rendered, optionally clear the screen so stale lines
+        // outside the new viewport don't linger.
+        let height_shrank_below_high_water =
+            (height as usize) < self.max_lines_rendered && height < self.previous_height;
+        if self.clear_on_shrink && height_shrank_below_high_water {
+            self.terminal.clear_screen();
+            force = true;
+        }
 
         if force {
             self.renderer.reset();
-            if self.clear_on_shrink && (width < self.previous_width || height < self.previous_height) {
-                self.terminal.clear_from_cursor();
-            }
         }
 
         let base = self.root.render(width);
@@ -1466,5 +1490,267 @@ mod tests {
         // Already false; calling false again must not write.
         tui.set_show_hardware_cursor(false);
         assert!(output.lock().unwrap().is_empty());
+    }
+
+    // ---------- resize handling (M2.T4) ----------
+
+    /// Mock terminal with resizable cached size and shared write log. Used by
+    /// the resize tests below to drive a `Tui` through a simulated SIGWINCH.
+    struct ResizableTerminal {
+        size: Arc<Mutex<(u16, u16)>>,
+        output: Arc<Mutex<Vec<String>>>,
+        capabilities: TerminalCapabilities,
+    }
+
+    type SharedSize = Arc<Mutex<(u16, u16)>>;
+    type SharedOutput = Arc<Mutex<Vec<String>>>;
+
+    impl ResizableTerminal {
+        fn new(cols: u16, rows: u16) -> (Self, SharedSize, SharedOutput) {
+            let size = Arc::new(Mutex::new((cols, rows)));
+            let output = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    size: size.clone(),
+                    output: output.clone(),
+                    capabilities: TerminalCapabilities::default(),
+                },
+                size,
+                output,
+            )
+        }
+    }
+
+    impl Terminal for ResizableTerminal {
+        fn write(&mut self, data: &str) {
+            self.output.lock().unwrap().push(data.to_string());
+        }
+        fn columns(&self) -> u16 {
+            self.size.lock().unwrap().0
+        }
+        fn rows(&self) -> u16 {
+            self.size.lock().unwrap().1
+        }
+        fn hide_cursor(&mut self) {
+            self.write("\x1b[?25l");
+        }
+        fn show_cursor(&mut self) {
+            self.write("\x1b[?25h");
+        }
+        fn clear_line(&mut self) {
+            self.write("\x1b[2K\r");
+        }
+        fn clear_from_cursor(&mut self) {
+            self.write("\x1b[J");
+        }
+        fn clear_screen(&mut self) {
+            self.write("\x1b[2J\x1b[H");
+        }
+        fn move_by(&mut self, lines: i32) {
+            if lines > 0 {
+                self.write(&format!("\x1b[{}B", lines));
+            } else if lines < 0 {
+                self.write(&format!("\x1b[{}A", -lines));
+            }
+        }
+        fn set_title(&mut self, title: &str) {
+            self.write(&format!("\x1b]0;{}\x07", title));
+        }
+        fn capabilities(&self) -> &TerminalCapabilities {
+            &self.capabilities
+        }
+    }
+
+    #[test]
+    fn test_set_clear_on_shrink_toggles_field() {
+        let mut tui = make_tui();
+        assert!(!tui.clear_on_shrink);
+        tui.set_clear_on_shrink(true);
+        assert!(tui.clear_on_shrink);
+        tui.set_clear_on_shrink(false);
+        assert!(!tui.clear_on_shrink);
+    }
+
+    #[test]
+    fn test_resize_width_change_triggers_force_render() {
+        // Render once at 80x24, change width to 60, render again — the
+        // second pass must take the force path (renderer.reset()) so that
+        // wrapping changes are not stale.
+        let (term, size, output) = ResizableTerminal::new(80, 24);
+        let mut tui = Tui::new(Box::new(term));
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec!["one", "two"])));
+
+        tui.request_render_force();
+        tui.maybe_render();
+        output.lock().unwrap().clear();
+
+        // Simulate width shrink. process_resize is what the run loop calls
+        // when a resize event arrives.
+        size.lock().unwrap().0 = 60;
+        tui.process_resize(60, 24);
+        // process_resize sets the request flag; maybe_render then notices the
+        // width delta and resets the diff renderer.
+        tui.maybe_render();
+
+        // Force-rendered frames re-emit the full content.
+        let writes: String = output.lock().unwrap().iter().cloned().collect();
+        assert!(
+            writes.contains("one") && writes.contains("two"),
+            "expected force-rendered content after width change, got: {writes:?}"
+        );
+        assert_eq!(tui.previous_width, 60);
+    }
+
+    #[test]
+    fn test_resize_height_shrink_with_clear_on_shrink() {
+        let (term, size, output) = ResizableTerminal::new(80, 24);
+        let mut tui = Tui::new(Box::new(term));
+        tui.set_clear_on_shrink(true);
+        // 10 lines of content sets max_lines_rendered to 10.
+        let content: Vec<&str> = vec!["l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"];
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(content)));
+
+        tui.request_render_force();
+        tui.maybe_render();
+        assert_eq!(tui.max_lines_rendered, 10);
+        output.lock().unwrap().clear();
+
+        // Shrink terminal height to 5 — below the 10-line high-water mark.
+        size.lock().unwrap().1 = 5;
+        tui.process_resize(80, 5);
+        tui.maybe_render();
+
+        let writes: String = output.lock().unwrap().iter().cloned().collect();
+        assert!(
+            writes.contains("\x1b[2J\x1b[H"),
+            "expected clear_screen sequence on shrink-with-flag-on, got: {writes:?}"
+        );
+    }
+
+    #[test]
+    fn test_resize_height_shrink_without_clear_on_shrink() {
+        let (term, size, output) = ResizableTerminal::new(80, 24);
+        let mut tui = Tui::new(Box::new(term));
+        // Default: clear_on_shrink == false.
+        let content: Vec<&str> = vec!["l0", "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"];
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(content)));
+
+        tui.request_render_force();
+        tui.maybe_render();
+        output.lock().unwrap().clear();
+
+        size.lock().unwrap().1 = 5;
+        tui.process_resize(80, 5);
+        tui.maybe_render();
+
+        let writes: String = output.lock().unwrap().iter().cloned().collect();
+        assert!(
+            !writes.contains("\x1b[2J\x1b[H"),
+            "clear_screen must NOT fire when clear_on_shrink is off, got: {writes:?}"
+        );
+    }
+
+    #[test]
+    fn test_max_lines_rendered_tracks_high_water_mark() {
+        let (term, _size, _output) = ResizableTerminal::new(80, 24);
+        let mut tui = Tui::new(Box::new(term));
+
+        let three_id = tui
+            .root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec!["a", "b", "c"])));
+        tui.request_render_force();
+        tui.maybe_render();
+        assert_eq!(tui.max_lines_rendered, 3);
+
+        // Shrink content — high-water mark must NOT regress.
+        tui.root_mut().remove_child_by_id(three_id);
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec!["x"])));
+        tui.request_render_force();
+        tui.maybe_render();
+        assert_eq!(
+            tui.max_lines_rendered, 3,
+            "max_lines_rendered must not shrink with content"
+        );
+
+        // Grow content — high-water mark advances.
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec!["y", "z", "w", "v"])));
+        tui.request_render_force();
+        tui.maybe_render();
+        assert_eq!(tui.max_lines_rendered, 5);
+    }
+
+    #[test]
+    fn test_resize_event_updates_previous_dims() {
+        let (term, size, _output) = ResizableTerminal::new(80, 24);
+        let mut tui = Tui::new(Box::new(term));
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec!["x"])));
+        tui.request_render_force();
+        tui.maybe_render();
+        assert_eq!((tui.previous_width, tui.previous_height), (80, 24));
+
+        size.lock().unwrap().0 = 100;
+        size.lock().unwrap().1 = 30;
+        tui.process_resize(100, 30);
+        tui.maybe_render();
+        assert_eq!(
+            (tui.previous_width, tui.previous_height),
+            (100, 30),
+            "previous dims must reflect the latest rendered frame"
+        );
+
+        // A subsequent same-size resize must NOT re-trigger a forced repaint.
+        // Drain the request flag by rendering once more, then assert the
+        // request flag stays clear when we deliver an identical resize.
+        tui.process_resize(100, 30);
+        assert!(
+            !tui.render_requested.load(Ordering::Relaxed),
+            "no-op resize must not arm render_requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_with_resizes_dispatches_resize_event() {
+        // End-to-end: feed a resize down the injected channel and confirm the
+        // root container observed a Resize input event.
+        let (term, size, _output) = ResizableTerminal::new(80, 24);
+        let mut tui = Tui::new(Box::new(term));
+        let (comp, events) = RecordingComponent::new();
+        tui.root_mut().add_child_with_id(Box::new(comp));
+
+        let running = tui.running.clone();
+        let (_event_tx, event_rx) = mpsc::unbounded_channel();
+        let (resize_tx, resize_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(async move {
+            tui.run_with_events_and_resizes(event_rx, resize_rx).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Mutate the cached size so the next render observes the new dims,
+        // then deliver the resize event.
+        size.lock().unwrap().0 = 100;
+        size.lock().unwrap().1 = 40;
+        resize_tx.send((100, 40)).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        running.store(false, Ordering::Relaxed);
+        let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
+
+        let received = events.lock().unwrap();
+        let resize_seen = received
+            .iter()
+            .any(|e| matches!(e, InputEvent::Resize { cols: 100, rows: 40 }));
+        assert!(
+            resize_seen,
+            "root must receive a Resize event from the resize channel: {received:?}"
+        );
     }
 }

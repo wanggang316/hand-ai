@@ -78,6 +78,14 @@ pub trait Terminal: Send {
 
     /// Get terminal capabilities.
     fn capabilities(&self) -> &TerminalCapabilities;
+
+    /// Re-query the OS for the terminal's current size and update any
+    /// cached fields. Called by [`Tui`](crate::tui::Tui) on each resize
+    /// event so subsequent renders see the new dimensions.
+    ///
+    /// Default impl is a no-op — backends that don't cache size (e.g.
+    /// in-memory test terminals) need do nothing.
+    fn refresh_size(&mut self) {}
 }
 
 /// Real terminal implementation using crossterm.
@@ -99,14 +107,6 @@ impl ProcessTerminal {
             raw_mode: false,
             alternate_screen: false,
         })
-    }
-
-    /// Refresh terminal size (call after resize).
-    pub fn refresh_size(&mut self) {
-        if let Ok((cols, rows)) = terminal::size() {
-            self.columns = cols;
-            self.rows = rows;
-        }
     }
 
     /// Enable raw mode. Idempotent — safe to call when already raw.
@@ -286,6 +286,13 @@ impl Terminal for ProcessTerminal {
     fn capabilities(&self) -> &TerminalCapabilities {
         &self.capabilities
     }
+
+    fn refresh_size(&mut self) {
+        if let Ok((cols, rows)) = terminal::size() {
+            self.columns = cols;
+            self.rows = rows;
+        }
+    }
 }
 
 /// In-memory terminal for testing.
@@ -308,6 +315,12 @@ impl TestTerminal {
 
     pub fn last_output(&self) -> Option<&str> {
         self.output.last().map(|s| s.as_str())
+    }
+
+    /// Update the cached size — used in tests to simulate a terminal resize.
+    pub fn set_size(&mut self, columns: u16, rows: u16) {
+        self.columns = columns;
+        self.rows = rows;
     }
 }
 

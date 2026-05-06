@@ -17,6 +17,7 @@ pub mod keys;
 pub mod kill_ring;
 pub mod overlay;
 pub mod render;
+pub mod resize;
 pub mod stdin_buffer;
 pub mod terminal;
 pub mod theme;
@@ -47,6 +48,7 @@ pub use overlay::{
     compose_overlays, render_with_overlay,
 };
 pub use render::DiffRenderer;
+pub use resize::watch_resizes;
 pub use stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
 pub use terminal::{ProcessTerminal, Terminal, TerminalCapabilities, run_stdin_reader};
 pub use theme::{Color, NamedColor, Style, Theme};
