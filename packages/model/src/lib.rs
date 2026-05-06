@@ -58,5 +58,6 @@ pub use providers::{
 
 // Re-export from transform
 pub use transform::{
-    NormalizeToolCallIdFn, normalize_tool_call_id_for_anthropic, transform_messages,
+    NormalizeToolCallIdFn, normalize_tool_call_id_for_anthropic,
+    supports_eager_tool_input_streaming, transform_messages,
 };

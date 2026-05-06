@@ -61,6 +61,10 @@ TS detects compat from `baseUrl` lazily inside each provider. We follow the same
 ### D-06: `AssistantMessageEventStream` becomes a concrete struct, not just a type alias
 Currently `pub type AssistantMessageEventStream<'a> = Pin<Box<dyn Stream<Item = ...>>>`. We add a wrapper struct in `utils/event_stream.rs` that owns a `tokio::sync::mpsc::Receiver<AssistantMessageEvent>` plus helper methods (`collect_to_message()`, `iter_text_deltas()`). This matches `AssistantMessageEventStream`'s methods in TS and unblocks the parity test suite.
 
+### D-07: Gemini-3 cross-API tool calls drop thought_signature (no placeholder)
+
+The original M3 spec bullet 3 ("synthesize a `thoughtSignature` placeholder when missing") was a misread of the pi-mono `google-shared.ts` reference. The TS source drops invalid/foreign signatures to undefined; pi-mono CHANGELOG entry 4032 documents that a previous `skip_thought_signature_validator` sentinel was removed because Vertex rejected it. The Rust implementation matches TS: cross-API replay to Google sets thought_signature to None; same-model replay preserves the original signature.
+
 (Append further decisions as the plan executes.)
 
 ## Outcomes & Retrospective
