@@ -27,7 +27,10 @@ pub use cancellable_loader::CancellableLoaderComponent;
 pub use editor::{AutocompleteState, EditorComponent, PasteContent, UndoEntry, UndoOp};
 pub use image::{ImageComponent, ImageProtocol};
 pub use input::InputComponent;
-pub use loader::LoaderComponent;
+pub use loader::{
+    DEFAULT_INDICATOR_INTERVAL_MS, DEFAULT_SPINNER_FRAMES, LoaderComponent,
+    LoaderIndicatorOptions,
+};
 pub use markdown::MarkdownComponent;
 pub use progress_bar::ProgressBarComponent;
 pub use select_list::{SelectItem, SelectListComponent};

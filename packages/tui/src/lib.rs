@@ -29,8 +29,9 @@ pub mod utils;
 pub use components::{
     AutocompleteComponent, AutocompleteContext, AutocompleteFuture, AutocompleteItem,
     AutocompleteItemKind, AutocompleteProvider, AutocompleteState, AutocompleteTrigger,
-    BoxComponent, CancellableLoaderComponent, CombinedAutocompleteProvider, EditorComponent,
-    ImageComponent, ImageProtocol, InputComponent, LoaderComponent, MarkdownComponent,
+    BoxComponent, CancellableLoaderComponent, CombinedAutocompleteProvider,
+    DEFAULT_INDICATOR_INTERVAL_MS, DEFAULT_SPINNER_FRAMES, EditorComponent, ImageComponent,
+    ImageProtocol, InputComponent, LoaderComponent, LoaderIndicatorOptions, MarkdownComponent,
     PasteContent, ProgressBarComponent, SelectItem, SelectListComponent, SettingEntry,
     SettingValue, SettingsListComponent, SlashCommand, SlashCommandProvider, SpacerComponent,
     StatusBarComponent, Suggestion, TextComponent, ToastComponent, ToastLevel,
