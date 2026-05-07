@@ -6,4 +6,5 @@
 //! the specific helper they need.
 
 pub mod frontmatter;
+pub mod paths;
 pub mod sleep;
