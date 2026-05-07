@@ -13,6 +13,7 @@
 pub mod agent;
 pub mod agent_loop;
 pub mod error;
+pub mod proxy;
 pub mod types;
 
 pub use agent::{AbortHandle, Agent, AgentOptions, IntoPromptInput, Listener, SubscriptionHandle};
