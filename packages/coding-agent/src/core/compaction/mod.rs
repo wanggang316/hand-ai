@@ -29,6 +29,6 @@ pub mod utils;
 // (`crate::core::agent_session`, integration tests, slash commands) do
 // not need to know that the module became a directory.
 pub use utils::{
-    build_compaction_prompt, estimate_context_tokens, estimate_tokens, extract_file_operations,
-    should_compact, split_for_compaction, CompactionResult, FileOperations,
+    CompactionResult, FileOperations, build_compaction_prompt, estimate_context_tokens,
+    estimate_tokens, extract_file_operations, should_compact, split_for_compaction,
 };
