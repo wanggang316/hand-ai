@@ -18,6 +18,8 @@ use base64::engine::general_purpose::STANDARD;
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::models::get_models;
+
 use super::types::{
     OAuthCredentials, OAuthError, OAuthLoginCallbacks, OAuthProvider, OAuthProviderId,
 };
@@ -150,6 +152,16 @@ impl OAuthProvider for GithubCopilotOAuthProvider {
             None,
         )
         .await?;
+        // Best-effort: enable all known GitHub Copilot models on the user's
+        // account. Mirrors the TS reference, which fires this off after every
+        // successful login. We spawn it as a detached task so a slow policy
+        // endpoint does not stall the login return; failures are silently
+        // swallowed.
+        let http = self.http.clone();
+        let token = creds.access_token.clone();
+        tokio::spawn(async move {
+            enable_all_github_copilot_models(&http, &token, None).await;
+        });
         Ok(creds)
     }
 
@@ -332,4 +344,127 @@ async fn exchange_for_copilot_token(
         scope: None,
         extra,
     })
+}
+
+/// Normalize a free-form GitHub Enterprise URL or domain into a hostname.
+///
+/// Returns `None` for empty input or values we cannot parse as a URL.
+/// Mirrors `normalizeDomain` in the TS reference.
+pub fn normalize_domain(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // The TS reference uses `new URL(...)`. We mimic that by stripping a
+    // leading scheme (anything before `://`), then taking the host portion
+    // up to the first `/`, `?`, or `#`.
+    let after_scheme = match trimmed.find("://") {
+        Some(idx) => &trimmed[idx + 3..],
+        None => trimmed,
+    };
+    if after_scheme.is_empty() {
+        return None;
+    }
+    // Strip optional userinfo (`user:pass@host`).
+    let after_userinfo = match after_scheme.rfind('@') {
+        Some(idx) => &after_scheme[idx + 1..],
+        None => after_scheme,
+    };
+    // Take up to the first path/query/fragment delimiter.
+    let host_end = after_userinfo
+        .find(['/', '?', '#'])
+        .unwrap_or(after_userinfo.len());
+    let host_with_port = &after_userinfo[..host_end];
+    if host_with_port.is_empty() {
+        return None;
+    }
+    // Drop an explicit port, if any.
+    let host = match host_with_port.rfind(':') {
+        Some(idx) => &host_with_port[..idx],
+        None => host_with_port,
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// Build the GitHub Copilot API base URL.
+///
+/// Tokens issued by the Copilot token endpoint contain a `proxy-ep=...`
+/// segment whose value points at the proxy host (e.g.
+/// `proxy.individual.githubcopilot.com`). The API host is the same domain
+/// with `proxy.` swapped for `api.`.
+///
+/// If the token does not carry a `proxy-ep` and an enterprise domain is
+/// supplied, fall back to `https://copilot-api.<enterprise>`. Otherwise
+/// return the documented public default `https://api.individual.githubcopilot.com`.
+///
+/// Mirrors `getGitHubCopilotBaseUrl` in the TS reference.
+pub fn github_copilot_base_url(token: Option<&str>, enterprise_domain: Option<&str>) -> String {
+    if let Some(t) = token
+        && let Some(url) = base_url_from_token(t)
+    {
+        return url;
+    }
+    if let Some(d) = enterprise_domain {
+        return format!("https://copilot-api.{d}");
+    }
+    "https://api.individual.githubcopilot.com".to_string()
+}
+
+/// Pull the `proxy-ep=...` segment out of a Copilot token and translate it
+/// into an `https://api.<host>` URL, or `None` if the segment is absent.
+fn base_url_from_token(token: &str) -> Option<String> {
+    let needle = "proxy-ep=";
+    let start = token.find(needle)? + needle.len();
+    let rest = &token[start..];
+    let end = rest.find(';').unwrap_or(rest.len());
+    let proxy_host = &rest[..end];
+    if proxy_host.is_empty() {
+        return None;
+    }
+    // `proxy.foo.bar` -> `api.foo.bar`. If there's no `proxy.` prefix, leave
+    // the host as-is (matches the TS regex `^proxy\.`).
+    let api_host = proxy_host
+        .strip_prefix("proxy.")
+        .map(|tail| format!("api.{tail}"))
+        .unwrap_or_else(|| proxy_host.to_string());
+    Some(format!("https://{api_host}"))
+}
+
+/// Best-effort: ask the Copilot policy endpoint to enable every known
+/// `github-copilot` model on the user's account. Some models (Claude, Grok)
+/// require this before they can be invoked.
+///
+/// Errors are intentionally swallowed: this is fired after a successful
+/// login and we do not want a transient policy failure to surface as a
+/// login error.
+async fn enable_all_github_copilot_models(
+    http: &reqwest::Client,
+    token: &str,
+    enterprise_domain: Option<&str>,
+) {
+    let base_url = github_copilot_base_url(Some(token), enterprise_domain);
+    let models = get_models("github-copilot");
+    let mut futs = Vec::with_capacity(models.len());
+    for model in models {
+        let model_id = model.id;
+        let url = format!("{base_url}/models/{model_id}/policy");
+        let req = http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("User-Agent", COPILOT_USER_AGENT)
+            .header("Editor-Version", COPILOT_EDITOR_VERSION)
+            .header("Editor-Plugin-Version", COPILOT_EDITOR_PLUGIN_VERSION)
+            .header("Copilot-Integration-Id", COPILOT_INTEGRATION_ID)
+            .header("openai-intent", "chat-policy")
+            .header("x-interaction-type", "chat-policy")
+            .json(&json!({ "state": "enabled" }))
+            .send();
+        futs.push(req);
+    }
+    let _ = futures::future::join_all(futs).await;
 }

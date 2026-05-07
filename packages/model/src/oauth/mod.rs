@@ -17,6 +17,7 @@ pub mod registry;
 pub mod types;
 mod util;
 
+pub use github_copilot::{github_copilot_base_url, normalize_domain};
 pub use registry::OAuthRegistry;
 pub use types::{
     OAuthAuthInfo, OAuthCredentials, OAuthError, OAuthLoginCallbacks, OAuthProvider,

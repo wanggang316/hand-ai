@@ -72,7 +72,7 @@ pub use providers::{FauxProvider, FauxScriptStep, faux_model, register_builtins_
 // Re-export from oauth
 pub use oauth::{
     OAuthAuthInfo, OAuthCredentials, OAuthError, OAuthLoginCallbacks, OAuthProvider,
-    OAuthProviderId, OAuthRegistry,
+    OAuthProviderId, OAuthRegistry, github_copilot_base_url, normalize_domain,
 };
 
 // Re-export from session_resources
