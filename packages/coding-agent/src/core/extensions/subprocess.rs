@@ -232,10 +232,29 @@ impl SubprocessExtension {
     }
 }
 
+/// Pull `context.data_dir` out of any outbound event variant. Used at
+/// subprocess spawn time to set `HAND_DATA_DIR`.
+fn event_data_dir(event: &ExtensionEventOut) -> Option<&Path> {
+    let dto = match event {
+        ExtensionEventOut::OnLoad { context } => context,
+        ExtensionEventOut::OnShutdown { context } => context,
+        ExtensionEventOut::OnBeforeToolCall { context, .. } => context,
+        ExtensionEventOut::OnAfterToolCall { context, .. } => context,
+        ExtensionEventOut::ExecuteCustomTool { context, .. } => context,
+        ExtensionEventOut::ExecuteSlashCommand { context, .. } => context,
+    };
+    Some(dto.data_dir.as_path())
+}
+
 impl SubprocessInner {
     /// Spawn the subprocess. Caller must hold the child mutex and have
     /// observed `None`.
-    fn spawn_locked(&self) -> Result<SubprocessHandle, ExtensionError> {
+    ///
+    /// `data_dir` is exported as `HAND_DATA_DIR` so subprocess hosts (e.g.
+    /// shell scripts that cannot easily parse JSON) can persist per-session
+    /// state without scraping the event payload. The directory is created
+    /// lazily here so the subprocess does not need to mkdir itself.
+    fn spawn_locked(&self, data_dir: Option<&Path>) -> Result<SubprocessHandle, ExtensionError> {
         let exec = self.manifest.exec.as_ref().ok_or_else(|| {
             ExtensionError::Custom {
                 name: self.manifest.name.clone(),
@@ -255,6 +274,12 @@ impl SubprocessInner {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
+        if let Some(dir) = data_dir {
+            // Best-effort directory creation. If this fails the subprocess
+            // can still run; it just won't have the dir pre-created.
+            let _ = std::fs::create_dir_all(dir);
+            cmd.env("HAND_DATA_DIR", dir);
+        }
 
         let mut child = cmd.spawn().map_err(|e| ExtensionError::Rpc {
             extension: self.manifest.name.clone(),
@@ -301,7 +326,11 @@ impl SubprocessInner {
     ) -> Result<ExtensionEventIn, ExtensionError> {
         let mut guard = self.child.lock().await;
         if guard.is_none() {
-            *guard = Some(self.spawn_locked()?);
+            // Extract `data_dir` from the event's embedded context (every
+            // `ExtensionEventOut` variant carries one) so the subprocess
+            // sees a stable `HAND_DATA_DIR` for the rest of its lifetime.
+            let data_dir = event_data_dir(&event);
+            *guard = Some(self.spawn_locked(data_dir)?);
         }
         let handle = guard.as_mut().expect("just-spawned handle present");
 
