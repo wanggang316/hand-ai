@@ -46,11 +46,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Headless RPC dispatch loop: takes precedence over interactive/print modes.
     if cli.rpc {
+        timings::print();
         return run_rpc(cli).await;
     }
 
     // Non-interactive print mode: single prompt + exit.
     if cli.print {
+        timings::print();
         return modes::print::run(cli).await;
     }
 
