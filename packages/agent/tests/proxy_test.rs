@@ -225,3 +225,80 @@ async fn proxy_aborts_when_token_cancelled() {
         other => panic!("expected last event to be Error(Aborted), got {other:?}"),
     }
 }
+
+/// End-to-end integration: `Agent` configured with `stream_fn_proxy` drives a
+/// real HTTP exchange against a wiremock proxy and reconstructs the assistant
+/// message. Covers the seam between [`Agent::with_options`] and
+/// [`stream_fn_proxy`] that the unit tests don't exercise.
+#[tokio::test]
+async fn agent_with_stream_fn_proxy_runs_end_to_end() {
+    use hand_agent::{Agent, AgentOptions, ProxyStreamOptions, stream_fn_proxy};
+    use model::Client;
+
+    let server = wiremock::MockServer::start().await;
+    let url = server.uri();
+
+    let sse_body = [
+        r#"data: {"type":"start"}"#,
+        r#"data: {"type":"text_start","contentIndex":0}"#,
+        r#"data: {"type":"text_delta","contentIndex":0,"delta":"Hello"}"#,
+        r#"data: {"type":"text_delta","contentIndex":0,"delta":" from agent"}"#,
+        r#"data: {"type":"text_end","contentIndex":0}"#,
+        r#"data: {"type":"done","reason":"stop","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}}"#,
+    ]
+    .join("\n")
+        + "\n";
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/api/stream"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    // No provider registered on the client. If the loop ever falls back to
+    // `client.stream_simple`, it would error out with `ProviderNotFound`,
+    // which would surface as an Error assistant message rather than the
+    // reconstructed text we assert on below.
+    let client = Client::new();
+
+    let stream_fn = stream_fn_proxy(ProxyStreamOptions {
+        auth_token: "test-token".into(),
+        proxy_url: url,
+        ..Default::default()
+    });
+
+    let mut agent = Agent::with_options(
+        client,
+        test_model(),
+        AgentOptions {
+            stream_fn: Some(stream_fn),
+            ..Default::default()
+        },
+    );
+
+    let result = agent
+        .prompt("hi")
+        .await
+        .expect("agent run should complete via proxy");
+
+    let last = result
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            model::Message::Assistant(a) => Some(a),
+            _ => None,
+        })
+        .expect("at least one assistant message");
+
+    assert_eq!(last.stop_reason, StopReason::Stop);
+    let text = match &last.content[0] {
+        AssistantContentBlock::Text(t) => &t.text,
+        other => panic!("expected text content, got {other:?}"),
+    };
+    assert_eq!(text, "Hello from agent");
+}

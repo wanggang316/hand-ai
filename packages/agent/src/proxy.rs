@@ -685,11 +685,20 @@ pub fn stream_proxy(
 ///     ..Default::default()
 /// });
 /// ```
+// Captures only auth_token and proxy_url from the template — `options` and
+// `cancel` are overridden per turn by the loop, so cloning them would waste
+// a per-turn HashMap clone. Future fields that need template-forwarding
+// must be captured here explicitly.
 pub fn stream_fn_proxy(template: ProxyStreamOptions) -> crate::types::StreamFn {
+    let auth_token = template.auth_token;
+    let proxy_url = template.proxy_url;
     Arc::new(move |model, context, simple_opts, cancel| {
-        let mut opts = template.clone();
-        opts.options = simple_opts;
-        opts.cancel = Some(cancel);
+        let opts = ProxyStreamOptions {
+            auth_token: auth_token.clone(),
+            proxy_url: proxy_url.clone(),
+            cancel: Some(cancel),
+            options: simple_opts,
+        };
         stream_proxy(model, context, opts)
     })
 }
