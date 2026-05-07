@@ -153,6 +153,16 @@ impl SessionManager {
         &self.header.id
     }
 
+    /// Whether this session manager is purely in-memory (no JSONL file
+    /// backing it). Used by callers like
+    /// [`crate::core::agent_session::AgentSession::reset_session`] to pick
+    /// the right constructor for the replacement manager — an in-memory
+    /// session must reset to an in-memory session, otherwise we would
+    /// suddenly try to write `./.hand/sessions/*.jsonl` from a test.
+    pub fn is_in_memory(&self) -> bool {
+        self.in_memory
+    }
+
     /// Get the session file path.
     pub fn path(&self) -> &Path {
         &self.path

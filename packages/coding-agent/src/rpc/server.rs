@@ -176,17 +176,12 @@ where
             Err(JsonlReadError::Parse { source, .. }) => {
                 // Parse failed before we could read the command kind, so
                 // we cannot attach a typed `RpcResponseBody::<X>` body
-                // truthfully. Emit a generic `Prompt` failure so the
-                // wire shape is still valid JSON and the success/error
-                // discriminator is present; consumers should treat
-                // `command: "prompt"` paired with `id: null` as a
-                // server-side parse rejection. TS RPC has the same
-                // limitation. TODO(rpc-server): add a dedicated
-                // `RpcResponseBody::Invalid` variant once T1.1's wire
-                // owner is willing to extend the schema.
+                // truthfully. Emit `Invalid` (command: "invalid") so the
+                // wire shape stays valid JSON and the discriminator
+                // distinguishes a parse rejection from a prompt failure.
                 let resp = RpcResponse::new(
                     None,
-                    RpcResponseBody::Prompt(RpcResultEmpty::err(format!(
+                    RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
                         "invalid JSON: {source}"
                     ))),
                 );
@@ -198,7 +193,7 @@ where
                 // Same treatment as a parse error — see above.
                 let resp = RpcResponse::new(
                     None,
-                    RpcResponseBody::Prompt(RpcResultEmpty::err(format!(
+                    RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
                         "invalid UTF-8 in command frame: {e}"
                     ))),
                 );
@@ -265,34 +260,32 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
         }
 
         RpcCommand::NewSession { id, .. } => {
-            // Replace the session's mutable state with a fresh in-memory
-            // session. The brief constrains us to keep this simple:
-            // reuse the current model and preserve the provider registry,
-            // but build a fresh session manager / context.
-            //
-            // Tools are NOT cloneable (`AgentTool` holds non-Clone async
-            // fns); a fresh session starts with no tools. Provider
-            // registry IS preserved by reusing the existing `Client`
-            // (the registry sits behind an `Arc` inside the client, so
-            // `clone()` shares state with the old session — but we drop
-            // the old session immediately so this is effectively a move).
+            // Reset the session in place. `reset_session` clears the
+            // conversation state but preserves the model, client, tools,
+            // extensions, AND — crucially for this handler —
+            // `event_listeners`. The dispatcher subscribed once at startup
+            // (see `run_rpc_server`); a wholesale `*session = new` would
+            // drop that subscription and post-reset events would no
+            // longer reach the client. See C1 in T1.3 for the original
+            // regression and the test below for the guard.
             //
             // NOTE: this path does not currently honor `parent_session`;
             // session forking lives in a later phase. The brief
             // explicitly lists it as out-of-scope context.
-            //
-            // TODO(rpc-server): take `Arc<Vec<AgentTool>>` on
-            // `AgentSession` so tools survive `new_session`.
-            let old_model = session.model().clone();
-            let old_client = session.client().clone();
-            let new = AgentSession::in_memory_with_client(old_model, Vec::new(), old_client);
-            *session = new;
-            RpcResponse::new(
-                id,
-                RpcResponseBody::NewSession(RpcResultWithData::ok(NewSessionData {
-                    cancelled: false,
-                })),
-            )
+            match session.reset_session() {
+                Ok(()) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::NewSession(RpcResultWithData::ok(NewSessionData {
+                        cancelled: false,
+                    })),
+                ),
+                Err(e) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::NewSession(RpcResultWithData::err(format!(
+                        "reset failed: {e}"
+                    ))),
+                ),
+            }
         }
 
         RpcCommand::GetState { id } => {
@@ -336,10 +329,94 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
         RpcCommand::Abort { id } => not_impl_empty(id, RpcResponseBody::Abort),
         RpcCommand::Steer { id, .. } => not_impl_empty(id, RpcResponseBody::Steer),
         RpcCommand::FollowUp { id, .. } => not_impl_empty(id, RpcResponseBody::FollowUp),
-        RpcCommand::SetModel { id, .. } => not_impl_data(id, RpcResponseBody::SetModel),
-        RpcCommand::CycleModel { id } => not_impl_data(id, RpcResponseBody::CycleModel),
+        RpcCommand::SetModel {
+            id,
+            provider,
+            model_id,
+        } => match session.model_registry().find(&provider, &model_id) {
+            Some(model) => {
+                let model = model.clone();
+                let value = match serde_json::to_value(&model) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return RpcResponse::new(
+                            id,
+                            RpcResponseBody::SetModel(RpcResultWithData::err(format!(
+                                "failed to serialize model: {e}"
+                            ))),
+                        );
+                    }
+                };
+                session.set_model(model);
+                RpcResponse::new(id, RpcResponseBody::SetModel(RpcResultWithData::ok(value)))
+            }
+            None => RpcResponse::new(
+                id,
+                RpcResponseBody::SetModel(RpcResultWithData::err(format!(
+                    "model not found: {provider}/{model_id}"
+                ))),
+            ),
+        },
+
+        RpcCommand::CycleModel { id } => {
+            let next = session.model_registry().next(session.model()).cloned();
+            match next {
+                Some(model) => {
+                    let value = match serde_json::to_value(&model) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return RpcResponse::new(
+                                id,
+                                RpcResponseBody::CycleModel(RpcResultWithData::err(format!(
+                                    "failed to serialize model: {e}"
+                                ))),
+                            );
+                        }
+                    };
+                    let thinking_level = session
+                        .stream_options()
+                        .reasoning
+                        .unwrap_or(ThinkingLevel::Medium);
+                    session.set_model(model);
+                    RpcResponse::new(
+                        id,
+                        RpcResponseBody::CycleModel(RpcResultWithData::ok(Some(
+                            crate::rpc::types::CycleModelData {
+                                model: value,
+                                thinking_level,
+                                // `is_scoped` is a TS concept tracking whether
+                                // the model came from a scoped (per-cwd /
+                                // per-project) override. Phase 1 has no such
+                                // override surface; report `false` until the
+                                // settings port lands.
+                                is_scoped: false,
+                            },
+                        ))),
+                    )
+                }
+                None => RpcResponse::new(
+                    id,
+                    RpcResponseBody::CycleModel(RpcResultWithData::ok(None)),
+                ),
+            }
+        }
+
         RpcCommand::GetAvailableModels { id } => {
-            not_impl_data(id, RpcResponseBody::GetAvailableModels)
+            // Each `Model` is `Serialize`; round-trip via `serde_json::to_value`
+            // because `AvailableModelsData::models` is opaque JSON in the wire
+            // protocol (see TODO on the type).
+            let models = session
+                .model_registry()
+                .all()
+                .iter()
+                .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+                .collect::<Vec<_>>();
+            RpcResponse::new(
+                id,
+                RpcResponseBody::GetAvailableModels(RpcResultWithData::ok(
+                    crate::rpc::types::AvailableModelsData { models },
+                )),
+            )
         }
         RpcCommand::SetThinkingLevel { id, .. } => {
             not_impl_empty(id, RpcResponseBody::SetThinkingLevel)
@@ -808,16 +885,6 @@ mod tests {
         // would emit `success: false` with `prompt failed: ...
         // ProviderNotFound`. A green prompt response on the reset session
         // proves the provider survived.
-        //
-        // NOTE: this test does NOT assert that events arrive after
-        // `new_session`. The dispatcher's `subscribe(...)` runs once at
-        // startup against the original session; replacing the session in
-        // the `NewSession` handler drops the listener registration along
-        // with the old session's `event_listeners` vec, so events from
-        // the post-reset turn currently go nowhere. That's a separate
-        // pre-existing bug (event listeners don't survive `new_session`)
-        // out of scope for this task — see the concerns block on the
-        // implementer report.
         let prompt_resp = frames
             .iter()
             .find(|f| f["type"] == "response" && f["command"] == "prompt")
@@ -828,6 +895,28 @@ mod tests {
              dropped the provider lookup would fail. frames: {frames:#?}"
         );
         assert_eq!(prompt_resp["id"], "p-1");
+
+        // C1 regression: event listeners must survive `new_session`.
+        // The dispatcher subscribes once at startup; if the `NewSession`
+        // handler regressed to wholesale-replacing the session, the
+        // post-reset `prompt` would emit no event frames because the
+        // subscription was attached to the dropped session. Count any
+        // event frame received AFTER the new_session response — they
+        // can only originate from the reset session's turn.
+        let new_session_idx = frames
+            .iter()
+            .position(|f| f["type"] == "response" && f["command"] == "new_session")
+            .expect("expected a new_session response");
+        let events_after_reset = frames
+            .iter()
+            .skip(new_session_idx + 1)
+            .filter(|f| f["type"] == "event")
+            .count();
+        assert!(
+            events_after_reset >= 1,
+            "expected at least one event frame on the post-new_session \
+             prompt — listeners must survive new_session. frames: {frames:#?}"
+        );
 
         handle.await.unwrap().unwrap();
     }
@@ -846,9 +935,11 @@ mod tests {
         let frames = drain_frames(out_rx).await;
         assert_eq!(frames.len(), 2, "expected two frames, got: {frames:#?}");
 
-        // First frame: parse-error response (no id, success: false).
+        // First frame: parse-error response (no id, success: false,
+        // command "invalid" — distinct from any real command kind).
         let err = &frames[0];
         assert_eq!(err["type"], "response");
+        assert_eq!(err["command"], "invalid");
         assert_eq!(err["success"], false);
         assert!(
             err["error"].as_str().unwrap_or("").contains("invalid JSON"),

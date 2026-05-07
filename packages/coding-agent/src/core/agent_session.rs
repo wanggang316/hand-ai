@@ -10,6 +10,7 @@ use crate::core::extensions::api::{
 };
 use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_before_tool_call};
 use crate::core::extensions::registry::builtin_tier1_extensions;
+use crate::core::model_registry::ModelRegistry;
 use crate::core::session_manager::SessionManager;
 use crate::core::settings::SettingsManager;
 use crate::core::skills::{self, Skill, SkillError};
@@ -106,6 +107,11 @@ pub struct AgentSession {
     /// Empty for in-memory test sessions; populated from
     /// [`builtin_tier1_extensions`] for [`Self::new`] / [`Self::new_with_skill_dirs`].
     extensions: Vec<Arc<dyn Extension>>,
+    /// Aggregate model catalog for this session. Built eagerly from the
+    /// owned [`model::Client`] at construction time and rebuilt by
+    /// [`Self::register_extension`] (extensions may contribute models in
+    /// later phases — the rebuild keeps the cache consistent).
+    model_registry: ModelRegistry,
 }
 
 impl AgentSession {
@@ -177,6 +183,7 @@ impl AgentSession {
             messages,
         };
 
+        let model_registry = ModelRegistry::build(&client);
         Ok(Self {
             config,
             session_manager,
@@ -188,6 +195,7 @@ impl AgentSession {
             skills: skills_discovered,
             skill_errors,
             extensions: builtin_tier1_extensions(),
+            model_registry,
         })
     }
 
@@ -212,6 +220,7 @@ impl AgentSession {
             messages: vec![],
         };
 
+        let model_registry = ModelRegistry::build(&client);
         Self {
             config: AgentSessionConfig {
                 cwd: PathBuf::from("."),
@@ -230,6 +239,7 @@ impl AgentSession {
             skills: Vec::new(),
             skill_errors: Vec::new(),
             extensions: Vec::new(),
+            model_registry,
         }
     }
 
@@ -409,6 +419,34 @@ impl AgentSession {
         &self.client
     }
 
+    /// Reset the conversation state to a fresh session, preserving
+    /// subscriber-facing fields (event listeners, extensions, tools, client,
+    /// model). This is the in-place equivalent of constructing a new
+    /// session — used by the RPC `new_session` handler so listeners that
+    /// subscribed via [`Self::subscribe`] before the reset keep receiving
+    /// events from the post-reset turn.
+    ///
+    /// What gets reset:
+    /// - `context.messages` is cleared (system prompt is preserved).
+    /// - `session_manager` is replaced with a fresh manager. If the current
+    ///   manager is in-memory the replacement is also in-memory; otherwise
+    ///   we create a new on-disk JSONL file under the session's `cwd`.
+    ///
+    /// What is preserved:
+    /// - `event_listeners` (the regression this method exists to fix).
+    /// - `extensions`, `tools`, `client`, `settings_manager`, `skills`,
+    ///   `skill_errors`, `config` (model, cwd, stream options, ...).
+    pub fn reset_session(&mut self) -> Result<(), CodingAgentError> {
+        let new_sm = if self.session_manager.is_in_memory() {
+            SessionManager::in_memory()
+        } else {
+            SessionManager::create(&self.config.cwd)?
+        };
+        self.session_manager = new_sm;
+        self.context.messages.clear();
+        Ok(())
+    }
+
     /// Get the working directory.
     pub fn cwd(&self) -> &Path {
         &self.config.cwd
@@ -496,8 +534,23 @@ impl AgentSession {
     /// Append an extension to the dispatch chain. Useful for tests and
     /// dynamic registration scenarios that don't go through
     /// [`builtin_tier1_extensions`].
+    ///
+    /// Rebuilds the [`ModelRegistry`] so any models contributed by the new
+    /// extension surface in [`Self::model_registry`]. Extensions don't
+    /// contribute models in v1, but the rebuild keeps the cache consistent
+    /// once they do (cheap: the static catalog has ~dozens of entries).
     pub fn register_extension(&mut self, ext: Arc<dyn Extension>) {
         self.extensions.push(ext);
+        self.model_registry = ModelRegistry::build(&self.client);
+    }
+
+    /// Aggregate model catalog for this session.
+    ///
+    /// Built eagerly at construction; rebuilt on
+    /// [`Self::register_extension`]. The returned reference is stable until
+    /// the next mutation that triggers a rebuild.
+    pub fn model_registry(&self) -> &ModelRegistry {
+        &self.model_registry
     }
 
     /// Slash commands contributed by every registered extension, paired with

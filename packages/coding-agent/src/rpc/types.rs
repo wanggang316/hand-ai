@@ -564,6 +564,12 @@ pub enum RpcResponseBody {
     GetMessages(RpcResultWithData<MessagesData>),
 
     GetCommands(RpcResultWithData<CommandsData>),
+
+    /// Used when the dispatcher cannot determine the command kind (e.g.
+    /// JSON parse failure or non-UTF-8 frame). Distinct from `prompt` so
+    /// clients don't mistake a parse error for a prompt failure.
+    #[serde(rename = "invalid")]
+    Invalid(RpcResultEmpty),
 }
 
 // =============================================================================
