@@ -34,3 +34,9 @@ pub use utils::{
     extract_file_ops_from_message, format_file_operations, serialize_conversation, should_compact,
     split_for_compaction,
 };
+
+pub use branch_summarization::{
+    BranchSummaryDetails, BranchSummaryResult, DEFAULT_BRANCH_RESERVE_TOKENS,
+    FALLBACK_CONTEXT_WINDOW, GenerateBranchSummaryOptions, SummarizationClient,
+    generate_branch_summary,
+};
