@@ -1,8 +1,8 @@
 //! On-disk persistence for OAuth tokens / API keys.
 //!
 //! Mirrors `pi-mono/packages/coding-agent/src/core/auth-storage.ts`. Records
-//! are keyed by provider id and persisted to `~/.hand/auth.json` with Unix
-//! mode `0600` (owner read/write only).
+//! are keyed by provider id and persisted to `~/.hand/agent/auth.json` with
+//! Unix mode `0600` (owner read/write only).
 //!
 //! ## Wire format
 //!
@@ -32,6 +32,22 @@
 //! lock — it's a pure read/write surface. Higher-level code that needs
 //! refresh-token serialisation must coordinate externally. The atomic
 //! rename still protects against torn writes from a single process.
+//!
+//! Note that [`AuthStorage::set`] and [`AuthStorage::remove`] perform a
+//! load-modify-save cycle and are **not** safe under concurrent writers,
+//! whether in-process (multiple threads sharing one `&AuthStorage`) or
+//! cross-process. Callers needing atomic read-modify-write must serialize
+//! externally — e.g. wrap the storage in a `Mutex`.
+//!
+//! ## Security
+//!
+//! Records are stored in **plaintext**. The only protection is the
+//! filesystem `0600` mode (owner-only on Unix). On Windows there is
+//! currently no equivalent enforcement — a follow-up should add NTFS
+//! ACL hardening or OS-keychain integration. Full-disk encryption,
+//! when enabled, provides at-rest protection but does not protect the
+//! file from other processes running as the same user. This matches
+//! the TS reference's behavior; see `pi-mono/.../auth-storage.ts`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -128,10 +144,14 @@ pub struct AuthStorage {
 }
 
 impl AuthStorage {
-    /// Default location: `~/.hand/auth.json`.
+    /// Default location: `~/.hand/agent/auth.json`.
+    ///
+    /// Lives under the same `agent/` subdir as `settings.yaml` and matches
+    /// the TS reference (`~/.pi/agent/auth.json`) so the two ports stay
+    /// wire-compatible if pointed at a shared layout.
     pub fn default_path() -> Result<PathBuf, AuthStorageError> {
         let home = dirs::home_dir().ok_or(AuthStorageError::NoHomeDir)?;
-        Ok(home.join(".hand").join("auth.json"))
+        Ok(home.join(".hand").join("agent").join("auth.json"))
     }
 
     /// Construct with the default path.
@@ -268,8 +288,10 @@ impl AuthStorage {
         Ok(self.load()?.remove(provider))
     }
 
-    /// Insert or replace the record for one provider. Loads, mutates,
-    /// saves.
+    /// Insert or replace the record for one provider. Loads, mutates, saves.
+    /// Best-effort: NOT safe under concurrent writers (in-process or
+    /// cross-process). Callers that need atomic read-modify-write must
+    /// serialize externally — e.g., wrap the `AuthStorage` in a `Mutex`.
     pub fn set(&self, provider: &str, record: AuthRecord) -> Result<(), AuthStorageError> {
         let mut records = self.load()?;
         records.insert(provider.to_string(), record);
@@ -277,8 +299,8 @@ impl AuthStorage {
     }
 
     /// Drop the record for one provider. Idempotent — removing an absent
-    /// provider is a no-op (still triggers a save so the file's mode is
-    /// re-asserted).
+    /// provider is a no-op and does not touch the file. Same concurrency
+    /// caveats as [`set`](Self::set).
     pub fn remove(&self, provider: &str) -> Result<(), AuthStorageError> {
         let mut records = self.load()?;
         if records.remove(provider).is_some() {
