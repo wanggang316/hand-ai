@@ -12,6 +12,7 @@ use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_befor
 use crate::core::extensions::registry::builtin_tier1_extensions;
 use crate::core::model_registry::ModelRegistry;
 use crate::core::session_manager::SessionManager;
+use crate::rpc::types::QueueMode;
 use crate::core::settings::SettingsManager;
 use crate::core::skills::{self, Skill, SkillError};
 use crate::core::system_prompt::{self, BuildSystemPromptOptions};
@@ -112,6 +113,28 @@ pub struct AgentSession {
     /// [`Self::register_extension`] (extensions may contribute models in
     /// later phases — the rebuild keeps the cache consistent).
     model_registry: ModelRegistry,
+    /// Steering queue mode (how queued user messages mid-turn are flushed).
+    /// Defaults to [`QueueMode::OneAtATime`]. Surfaced via the RPC
+    /// `set_steering_mode` / `get_state` handlers.
+    steering_mode: QueueMode,
+    /// Follow-up queue mode (how queued user messages between turns are
+    /// flushed). Same default + same wiring as `steering_mode`.
+    follow_up_mode: QueueMode,
+    /// Whether automatic compaction (when context window approaches the
+    /// model's `max_input_tokens`) is enabled. Surfaced via
+    /// `set_auto_compaction` / `get_state`.
+    auto_compaction_enabled: bool,
+    /// Whether automatic retry-with-backoff for transient provider errors
+    /// is enabled. Surfaced via `set_auto_retry`.
+    auto_retry_enabled: bool,
+    /// Whether the session is currently inside an `agent_loop` turn. Set
+    /// by [`Self::send_message`] for the duration of the call. Surfaced
+    /// via `get_state.is_streaming`.
+    is_streaming: bool,
+    /// Whether the session is currently performing a compaction summary.
+    /// Set around the `agent_loop_compaction` invocation. Surfaced via
+    /// `get_state.is_compacting`.
+    is_compacting: bool,
 }
 
 impl AgentSession {
@@ -196,6 +219,12 @@ impl AgentSession {
             skill_errors,
             extensions: builtin_tier1_extensions(),
             model_registry,
+            steering_mode: QueueMode::OneAtATime,
+            follow_up_mode: QueueMode::OneAtATime,
+            auto_compaction_enabled: true,
+            auto_retry_enabled: true,
+            is_streaming: false,
+            is_compacting: false,
         })
     }
 
@@ -240,6 +269,12 @@ impl AgentSession {
             skill_errors: Vec::new(),
             extensions: Vec::new(),
             model_registry,
+            steering_mode: QueueMode::OneAtATime,
+            follow_up_mode: QueueMode::OneAtATime,
+            auto_compaction_enabled: true,
+            auto_retry_enabled: true,
+            is_streaming: false,
+            is_compacting: false,
         }
     }
 
@@ -259,6 +294,14 @@ impl AgentSession {
         self.session_manager.append_message(user_msg.clone())?;
 
         let prompts = vec![user_msg];
+
+        // Mark the session as streaming for the duration of this turn.
+        // Restored on the happy path below; on cancel/panic the field
+        // stays `true` until the next turn or `reset_session()`. We
+        // accept this minor staleness — RPC callers that observe a
+        // cancelled session will reconcile via `get_state` after their
+        // own retry/abort logic, and the field has no safety impact.
+        self.is_streaming = true;
 
         // Snapshot the extension chain and per-session context so the hook
         // closures can own them as `'static` data captured by the `Box<dyn Fn>`.
@@ -288,8 +331,8 @@ impl AgentSession {
             convert_to_llm: None,
             transform_context: None,
             get_api_key: None,
-            steering_mode: hand_agent::QueueDeliveryMode::OneAtATime,
-            follow_up_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+            steering_mode: queue_mode_to_delivery(self.steering_mode),
+            follow_up_mode: queue_mode_to_delivery(self.follow_up_mode),
             max_retry_delay_ms: None,
         };
 
@@ -339,6 +382,10 @@ impl AgentSession {
         // happy path. On cancel/panic the same Drop runs implicitly.
         drop(guard);
 
+        // Streaming complete (either Ok or Err — happens before compaction
+        // so `is_streaming` doesn't bleed into the compaction window).
+        self.is_streaming = false;
+
         let result = result_outcome.map_err(CodingAgentError::Agent)?;
 
         // Persist new messages to session
@@ -354,6 +401,12 @@ impl AgentSession {
 
     /// Check if compaction is needed and run it.
     async fn maybe_compact(&mut self) -> Result<(), CodingAgentError> {
+        // Honor the runtime auto-compaction toggle (`set_auto_compaction`)
+        // before doing any token math — the toggle is the cheap fast path.
+        if !self.auto_compaction_enabled {
+            return Ok(());
+        }
+
         let settings = self.settings_manager.compaction_settings();
         let context_tokens = compaction::estimate_context_tokens(&self.context.messages);
         let max_context_tokens = settings.max_context_tokens() as usize;
@@ -362,6 +415,7 @@ impl AgentSession {
             return Ok(());
         }
 
+        self.is_compacting = true;
         self.emit(AgentSessionEvent::CompactionStart);
 
         let (to_compact, _to_keep, _split_idx) = compaction::split_for_compaction(
@@ -394,6 +448,7 @@ impl AgentSession {
         self.emit(AgentSessionEvent::CompactionEnd {
             summary: summary.clone(),
         });
+        self.is_compacting = false;
 
         Ok(())
     }
@@ -444,6 +499,11 @@ impl AgentSession {
         };
         self.session_manager = new_sm;
         self.context.messages.clear();
+        // Runtime flags are conversation-scoped; reset alongside the
+        // messages so `is_streaming`/`is_compacting` don't bleed over
+        // from a cancelled prior turn.
+        self.is_streaming = false;
+        self.is_compacting = false;
         Ok(())
     }
 
@@ -499,6 +559,66 @@ impl AgentSession {
     /// Get message count.
     pub fn message_count(&self) -> usize {
         self.session_manager.message_count()
+    }
+
+    /// Steering queue mode (mid-turn user-message delivery policy).
+    pub fn steering_mode(&self) -> QueueMode {
+        self.steering_mode
+    }
+
+    /// Set the steering queue mode.
+    pub fn set_steering_mode(&mut self, mode: QueueMode) {
+        self.steering_mode = mode;
+    }
+
+    /// Follow-up queue mode (between-turn user-message delivery policy).
+    pub fn follow_up_mode(&self) -> QueueMode {
+        self.follow_up_mode
+    }
+
+    /// Set the follow-up queue mode.
+    pub fn set_follow_up_mode(&mut self, mode: QueueMode) {
+        self.follow_up_mode = mode;
+    }
+
+    /// Whether auto-compaction is enabled for this session.
+    pub fn auto_compaction_enabled(&self) -> bool {
+        self.auto_compaction_enabled
+    }
+
+    /// Toggle auto-compaction.
+    pub fn set_auto_compaction(&mut self, enabled: bool) {
+        self.auto_compaction_enabled = enabled;
+    }
+
+    /// Whether automatic retry-with-backoff is enabled.
+    pub fn auto_retry_enabled(&self) -> bool {
+        self.auto_retry_enabled
+    }
+
+    /// Toggle automatic retry-with-backoff.
+    pub fn set_auto_retry(&mut self, enabled: bool) {
+        self.auto_retry_enabled = enabled;
+    }
+
+    /// Whether the session is currently inside an `agent_loop` turn.
+    pub fn is_streaming(&self) -> bool {
+        self.is_streaming
+    }
+
+    /// Whether the session is currently performing a compaction summary.
+    pub fn is_compacting(&self) -> bool {
+        self.is_compacting
+    }
+
+    /// Path to the on-disk JSONL session file, if any. Returns `None`
+    /// for in-memory sessions.
+    pub fn session_file(&self) -> Option<&Path> {
+        if self.session_manager.is_in_memory() {
+            None
+        } else {
+            Some(self.session_manager.path())
+        }
     }
 
     /// Per-skill discovery errors collected at construction time.
@@ -651,6 +771,17 @@ impl AgentSession {
 
 /// Build a `BeforeToolCallHook` that drives `dispatch_before_tool_call`.
 ///
+/// Map the RPC-level [`QueueMode`] enum to the hand-agent runtime
+/// equivalent. Both have the same shape but live in different layers;
+/// keep the conversion exhaustive so a new variant on either side
+/// surfaces as a compile error.
+fn queue_mode_to_delivery(mode: QueueMode) -> hand_agent::QueueDeliveryMode {
+    match mode {
+        QueueMode::All => hand_agent::QueueDeliveryMode::All,
+        QueueMode::OneAtATime => hand_agent::QueueDeliveryMode::OneAtATime,
+    }
+}
+
 /// `HookDecision::Replace(args)` from the aggregated chain is forwarded to
 /// hand-agent via `BeforeToolCallResult::replace_args` so the agent loop
 /// invokes the tool with the rewritten arguments. The model still sees the

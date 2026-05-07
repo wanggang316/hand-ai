@@ -109,6 +109,7 @@ pub enum WidgetPlacement {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SlashCommandSource {
+    Builtin,
     Extension,
     Prompt,
     Skill,

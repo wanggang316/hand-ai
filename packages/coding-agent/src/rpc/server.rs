@@ -32,15 +32,16 @@
 use crate::core::agent_session::{AgentSession, AgentSessionEvent};
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
 use crate::rpc::types::{
-    CommandsData, ForkData, ForkMessagesData, LastAssistantTextData, MessagesData, NewSessionData,
-    QueueMode, RpcCommand, RpcResponse, RpcResponseBody, RpcResultEmpty, RpcResultWithData,
-    RpcSessionState, SwitchSessionData,
+    CommandsData, ExportHtmlData, ForkData, ForkMessagesData, LastAssistantTextData, MessagesData,
+    NewSessionData, RpcCommand, RpcResponse, RpcResponseBody, RpcResultEmpty, RpcResultWithData,
+    RpcSessionState, RpcSlashCommand, SlashCommandSource, SwitchSessionData,
 };
 use futures::StreamExt;
 use hand_agent::types::AgentEvent;
 use model::types::ThinkingLevel;
 use serde::Serialize;
 use std::io;
+use std::path::PathBuf;
 use tokio::io::{AsyncBufRead, AsyncWrite};
 use tokio::sync::mpsc;
 
@@ -418,30 +419,116 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                 )),
             )
         }
-        RpcCommand::SetThinkingLevel { id, .. } => {
-            not_impl_empty(id, RpcResponseBody::SetThinkingLevel)
+        RpcCommand::SetThinkingLevel { id, level } => {
+            let mut opts = session.stream_options().clone();
+            opts.reasoning = Some(level);
+            session.set_stream_options(opts);
+            RpcResponse::new(
+                id,
+                RpcResponseBody::SetThinkingLevel(RpcResultEmpty::ok()),
+            )
         }
         RpcCommand::CycleThinkingLevel { id } => {
-            not_impl_data(id, RpcResponseBody::CycleThinkingLevel)
+            // Cycle order matches the TS reference's full ladder:
+            // minimal → low → medium → high → xhigh → minimal.
+            // Treat "unset" as Medium so cycling from the implicit
+            // default lands somewhere predictable (High).
+            let current = session
+                .stream_options()
+                .reasoning
+                .unwrap_or(ThinkingLevel::Medium);
+            let next = match current {
+                ThinkingLevel::Minimal => ThinkingLevel::Low,
+                ThinkingLevel::Low => ThinkingLevel::Medium,
+                ThinkingLevel::Medium => ThinkingLevel::High,
+                ThinkingLevel::High => ThinkingLevel::Xhigh,
+                ThinkingLevel::Xhigh => ThinkingLevel::Minimal,
+            };
+            let mut opts = session.stream_options().clone();
+            opts.reasoning = Some(next);
+            session.set_stream_options(opts);
+            RpcResponse::new(
+                id,
+                RpcResponseBody::CycleThinkingLevel(RpcResultWithData::ok(Some(
+                    crate::rpc::types::CycleThinkingLevelData { level: next },
+                ))),
+            )
         }
-        RpcCommand::SetSteeringMode { id, .. } => {
-            not_impl_empty(id, RpcResponseBody::SetSteeringMode)
+        RpcCommand::SetSteeringMode { id, mode } => {
+            session.set_steering_mode(mode);
+            RpcResponse::new(
+                id,
+                RpcResponseBody::SetSteeringMode(RpcResultEmpty::ok()),
+            )
         }
-        RpcCommand::SetFollowUpMode { id, .. } => {
-            not_impl_empty(id, RpcResponseBody::SetFollowUpMode)
+        RpcCommand::SetFollowUpMode { id, mode } => {
+            session.set_follow_up_mode(mode);
+            RpcResponse::new(
+                id,
+                RpcResponseBody::SetFollowUpMode(RpcResultEmpty::ok()),
+            )
         }
         RpcCommand::Compact { id, .. } => not_impl_data(id, RpcResponseBody::Compact),
-        RpcCommand::SetAutoCompaction { id, .. } => {
-            not_impl_empty(id, RpcResponseBody::SetAutoCompaction)
+        RpcCommand::SetAutoCompaction { id, enabled } => {
+            session.set_auto_compaction(enabled);
+            RpcResponse::new(
+                id,
+                RpcResponseBody::SetAutoCompaction(RpcResultEmpty::ok()),
+            )
         }
-        RpcCommand::SetAutoRetry { id, .. } => not_impl_empty(id, RpcResponseBody::SetAutoRetry),
+        RpcCommand::SetAutoRetry { id, enabled } => {
+            session.set_auto_retry(enabled);
+            RpcResponse::new(id, RpcResponseBody::SetAutoRetry(RpcResultEmpty::ok()))
+        }
         RpcCommand::AbortRetry { id } => not_impl_empty(id, RpcResponseBody::AbortRetry),
         RpcCommand::Bash { id, .. } => not_impl_data(id, RpcResponseBody::Bash),
         RpcCommand::AbortBash { id } => not_impl_empty(id, RpcResponseBody::AbortBash),
         RpcCommand::GetSessionStats { id } => {
-            not_impl_data(id, RpcResponseBody::GetSessionStats)
+            // `GetSessionStats` is typed as opaque JSON in the wire
+            // protocol pending the typed `SessionStats` port. Compose
+            // the same fields the TS reference emits — id / name /
+            // message count / model id / provider / cwd — so consumers
+            // see a stable shape today.
+            let stats = serde_json::json!({
+                "sessionId": session.session_id(),
+                "sessionName": session.label(),
+                "messageCount": session.message_count(),
+                "modelId": session.model().id,
+                "provider": session.model().provider,
+                "cwd": session.cwd().to_string_lossy(),
+            });
+            RpcResponse::new(
+                id,
+                RpcResponseBody::GetSessionStats(RpcResultWithData::ok(stats)),
+            )
         }
-        RpcCommand::ExportHtml { id, .. } => not_impl_data(id, RpcResponseBody::ExportHtml),
+        RpcCommand::ExportHtml { id, output_path } => {
+            // Default output: "<session_id>.html" under the session cwd.
+            let path = output_path.map(PathBuf::from).unwrap_or_else(|| {
+                session
+                    .cwd()
+                    .join(format!("{}.html", session.session_id()))
+            });
+            match crate::core::export::export_to_html(
+                session.messages(),
+                session.session_id(),
+                &session.model().id,
+                &path,
+            ) {
+                Ok(()) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::ExportHtml(RpcResultWithData::ok(ExportHtmlData {
+                        path: path.to_string_lossy().into_owned(),
+                    })),
+                ),
+                Err(e) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::ExportHtml(RpcResultWithData::<ExportHtmlData>::err(
+                        format!("export failed: {e}"),
+                    )),
+                ),
+            }
+        }
         RpcCommand::SwitchSession { id, .. } => RpcResponse::new(
             id,
             RpcResponseBody::SwitchSession(RpcResultWithData::<SwitchSessionData>::err(
@@ -459,20 +546,96 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                 NOT_IMPLEMENTED,
             )),
         ),
-        RpcCommand::GetLastAssistantText { id } => RpcResponse::new(
-            id,
-            RpcResponseBody::GetLastAssistantText(RpcResultWithData::<LastAssistantTextData>::err(
-                NOT_IMPLEMENTED,
-            )),
-        ),
-        RpcCommand::SetSessionName { id, .. } => {
-            not_impl_empty(id, RpcResponseBody::SetSessionName)
+        RpcCommand::GetLastAssistantText { id } => {
+            // Walk messages in reverse, find the last assistant message with a
+            // text block, and return its concatenated text. If no assistant
+            // text exists yet, return an empty string (parity with TS).
+            let last_text = session
+                .messages()
+                .iter()
+                .rev()
+                .find_map(|m| match m {
+                    model::Message::Assistant(a) => {
+                        let combined: String = a
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                model::types::AssistantContentBlock::Text(t) => Some(t.text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("");
+                        if combined.is_empty() {
+                            None
+                        } else {
+                            Some(combined)
+                        }
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default();
+            RpcResponse::new(
+                id,
+                RpcResponseBody::GetLastAssistantText(RpcResultWithData::ok(
+                    LastAssistantTextData {
+                        text: if last_text.is_empty() {
+                            None
+                        } else {
+                            Some(last_text)
+                        },
+                    },
+                )),
+            )
         }
-        RpcCommand::GetCommands { id } => RpcResponse::new(
-            id,
-            RpcResponseBody::GetCommands(RpcResultWithData::<CommandsData>::err(NOT_IMPLEMENTED)),
-        ),
+        RpcCommand::SetSessionName { id, name } => match session.set_label(&name) {
+            Ok(()) => RpcResponse::new(
+                id,
+                RpcResponseBody::SetSessionName(RpcResultEmpty::ok()),
+            ),
+            Err(e) => RpcResponse::new(
+                id,
+                RpcResponseBody::SetSessionName(RpcResultEmpty::err(format!(
+                    "failed to set session name: {e}"
+                ))),
+            ),
+        },
+        RpcCommand::GetCommands { id } => {
+            // Built-in commands shadow extension commands of the same
+            // name (handled by `SlashCommandRegistry::resolve`); the
+            // wire response listing simply tags them by source so the
+            // client can filter or render accordingly.
+            let mut commands: Vec<RpcSlashCommand> = builtin_command_specs();
+            for (spec, _ext) in session.collected_slash_commands() {
+                commands.push(RpcSlashCommand {
+                    name: spec.name.clone(),
+                    description: Some(spec.description.clone()),
+                    source: SlashCommandSource::Extension,
+                    source_info: serde_json::Value::Null,
+                });
+            }
+            RpcResponse::new(
+                id,
+                RpcResponseBody::GetCommands(RpcResultWithData::ok(CommandsData { commands })),
+            )
+        }
     }
+}
+
+/// Built-in slash command specs. Built from a fresh
+/// [`SlashCommandRegistry::new`] so the surface here tracks the
+/// dispatcher's actual built-in set.
+fn builtin_command_specs() -> Vec<RpcSlashCommand> {
+    let registry = crate::core::slash_commands::SlashCommandRegistry::new();
+    registry
+        .commands()
+        .iter()
+        .map(|c| RpcSlashCommand {
+            name: c.name.clone(),
+            description: Some(c.description.clone()),
+            source: SlashCommandSource::Builtin,
+            source_info: serde_json::Value::Null,
+        })
+        .collect()
 }
 
 /// Canonical "not implemented" error string. Matches the brief verbatim
@@ -497,40 +660,29 @@ fn not_impl_data<T>(
 
 /// Build a snapshot of the session for `get_state`.
 ///
-/// TODOs (each tracks a Rust subsystem that does not yet exist; the wire
-/// shape here uses defaults so consumers can still parse a `RpcSessionState`):
-///
-/// - `is_streaming`: tracked by the dispatcher in TS via `pendingPrompt`
-///   state; needs an `AgentSession::is_streaming()` accessor (owner: core).
-/// - `is_compacting`: needs a `compacting` flag on `AgentSession`
-///   (owner: core/compaction).
-/// - `pending_message_count`: needs a steer/follow-up queue on the
-///   session (owner: core/queue, parity port pending).
-/// - `auto_compaction_enabled`: needs settings exposure
-///   (owner: core/settings).
-/// - `steering_mode` / `follow_up_mode`: hard-coded to `OneAtATime` to
-///   match `AgentLoopConfig` defaults; needs accessors when those are
-///   made mutable (owner: core/agent_session).
-/// - `session_file`: not exposed on `SessionManager` (owner: core/session).
-/// - `thinking_level`: derived from `stream_options().reasoning` if set,
-///   else defaults to `Medium` (the TS default; owner: core/settings).
+/// Pulls runtime state directly from `AgentSession` accessors. The only
+/// remaining placeholder is `pending_message_count`: the steer / follow-up
+/// queue is not yet ported, so we report 0 until the queue lands.
 fn build_session_state(session: &AgentSession) -> RpcSessionState {
     let model_value = serde_json::to_value(session.model()).ok();
     let thinking_level = session
         .stream_options()
         .reasoning
         .unwrap_or(ThinkingLevel::Medium);
+    let session_file = session
+        .session_file()
+        .and_then(|p| p.to_str().map(String::from));
     RpcSessionState {
         model: model_value,
         thinking_level,
-        is_streaming: false,
-        is_compacting: false,
-        steering_mode: QueueMode::OneAtATime,
-        follow_up_mode: QueueMode::OneAtATime,
-        session_file: None,
+        is_streaming: session.is_streaming(),
+        is_compacting: session.is_compacting(),
+        steering_mode: session.steering_mode(),
+        follow_up_mode: session.follow_up_mode(),
+        session_file,
         session_id: session.session_id().to_string(),
         session_name: session.label().map(str::to_string),
-        auto_compaction_enabled: true,
+        auto_compaction_enabled: session.auto_compaction_enabled(),
         message_count: session.message_count() as u64,
         pending_message_count: 0,
     }
@@ -952,6 +1104,201 @@ mod tests {
         assert_eq!(ok["command"], "get_state");
         assert_eq!(ok["success"], true);
         assert_eq!(ok["id"], "7");
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `set_thinking_level` should mutate `stream_options.reasoning` and
+    /// surface the new value via the next `get_state`.
+    #[tokio::test]
+    async fn set_thinking_level_mutates_stream_options() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                br#"{"type":"set_thinking_level","id":"1","level":"high"}
+{"type":"get_state","id":"2"}
+"#,
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 2, "frames: {frames:#?}");
+        assert_eq!(frames[0]["command"], "set_thinking_level");
+        assert_eq!(frames[0]["success"], true);
+        assert_eq!(frames[1]["command"], "get_state");
+        assert_eq!(frames[1]["data"]["thinkingLevel"], "high");
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `cycle_thinking_level` returns the new level and rotates the
+    /// full ladder (default Medium → High).
+    #[tokio::test]
+    async fn cycle_thinking_level_rotates_from_default() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(b"{\"type\":\"cycle_thinking_level\",\"id\":\"1\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 1, "frames: {frames:#?}");
+        assert_eq!(frames[0]["command"], "cycle_thinking_level");
+        assert_eq!(frames[0]["success"], true);
+        // Default unset is treated as Medium → High.
+        assert_eq!(frames[0]["data"]["level"], "high");
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// Mode setters reflect immediately in `get_state`.
+    #[tokio::test]
+    async fn steering_and_followup_modes_round_trip() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                br#"{"type":"set_steering_mode","id":"1","mode":"all"}
+{"type":"set_follow_up_mode","id":"2","mode":"all"}
+{"type":"set_auto_compaction","id":"3","enabled":false}
+{"type":"set_auto_retry","id":"4","enabled":false}
+{"type":"get_state","id":"5"}
+"#,
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 5, "frames: {frames:#?}");
+        let state = &frames[4]["data"];
+        assert_eq!(state["steeringMode"], "all");
+        assert_eq!(state["followUpMode"], "all");
+        assert_eq!(state["autoCompactionEnabled"], false);
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `set_session_name` propagates into `get_state.session_name` via
+    /// `SessionManager::append_label`.
+    #[tokio::test]
+    async fn set_session_name_persists() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                br#"{"type":"set_session_name","id":"1","name":"my session"}
+{"type":"get_state","id":"2"}
+"#,
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 2, "frames: {frames:#?}");
+        assert_eq!(frames[0]["command"], "set_session_name");
+        assert_eq!(frames[0]["success"], true);
+        assert_eq!(frames[1]["data"]["sessionName"], "my session");
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `get_session_stats` returns the session id, model id, and cwd.
+    #[tokio::test]
+    async fn get_session_stats_returns_basic_fields() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(b"{\"type\":\"get_session_stats\",\"id\":\"1\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 1, "frames: {frames:#?}");
+        let data = &frames[0]["data"];
+        assert!(data["sessionId"].is_string(), "stats: {data:#?}");
+        assert!(data["modelId"].is_string());
+        assert!(data["cwd"].is_string());
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `get_commands` returns the built-in command set tagged
+    /// `source: "builtin"`.
+    #[tokio::test]
+    async fn get_commands_returns_builtins() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(b"{\"type\":\"get_commands\",\"id\":\"1\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 1, "frames: {frames:#?}");
+        let cmds = frames[0]["data"]["commands"].as_array().unwrap();
+        assert!(!cmds.is_empty(), "expected at least one builtin command");
+        for c in cmds {
+            assert_eq!(
+                c["source"], "builtin",
+                "expected builtin source, got: {c:#?}"
+            );
+        }
+        // Sanity check: `/help` should be in there.
+        let names: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| c["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"help"),
+            "expected /help in builtin commands, got: {names:?}"
+        );
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `set_model` finds the model in the registry, updates the session,
+    /// and surfaces it via `get_state`.
+    #[tokio::test]
+    async fn set_model_unknown_returns_error() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                br#"{"type":"set_model","id":"1","provider":"nope","modelId":"nope"}
+"#,
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 1, "frames: {frames:#?}");
+        assert_eq!(frames[0]["command"], "set_model");
+        assert_eq!(frames[0]["success"], false);
+        assert!(
+            frames[0]["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("model not found"),
+            "expected error: {:#?}",
+            frames[0]
+        );
 
         handle.await.unwrap().unwrap();
     }
