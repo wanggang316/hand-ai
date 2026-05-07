@@ -12,7 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
+use tokio::sync::broadcast;
 
 /// Top-level settings shape.
 ///
@@ -343,16 +345,48 @@ fn parse_yaml_with_warning(path: &Path, content: &str) -> Result<Settings, Setti
     })
 }
 
+/// Event broadcast on settings change. Holds both the previous and the
+/// freshly-loaded settings so subscribers can diff fields they care about.
+#[derive(Debug, Clone)]
+pub struct SettingsChanged {
+    pub previous: Settings,
+    pub current: Settings,
+}
+
+/// Internal handle owned by [`SettingsManager`] when a watcher is active.
+/// Holding the `RecommendedWatcher` keeps the OS-level subscription alive;
+/// holding the `JoinHandle` keeps the debounce/reload task alive — dropping
+/// the handle aborts the task (tokio detaches and reaps it).
+struct WatchHandle {
+    sender: broadcast::Sender<SettingsChanged>,
+    _watcher: notify::RecommendedWatcher,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for WatchHandle {
+    fn drop(&mut self) {
+        // Best-effort: ensure the task wakes up and observes the dropped
+        // notify channel quickly. Aborting is idempotent.
+        self.task.abort();
+    }
+}
+
 /// Manages loading settings from the standard hand layout.
 ///
 /// Holds the merged [`Settings`] together with the resolved layer paths.
 /// Persistence (writing back to disk) is intentionally out of scope here —
-/// the TUI does not edit YAML, and a watcher-driven reload story lands in a
-/// later task.
+/// the TUI does not edit YAML.
+///
+/// Hot-reload: call [`SettingsManager::watch`] to receive a
+/// [`broadcast::Receiver<SettingsChanged>`] that fires whenever the YAML
+/// files on disk change to a value different from the in-memory copy. The
+/// watcher is started lazily on first call and shared across subsequent
+/// callers.
 pub struct SettingsManager {
     settings: Settings,
     project_path: Option<PathBuf>,
     global_path: Option<PathBuf>,
+    watch_handle: Option<WatchHandle>,
 }
 
 impl SettingsManager {
@@ -371,6 +405,7 @@ impl SettingsManager {
             settings,
             project_path,
             global_path,
+            watch_handle: None,
         })
     }
 
@@ -380,6 +415,7 @@ impl SettingsManager {
             settings: Settings::defaults(),
             project_path: None,
             global_path: None,
+            watch_handle: None,
         }
     }
 
@@ -425,6 +461,236 @@ impl SettingsManager {
     pub fn project_path(&self) -> Option<&Path> {
         self.project_path.as_deref()
     }
+
+    /// Subscribe to settings changes. Returns a [`broadcast::Receiver`] that
+    /// yields a [`SettingsChanged`] event each time the disk YAML files
+    /// reload to a value different from the current in-memory copy.
+    ///
+    /// The watcher task is started lazily on the first call; subsequent
+    /// calls return additional subscribers attached to the same task.
+    /// Multiple subscribers are supported (broadcast semantics).
+    ///
+    /// Behaviour notes:
+    /// - The watcher debounces filesystem events with a sliding 200ms
+    ///   window: events arriving within 200ms of each other coalesce
+    ///   into a single reload, regardless of total burst duration.
+    /// - On transient errors (file mid-rewrite, permission denied,
+    ///   malformed YAML), the watcher logs via `tracing::warn!` and keeps
+    ///   running — the next valid write will fire as normal.
+    /// - The notify subscription targets the *parent directory* of each
+    ///   settings file (not the file itself) so editor save-rename patterns
+    ///   are observed.
+    /// - Channel capacity is 16. Subscribers that lag receive
+    ///   `RecvError::Lagged`; that's a documented signal to re-load and
+    ///   resync, not a fatal error.
+    /// - Must be called from inside a tokio runtime — the internal task is
+    ///   spawned via [`tokio::spawn`].
+    pub fn watch(&mut self) -> broadcast::Receiver<SettingsChanged> {
+        if let Some(handle) = self.watch_handle.as_ref() {
+            return handle.sender.subscribe();
+        }
+
+        let (sender, _initial_rx) = broadcast::channel::<SettingsChanged>(16);
+        let (notify_tx, mut notify_rx) =
+            tokio::sync::mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+
+        // Build the notify watcher. The closure runs on a notify-internal
+        // thread; we forward each event into the tokio mpsc for the
+        // debounce task to consume.
+        let watcher_result = <notify::RecommendedWatcher as notify::Watcher>::new(
+            move |res| {
+                let _ = notify_tx.send(res);
+            },
+            notify::Config::default().with_poll_interval(Duration::from_secs(2)),
+        );
+        let mut watcher = match watcher_result {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(?e, "failed to create settings watcher; hot-reload disabled");
+                // Return a receiver to a never-fired channel; callers can
+                // hold it without surprise.
+                let rx = sender.subscribe();
+                drop(sender);
+                return rx;
+            }
+        };
+
+        // Watch the parent directory of each configured layer path. We
+        // dedupe by canonical parent so a single dir is registered once.
+        let mut watched_parents: Vec<PathBuf> = Vec::new();
+        for path in [self.global_path.as_deref(), self.project_path.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(parent) = path.parent() {
+                // Create the parent if it doesn't exist — notify can't
+                // watch a missing directory and the file may legitimately
+                // be created later.
+                if !parent.exists()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    tracing::warn!(
+                        path = %parent.display(),
+                        ?e,
+                        "could not create settings parent dir for watcher",
+                    );
+                    continue;
+                }
+                let parent_buf = parent.to_path_buf();
+                if watched_parents.contains(&parent_buf) {
+                    continue;
+                }
+                if let Err(e) =
+                    notify::Watcher::watch(&mut watcher, parent, notify::RecursiveMode::NonRecursive)
+                {
+                    tracing::warn!(
+                        path = %parent.display(),
+                        ?e,
+                        "failed to watch settings parent dir",
+                    );
+                    continue;
+                }
+                watched_parents.push(parent_buf);
+            }
+        }
+
+        // Snapshot of inputs the spawned task needs.
+        let global_path = self.global_path.clone();
+        let project_path = self.project_path.clone();
+        let mut current_settings = self.settings.clone();
+        let task_sender = sender.clone();
+        // Filter events to ones touching one of our settings files. Build
+        // both literal and canonicalised forms — FSEvents on macOS reports
+        // canonical paths (e.g. `/private/var/...`) while the configured
+        // path may be the symlinked alias (e.g. `/var/...`). Including
+        // parent dirs lets us catch coarse "directory changed" events too.
+        let target_files: Vec<PathBuf> = build_match_targets(
+            self.global_path.as_deref(),
+            self.project_path.as_deref(),
+        );
+
+        let task = tokio::spawn(async move {
+            loop {
+                // Block until the first relevant event arrives.
+                let first = match notify_rx.recv().await {
+                    Some(ev) => ev,
+                    None => break, // channel closed — watcher dropped
+                };
+                if !event_matches_targets(&first, &target_files) {
+                    continue;
+                }
+
+                // Debounce with a sliding 200ms window: each new event
+                // resets the idle timer so a continuous burst coalesces
+                // into a single reload regardless of total duration.
+                const DEBOUNCE: Duration = Duration::from_millis(200);
+                loop {
+                    match tokio::time::timeout(DEBOUNCE, notify_rx.recv()).await {
+                        Ok(Some(_ev)) => continue, // got another event, reset window
+                        // Channel closed mid-debounce — process the batch
+                        // we have, then exit the outer loop.
+                        Ok(None) => break,
+                        Err(_) => break, // 200ms idle elapsed
+                    }
+                }
+
+                // Re-load settings from disk.
+                let new_settings = match Settings::load(
+                    global_path.as_deref(),
+                    project_path.as_deref(),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(?e, "settings reload failed; keeping previous value");
+                        continue;
+                    }
+                };
+
+                if new_settings != current_settings {
+                    let event = SettingsChanged {
+                        previous: current_settings.clone(),
+                        current: new_settings.clone(),
+                    };
+                    // Ignore "no subscribers" — that's a benign state.
+                    let _ = task_sender.send(event);
+                    current_settings = new_settings;
+                }
+            }
+        });
+
+        let receiver = sender.subscribe();
+        self.watch_handle = Some(WatchHandle {
+            sender,
+            _watcher: watcher,
+            task,
+        });
+        receiver
+    }
+
+    /// Stop the watcher (used in tests and on shutdown). Idempotent.
+    /// Already-issued [`broadcast::Receiver`] handles will see the channel
+    /// close on their next `recv()`.
+    pub fn stop_watching(&mut self) {
+        // Dropping the handle drops the notify watcher (closing the
+        // forward channel) and aborts the spawned task. Dropping the
+        // sender closes the broadcast channel for surviving receivers.
+        self.watch_handle.take();
+    }
+}
+
+/// Build the set of paths (literal + canonicalised, plus parent dirs) we
+/// will match notify events against. Matching is permissive: we'd rather
+/// over-fire and let the post-reload diff filter than miss a real change.
+fn build_match_targets(global: Option<&Path>, project: Option<&Path>) -> Vec<PathBuf> {
+    let mut targets = Vec::new();
+    for p in [global, project].into_iter().flatten() {
+        targets.push(p.to_path_buf());
+        if let Ok(canon) = p.canonicalize()
+            && !targets.contains(&canon)
+        {
+            targets.push(canon);
+        }
+        if let Some(parent) = p.parent() {
+            let parent_buf = parent.to_path_buf();
+            if !targets.contains(&parent_buf) {
+                targets.push(parent_buf);
+            }
+            if let Ok(canon_parent) = parent.canonicalize()
+                && !targets.contains(&canon_parent)
+            {
+                targets.push(canon_parent);
+            }
+        }
+    }
+    targets
+}
+
+/// Predicate: does this notify event refer to one of our target files
+/// (or live inside one of our watched directories)?
+///
+/// `notify::Event::paths` lists every path the event covers. We match on:
+/// - exact equality with a target;
+/// - prefix-match against a watched parent dir (FSEvents often reports
+///   directory-level events).
+///
+/// If no paths are populated (rare; some platforms emit a generic
+/// "something changed" event) or the event is an error, return `true` so
+/// the reload step can decide whether anything actually moved.
+fn event_matches_targets(
+    res: &notify::Result<notify::Event>,
+    targets: &[PathBuf],
+) -> bool {
+    let event = match res {
+        Ok(e) => e,
+        Err(_) => return true,
+    };
+    if event.paths.is_empty() {
+        return true;
+    }
+    event
+        .paths
+        .iter()
+        .any(|p| targets.iter().any(|t| p == t || p.starts_with(t)))
 }
 
 #[cfg(test)]
@@ -605,5 +871,220 @@ mod tests {
         // Inputs are unchanged.
         assert_eq!(g.default_model.as_deref(), Some("a"));
         assert_eq!(p.default_model.as_deref(), Some("b"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Hot-reload watcher tests (T4.2)
+    // ---------------------------------------------------------------------
+
+    use tokio::sync::broadcast::error::RecvError;
+
+    /// Build a manager whose project layer points at the given file path
+    /// (without requiring the file to exist yet) and no global layer.
+    fn manager_for_project(project: PathBuf) -> SettingsManager {
+        // Bypass `from_cwd` (which forces the standard layout) and use
+        // `Settings::load` directly so we control which files exist.
+        let settings =
+            Settings::load(None, Some(project.as_path())).unwrap_or_else(|_| Settings::defaults());
+        SettingsManager {
+            settings,
+            project_path: Some(project),
+            global_path: None,
+            watch_handle: None,
+        }
+    }
+
+    /// Atomic file rewrite via tmp + rename — closer to how editors save
+    /// and a robust way to trigger a single coalescable filesystem event.
+    fn atomic_write(path: &Path, content: &str) {
+        use std::io::Write;
+        let parent = path.parent().expect("path has a parent");
+        let tmp = parent.join(format!(
+            ".{}.tmp",
+            path.file_name().and_then(|s| s.to_str()).unwrap_or("settings")
+        ));
+        let mut f = std::fs::File::create(&tmp).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.sync_all().ok();
+        drop(f);
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn watcher_delivers_event_to_single_subscriber() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: alpha\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        assert_eq!(mgr.current().default_model.as_deref(), Some("alpha"));
+
+        let mut rx = mgr.watch();
+
+        // Modify after the watcher is up.
+        atomic_write(&project, "default-model: beta\n");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event arrived within timeout")
+            .expect("broadcast not closed");
+        assert_eq!(event.previous.default_model.as_deref(), Some("alpha"));
+        assert_eq!(event.current.default_model.as_deref(), Some("beta"));
+    }
+
+    #[tokio::test]
+    async fn watcher_broadcasts_to_multiple_subscribers() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: alpha\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx_a = mgr.watch();
+        let mut rx_b = mgr.watch();
+
+        atomic_write(&project, "default-model: gamma\n");
+
+        let ev_a = tokio::time::timeout(Duration::from_secs(2), rx_a.recv())
+            .await
+            .expect("a: timed out")
+            .expect("a: closed");
+        let ev_b = tokio::time::timeout(Duration::from_secs(2), rx_b.recv())
+            .await
+            .expect("b: timed out")
+            .expect("b: closed");
+
+        assert_eq!(ev_a.current.default_model.as_deref(), Some("gamma"));
+        assert_eq!(ev_b.current.default_model.as_deref(), Some("gamma"));
+    }
+
+    #[tokio::test]
+    async fn watcher_suppresses_event_when_content_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        let body = "default-model: alpha\n";
+        std::fs::write(&project, body).unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx = mgr.watch();
+
+        // Re-write the same content.
+        atomic_write(&project, body);
+
+        // Allow the debounce + reload to run, then assert no event.
+        let outcome = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+        assert!(
+            outcome.is_err(),
+            "expected no event for identical write, got {outcome:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_debounces_rapid_writes_into_one_event() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: v0\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx = mgr.watch();
+
+        // 5 rapid writes; final state is `default-model: v5`.
+        for i in 1..=5 {
+            atomic_write(&project, &format!("default-model: v{i}\n"));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // First event must arrive.
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("first event timed out")
+            .expect("broadcast closed");
+        assert_eq!(first.current.default_model.as_deref(), Some("v5"));
+
+        // Within a generous window, no further events should arrive — the
+        // debounce should have coalesced the burst.
+        let second = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+        assert!(
+            second.is_err(),
+            "expected only one event from a debounced burst, got {second:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_survives_malformed_yaml_then_recovers() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: alpha\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx = mgr.watch();
+
+        // Bad write — watcher should log + skip.
+        atomic_write(&project, "default-model: [unterminated\n");
+        // Give the debounce window time to fire and the reload to fail.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Good write — should fire.
+        atomic_write(&project, "default-model: recovered\n");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event after recovery timed out")
+            .expect("broadcast closed");
+        assert_eq!(event.current.default_model.as_deref(), Some("recovered"));
+    }
+
+    #[tokio::test]
+    async fn stop_watching_closes_existing_subscribers() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: alpha\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx = mgr.watch();
+
+        mgr.stop_watching();
+
+        let res = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("recv resolved within timeout");
+        assert!(matches!(res, Err(RecvError::Closed)), "got {res:?}");
+
+        // Idempotent.
+        mgr.stop_watching();
+    }
+
+    #[tokio::test]
+    async fn project_layer_overrides_global_under_watcher() {
+        let dir = TempDir::new().unwrap();
+        // Use distinct directories so the watcher registers two parents.
+        let global_dir = dir.path().join("global");
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let global = global_dir.join("settings.yaml");
+        let project = project_dir.join("settings.yaml");
+        std::fs::write(&global, "default-model: A\n").unwrap();
+        // Project file does not yet exist.
+
+        let settings = Settings::load(Some(global.as_path()), Some(project.as_path())).unwrap();
+        let mut mgr = SettingsManager {
+            settings,
+            project_path: Some(project.clone()),
+            global_path: Some(global.clone()),
+            watch_handle: None,
+        };
+        assert_eq!(mgr.current().default_model.as_deref(), Some("A"));
+
+        let mut rx = mgr.watch();
+
+        // Create the project file mid-watch — it should shadow global.
+        atomic_write(&project, "default-model: B\n");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event timed out")
+            .expect("broadcast closed");
+        assert_eq!(event.previous.default_model.as_deref(), Some("A"));
+        assert_eq!(event.current.default_model.as_deref(), Some("B"));
     }
 }

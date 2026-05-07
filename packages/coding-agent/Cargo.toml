@@ -32,6 +32,7 @@ futures = "0.3"
 async-stream = "0.3"
 async-trait = "0.1"
 toml = "0.8"
+notify = "8"
 
 [dev-dependencies]
 tempfile = "3"

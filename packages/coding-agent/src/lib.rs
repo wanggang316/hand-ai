@@ -40,5 +40,8 @@ pub use core::extensions::{
 
 // Slash commands and keybindings — same caveat as extensions; will be
 // reshaped in Phases 4/5.
-pub use core::keybindings::KeyBindingsConfig;
+pub use core::keybindings::{
+    Action, ChordParseError, Key, KeyBindings, KeyBindingsError, KeyBindingsFile, KeyChord,
+    KeyModifiers, parse_chord,
+};
 pub use core::slash_commands::SlashCommandRegistry;

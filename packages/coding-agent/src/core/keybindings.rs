@@ -1,389 +1,677 @@
-//! Keybindings system — configurable keyboard shortcuts.
+//! Keybindings configuration.
+//!
+//! User-customizable bindings layered on top of defaults. Resolution order:
+//! project (`<cwd>/.hand/keybindings.yaml`) > global
+//! (`~/.hand/keybindings.yaml`) > defaults.
+//!
+//! Each action has at most one chord; multiple chords for one action would
+//! require palette UX work — defer to a later phase.
+//!
+//! The chord string format is intentionally simple:
+//!
+//! - `"ctrl+s"` -> `Char('s')` + `Ctrl`
+//! - `"alt+enter"` -> `Enter` + `Alt`
+//! - `"escape"` -> `Escape`
+//! - `"f5"` -> `F(5)`
+//! - `"ctrl+shift+up"` -> `ArrowUp` + `Ctrl + Shift`
+//!
+//! All lowercase. Modifiers in any order before the key. Single `+`
+//! separator. The `KeyChord` representation is for keybindings
+//! persistence/parsing only; it does not interop with runtime input event
+//! types yet (T5 will define those and translate if needed).
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
 
-/// An action that can be triggered by a key binding.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Every action that the interactive REPL can fire via a keybinding.
+///
+/// Names match the TS reference where possible. Kept tight for v1; new
+/// actions can be added later.
+// TODO: extend Action enum as new keybindable surfaces appear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Action {
-    /// Submit the current input.
+    /// Submit the current prompt to the agent.
     Submit,
-    /// Insert a newline.
-    Newline,
-    /// Clear editor or quit if empty.
-    ClearOrQuit,
-    /// Cancel/abort current operation.
+    /// Cancel an in-flight operation (or clear input when idle).
     Cancel,
-    /// Navigate history up.
-    HistoryUp,
-    /// Navigate history down.
-    HistoryDown,
-    /// Trigger autocomplete.
-    Autocomplete,
-    /// Clear the screen.
-    ClearScreen,
-    /// Clear the current line.
-    ClearLine,
-    /// Kill to end of line.
+    /// Insert a literal newline in the input buffer.
+    NewLine,
+    /// Move backward through input history.
+    HistoryPrev,
+    /// Move forward through input history.
+    HistoryNext,
+    /// Delete the previous word.
+    DeleteWordBack,
+    /// Kill text from cursor to end of line.
     KillToEnd,
-    /// Move to start of line.
-    LineStart,
-    /// Move to end of line.
-    LineEnd,
-    /// Undo last edit.
-    Undo,
-    /// Redo last undone edit.
-    Redo,
+    /// Kill text from cursor to start of line.
+    KillToStart,
+    /// Quit the REPL.
+    Quit,
+    /// Toggle the model's reasoning/thinking display.
+    ToggleThinking,
+    /// Open the slash-command palette.
+    OpenSlashPalette,
 }
 
-/// A key combination (simplified representation).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct KeyCombo {
-    /// The key name (e.g., "enter", "c", "escape", "up").
-    pub key: String,
-    /// Whether Ctrl is held.
+impl Action {
+    /// All variants, in declaration order. Useful for iterating defaults.
+    pub const ALL: &'static [Action] = &[
+        Action::Submit,
+        Action::Cancel,
+        Action::NewLine,
+        Action::HistoryPrev,
+        Action::HistoryNext,
+        Action::DeleteWordBack,
+        Action::KillToEnd,
+        Action::KillToStart,
+        Action::Quit,
+        Action::ToggleThinking,
+        Action::OpenSlashPalette,
+    ];
+
+    /// Kebab-case name as used in YAML config keys.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Action::Submit => "submit",
+            Action::Cancel => "cancel",
+            Action::NewLine => "new-line",
+            Action::HistoryPrev => "history-prev",
+            Action::HistoryNext => "history-next",
+            Action::DeleteWordBack => "delete-word-back",
+            Action::KillToEnd => "kill-to-end",
+            Action::KillToStart => "kill-to-start",
+            Action::Quit => "quit",
+            Action::ToggleThinking => "toggle-thinking",
+            Action::OpenSlashPalette => "open-slash-palette",
+        }
+    }
+
+    /// Parse a kebab-case action name.
+    pub fn from_name(name: &str) -> Option<Action> {
+        Action::ALL.iter().copied().find(|a| a.as_str() == name)
+    }
+}
+
+/// A single keystroke (key + modifiers).
+///
+/// Chord sequences (e.g., `Ctrl+X Ctrl+S`) are deferred — v1 supports only
+/// single chords.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct KeyChord {
+    pub key: Key,
+    #[serde(default)]
+    pub modifiers: KeyModifiers,
+}
+
+impl KeyChord {
+    /// Construct a chord with no modifiers.
+    pub fn plain(key: Key) -> Self {
+        Self {
+            key,
+            modifiers: KeyModifiers::default(),
+        }
+    }
+
+    /// Construct a chord with the given modifiers.
+    pub fn with_mods(key: Key, modifiers: KeyModifiers) -> Self {
+        Self { key, modifiers }
+    }
+}
+
+/// A keyboard key. Extend as new surfaces require it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Key {
+    /// A printable character.
+    Char(char),
+    Enter,
+    Tab,
+    Backspace,
+    Delete,
+    Escape,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    F(u8),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct KeyModifiers {
+    #[serde(default)]
     pub ctrl: bool,
-    /// Whether Shift is held.
-    pub shift: bool,
-    /// Whether Alt is held.
+    #[serde(default)]
     pub alt: bool,
+    #[serde(default)]
+    pub shift: bool,
+    #[serde(default)]
+    pub cmd: bool,
 }
 
-impl KeyCombo {
-    /// Create a simple key with no modifiers.
-    pub fn key(name: &str) -> Self {
-        Self {
-            key: name.to_lowercase(),
-            ctrl: false,
-            shift: false,
-            alt: false,
-        }
-    }
-
-    /// Create a Ctrl+key combo.
-    pub fn ctrl(name: &str) -> Self {
-        Self {
-            key: name.to_lowercase(),
-            ctrl: true,
-            shift: false,
-            alt: false,
-        }
-    }
-
-    /// Create a Shift+key combo.
-    pub fn shift(name: &str) -> Self {
-        Self {
-            key: name.to_lowercase(),
-            ctrl: false,
-            shift: true,
-            alt: false,
-        }
-    }
+impl KeyModifiers {
+    /// `Ctrl` only.
+    pub const CTRL: Self = Self {
+        ctrl: true,
+        alt: false,
+        shift: false,
+        cmd: false,
+    };
+    /// `Alt` only.
+    pub const ALT: Self = Self {
+        ctrl: false,
+        alt: true,
+        shift: false,
+        cmd: false,
+    };
+    /// `Shift` only.
+    pub const SHIFT: Self = Self {
+        ctrl: false,
+        alt: false,
+        shift: true,
+        cmd: false,
+    };
 }
 
-impl std::fmt::Display for KeyCombo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut parts = Vec::new();
-        if self.ctrl {
-            parts.push("Ctrl");
-        }
-        if self.shift {
-            parts.push("Shift");
-        }
-        if self.alt {
-            parts.push("Alt");
-        }
-        parts.push(&self.key);
-        write!(f, "{}", parts.join("+"))
-    }
+#[derive(Debug, Error)]
+pub enum KeyBindingsError {
+    #[error("I/O error reading {path}: {source}", path = .path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("YAML parse error in {path}: {source}", path = .path.display())]
+    Yaml {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
+    #[error("invalid chord {raw:?} for action {action:?}: {reason}")]
+    InvalidChord {
+        raw: String,
+        action: String,
+        reason: String,
+    },
 }
 
-/// A single key binding entry.
+/// Wire format for the keybindings YAML file.
+///
+/// The file is a flat map from action name (kebab-case) to chord string
+/// (e.g., `"ctrl+s"`, `"alt+enter"`, `"f5"`, `"escape"`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct KeyBindingsFile {
+    pub bindings: HashMap<String, String>,
+}
+
+/// User-facing keybindings table.
 #[derive(Debug, Clone)]
-pub struct KeyBinding {
-    /// The key combination.
-    pub combo: KeyCombo,
-    /// The action to execute.
-    pub action: Action,
-    /// Human-readable description.
-    pub description: String,
+pub struct KeyBindings {
+    /// action -> chord, after merging defaults + user overrides.
+    by_action: HashMap<Action, KeyChord>,
+    /// chord -> action (for reverse lookup; populated by `Self::build`).
+    by_chord: HashMap<KeyChord, Action>,
+    /// Conflicts encountered at load time; reported via diagnostics.
+    conflicts: Vec<(KeyChord, Vec<Action>)>,
 }
 
-/// Manages key bindings with defaults and user overrides.
-#[derive(Debug)]
-pub struct KeyBindingsConfig {
-    bindings: Vec<KeyBinding>,
-    lookup: HashMap<KeyCombo, Action>,
-}
-
-impl Default for KeyBindingsConfig {
+impl Default for KeyBindings {
     fn default() -> Self {
-        Self::new()
+        Self::defaults()
     }
 }
 
-impl KeyBindingsConfig {
-    /// Create with default bindings.
-    pub fn new() -> Self {
-        let mut config = Self {
-            bindings: Vec::new(),
-            lookup: HashMap::new(),
-        };
-        config.register_defaults();
-        config
+impl KeyBindings {
+    /// Default keybindings. Hardcoded; one chord per `Action`.
+    pub fn defaults() -> Self {
+        let mut by_action: HashMap<Action, KeyChord> = HashMap::new();
+
+        by_action.insert(Action::Submit, KeyChord::plain(Key::Enter));
+        by_action.insert(Action::Cancel, KeyChord::plain(Key::Escape));
+        by_action.insert(
+            Action::NewLine,
+            KeyChord::with_mods(Key::Enter, KeyModifiers::SHIFT),
+        );
+        by_action.insert(Action::HistoryPrev, KeyChord::plain(Key::ArrowUp));
+        by_action.insert(Action::HistoryNext, KeyChord::plain(Key::ArrowDown));
+        by_action.insert(
+            Action::DeleteWordBack,
+            KeyChord::with_mods(Key::Char('w'), KeyModifiers::CTRL),
+        );
+        by_action.insert(
+            Action::KillToEnd,
+            KeyChord::with_mods(Key::Char('k'), KeyModifiers::CTRL),
+        );
+        by_action.insert(
+            Action::KillToStart,
+            KeyChord::with_mods(Key::Char('u'), KeyModifiers::CTRL),
+        );
+        by_action.insert(
+            Action::Quit,
+            KeyChord::with_mods(Key::Char('c'), KeyModifiers::CTRL),
+        );
+        by_action.insert(
+            Action::ToggleThinking,
+            KeyChord::with_mods(Key::Char('t'), KeyModifiers::CTRL),
+        );
+        by_action.insert(Action::OpenSlashPalette, KeyChord::plain(Key::Char('/')));
+
+        Self::build(by_action)
     }
 
-    /// Load user keybindings from `~/.hand/keybindings.json`, merging with defaults.
-    pub fn load_from_file(path: &PathBuf) -> Self {
-        let mut config = Self::new();
+    /// Load and merge global + project YAML files. Either missing is OK.
+    ///
+    /// Unknown action names and malformed chord strings are logged via
+    /// `tracing::warn!` and skipped; the rest of the file is still applied.
+    pub fn load(
+        global_path: Option<&Path>,
+        project_path: Option<&Path>,
+    ) -> Result<Self, KeyBindingsError> {
+        let mut by_action = Self::defaults().by_action;
 
-        if let Ok(content) = std::fs::read_to_string(path)
-            && let Ok(overrides) = serde_json::from_str::<HashMap<String, String>>(&content)
-        {
-            for (key_str, action_str) in overrides {
-                if let (Some(combo), Some(action)) =
-                    (parse_key_combo(&key_str), parse_action(&action_str))
-                {
-                    config.bind(
-                        combo.clone(),
-                        action.clone(),
-                        &format!("{key_str} -> {action_str}"),
-                    );
-                }
+        if let Some(p) = global_path {
+            apply_file(&mut by_action, p, "global")?;
+        }
+        if let Some(p) = project_path {
+            apply_file(&mut by_action, p, "project")?;
+        }
+
+        Ok(Self::build(by_action))
+    }
+
+    /// Resolve an action to its bound chord, if any.
+    pub fn resolve(&self, action: Action) -> Option<&KeyChord> {
+        self.by_action.get(&action)
+    }
+
+    /// Reverse-resolve a chord to its action, if bound.
+    ///
+    /// When two actions are bound to the same chord (a conflict), the chord
+    /// is removed from the reverse map — neither action wins. Use
+    /// [`Self::conflicts`] to surface this to the user.
+    pub fn resolve_chord(&self, chord: &KeyChord) -> Option<Action> {
+        self.by_chord.get(chord).copied()
+    }
+
+    /// Conflicts (chord bound to multiple actions). Reported once per load.
+    pub fn conflicts(&self) -> &[(KeyChord, Vec<Action>)] {
+        &self.conflicts
+    }
+
+    /// Internal: build the reverse index and conflict list from an
+    /// action -> chord map.
+    fn build(by_action: HashMap<Action, KeyChord>) -> Self {
+        // First, group actions by chord to detect collisions.
+        let mut grouped: HashMap<KeyChord, Vec<Action>> = HashMap::new();
+        for (action, chord) in &by_action {
+            grouped.entry(chord.clone()).or_default().push(*action);
+        }
+
+        let mut by_chord = HashMap::new();
+        let mut conflicts = Vec::new();
+        for (chord, mut actions) in grouped {
+            if actions.len() == 1 {
+                by_chord.insert(chord, actions[0]);
+            } else {
+                // Stable order so diagnostics are reproducible.
+                actions.sort_by_key(|a| a.as_str());
+                tracing::warn!(
+                    chord = ?chord,
+                    actions = ?actions,
+                    "keybinding conflict: chord bound to multiple actions"
+                );
+                conflicts.push((chord, actions));
             }
         }
 
-        config
+        Self {
+            by_action,
+            by_chord,
+            conflicts,
+        }
+    }
+}
+
+fn apply_file(
+    by_action: &mut HashMap<Action, KeyChord>,
+    path: &Path,
+    layer: &str,
+) -> Result<(), KeyBindingsError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(KeyBindingsError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    if raw.trim().is_empty() {
+        return Ok(());
     }
 
-    /// Bind a key combo to an action.
-    pub fn bind(&mut self, combo: KeyCombo, action: Action, description: &str) {
-        self.lookup.insert(combo.clone(), action.clone());
-        self.bindings.push(KeyBinding {
-            combo,
-            action,
-            description: description.to_string(),
+    let file: KeyBindingsFile =
+        serde_yaml::from_str(&raw).map_err(|source| KeyBindingsError::Yaml {
+            path: path.to_path_buf(),
+            source,
+        })?;
+
+    for (action_name, chord_str) in file.bindings {
+        let Some(action) = Action::from_name(&action_name) else {
+            tracing::warn!(
+                layer,
+                path = %path.display(),
+                action = %action_name,
+                "unknown action in keybindings file; skipping",
+            );
+            continue;
+        };
+        match parse_chord(&chord_str) {
+            Ok(chord) => {
+                by_action.insert(action, chord);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    layer,
+                    path = %path.display(),
+                    action = %action_name,
+                    chord = %chord_str,
+                    error = %e,
+                    "invalid chord in keybindings file; skipping",
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ChordParseError {
+    #[error("empty chord")]
+    Empty,
+    #[error("unknown modifier {modifier:?}")]
+    UnknownModifier { modifier: String },
+    #[error("unknown key {key:?}")]
+    UnknownKey { key: String },
+}
+
+/// Parse a chord string like `"ctrl+shift+s"` or `"alt+enter"` into a
+/// [`KeyChord`].
+///
+/// Lowercase only. Modifiers may appear in any order, separated by `+`.
+/// The final segment is the key.
+pub fn parse_chord(raw: &str) -> Result<KeyChord, ChordParseError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ChordParseError::Empty);
+    }
+
+    let segments: Vec<&str> = trimmed.split('+').map(str::trim).collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        // Catches "ctrl+", "+s", and "ctrl++s".
+        return Err(ChordParseError::UnknownKey {
+            key: String::new(),
         });
     }
 
-    /// Resolve a key combo to an action.
-    pub fn resolve(&self, combo: &KeyCombo) -> Option<&Action> {
-        self.lookup.get(combo)
-    }
+    let (key_seg, mod_segs) = segments
+        .split_last()
+        .expect("non-empty after empty-segment check");
 
-    /// Get all bindings.
-    pub fn bindings(&self) -> &[KeyBinding] {
-        &self.bindings
-    }
-
-    /// Get hotkeys help text.
-    pub fn hotkeys_text(&self) -> String {
-        let mut lines = vec!["Keyboard Shortcuts:".to_string(), String::new()];
-        let max_combo_len = self
-            .bindings
-            .iter()
-            .map(|b| b.combo.to_string().len())
-            .max()
-            .unwrap_or(0);
-
-        for binding in &self.bindings {
-            lines.push(format!(
-                "  {:<width$}  {}",
-                binding.combo,
-                binding.description,
-                width = max_combo_len
-            ));
-        }
-        lines.join("\n")
-    }
-
-    fn register_defaults(&mut self) {
-        let defaults = vec![
-            (KeyCombo::key("enter"), Action::Submit, "Submit message"),
-            (KeyCombo::shift("enter"), Action::Newline, "Insert newline"),
-            (
-                KeyCombo::ctrl("c"),
-                Action::ClearOrQuit,
-                "Clear editor / quit if empty",
-            ),
-            (
-                KeyCombo::key("escape"),
-                Action::Cancel,
-                "Cancel current operation",
-            ),
-            (
-                KeyCombo::key("up"),
-                Action::HistoryUp,
-                "Previous in history",
-            ),
-            (
-                KeyCombo::key("down"),
-                Action::HistoryDown,
-                "Next in history",
-            ),
-            (
-                KeyCombo::key("tab"),
-                Action::Autocomplete,
-                "Trigger autocomplete",
-            ),
-            (KeyCombo::ctrl("l"), Action::ClearScreen, "Clear screen"),
-            (KeyCombo::ctrl("u"), Action::ClearLine, "Clear line"),
-            (
-                KeyCombo::ctrl("k"),
-                Action::KillToEnd,
-                "Kill to end of line",
-            ),
-            (
-                KeyCombo::ctrl("a"),
-                Action::LineStart,
-                "Move to start of line",
-            ),
-            (KeyCombo::ctrl("e"), Action::LineEnd, "Move to end of line"),
-            (KeyCombo::ctrl("z"), Action::Undo, "Undo"),
-            (KeyCombo::ctrl("y"), Action::Redo, "Redo"),
-        ];
-
-        for (combo, action, desc) in defaults {
-            self.bind(combo, action, desc);
+    let mut modifiers = KeyModifiers::default();
+    for m in mod_segs {
+        match m.to_ascii_lowercase().as_str() {
+            "ctrl" => modifiers.ctrl = true,
+            "alt" | "option" | "opt" => modifiers.alt = true,
+            "shift" => modifiers.shift = true,
+            "cmd" | "meta" | "super" | "win" => modifiers.cmd = true,
+            other => {
+                return Err(ChordParseError::UnknownModifier {
+                    modifier: other.to_string(),
+                });
+            }
         }
     }
+
+    let key = parse_key(key_seg)?;
+    Ok(KeyChord { key, modifiers })
 }
 
-/// Parse a key combo string like "Ctrl+C" or "Shift+Enter".
-pub fn parse_key_combo(s: &str) -> Option<KeyCombo> {
-    let parts: Vec<&str> = s.split('+').map(str::trim).collect();
-    let mut ctrl = false;
-    let mut shift = false;
-    let mut alt = false;
-    let mut key = String::new();
-
-    for part in parts {
-        match part.to_lowercase().as_str() {
-            "ctrl" => ctrl = true,
-            "shift" => shift = true,
-            "alt" => alt = true,
-            k => key = k.to_string(),
+fn parse_key(raw: &str) -> Result<Key, ChordParseError> {
+    let lower = raw.to_ascii_lowercase();
+    let key = match lower.as_str() {
+        "enter" | "return" => Key::Enter,
+        "tab" => Key::Tab,
+        "backspace" => Key::Backspace,
+        "delete" | "del" => Key::Delete,
+        "escape" | "esc" => Key::Escape,
+        "up" | "arrow-up" | "arrowup" => Key::ArrowUp,
+        "down" | "arrow-down" | "arrowdown" => Key::ArrowDown,
+        "left" | "arrow-left" | "arrowleft" => Key::ArrowLeft,
+        "right" | "arrow-right" | "arrowright" => Key::ArrowRight,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" | "page-up" | "pgup" => Key::PageUp,
+        "pagedown" | "page-down" | "pgdn" => Key::PageDown,
+        s if s.starts_with('f') && s.len() >= 2 => {
+            // f1..f24
+            let n: u8 = s[1..]
+                .parse()
+                .map_err(|_| ChordParseError::UnknownKey { key: raw.to_string() })?;
+            if !(1..=24).contains(&n) {
+                return Err(ChordParseError::UnknownKey { key: raw.to_string() });
+            }
+            Key::F(n)
         }
-    }
-
-    if key.is_empty() {
-        return None;
-    }
-
-    Some(KeyCombo {
-        key,
-        ctrl,
-        shift,
-        alt,
-    })
-}
-
-/// Parse an action string.
-pub fn parse_action(s: &str) -> Option<Action> {
-    match s.to_lowercase().as_str() {
-        "submit" => Some(Action::Submit),
-        "newline" => Some(Action::Newline),
-        "clear_or_quit" | "clearorquit" => Some(Action::ClearOrQuit),
-        "cancel" => Some(Action::Cancel),
-        "history_up" | "historyup" => Some(Action::HistoryUp),
-        "history_down" | "historydown" => Some(Action::HistoryDown),
-        "autocomplete" => Some(Action::Autocomplete),
-        "clear_screen" | "clearscreen" => Some(Action::ClearScreen),
-        "clear_line" | "clearline" => Some(Action::ClearLine),
-        "kill_to_end" | "killtoend" => Some(Action::KillToEnd),
-        "line_start" | "linestart" => Some(Action::LineStart),
-        "line_end" | "lineend" => Some(Action::LineEnd),
-        "undo" => Some(Action::Undo),
-        "redo" => Some(Action::Redo),
-        _ => None,
-    }
+        s if s.chars().count() == 1 => Key::Char(s.chars().next().unwrap()),
+        _ => {
+            return Err(ChordParseError::UnknownKey {
+                key: raw.to_string(),
+            });
+        }
+    };
+    Ok(key)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
 
-    #[test]
-    fn default_bindings_registered() {
-        let config = KeyBindingsConfig::new();
-        assert!(!config.bindings().is_empty());
-        assert!(config.bindings().len() >= 14);
+    fn write_yaml(dir: &TempDir, name: &str, contents: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        path
     }
 
     #[test]
-    fn resolve_ctrl_c() {
-        let config = KeyBindingsConfig::new();
-        let action = config.resolve(&KeyCombo::ctrl("c"));
-        assert_eq!(action, Some(&Action::ClearOrQuit));
-    }
-
-    #[test]
-    fn resolve_enter() {
-        let config = KeyBindingsConfig::new();
+    fn defaults_are_fully_populated() {
+        let kb = KeyBindings::defaults();
+        for action in Action::ALL {
+            assert!(
+                kb.resolve(*action).is_some(),
+                "missing default binding for {:?}",
+                action
+            );
+        }
+        assert_eq!(kb.resolve(Action::Submit), Some(&KeyChord::plain(Key::Enter)));
         assert_eq!(
-            config.resolve(&KeyCombo::key("enter")),
-            Some(&Action::Submit)
+            kb.resolve(Action::Quit),
+            Some(&KeyChord::with_mods(Key::Char('c'), KeyModifiers::CTRL))
+        );
+        assert!(kb.conflicts().is_empty());
+    }
+
+    #[test]
+    fn empty_user_file_preserves_defaults() {
+        let dir = TempDir::new().unwrap();
+        let path = write_yaml(&dir, "keybindings.yaml", "");
+        let kb = KeyBindings::load(Some(&path), None).unwrap();
+        let defaults = KeyBindings::defaults();
+        for action in Action::ALL {
+            assert_eq!(kb.resolve(*action), defaults.resolve(*action));
+        }
+    }
+
+    #[test]
+    fn missing_file_is_ok() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("does-not-exist.yaml");
+        let kb = KeyBindings::load(Some(&path), None).unwrap();
+        assert_eq!(kb.resolve(Action::Submit), Some(&KeyChord::plain(Key::Enter)));
+    }
+
+    #[test]
+    fn user_override_replaces_default() {
+        let dir = TempDir::new().unwrap();
+        let path = write_yaml(&dir, "global.yaml", "submit: ctrl+s\n");
+        let kb = KeyBindings::load(Some(&path), None).unwrap();
+        assert_eq!(
+            kb.resolve(Action::Submit),
+            Some(&KeyChord::with_mods(Key::Char('s'), KeyModifiers::CTRL))
+        );
+        // Default for an unrelated action is preserved.
+        assert_eq!(kb.resolve(Action::Cancel), Some(&KeyChord::plain(Key::Escape)));
+    }
+
+    #[test]
+    fn project_shadows_global() {
+        let dir = TempDir::new().unwrap();
+        let global = write_yaml(&dir, "global.yaml", "submit: ctrl+s\n");
+        let project = write_yaml(&dir, "project.yaml", "submit: alt+enter\n");
+        let kb = KeyBindings::load(Some(&global), Some(&project)).unwrap();
+        assert_eq!(
+            kb.resolve(Action::Submit),
+            Some(&KeyChord::with_mods(Key::Enter, KeyModifiers::ALT))
         );
     }
 
     #[test]
-    fn resolve_unknown_returns_none() {
-        let config = KeyBindingsConfig::new();
-        assert!(config.resolve(&KeyCombo::key("f12")).is_none());
+    fn unknown_action_name_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        let path = write_yaml(&dir, "kb.yaml", "bogus: ctrl+x\nsubmit: ctrl+s\n");
+        let kb = KeyBindings::load(Some(&path), None).unwrap();
+        // The valid binding is applied.
+        assert_eq!(
+            kb.resolve(Action::Submit),
+            Some(&KeyChord::with_mods(Key::Char('s'), KeyModifiers::CTRL))
+        );
     }
 
     #[test]
-    fn parse_key_combo_simple() {
-        let combo = parse_key_combo("enter").unwrap();
-        assert_eq!(combo.key, "enter");
-        assert!(!combo.ctrl);
+    fn invalid_chord_is_skipped() {
+        let dir = TempDir::new().unwrap();
+        let path = write_yaml(&dir, "kb.yaml", "submit: \"ctrl+\"\n");
+        let kb = KeyBindings::load(Some(&path), None).unwrap();
+        // Default preserved because the override was malformed.
+        assert_eq!(kb.resolve(Action::Submit), Some(&KeyChord::plain(Key::Enter)));
     }
 
     #[test]
-    fn parse_key_combo_with_ctrl() {
-        let combo = parse_key_combo("Ctrl+C").unwrap();
-        assert_eq!(combo.key, "c");
-        assert!(combo.ctrl);
+    fn conflict_detected_when_two_actions_share_chord() {
+        let dir = TempDir::new().unwrap();
+        let path = write_yaml(
+            &dir,
+            "kb.yaml",
+            "submit: ctrl+x\ncancel: ctrl+x\n",
+        );
+        let kb = KeyBindings::load(Some(&path), None).unwrap();
+        let conflicts = kb.conflicts();
+        assert_eq!(conflicts.len(), 1, "expected one conflict, got {:?}", conflicts);
+        let (chord, actions) = &conflicts[0];
+        assert_eq!(
+            chord,
+            &KeyChord::with_mods(Key::Char('x'), KeyModifiers::CTRL)
+        );
+        assert!(actions.contains(&Action::Submit));
+        assert!(actions.contains(&Action::Cancel));
+        // Conflicting chord does not reverse-resolve.
+        assert!(kb.resolve_chord(chord).is_none());
     }
 
     #[test]
-    fn parse_key_combo_with_shift() {
-        let combo = parse_key_combo("Shift+Enter").unwrap();
-        assert_eq!(combo.key, "enter");
-        assert!(combo.shift);
+    fn parse_chord_happy_paths() {
+        assert_eq!(
+            parse_chord("ctrl+s").unwrap(),
+            KeyChord::with_mods(Key::Char('s'), KeyModifiers::CTRL)
+        );
+        assert_eq!(
+            parse_chord("alt+enter").unwrap(),
+            KeyChord::with_mods(Key::Enter, KeyModifiers::ALT)
+        );
+        assert_eq!(parse_chord("escape").unwrap(), KeyChord::plain(Key::Escape));
+        assert_eq!(parse_chord("f5").unwrap(), KeyChord::plain(Key::F(5)));
+        assert_eq!(
+            parse_chord("ctrl+shift+up").unwrap(),
+            KeyChord::with_mods(
+                Key::ArrowUp,
+                KeyModifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..KeyModifiers::default()
+                }
+            )
+        );
     }
 
     #[test]
-    fn parse_action_valid() {
-        assert_eq!(parse_action("submit"), Some(Action::Submit));
-        assert_eq!(parse_action("Cancel"), Some(Action::Cancel));
-        assert_eq!(parse_action("undo"), Some(Action::Undo));
+    fn parse_chord_errors() {
+        assert_eq!(parse_chord(""), Err(ChordParseError::Empty));
+        assert_eq!(parse_chord("   "), Err(ChordParseError::Empty));
+        assert!(matches!(
+            parse_chord("hyper+s"),
+            Err(ChordParseError::UnknownModifier { .. })
+        ));
+        assert!(matches!(
+            parse_chord("ctrl+nopekey"),
+            Err(ChordParseError::UnknownKey { .. })
+        ));
+        // Trailing '+' (empty key segment).
+        assert!(matches!(
+            parse_chord("ctrl+"),
+            Err(ChordParseError::UnknownKey { .. })
+        ));
     }
 
     #[test]
-    fn parse_action_invalid() {
-        assert!(parse_action("nonexistent").is_none());
+    fn resolve_chord_reverse_lookup() {
+        let kb = KeyBindings::defaults();
+        assert_eq!(
+            kb.resolve_chord(&KeyChord::plain(Key::Enter)),
+            Some(Action::Submit)
+        );
+        assert_eq!(
+            kb.resolve_chord(&KeyChord::plain(Key::Escape)),
+            Some(Action::Cancel)
+        );
+        assert_eq!(
+            kb.resolve_chord(&KeyChord::with_mods(Key::Char('c'), KeyModifiers::CTRL)),
+            Some(Action::Quit)
+        );
+        // Unbound chord returns None.
+        assert_eq!(kb.resolve_chord(&KeyChord::plain(Key::F(12))), None);
     }
 
     #[test]
-    fn custom_binding() {
-        let mut config = KeyBindingsConfig::new();
-        config.bind(KeyCombo::ctrl("s"), Action::Submit, "Save/Submit");
-        assert_eq!(config.resolve(&KeyCombo::ctrl("s")), Some(&Action::Submit));
-    }
-
-    #[test]
-    fn hotkeys_text_not_empty() {
-        let config = KeyBindingsConfig::new();
-        let text = config.hotkeys_text();
-        assert!(text.contains("Ctrl+c"));
-        assert!(text.contains("enter"));
-    }
-
-    #[test]
-    fn key_combo_display() {
-        assert_eq!(KeyCombo::ctrl("c").to_string(), "Ctrl+c");
-        assert_eq!(KeyCombo::key("enter").to_string(), "enter");
-        assert_eq!(KeyCombo::shift("enter").to_string(), "Shift+enter");
+    fn action_name_roundtrip() {
+        for a in Action::ALL {
+            assert_eq!(Action::from_name(a.as_str()), Some(*a));
+        }
+        assert_eq!(Action::from_name("not-an-action"), None);
     }
 }
