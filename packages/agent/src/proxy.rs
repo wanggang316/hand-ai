@@ -15,9 +15,51 @@
 
 use std::collections::HashMap;
 
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AgentError;
+
+/// Current wall-clock time as Unix epoch milliseconds. Used to seed
+/// `partial.timestamp` once at the start of a proxy stream; mirrors TS'
+/// `Date.now()` at `proxy.ts:136`.
+fn current_timestamp_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// Build the seed `AssistantMessage` that the proxy stream's reducer mutates
+/// in place. Mirrors `proxy.ts:121-137`.
+fn seed_partial(model: &model::Model) -> model::AssistantMessage {
+    model::AssistantMessage {
+        role: "assistant".to_string(),
+        content: Vec::new(),
+        api: model.api,
+        provider: model.provider,
+        model: model.id.clone(),
+        usage: model::Usage::default(),
+        stop_reason: model::StopReason::Stop,
+        error_message: None,
+        timestamp: current_timestamp_ms(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+    }
+}
+
+/// Format a `reqwest::Error` without the trailing `" for url (...)"` suffix
+/// that `Display` appends. The proxy URL is internal infrastructure and
+/// shouldn't surface in user-visible `error_message` strings.
+fn strip_url_from_reqwest_err(e: &reqwest::Error) -> String {
+    let s = e.to_string();
+    match s.rfind(" for url (") {
+        Some(i) => s[..i].to_string(),
+        None => s,
+    }
+}
 
 /// Wire-format event from a proxy server. The proxy strips the `partial`
 /// field from `AssistantMessageEvent` to save bandwidth; the client
@@ -108,7 +150,6 @@ pub enum ProxyAssistantMessageEvent {
 /// `pi-mono/packages/agent/src/proxy.ts:59-71`.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // Wired up in T4/T5 (proxy stream pipeline).
 struct ProxyRequestOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -154,7 +195,6 @@ pub struct ProxyStreamOptions {
 /// JSON body of `POST {proxy_url}/api/stream`. Three top-level keys exactly:
 /// `model`, `context`, `options` (TS shape at `proxy.ts:158-162`).
 #[derive(Serialize)]
-#[allow(dead_code)] // Wired up in T4/T5 (proxy stream pipeline).
 struct ProxyRequest<'a> {
     model: &'a model::Model,
     context: &'a model::Context,
@@ -163,7 +203,6 @@ struct ProxyRequest<'a> {
 
 /// Project a [`model::SimpleStreamOptions`] into the bandwidth-trimmed
 /// [`ProxyRequestOptions`] forwarded to the proxy server.
-#[allow(dead_code)] // Wired up in T4/T5 (proxy stream pipeline).
 fn build_request_options(opts: &model::SimpleStreamOptions) -> ProxyRequestOptions {
     ProxyRequestOptions {
         temperature: opts.base.temperature,
@@ -196,7 +235,6 @@ fn build_request_options(opts: &model::SimpleStreamOptions) -> ProxyRequestOptio
 /// (TS would `throw`), with the single exception of `toolcall_end` on a
 /// non-tool-call slot which returns `Ok(None)` to mirror TS' `return undefined`
 /// at `proxy.ts:347`.
-#[allow(dead_code)] // Wired up in T5 (stream_proxy driver).
 fn process_proxy_event(
     event: ProxyAssistantMessageEvent,
     partial: &mut model::AssistantMessage,
@@ -425,6 +463,201 @@ fn process_proxy_event(
             }))
         }
     }
+}
+
+/// Open a streaming proxy request and yield translated
+/// [`model::AssistantMessageEvent`]s.
+///
+/// `POST {proxy_url}/api/stream` is sent with the model, context, and a
+/// bandwidth-trimmed projection of `options.options`. The server replies with
+/// an SSE-style stream of `data: <json>` lines, each carrying a
+/// [`ProxyAssistantMessageEvent`]. Lines are line-buffered, parsed, fed
+/// through [`process_proxy_event`], and the resulting events are yielded.
+///
+/// This function is synchronous: it returns the boxed stream immediately, and
+/// the HTTP request is initiated on the first poll.
+///
+/// On any failure — network error, non-2xx status, malformed event,
+/// reducer-detected protocol violation — the stream yields exactly one
+/// `AssistantMessageEvent::Error` and ends. On cancellation via
+/// `options.cancel`, an `Error { reason: Aborted, .. }` is yielded.
+///
+/// Mirrors `streamProxy` at `pi-mono/packages/agent/src/proxy.ts:116-233`.
+pub fn stream_proxy(
+    model: &model::Model,
+    context: model::Context,
+    options: ProxyStreamOptions,
+) -> model::AssistantMessageEventStream<'static> {
+    let model = model.clone();
+    let cancel = options.cancel.clone();
+    let auth_token = options.auth_token.clone();
+    let proxy_url = options.proxy_url.clone();
+    let request_options = build_request_options(&options.options);
+
+    let s = async_stream::stream! {
+        let mut partial = seed_partial(&model);
+
+        let url = format!("{}/api/stream", proxy_url);
+        let body = ProxyRequest {
+            model: &model,
+            context: &context,
+            options: request_options,
+        };
+
+        let client = reqwest::Client::new();
+        let send_fut = client
+            .post(&url)
+            .bearer_auth(&auth_token)
+            .json(&body)
+            .send();
+
+        // Phase 1: send request, race against cancellation.
+        let response = if let Some(cancel_tok) = cancel.as_ref() {
+            tokio::select! {
+                _ = cancel_tok.cancelled() => {
+                    partial.stop_reason = model::StopReason::Aborted;
+                    partial.error_message = Some("Aborted".to_string());
+                    yield model::AssistantMessageEvent::Error {
+                        reason: model::StopReason::Aborted,
+                        error: partial.clone(),
+                    };
+                    return;
+                }
+                result = send_fut => match result {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        partial.stop_reason = model::StopReason::Error;
+                        partial.error_message = Some(format!("Proxy error: {}", strip_url_from_reqwest_err(&e)));
+                        yield model::AssistantMessageEvent::Error {
+                            reason: model::StopReason::Error,
+                            error: partial.clone(),
+                        };
+                        return;
+                    }
+                },
+            }
+        } else {
+            match send_fut.await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    partial.stop_reason = model::StopReason::Error;
+                    partial.error_message = Some(format!("Proxy error: {}", strip_url_from_reqwest_err(&e)));
+                    yield model::AssistantMessageEvent::Error {
+                        reason: model::StopReason::Error,
+                        error: partial.clone(),
+                    };
+                    return;
+                }
+            }
+        };
+
+        // Phase 2: non-2xx → drain body, surface error, end.
+        if !response.status().is_success() {
+            let status = response.status();
+            let status_text = status.canonical_reason().unwrap_or("");
+            let mut msg = format!("Proxy error: {} {}", status.as_u16(), status_text);
+
+            if let Ok(v) = response.json::<serde_json::Value>().await
+                && let Some(err_str) = v.get("error").and_then(|e| e.as_str())
+            {
+                msg = format!("Proxy error: {err_str}");
+            }
+
+            partial.stop_reason = model::StopReason::Error;
+            partial.error_message = Some(msg);
+            yield model::AssistantMessageEvent::Error {
+                reason: model::StopReason::Error,
+                error: partial.clone(),
+            };
+            return;
+        }
+
+        // Phase 3: SSE body — line-buffer, parse, dispatch.
+        let mut bytes_stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut tool_partial_json: HashMap<u32, String> = HashMap::new();
+
+        loop {
+            let next_chunk = if let Some(cancel_tok) = cancel.as_ref() {
+                tokio::select! {
+                    _ = cancel_tok.cancelled() => {
+                        partial.stop_reason = model::StopReason::Aborted;
+                        partial.error_message = Some("Aborted".to_string());
+                        yield model::AssistantMessageEvent::Error {
+                            reason: model::StopReason::Aborted,
+                            error: partial.clone(),
+                        };
+                        return;
+                    }
+                    chunk = bytes_stream.next() => chunk,
+                }
+            } else {
+                bytes_stream.next().await
+            };
+
+            let bytes = match next_chunk {
+                Some(Ok(b)) => b,
+                Some(Err(e)) => {
+                    partial.stop_reason = model::StopReason::Error;
+                    partial.error_message = Some(format!("Proxy error: {}", strip_url_from_reqwest_err(&e)));
+                    yield model::AssistantMessageEvent::Error {
+                        reason: model::StopReason::Error,
+                        error: partial.clone(),
+                    };
+                    return;
+                }
+                None => break,
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line: String = buffer.drain(..=newline_pos).collect();
+                let line = line.trim_end_matches(['\r', '\n']);
+                let trimmed = line.trim();
+
+                if trimmed.is_empty() || trimmed.starts_with(':') {
+                    continue;
+                }
+                let payload = match trimmed.strip_prefix("data: ") {
+                    Some(p) => p,
+                    None => continue,
+                };
+                if payload.is_empty() {
+                    continue;
+                }
+
+                let proxy_event: ProxyAssistantMessageEvent = match serde_json::from_str(payload) {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        partial.stop_reason = model::StopReason::Error;
+                        partial.error_message = Some(format!("Proxy error: {e}"));
+                        yield model::AssistantMessageEvent::Error {
+                            reason: model::StopReason::Error,
+                            error: partial.clone(),
+                        };
+                        return;
+                    }
+                };
+
+                match process_proxy_event(proxy_event, &mut partial, &mut tool_partial_json) {
+                    Ok(Some(ev)) => yield ev,
+                    Ok(None) => {}
+                    Err(e) => {
+                        partial.stop_reason = model::StopReason::Error;
+                        partial.error_message = Some(e.to_string());
+                        yield model::AssistantMessageEvent::Error {
+                            reason: model::StopReason::Error,
+                            error: partial.clone(),
+                        };
+                        return;
+                    }
+                }
+            }
+        }
+    };
+
+    Box::pin(s)
 }
 
 #[cfg(test)]
