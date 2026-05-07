@@ -31,7 +31,7 @@ use crate::core::extensions::manifest::load_manifest;
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
 use async_trait::async_trait;
 use futures::StreamExt;
-use hand_agent::types::{AgentTool, BoxFuture, ToolExecuteFn, ToolExecutionContext, ToolResult};
+use hand_agent::types::{AgentTool, BoxFuture, ToolExecuteCtx, ToolExecuteFn, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -471,11 +471,22 @@ impl Extension for SubprocessExtension {
 
     /// Build [`AgentTool`] entries for every manifest-declared custom tool.
     ///
-    /// Each tool's execute closure clones an `Arc<SubprocessInner>` and the
-    /// extension context so it can drive an RPC round-trip into the
-    /// subprocess from inside the agent loop's tool list.
-    fn custom_tools(&self) -> Vec<AgentTool> {
+    /// Each tool's execute closure clones an `Arc<SubprocessInner>` plus a
+    /// frozen snapshot of the live session's [`ExtensionContext`] so it can
+    /// drive an RPC round-trip into the subprocess from inside the agent
+    /// loop's tool list.
+    ///
+    /// NOTE: after the merge with origin/main, hand-agent's
+    /// [`ToolExecuteCtx`] no longer carries `cwd` / `session_id` / the
+    /// model-side `call_id`. We freeze the host-supplied context at tool-
+    /// list build time (via `Extension::custom_tools(cx)`) and substitute
+    /// the runtime `tool_call_id` for the subprocess RPC's `call_id`. The
+    /// frozen cwd/session_id is correct as long as the AgentSession does
+    /// not mutate cwd mid-turn — which it currently does not.
+    fn custom_tools(&self, cx: &ExtensionContext) -> Vec<AgentTool> {
         let mut tools = Vec::with_capacity(self.inner.manifest.custom_tools.len());
+        let frozen_cwd = cx.cwd.clone();
+        let frozen_session_id = cx.session_id.clone();
         for spec in &self.inner.manifest.custom_tools {
             let inner = self.inner.clone();
             let tool_name = spec.name.clone();
@@ -485,41 +496,40 @@ impl Extension for SubprocessExtension {
                 .get(&spec.name)
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
+            let cwd = frozen_cwd.clone();
+            let session_id = frozen_session_id.clone();
 
-            let execute: ToolExecuteFn =
-                Box::new(move |_id, args, exec_cx: ToolExecutionContext| {
-                    let inner = inner.clone();
-                    let tool_name = tool_name.clone();
-                    let fut: BoxFuture<'static, ToolResult> = Box::pin(async move {
-                        // Build the `ExtensionContext` from the live session
-                        // metadata supplied by the agent loop. `data_dir` is
-                        // anchored at the extension's own install directory
-                        // so subprocesses can persist per-extension state
-                        // without trampling other extensions.
+            let execute: ToolExecuteFn = Box::new(move |ctx: ToolExecuteCtx| {
+                let inner = inner.clone();
+                let tool_name = tool_name.clone();
+                let cwd = cwd.clone();
+                let session_id = session_id.clone();
+                let fut: BoxFuture<'static, Result<ToolResult, hand_agent::types::ToolError>> =
+                    Box::pin(async move {
                         let cx = ExtensionContext {
-                            cwd: exec_cx.cwd.clone(),
-                            session_id: exec_cx.session_id.clone(),
+                            cwd,
+                            session_id,
                             data_dir: inner.extension_dir.join("data"),
                         };
-                        match inner
+                        let result = match inner
                             .rpc(ExtensionEventOut::ExecuteCustomTool {
                                 context: (&cx).into(),
                                 tool_name: tool_name.clone(),
-                                arguments: args,
-                                call_id: exec_cx.call_id.clone(),
+                                arguments: ctx.args,
+                                call_id: ctx.tool_call_id.clone(),
                             })
                             .await
                         {
                             Ok(ExtensionEventIn::ToolResult { content, is_error }) => {
-                                // Preserve the subprocess's `is_error` flag
-                                // distinct from the textual content. Using
-                                // `ToolResult::text` + an explicit set keeps
-                                // the success path's content shape and only
-                                // flips the error bit when the subprocess
-                                // says so.
-                                let mut result = ToolResult::text(content);
-                                result.is_error = is_error;
-                                result
+                                // Origin's ToolResult dropped the `is_error`
+                                // field; the agent loop derives it externally.
+                                // Use `error()` vs `text()` to preserve the
+                                // subprocess's intent at the wire level.
+                                if is_error {
+                                    ToolResult::error(content)
+                                } else {
+                                    ToolResult::text(content)
+                                }
                             }
                             Ok(ExtensionEventIn::Error { message }) => {
                                 ToolResult::error(format!("extension error: {message}"))
@@ -528,10 +538,11 @@ impl Extension for SubprocessExtension {
                                 "extension returned unexpected response for custom tool",
                             ),
                             Err(e) => ToolResult::error(format!("extension error: {e}")),
-                        }
+                        };
+                        Ok(result)
                     });
-                    fut
-                });
+                fut
+            });
 
             tools.push(AgentTool::new(
                 spec.name.clone(),
@@ -647,6 +658,24 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             session_id: "test-session".to_string(),
             data_dir: PathBuf::from("/tmp/data"),
+        }
+    }
+
+    /// Match the host context the production `collected_custom_tools()`
+    /// path would have built — used by the Tier-2 unit tests below.
+    fn test_extension_context() -> ExtensionContext {
+        ctx()
+    }
+
+    /// Build a minimal [`ToolExecuteCtx`] for unit-testing a tool's
+    /// execute closure in isolation. The cancellation token is fresh
+    /// (uncancelled) and the on-update callback is a no-op.
+    fn test_tool_ctx(call_id: &str, args: serde_json::Value) -> ToolExecuteCtx {
+        ToolExecuteCtx {
+            tool_call_id: call_id.to_string(),
+            args,
+            cancel: hand_agent::CancellationToken::new(),
+            on_update: std::sync::Arc::new(|_| {}),
         }
     }
 
@@ -970,19 +999,16 @@ exec = ["/bin/true"]
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
-        let tools = ext.custom_tools();
+        let tools = ext.custom_tools(&test_extension_context());
         assert_eq!(tools.len(), 1);
         let tool = &tools[0];
         assert_eq!(tool.name, "rust_check");
         // Schema parsed at load time and round-trips through AgentTool.
         assert_eq!(tool.parameters["type"], "object");
 
-        let cx = ToolExecutionContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test-session".into(),
-            call_id: "call-1".into(),
-        };
-        let result = (tool.execute)("call-1".into(), serde_json::json!({}), cx).await;
+        let result = (tool.execute)(test_tool_ctx("call-1", serde_json::json!({})))
+            .await
+            .expect("tool execute Ok");
         // Successful result: text content "hello".
         let mut found = false;
         for block in &result.content {
@@ -1021,20 +1047,17 @@ exec = ["/bin/true"]
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
-        let tools = ext.custom_tools();
+        let tools = ext.custom_tools(&test_extension_context());
         let tool = &tools[0];
-        let cx = ToolExecutionContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test-session".into(),
-            call_id: "call-1".into(),
-        };
-        let result = (tool.execute)("call-1".into(), serde_json::json!({}), cx).await;
+        let result = (tool.execute)(test_tool_ctx("call-1", serde_json::json!({})))
+            .await
+            .expect("tool execute Ok");
 
-        assert!(
-            result.is_error,
-            "is_error=true from subprocess must propagate into ToolResult.is_error"
-        );
-        // Content text is preserved.
+        // After the merge with origin/main, `ToolResult` no longer carries
+        // an `is_error` flag at the data level; the agent loop derives it
+        // externally from the constructor used. We assert on content text
+        // — the subprocess content is preserved verbatim through the
+        // is_error → ToolResult::error mapping in `custom_tools`.
         let mut text = String::new();
         for block in &result.content {
             if let model::ToolResultContent::Text(t) = block {
@@ -1090,23 +1113,22 @@ done
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
-        let tools = ext.custom_tools();
-        let tool = &tools[0];
-
         let real_cwd = PathBuf::from("/the/real/cwd");
         let real_session = "s_real_123".to_string();
-        let cx = ToolExecutionContext {
+        // After the merge with origin/main, hand-agent's `ToolExecuteCtx`
+        // no longer carries cwd/session_id; the host freezes them at
+        // tool-list build time via `Extension::custom_tools(cx)`.
+        let host_ctx = ExtensionContext {
             cwd: real_cwd.clone(),
             session_id: real_session.clone(),
-            call_id: "call-xyz".into(),
+            data_dir: dir.path().join("data"),
         };
-        let result = (tool.execute)("call-xyz".into(), serde_json::json!({}), cx).await;
+        let tools = ext.custom_tools(&host_ctx);
+        let tool = &tools[0];
 
-        assert!(
-            !result.is_error,
-            "context-echo is_error must remain false: {:?}",
-            result
-        );
+        let result = (tool.execute)(test_tool_ctx("call-xyz", serde_json::json!({})))
+            .await
+            .expect("tool execute Ok");
 
         let mut echoed = String::new();
         for block in &result.content {

@@ -17,10 +17,10 @@ use crate::core::settings::SettingsManager;
 use crate::core::skills::{self, Skill, SkillError};
 use crate::core::system_prompt::{self, BuildSystemPromptOptions};
 use hand_agent::types::{
-    AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AfterToolCallContext,
-    AfterToolCallResult, BeforeToolCallContext, BeforeToolCallResult, BoxFuture,
+    AfterToolCallContext, AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig,
+    AgentTool, BeforeToolCallContext, BeforeToolCallResult, BoxFuture,
 };
-use hand_agent::{AgentEventSink, agent_loop};
+use hand_agent::{AgentEventSink, CancellationToken, agent_loop};
 use model::{Message, SimpleStreamOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -56,7 +56,7 @@ impl Drop for ToolsRestoreGuard<'_> {
 #[derive(Debug, Clone)]
 pub enum AgentSessionEvent {
     /// Forwarded agent event.
-    Agent(AgentEvent),
+    Agent(Box<AgentEvent>),
     /// Compaction started.
     CompactionStart,
     /// Compaction completed.
@@ -317,27 +317,24 @@ impl AgentSession {
             )
         };
 
-        // Build agent loop config
-        let loop_config = AgentLoopConfig {
-            model: self.config.model.clone(),
-            stream_options: self.config.stream_options.clone(),
-            cwd: self.config.cwd.clone(),
-            session_id: self.session_manager.id().to_string(),
-            tool_execution: hand_agent::types::ToolExecutionMode::Parallel,
-            before_tool_call: before_hook,
-            after_tool_call: after_hook,
-            get_steering_messages: None,
-            get_follow_up_messages: None,
-            convert_to_llm: None,
-            transform_context: None,
-            get_api_key: None,
-            steering_mode: queue_mode_to_delivery(self.steering_mode),
-            follow_up_mode: queue_mode_to_delivery(self.follow_up_mode),
-            max_retry_delay_ms: None,
-        };
+        // Build agent loop config from defaults, then apply session-level
+        // overrides. After the merge with origin/main, AgentLoopConfig no
+        // longer carries `cwd` / `session_id` — those moved out of the
+        // hook surface entirely. Extensions that need cwd/session_id read
+        // them from the host-supplied `ExtensionContext` instead.
+        let mut loop_config = AgentLoopConfig::new(
+            self.config.model.clone(),
+            self.config.stream_options.clone(),
+        );
+        loop_config.tool_execution = hand_agent::types::ToolExecutionMode::Parallel;
+        loop_config.before_tool_call = before_hook;
+        loop_config.after_tool_call = after_hook;
+        loop_config.steering_mode = queue_mode_to_delivery(self.steering_mode);
+        loop_config.follow_up_mode = queue_mode_to_delivery(self.follow_up_mode);
 
         // Create event sink for the agent loop
         let emit = self.build_event_sink();
+        let cancel = CancellationToken::new();
 
         // Merge built-in tools with extension-contributed custom tools so
         // the model can call them through the same agent loop tool list.
@@ -375,6 +372,7 @@ impl AgentSession {
             &loop_config,
             &self.client,
             &emit,
+            &cancel,
         )
         .await;
 
@@ -693,9 +691,10 @@ impl AgentSession {
     /// extensions return tools backed by Rust closures; Tier 2 extensions
     /// return tools whose execute fn drives an RPC into the subprocess.
     pub fn collected_custom_tools(&self) -> Vec<AgentTool> {
+        let cx = self.extension_context();
         let mut out = Vec::new();
         for ext in &self.extensions {
-            out.extend(ext.custom_tools());
+            out.extend(ext.custom_tools(&cx));
         }
         out
     }
@@ -756,8 +755,8 @@ impl AgentSession {
 
     fn build_event_sink(&self) -> AgentEventSink {
         let listeners = Arc::clone(&self.event_listeners);
-        Box::new(move |event: AgentEvent| {
-            Self::emit_to_listeners(&listeners, AgentSessionEvent::Agent(event));
+        Arc::new(move |event: AgentEvent| {
+            Self::emit_to_listeners(&listeners, AgentSessionEvent::Agent(Box::new(event)));
         })
     }
 
@@ -782,39 +781,51 @@ fn queue_mode_to_delivery(mode: QueueMode) -> hand_agent::QueueDeliveryMode {
     }
 }
 
-/// `HookDecision::Replace(args)` from the aggregated chain is forwarded to
-/// hand-agent via `BeforeToolCallResult::replace_args` so the agent loop
-/// invokes the tool with the rewritten arguments. The model still sees the
-/// original tool call id, so the conversation thread is unaffected.
+/// Build a `BeforeToolCallHook` that fans the tool-call event out to
+/// every registered extension and aggregates their decisions.
+///
+/// NOTE: after the merge with origin/main, hand-agent's
+/// [`BeforeToolCallResult`] dropped its `replace_args` field. The Tier-1
+/// hook chain still emits [`HookDecision::Replace(args)`] but we can no
+/// longer forward it to the agent loop — the rewrite is logged and
+/// downgraded to `Continue` until a follow-up re-introduces argument
+/// rewriting in hand-agent.
 fn build_before_tool_call_hook(
     extensions: Arc<Vec<Arc<dyn Extension>>>,
     cx: Arc<ExtensionContext>,
 ) -> hand_agent::types::BeforeToolCallHook {
-    Box::new(move |ctx: BeforeToolCallContext<'_>| -> BoxFuture<'_, Option<BeforeToolCallResult>> {
-        let extensions = extensions.clone();
-        let cx = cx.clone();
-        let event = ToolCallEvent {
-            tool_name: ctx.tool_call.name.clone(),
-            arguments: ctx.args.clone(),
-            call_id: ctx.tool_call.id.clone(),
-        };
-        Box::pin(async move {
-            let decision = dispatch_before_tool_call(&extensions, &cx, &event).await;
-            match decision {
-                HookDecision::Continue => None,
-                HookDecision::Replace(args) => Some(BeforeToolCallResult {
-                    block: false,
-                    reason: None,
-                    replace_args: Some(args),
-                }),
-                HookDecision::Cancel(reason) => Some(BeforeToolCallResult {
-                    block: true,
-                    reason: Some(reason),
-                    replace_args: None,
-                }),
-            }
-        })
-    })
+    Arc::new(
+        move |ctx: BeforeToolCallContext<'_>,
+              _cancel: hand_agent::CancellationToken|
+              -> BoxFuture<'_, Option<BeforeToolCallResult>> {
+            let extensions = extensions.clone();
+            let cx = cx.clone();
+            let event = ToolCallEvent {
+                tool_name: ctx.tool_call.name.clone(),
+                arguments: ctx.args.clone(),
+                call_id: ctx.tool_call.id.clone(),
+            };
+            Box::pin(async move {
+                let decision = dispatch_before_tool_call(&extensions, &cx, &event).await;
+                match decision {
+                    HookDecision::Continue => None,
+                    HookDecision::Replace(_args) => {
+                        tracing::warn!(
+                            tool = %event.tool_name,
+                            "extension requested arg rewrite (HookDecision::Replace) but \
+                             hand-agent::BeforeToolCallResult no longer supports it; \
+                             treating as Continue. Re-enable by restoring replace_args."
+                        );
+                        None
+                    }
+                    HookDecision::Cancel(reason) => Some(BeforeToolCallResult {
+                        block: true,
+                        reason: Some(reason),
+                    }),
+                }
+            })
+        },
+    )
 }
 
 /// Build an `AfterToolCallHook` that fans the result event out to every
@@ -824,26 +835,33 @@ fn build_after_tool_call_hook(
     extensions: Arc<Vec<Arc<dyn Extension>>>,
     cx: Arc<ExtensionContext>,
 ) -> hand_agent::types::AfterToolCallHook {
-    Box::new(move |ctx: AfterToolCallContext<'_>| -> BoxFuture<'_, Option<AfterToolCallResult>> {
-        let extensions = extensions.clone();
-        let cx = cx.clone();
-        // Render the tool result content as JSON for the extension. The
-        // ToolResult shape is internal to hand-agent; for the v1 event
-        // surface we expose `success` (== !is_error) and the JSON body.
-        let event = ToolResultEvent {
-            tool_name: ctx.tool_call.name.clone(),
-            call_id: ctx.tool_call.id.clone(),
-            success: !ctx.is_error,
-            result: serde_json::to_value(ctx.result).unwrap_or_else(|err| {
-                tracing::warn!(error = %err, "failed to serialize tool result for after-hook; using null");
-                serde_json::Value::Null
-            }),
-        };
-        Box::pin(async move {
-            dispatch_after_tool_call(&extensions, &cx, &event).await;
-            None
-        })
-    })
+    Arc::new(
+        move |ctx: AfterToolCallContext<'_>,
+              _cancel: hand_agent::CancellationToken|
+              -> BoxFuture<'_, Option<AfterToolCallResult>> {
+            let extensions = extensions.clone();
+            let cx = cx.clone();
+            // Render the tool result content as JSON for the extension. The
+            // ToolResult shape is internal to hand-agent; the v1 event
+            // surface exposes `success` (== !is_error) and the JSON body.
+            let event = ToolResultEvent {
+                tool_name: ctx.tool_call.name.clone(),
+                call_id: ctx.tool_call.id.clone(),
+                success: !ctx.is_error,
+                result: serde_json::to_value(ctx.result).unwrap_or_else(|err| {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to serialize tool result for after-hook; using null"
+                    );
+                    serde_json::Value::Null
+                }),
+            };
+            Box::pin(async move {
+                dispatch_after_tool_call(&extensions, &cx, &event).await;
+                None
+            })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -872,6 +890,7 @@ mod tests {
             max_tokens: 4096,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 
@@ -999,7 +1018,7 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            AgentSessionEvent::Agent(AgentEvent::AgentStart) => {}
+            AgentSessionEvent::Agent(e) if matches!(**e, AgentEvent::AgentStart) => {}
             other => panic!("unexpected event: {other:?}"),
         }
     }
@@ -1148,20 +1167,18 @@ mod tests {
             fn manifest(&self) -> &ExtensionManifest {
                 &self.manifest
             }
-            fn custom_tools(&self) -> Vec<AgentTool> {
-                let execute: hand_agent::types::ToolExecuteFn = Box::new(
-                    |_id, _args, _cx: hand_agent::types::ToolExecutionContext| {
-                        Box::pin(
-                            async move { hand_agent::types::ToolResult::text("custom tool ran") },
-                        )
-                    },
-                );
-                vec![AgentTool::new(
+            fn custom_tools(
+                &self,
+                _cx: &crate::core::extensions::api::ExtensionContext,
+            ) -> Vec<AgentTool> {
+                vec![AgentTool::simple(
                     "echo",
                     "Echo a string",
                     serde_json::json!({"type":"object","properties":{}}),
                     "Echo",
-                    execute,
+                    |_call_id, _args| async move {
+                        hand_agent::types::ToolResult::text("custom tool ran")
+                    },
                 )]
             }
         }
@@ -1175,12 +1192,13 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
 
-        let cx = hand_agent::types::ToolExecutionContext {
-            cwd: PathBuf::from("."),
-            session_id: "test-session".into(),
-            call_id: "c1".into(),
+        let ctx = hand_agent::types::ToolExecuteCtx {
+            tool_call_id: "c1".into(),
+            args: serde_json::json!({}),
+            cancel: hand_agent::CancellationToken::new(),
+            on_update: std::sync::Arc::new(|_| {}),
         };
-        let result = (tools[0].execute)("c1".into(), serde_json::json!({}), cx).await;
+        let result = (tools[0].execute)(ctx).await.expect("tool execute Ok");
         let mut text = String::new();
         for block in &result.content {
             if let model::ToolResultContent::Text(t) = block {
@@ -1229,6 +1247,9 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         }
     }
 
@@ -1249,6 +1270,9 @@ mod tests {
             stop_reason: StopReason::ToolUse,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         }
     }
 
@@ -1314,19 +1338,12 @@ mod tests {
     }
 
     fn noop_tool() -> AgentTool {
-        let execute: hand_agent::types::ToolExecuteFn = Box::new(
-            move |_id, _args, _cx: hand_agent::types::ToolExecutionContext| {
-                Box::pin(async move {
-                    hand_agent::types::ToolResult::text("noop ok")
-                })
-            },
-        );
-        AgentTool::new(
+        AgentTool::simple(
             "noop",
             "A no-op test tool.",
             serde_json::json!({"type": "object", "properties": {}}),
             "Noop",
-            execute,
+            |_call_id, _args| async move { hand_agent::types::ToolResult::text("noop ok") },
         )
     }
 
@@ -1462,21 +1479,18 @@ mod tests {
 
         let executions = Arc::new(AtomicUsize::new(0));
         let executions_for_tool = executions.clone();
-        let execute: hand_agent::types::ToolExecuteFn = Box::new(
-            move |_id, _args, _cx: hand_agent::types::ToolExecutionContext| {
-                let counter = executions_for_tool.clone();
-                Box::pin(async move {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    hand_agent::types::ToolResult::text("ran")
-                })
-            },
-        );
-        let counted_tool = AgentTool::new(
+        let counted_tool = AgentTool::simple(
             "noop",
             "A no-op test tool.",
             serde_json::json!({"type": "object", "properties": {}}),
             "Noop",
-            execute,
+            move |_call_id, _args| {
+                let counter = executions_for_tool.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    hand_agent::types::ToolResult::text("ran")
+                }
+            },
         );
 
         let mut session =
@@ -1505,11 +1519,17 @@ mod tests {
         );
     }
 
-    /// F23: A `HookDecision::Replace(args)` returned by a Tier-1 extension
-    /// must be forwarded to the tool execute closure. The tool sees the
-    /// rewritten args, not the model's original ones.
+    /// F23 regression (post-merge): a `HookDecision::Replace(args)` from a
+    /// Tier-1 extension is currently downgraded to `Continue` (with a
+    /// warning) because hand-agent's `BeforeToolCallResult` no longer
+    /// carries `replace_args` after the merge with origin/main. This test
+    /// pins the contract: send_message still succeeds, the tool observes
+    /// the model's ORIGINAL args, and no panic / unwind escapes.
+    ///
+    /// When `replace_args` is restored upstream this test should flip to
+    /// asserting the rewritten args are observed.
     #[tokio::test]
-    async fn replace_args_propagates_to_tool_execution() {
+    async fn replace_args_currently_downgrades_to_continue() {
         let client = model::Client::new();
         client.registry.register(
             Api::OpenAICompletions,
@@ -1521,24 +1541,20 @@ mod tests {
             Some("test".into()),
         );
 
-        // Build a recording tool that captures the args it actually received.
         let observed: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
         let observed_for_tool = observed.clone();
-        let execute: hand_agent::types::ToolExecuteFn = Box::new(
-            move |_id, args, _cx: hand_agent::types::ToolExecutionContext| {
-                let observed = observed_for_tool.clone();
-                Box::pin(async move {
-                    *observed.lock().unwrap() = Some(args);
-                    hand_agent::types::ToolResult::text("recorded")
-                })
-            },
-        );
-        let recorder_tool = AgentTool::new(
+        let recorder_tool = AgentTool::simple(
             "noop",
             "Records args",
             serde_json::json!({"type":"object","properties":{}}),
             "Noop",
-            execute,
+            move |_call_id, args| {
+                let observed = observed_for_tool.clone();
+                async move {
+                    *observed.lock().unwrap() = Some(args);
+                    hand_agent::types::ToolResult::text("recorded")
+                }
+            },
         );
 
         let mut session = AgentSession::in_memory_with_client(
@@ -1561,8 +1577,8 @@ mod tests {
         let captured = observed.lock().unwrap().clone();
         assert_eq!(
             captured,
-            Some(serde_json::json!({"replaced": true})),
-            "tool must observe the replaced args, not the model's original args"
+            Some(serde_json::json!({"original": true})),
+            "with replace_args removed upstream, tool observes the model's original args"
         );
     }
 }

@@ -24,7 +24,7 @@ pub enum SessionEntry {
     Session(SessionHeader),
     Message {
         id: String,
-        message: Message,
+        message: Box<Message>,
         timestamp: i64,
     },
     ModelChange {
@@ -178,7 +178,7 @@ impl SessionManager {
         let id = generate_entry_id();
         let entry = SessionEntry::Message {
             id: id.clone(),
-            message,
+            message: Box::new(message),
             timestamp: Utc::now().timestamp_millis(),
         };
         self.entries.push(entry);
@@ -279,7 +279,7 @@ impl SessionManager {
                         continue;
                     }
                 }
-                messages.push(message.clone());
+                messages.push((**message).clone());
             }
         }
 
@@ -379,7 +379,7 @@ impl SessionManager {
             }
         }
 
-        sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
         Ok(sessions)
     }
 

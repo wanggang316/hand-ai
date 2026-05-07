@@ -142,6 +142,9 @@ fn make_error_stream(
                 error_message: Some(error_msg),
                 timestamp: current_timestamp_ms(),
                 content: vec![],
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
             },
         };
     })
@@ -179,6 +182,9 @@ pub fn stream_openai_completions(
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp: current_timestamp_ms(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         };
 
         yield AssistantMessageEvent::Start { partial: output.clone() };
@@ -488,11 +494,11 @@ fn build_params(
             serde_json::json!(options.reasoning_effort.is_some()),
         );
         builder = builder.extra_params(extra);
-    } else if options.reasoning_effort.is_some()
+    } else if let Some(effort) = options.reasoning_effort
         && model.reasoning
         && compat.supports_reasoning_effort
     {
-        builder = builder.reasoning_effort(options.reasoning_effort.unwrap());
+        builder = builder.reasoning_effort(effort);
     }
 
     if model.base_url.contains("openrouter.ai")
@@ -931,6 +937,10 @@ fn current_timestamp_ms() -> u64 {
 // =============================================================================
 
 /// Resolved compatibility settings with all fields set.
+///
+/// Fields are populated by [`detect_compat`] from `model.provider`/`model.base_url`,
+/// then overridden by any explicit settings on `model.compat`. New fields should
+/// be added with sane defaults so older callers keep compiling.
 #[derive(Debug, Clone)]
 pub struct ResolvedCompat {
     pub supports_store: bool,
@@ -945,13 +955,29 @@ pub struct ResolvedCompat {
     pub thinking_format: Option<String>,
     pub open_router_routing: Option<crate::types::OpenRouterRouting>,
     pub vercel_gateway_routing: Option<crate::types::VercelGatewayRouting>,
+    /// `true` when the upstream supports OpenAI strict-mode tool calls.
+    /// Cloudflare Workers AI does not.
+    pub supports_strict_mode: bool,
+    /// `true` when the model exposes Z.ai's incremental tool-stream protocol.
+    pub zai_tool_stream: bool,
 }
 
 fn detect_compat(model: &Model) -> ResolvedCompat {
     let provider = &model.provider;
     let base_url = &model.base_url;
 
-    let is_zai = *provider == Provider::Zai || base_url.contains("api.z.ai");
+    let is_zai = *provider == Provider::Zai
+        || base_url.contains("api.z.ai")
+        || base_url.contains("bigmodel.cn");
+
+    let is_qwen = base_url.contains("dashscope.aliyuncs.com");
+
+    let is_deepseek = *provider == Provider::Deepseek || base_url.contains("deepseek.com");
+
+    let is_openrouter = *provider == Provider::Openrouter || base_url.contains("openrouter.ai");
+
+    let is_cloudflare_workers_ai = *provider == Provider::CloudflareWorkersAi
+        || base_url.contains("cloudflare.com/client/v4/accounts");
 
     let is_non_standard = *provider == Provider::Cerebras
         || base_url.contains("cerebras.ai")
@@ -960,10 +986,11 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
         || *provider == Provider::Mistral
         || base_url.contains("mistral.ai")
         || base_url.contains("chutes.ai")
-        || base_url.contains("deepseek.com")
+        || is_deepseek
         || is_zai
         || *provider == Provider::Opencode
-        || base_url.contains("opencode.ai");
+        || base_url.contains("opencode.ai")
+        || is_cloudflare_workers_ai;
 
     let use_max_tokens = *provider == Provider::Mistral
         || base_url.contains("mistral.ai")
@@ -971,6 +998,21 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
 
     let is_grok = *provider == Provider::Xai || base_url.contains("api.x.ai");
     let is_mistral = *provider == Provider::Mistral || base_url.contains("mistral.ai");
+
+    // Pick `thinking_format` precedence: explicit-deepseek > zai > qwen > openrouter
+    // > openai default. Mirrors the TS reference and keeps zai overlapping with
+    // the boolean `is_zai` check.
+    let thinking_format = if is_deepseek {
+        Some("deepseek".to_string())
+    } else if is_zai {
+        Some("zai".to_string())
+    } else if is_qwen {
+        Some("qwen".to_string())
+    } else if is_openrouter {
+        Some("openrouter".to_string())
+    } else {
+        Some("openai".to_string())
+    };
 
     ResolvedCompat {
         supports_store: !is_non_standard,
@@ -986,13 +1028,15 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
         requires_assistant_after_tool_result: false,
         requires_thinking_as_text: is_mistral,
         requires_mistral_tool_ids: is_mistral,
-        thinking_format: if is_zai {
-            Some("zai".to_string())
+        thinking_format,
+        open_router_routing: if is_openrouter {
+            Some(crate::types::OpenRouterRouting::default())
         } else {
-            Some("openai".to_string())
+            None
         },
-        open_router_routing: None,
         vercel_gateway_routing: None,
+        supports_strict_mode: !is_cloudflare_workers_ai,
+        zai_tool_stream: is_zai,
     }
 }
 
@@ -1033,12 +1077,33 @@ fn get_compat(model: &Model) -> ResolvedCompat {
                 .thinking_format
                 .clone()
                 .or(detected.thinking_format),
-            open_router_routing: compat_settings.open_router_routing.clone(),
-            vercel_gateway_routing: compat_settings.vercel_gateway_routing.clone(),
+            open_router_routing: compat_settings
+                .open_router_routing
+                .clone()
+                .or(detected.open_router_routing),
+            vercel_gateway_routing: compat_settings
+                .vercel_gateway_routing
+                .clone()
+                .or(detected.vercel_gateway_routing),
+            supports_strict_mode: compat_settings
+                .supports_strict_mode
+                .unwrap_or(detected.supports_strict_mode),
+            zai_tool_stream: compat_settings
+                .zai_tool_stream
+                .unwrap_or(detected.zai_tool_stream),
         };
     }
 
     detected
+}
+
+/// Resolve the merged compatibility settings for a model.
+///
+/// Public entry-point for callers (and tests) that want the same precedence
+/// rules used internally: explicit `model.compat` values win, missing fields
+/// fall back to URL/provider auto-detection.
+pub fn resolve_compat(model: &Model) -> ResolvedCompat {
+    get_compat(model)
 }
 
 #[cfg(test)]
@@ -1068,6 +1133,7 @@ mod tests {
             max_tokens: 4096,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 
@@ -1219,6 +1285,9 @@ mod tests {
             stop_reason: StopReason::ToolUse,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         })];
         assert!(has_tool_history(&messages));
     }

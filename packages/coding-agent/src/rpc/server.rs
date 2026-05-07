@@ -86,7 +86,11 @@ enum EventTag {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum WireSessionEvent {
-    Agent(AgentEvent),
+    // `AgentEvent` is large after the origin/main merge — clippy's
+    // `large_enum_variant` lint flags the unboxed form. Box to keep the
+    // enum size small; `serde` serializes Box<T> identically to T so
+    // the JSONL wire shape is unchanged.
+    Agent(Box<AgentEvent>),
     CompactionStart,
     CompactionEnd { summary: String },
     Error { message: String },
@@ -728,6 +732,7 @@ mod tests {
             max_tokens: 4096,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 
@@ -742,6 +747,9 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         }
     }
 

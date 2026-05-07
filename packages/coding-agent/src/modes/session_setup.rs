@@ -10,9 +10,7 @@ use crate::cli::Args;
 use crate::core::agent_session::AgentSessionConfig;
 use crate::core::error::CodingAgentError;
 use crate::core::model_resolver;
-use crate::core::settings::SettingsManager;
 use crate::tools;
-use crate::tools::bash::BashToolConfig;
 use hand_agent::types::AgentTool;
 use model::SimpleStreamOptions;
 use std::path::{Path, PathBuf};
@@ -67,28 +65,20 @@ impl SessionSetup {
             stream_options.reasoning = Some(level);
         }
 
-        // Resolve the bash shell path from settings (best-effort): if
-        // settings load fails for any reason, fall back to the default
-        // (`/bin/bash`). The session itself will surface the error later
-        // when it reads settings for compaction/retry/etc.
-        let bash_config = match SettingsManager::from_cwd(&cwd) {
-            Ok(mgr) => BashToolConfig {
-                shell_path: mgr
-                    .shell_path()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("/bin/bash")),
-            },
-            Err(_) => BashToolConfig::default(),
-        };
-
         // Tool list: `--no-tools` empties it, `--tools` selects a subset,
         // otherwise the default set is used.
+        //
+        // NOTE: prior to the merge with origin/main, `Settings.shell_path`
+        // was threaded into a `BashToolConfig` here. The bash tool was
+        // rewritten on origin/main to hard-code `/bin/bash`; the
+        // settings-driven shell override is dropped until a follow-up
+        // re-introduces a `BashToolConfig` builder on the new tool factory.
         let agent_tools = if args.no_tools {
             Vec::new()
         } else if let Some(ref tool_list) = args.tools {
-            create_selected_tools(&cwd, tool_list, &bash_config)
+            create_selected_tools(&cwd, tool_list)
         } else {
-            tools::create_default_tools_with_config(&cwd, bash_config)
+            tools::create_default_tools(&cwd)
         };
 
         Ok(Self {
@@ -123,11 +113,7 @@ impl SessionSetup {
 ///
 /// Unknown names emit a warning and are skipped, matching the pre-extraction
 /// behaviour from `main.rs`.
-pub(crate) fn create_selected_tools(
-    cwd: &Path,
-    tool_list: &str,
-    bash_config: &BashToolConfig,
-) -> Vec<AgentTool> {
+pub(crate) fn create_selected_tools(cwd: &Path, tool_list: &str) -> Vec<AgentTool> {
     let cwd = cwd.to_path_buf();
     let selected: Vec<&str> = tool_list.split(',').map(|s| s.trim()).collect();
     let mut result = Vec::new();
@@ -137,10 +123,7 @@ pub(crate) fn create_selected_tools(
             "read" => result.push(tools::read::create_read_tool(cwd.clone())),
             "write" => result.push(tools::write::create_write_tool(cwd.clone())),
             "edit" => result.push(tools::edit::create_edit_tool(cwd.clone())),
-            "bash" => result.push(tools::bash::create_bash_tool_with_config(
-                cwd.clone(),
-                bash_config.clone(),
-            )),
+            "bash" => result.push(tools::bash::create_bash_tool(cwd.clone())),
             "grep" => result.push(tools::grep::create_grep_tool(cwd.clone())),
             "find" => result.push(tools::find::create_find_tool(cwd.clone())),
             "ls" => result.push(tools::ls::create_ls_tool(cwd.clone())),

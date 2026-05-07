@@ -40,9 +40,10 @@ packages/
 
 ## 阶段 0：Model crate 补全（pi-ai → hand-model）
 
-> **状态**：已完成大部分，需补全剩余 provider。
+> **状态**：✅ 已完成。Model package completion 的 M1–M14 全部交付，详见
+> [`docs/exec-plans/model-package-completion.md`](exec-plans/model-package-completion.md)。
 
-### 0.1 已完成
+### 0.1 已完成（基础）
 
 - [x] 核心类型系统（Message, Content, StreamOptions, Usage, Cost...）
 - [x] ApiProvider trait 和 Registry
@@ -53,30 +54,29 @@ packages/
 - [x] CLI 工具（list-providers, list-models, chat...）
 - [x] 测试框架
 
-### 0.2 待补全
+### 0.2 Provider 补全（M1–M11）
 
-- [ ] **Anthropic Messages provider**
-  - 对应 TS: `packages/ai/src/providers/anthropic.ts`
-  - 实现 Anthropic streaming API（SSE）
-  - 支持 thinking/reasoning blocks
-  - 支持 tool_use blocks
+- [x] **Anthropic Messages provider**（SSE、thinking blocks、tool_use blocks、eager-tool-input compat）
+- [x] **Google Generative AI provider**（Gemini 系列；含 Gemini CLI 凭证流）
+- [x] **OpenAI Responses provider**
+- [x] **Azure OpenAI Responses provider**（M7，与 OpenAI Responses 共享解析）
+- [x] **AWS Bedrock provider**（converse-stream）
+- [x] **Mistral Conversations provider**（M6，含 9 字符 tool-id 规范化与 reasoning mode）
+- [x] **Google Vertex provider**（M8，ADC + API Key 双路径）
+- [x] **OpenAI Codex Responses provider**（M9，SSE + WebSocket + WebsocketCached + OAuth）
+- [x] **Cloudflare Workers AI / AI Gateway 覆盖层**（M10）
+- [x] **Faux provider + parity 测试 harness**（M5）
+- [x] **`register_builtins()` + Compat URL 自动检测**（M11）
 
-- [ ] **Google Generative AI provider**
-  - 对应 TS: `packages/ai/src/providers/google.ts`
-  - 使用已有的 `google-genai-rust` 依赖
+### 0.3 功能补全（M1–M4, M12–M14）
 
-- [ ] **其他 provider**（按需实现）
-  - OpenAI Responses API
-  - AWS Bedrock
-  - Azure OpenAI
-  - Mistral
-  - 大部分可复用 OpenAI Completions 的实现（兼容 API）
-
-### 0.3 功能补全
-
-- [ ] `stream()` / `streamSimple()` 的重试逻辑（指数退避）
-- [ ] Token 计算与 cost tracking 的完善
-- [ ] 模型能力查询（支持哪些 input modality）
+- [x] **类型系统扩展**（M1）：`Transport`、`CacheRetention`、`ProviderResponse`、`AssistantMessageDiagnostic`、`ThinkingLevelMap`、`AnthropicMessagesCompat`、`OpenRouterRouting` 全字段、Compat 矩阵扩展。
+- [x] **utils 模块**（M2）：`event_stream`、`diagnostics`、`json_parse`（safe partial parse）、`sanitize_unicode`、`validation`、`headers`、`hash`、`overflow`。
+- [x] **Cross-provider transform 重构**（M3）：image-tool-result routing、eager-tool-input、Gemini-3 unsigned tool calls、response-id normalization。
+- [x] **OAuth 子系统**（M4）：Anthropic / OpenAI Codex / GitHub Copilot；PKCE + 设备流；凭证存于 `~/.hand-ai/oauth.json`。
+- [x] **`stream_simple` / `complete_simple` 包装层**（M12）：`signal` 取消、`timeout_ms`、`max_retries` 指数退避、`metadata`、`on_payload` / `on_response` 回调、自动 `transform_messages`。
+- [x] **CLI surface 对齐**（M13）：`oauth login/status/logout`、`chat --transport`、`chat --cache-retention`、`list-providers` 显示 OAuth 状态。
+- [x] **文档刷新**（M14）：本文件、`packages/model/README.md`、`packages/model/CLI.md`、ExecPlan Progress / Outcomes 更新。
 
 ---
 

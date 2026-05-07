@@ -524,17 +524,17 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
             tool_name,
             is_error,
             ..
-        } => {
-            if *is_error {
-                eprintln!("\x1b[31m[{} failed]\x1b[0m", tool_name);
-            }
+        } if *is_error => {
+            eprintln!("\x1b[31m[{} failed]\x1b[0m", tool_name);
         }
-        AgentEvent::ToolExecutionUpdate { update, .. } => {
+        AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
             // Show progress updates from tools (e.g., bash streaming output)
-            if let Some(text) = update.as_str() {
-                eprint!("\x1b[2m{}\x1b[0m", text);
-                let _ = io::stderr().flush();
+            for block in &partial_result.content {
+                if let model::ToolResultContent::Text(t) = block {
+                    eprint!("\x1b[2m{}\x1b[0m", t.text);
+                }
             }
+            let _ = io::stderr().flush();
         }
         _ => {}
     }

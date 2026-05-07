@@ -162,8 +162,8 @@ mod tests {
     #[test]
     fn test_diff_detects_change() {
         let mut renderer = DiffRenderer::new();
-        renderer.diff(&vec!["hello".to_string()]);
-        let output = renderer.diff(&vec!["world".to_string()]);
+        renderer.diff(&["hello".to_string()]);
+        let output = renderer.diff(&["world".to_string()]);
         assert!(!output.is_empty());
         assert!(output.contains("world"));
     }
@@ -171,8 +171,8 @@ mod tests {
     #[test]
     fn test_diff_handles_added_lines() {
         let mut renderer = DiffRenderer::new();
-        renderer.diff(&vec!["line1".to_string()]);
-        let output = renderer.diff(&vec!["line1".to_string(), "line2".to_string()]);
+        renderer.diff(&["line1".to_string()]);
+        let output = renderer.diff(&["line1".to_string(), "line2".to_string()]);
         assert!(!output.is_empty());
         assert!(output.contains("line2"));
     }
@@ -180,17 +180,17 @@ mod tests {
     #[test]
     fn test_diff_handles_removed_lines() {
         let mut renderer = DiffRenderer::new();
-        renderer.diff(&vec!["line1".to_string(), "line2".to_string()]);
-        let output = renderer.diff(&vec!["line1".to_string()]);
+        renderer.diff(&["line1".to_string(), "line2".to_string()]);
+        let output = renderer.diff(&["line1".to_string()]);
         assert!(!output.is_empty());
     }
 
     #[test]
     fn test_reset_forces_full_render() {
         let mut renderer = DiffRenderer::new();
-        renderer.diff(&vec!["hello".to_string()]);
+        renderer.diff(&["hello".to_string()]);
         renderer.reset();
-        let output = renderer.diff(&vec!["hello".to_string()]);
+        let output = renderer.diff(&["hello".to_string()]);
         // After reset, should do full render even with same content
         assert!(output.contains("hello"));
     }
@@ -198,7 +198,7 @@ mod tests {
     #[test]
     fn test_synchronized_output_markers() {
         let mut renderer = DiffRenderer::new();
-        let output = renderer.diff(&vec!["test".to_string()]);
+        let output = renderer.diff(&["test".to_string()]);
         assert!(output.contains("\x1b[?2026h")); // Begin
         assert!(output.contains("\x1b[?2026l")); // End
     }
@@ -207,7 +207,7 @@ mod tests {
     fn test_prev_line_count() {
         let mut renderer = DiffRenderer::new();
         assert_eq!(renderer.prev_line_count(), 0);
-        renderer.diff(&vec!["a".to_string(), "b".to_string()]);
+        renderer.diff(&["a".to_string(), "b".to_string()]);
         assert_eq!(renderer.prev_line_count(), 2);
     }
 }

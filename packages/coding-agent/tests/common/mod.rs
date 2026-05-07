@@ -36,6 +36,7 @@ pub fn test_model() -> Model {
         max_tokens: 4096,
         headers: None,
         compat: None,
+        thinking_level_map: None,
     }
 }
 
@@ -51,6 +52,9 @@ fn assistant_text_message(text: &str) -> AssistantMessage {
         stop_reason: StopReason::Stop,
         error_message: None,
         timestamp: 0,
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
     }
 }
 
@@ -72,6 +76,9 @@ fn assistant_tool_call_message(
         stop_reason: StopReason::ToolUse,
         error_message: None,
         timestamp: 0,
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
     }
 }
 

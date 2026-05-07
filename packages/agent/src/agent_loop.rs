@@ -1,22 +1,32 @@
 //! Core agent loop implementation.
 //!
-//! Transforms AgentMessage[] to Message[] only at the LLM call boundary.
-//! Handles tool execution, steering messages, and follow-up messages.
+//! Mirrors the behavior contract of `pi-agent-core/src/agent-loop.ts`:
+//!
+//! - prompts → assistant turn → tool execution → tool results → next turn …
+//! - steering messages drained between turns; follow-up drained at the boundary
+//!   where the agent would otherwise stop.
+//! - `terminate` early-stop only fires when *every* tool result in the batch
+//!   sets `terminate = true`.
+//! - `should_stop_after_turn` exits cleanly after `turn_end`.
+//! - cancellation is honored at every async boundary via `CancellationToken`.
 
 use crate::error::AgentError;
 use crate::types::{
-    AfterToolCallContext, AgentContext, AgentEvent, AgentLoopConfig, AgentTool,
-    BeforeToolCallContext, ToolExecutionContext, ToolExecutionMode, ToolResult, extract_tool_calls,
+    AfterToolCallContext, AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig,
+    AgentTool, BeforeToolCallContext, OnUpdate, ShouldStopAfterTurnContext, ToolExecuteCtx,
+    ToolExecutionMode, ToolResult, extract_tool_calls,
 };
-use std::path::PathBuf;
 use futures::StreamExt;
+use futures::future::join_all;
 use model::{
     AssistantMessage, AssistantMessageEvent, Context, Message, StopReason, ToolCall,
     ToolResultMessage,
 };
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
-/// Sink for agent events (callback pattern).
-pub type AgentEventSink = Box<dyn Fn(AgentEvent) + Send + Sync>;
+/// Sink for agent events. The closure must be cheap and non-blocking.
+pub type AgentEventSink = Arc<dyn Fn(AgentEvent) + Send + Sync>;
 
 /// Result of running the agent loop.
 #[derive(Debug, Clone)]
@@ -25,9 +35,13 @@ pub struct AgentLoopResult {
     pub messages: Vec<Message>,
 }
 
+// ---------------------------------------------------------------------------
+// Public entry points
+// ---------------------------------------------------------------------------
+
 /// Start an agent loop with new prompt messages.
 ///
-/// The prompts are added to the context and events are emitted for them.
+/// The prompts are added to the context and `message_*` events are emitted for them.
 pub async fn run_agent_loop(
     prompts: Vec<Message>,
     context: &mut AgentContext,
@@ -35,19 +49,16 @@ pub async fn run_agent_loop(
     config: &AgentLoopConfig,
     client: &model::Client,
     emit: &AgentEventSink,
+    cancel: &CancellationToken,
 ) -> Result<AgentLoopResult, AgentError> {
-    let mut new_messages: Vec<Message> = prompts.clone();
-
-    // Add prompts to context
-    for prompt in &prompts {
-        context.messages.push(prompt.clone());
-    }
+    let mut new_messages: Vec<Message> = Vec::with_capacity(prompts.len() + 4);
 
     emit(AgentEvent::AgentStart);
     emit(AgentEvent::TurnStart);
 
-    // Emit message events for prompts
     for prompt in &prompts {
+        context.messages.push(prompt.clone());
+        new_messages.push(prompt.clone());
         emit(AgentEvent::MessageStart {
             message: prompt.clone(),
         });
@@ -56,7 +67,18 @@ pub async fn run_agent_loop(
         });
     }
 
-    run_loop(context, &mut new_messages, tools, config, client, emit).await?;
+    run_loop(
+        context,
+        &mut new_messages,
+        tools,
+        config,
+        client,
+        emit,
+        cancel,
+        /* skip_initial_steering_poll */ false,
+        /* first_turn_already_emitted */ true,
+    )
+    .await?;
 
     Ok(AgentLoopResult {
         messages: new_messages,
@@ -65,13 +87,15 @@ pub async fn run_agent_loop(
 
 /// Continue an agent loop from the current context without adding a new message.
 ///
-/// The last message in context must be a user or tool_result message.
+/// The last message in context must convert to a user or tool-result message;
+/// otherwise the LLM provider will reject the request.
 pub async fn run_agent_loop_continue(
     context: &mut AgentContext,
     tools: &[AgentTool],
     config: &AgentLoopConfig,
     client: &model::Client,
     emit: &AgentEventSink,
+    cancel: &CancellationToken,
 ) -> Result<AgentLoopResult, AgentError> {
     if context.messages.is_empty() {
         return Err(AgentError::InvalidState(
@@ -79,7 +103,6 @@ pub async fn run_agent_loop_continue(
         ));
     }
 
-    // Check last message is not assistant
     if let Some(Message::Assistant(_)) = context.messages.last() {
         return Err(AgentError::InvalidState(
             "cannot continue from assistant message".to_string(),
@@ -91,14 +114,76 @@ pub async fn run_agent_loop_continue(
     emit(AgentEvent::AgentStart);
     emit(AgentEvent::TurnStart);
 
-    run_loop(context, &mut new_messages, tools, config, client, emit).await?;
+    run_loop(
+        context,
+        &mut new_messages,
+        tools,
+        config,
+        client,
+        emit,
+        cancel,
+        false,
+        true,
+    )
+    .await?;
 
     Ok(AgentLoopResult {
         messages: new_messages,
     })
 }
 
-/// Main loop logic shared by `run_agent_loop` and `run_agent_loop_continue`.
+/// Variant of `run_agent_loop` used by `Agent::continue()` when it has already
+/// drained steering messages and wants the loop to skip the initial steering poll.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_agent_loop_with_messages(
+    prompts: Vec<Message>,
+    context: &mut AgentContext,
+    tools: &[AgentTool],
+    config: &AgentLoopConfig,
+    client: &model::Client,
+    emit: &AgentEventSink,
+    cancel: &CancellationToken,
+    skip_initial_steering_poll: bool,
+) -> Result<AgentLoopResult, AgentError> {
+    let mut new_messages: Vec<Message> = Vec::with_capacity(prompts.len() + 4);
+
+    emit(AgentEvent::AgentStart);
+    emit(AgentEvent::TurnStart);
+
+    for prompt in &prompts {
+        context.messages.push(prompt.clone());
+        new_messages.push(prompt.clone());
+        emit(AgentEvent::MessageStart {
+            message: prompt.clone(),
+        });
+        emit(AgentEvent::MessageEnd {
+            message: prompt.clone(),
+        });
+    }
+
+    run_loop(
+        context,
+        &mut new_messages,
+        tools,
+        config,
+        client,
+        emit,
+        cancel,
+        skip_initial_steering_poll,
+        true,
+    )
+    .await?;
+
+    Ok(AgentLoopResult {
+        messages: new_messages,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     context: &mut AgentContext,
     new_messages: &mut Vec<Message>,
@@ -106,54 +191,64 @@ async fn run_loop(
     config: &AgentLoopConfig,
     client: &model::Client,
     emit: &AgentEventSink,
+    cancel: &CancellationToken,
+    skip_initial_steering_poll: bool,
+    first_turn_already_emitted: bool,
 ) -> Result<(), AgentError> {
-    let mut first_turn = true;
+    let mut first_turn = first_turn_already_emitted;
 
-    // Check for steering messages at start
-    let mut pending_messages = get_steering_messages(config).await;
+    let mut pending_messages: Vec<Message> = if skip_initial_steering_poll {
+        Vec::new()
+    } else {
+        get_steering_messages(config, cancel).await
+    };
 
-    // Outer loop: continues when queued follow-up messages arrive after agent would stop
-    loop {
+    // Outer loop: continues when queued follow-up messages arrive after agent would stop.
+    'outer: loop {
         let mut has_more_tool_calls = true;
 
-        // Inner loop: process tool calls and steering messages
+        // Inner loop: process tool calls and steering messages.
         while has_more_tool_calls || !pending_messages.is_empty() {
-            if !first_turn {
-                emit(AgentEvent::TurnStart);
-            } else {
+            // Note: cancellation is checked inside `stream_assistant_response`,
+            // which synthesizes a `stop_reason=Aborted` assistant message and
+            // emits MessageStart/MessageEnd for it. The post-turn cancellation
+            // check below catches aborts that arrive between turns.
+            if first_turn {
                 first_turn = false;
+            } else {
+                emit(AgentEvent::TurnStart);
             }
 
-            // Process pending messages (inject before next assistant response)
+            // Inject pending (steering or follow-up) messages.
             if !pending_messages.is_empty() {
-                for message in pending_messages.drain(..) {
+                for msg in pending_messages.drain(..) {
                     emit(AgentEvent::MessageStart {
-                        message: message.clone(),
+                        message: msg.clone(),
                     });
                     emit(AgentEvent::MessageEnd {
-                        message: message.clone(),
+                        message: msg.clone(),
                     });
-                    context.messages.push(message.clone());
-                    new_messages.push(message);
+                    context.messages.push(msg.clone());
+                    new_messages.push(msg);
                 }
             }
 
-            // Stream assistant response
+            // Stream the assistant response.
             let assistant_msg =
-                stream_assistant_response(context, tools, config, client, emit).await?;
-            let assistant_message_ref = match &assistant_msg {
+                stream_assistant_response(context, tools, config, client, emit, cancel).await?;
+            let assistant_ref = match &assistant_msg {
                 Message::Assistant(a) => a,
                 _ => unreachable!("stream_assistant_response always returns Assistant"),
             };
 
             new_messages.push(assistant_msg.clone());
 
-            // Check for error/abort
-            if assistant_message_ref.stop_reason == StopReason::Error
-                || assistant_message_ref.stop_reason == StopReason::Aborted
-            {
+            if matches!(
+                assistant_ref.stop_reason,
+                StopReason::Error | StopReason::Aborted
+            ) {
                 emit(AgentEvent::TurnEnd {
-                    message: assistant_msg,
+                    message: assistant_msg.clone(),
                     tool_results: vec![],
                 });
                 emit(AgentEvent::AgentEnd {
@@ -162,44 +257,66 @@ async fn run_loop(
                 return Ok(());
             }
 
-            // Check for tool calls
-            let tool_calls = extract_tool_calls(assistant_message_ref);
-            has_more_tool_calls = !tool_calls.is_empty();
-
+            let tool_calls = extract_tool_calls(assistant_ref);
             let mut tool_results: Vec<ToolResultMessage> = Vec::new();
 
-            if has_more_tool_calls {
-                let results = execute_tool_calls(
+            if !tool_calls.is_empty() {
+                let batch = execute_tool_calls(
                     context,
-                    assistant_message_ref,
+                    assistant_ref,
                     &tool_calls,
                     tools,
                     config,
                     emit,
+                    cancel,
                 )
                 .await;
 
-                for result in &results {
+                for result in &batch.messages {
                     let result_msg = Message::ToolResult(result.clone());
                     context.messages.push(result_msg.clone());
                     new_messages.push(result_msg);
                 }
-                tool_results = results;
+                tool_results = batch.messages;
+                has_more_tool_calls = !batch.terminate;
+            } else {
+                has_more_tool_calls = false;
             }
 
             emit(AgentEvent::TurnEnd {
-                message: assistant_msg,
-                tool_results,
+                message: assistant_msg.clone(),
+                tool_results: tool_results.clone(),
             });
 
-            pending_messages = get_steering_messages(config).await;
+            // shouldStopAfterTurn hook → exit cleanly
+            if let Some(hook) = &config.should_stop_after_turn {
+                let stop_ctx = ShouldStopAfterTurnContext {
+                    message: assistant_ref,
+                    tool_results: &tool_results,
+                    context,
+                    new_messages,
+                };
+                let should_stop = hook(stop_ctx, cancel.clone()).await;
+                if should_stop {
+                    emit(AgentEvent::AgentEnd {
+                        messages: new_messages.clone(),
+                    });
+                    return Ok(());
+                }
+            }
+
+            if cancel.is_cancelled() {
+                return finish_with_cancel(emit, new_messages.clone());
+            }
+
+            pending_messages = get_steering_messages(config, cancel).await;
         }
 
         // Agent would stop here. Check for follow-up messages.
-        let follow_up = get_follow_up_messages(config).await;
+        let follow_up = get_follow_up_messages(config, cancel).await;
         if !follow_up.is_empty() {
             pending_messages = follow_up;
-            continue;
+            continue 'outer;
         }
 
         break;
@@ -211,29 +328,43 @@ async fn run_loop(
     Ok(())
 }
 
-/// Stream an assistant response from the LLM.
+/// Cancellation is treated as a clean exit at the loop level: we already
+/// synthesized an `Assistant{stop_reason: Aborted}` message inside
+/// `stream_assistant_response`, so callers can detect aborts by inspecting the
+/// last assistant message rather than discriminating on a separate error
+/// variant. `Agent::finish_run_outcome` still surfaces `cancel.is_cancelled()`
+/// when wrapping a true loop error.
+fn finish_with_cancel(emit: &AgentEventSink, messages: Vec<Message>) -> Result<(), AgentError> {
+    emit(AgentEvent::AgentEnd { messages });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Streaming the assistant response
+// ---------------------------------------------------------------------------
+
 async fn stream_assistant_response(
     context: &mut AgentContext,
     tools: &[AgentTool],
     config: &AgentLoopConfig,
     client: &model::Client,
     emit: &AgentEventSink,
+    cancel: &CancellationToken,
 ) -> Result<Message, AgentError> {
-    // Phase 1: transform context (optional)
+    // Phase 1: optional context transform (works on Message[]).
     let transformed = if let Some(transform) = &config.transform_context {
-        transform(context.messages.clone()).await
+        transform(context.messages.clone(), cancel.clone()).await
     } else {
         context.messages.clone()
     };
 
-    // Phase 2: convert to LLM messages
+    // Phase 2: convert to LLM-bound messages.
     let llm_messages = if let Some(convert) = &config.convert_to_llm {
-        convert(&transformed).await
+        convert(transformed).await
     } else {
-        default_convert_to_llm(&transformed)
+        default_convert_to_llm(transformed)
     };
 
-    // Build LLM context
     let model_tools: Vec<model::Tool> = tools.iter().map(|t| t.to_model_tool()).collect();
 
     let llm_context = Context {
@@ -250,24 +381,61 @@ async fn stream_assistant_response(
         },
     };
 
-    // Resolve API key dynamically (for OAuth tokens, etc.)
+    // Resolve API key dynamically (e.g. for OAuth tokens).
     let mut stream_opts = config.stream_options.clone();
     if let Some(get_api_key) = &config.get_api_key {
-        let provider_str = config.model.provider.as_str();
+        let provider_str = config.model.provider.as_str().to_string();
         if let Some(resolved_key) = get_api_key(provider_str).await {
             stream_opts.base.api_key = Some(resolved_key);
         }
     }
 
-    // Stream from client
-    let mut stream = client
-        .stream_simple(&config.model, llm_context, Some(stream_opts))
-        .map_err(AgentError::Client)?;
+    if cancel.is_cancelled() {
+        let aborted = synthesize_aborted_message(&config.model, "Aborted before request");
+        let msg = Message::Assistant(aborted.clone());
+        context.messages.push(msg.clone());
+        emit(AgentEvent::MessageStart {
+            message: msg.clone(),
+        });
+        emit(AgentEvent::MessageEnd { message: msg });
+        return Ok(Message::Assistant(aborted));
+    }
+
+    let stream_result = client.stream_simple(&config.model, llm_context, Some(stream_opts));
+    let mut stream = match stream_result {
+        Ok(s) => s,
+        Err(e) => return Err(AgentError::Client(e)),
+    };
 
     let mut final_message: Option<AssistantMessage> = None;
     let mut emitted_start = false;
 
-    while let Some(event) = stream.next().await {
+    loop {
+        let next = tokio::select! {
+            _ = cancel.cancelled() => {
+                // Drop the stream and synthesize an aborted message.
+                let aborted =
+                    synthesize_aborted_message(&config.model, "Aborted by caller");
+                if emitted_start {
+                    if let Some(last) = context.messages.last_mut() {
+                        *last = Message::Assistant(aborted.clone());
+                    }
+                } else {
+                    context.messages.push(Message::Assistant(aborted.clone()));
+                    emit(AgentEvent::MessageStart {
+                        message: Message::Assistant(aborted.clone()),
+                    });
+                }
+                emit(AgentEvent::MessageEnd {
+                    message: Message::Assistant(aborted.clone()),
+                });
+                return Ok(Message::Assistant(aborted));
+            }
+            event = stream.next() => event,
+        };
+
+        let Some(event) = next else { break };
+
         match &event {
             AssistantMessageEvent::Start { partial } => {
                 let msg = Message::Assistant(partial.clone());
@@ -283,21 +451,8 @@ async fn stream_assistant_response(
             | AssistantMessageEvent::ThinkingDelta { partial, .. }
             | AssistantMessageEvent::ThinkingEnd { partial, .. }
             | AssistantMessageEvent::ToolCallStart { partial, .. }
-            | AssistantMessageEvent::ToolCallDelta { partial, .. } => {
-                if emitted_start {
-                    let msg = Message::Assistant(partial.clone());
-                    // Update the last message in context
-                    if let Some(last) = context.messages.last_mut() {
-                        *last = msg.clone();
-                    }
-                    emit(AgentEvent::MessageUpdate {
-                        message: msg,
-                        assistant_message_event: Box::new(event),
-                    });
-                }
-            }
-
-            AssistantMessageEvent::ToolCallEnd { partial, .. } => {
+            | AssistantMessageEvent::ToolCallDelta { partial, .. }
+            | AssistantMessageEvent::ToolCallEnd { partial, .. } => {
                 if emitted_start {
                     let msg = Message::Assistant(partial.clone());
                     if let Some(last) = context.messages.last_mut() {
@@ -346,16 +501,74 @@ async fn stream_assistant_response(
 
     match final_message {
         Some(msg) => Ok(Message::Assistant(msg)),
-        None => Err(AgentError::LoopEndedWithoutResult),
+        None => {
+            // Stream ended without `Done` or `Error`. Treat as a provider-side
+            // failure (like `AssistantMessageEvent::Error`): synthesize an
+            // error assistant message in place, replacing the partial that was
+            // emitted on `Start`, so subscribers see a balanced
+            // `MessageStart`/`MessageEnd` pair and the transcript holds a
+            // single closed assistant message.
+            let mut failure =
+                synthesize_aborted_message(&config.model, "Stream ended without a final message");
+            failure.stop_reason = StopReason::Error;
+            let msg = Message::Assistant(failure.clone());
+            if emitted_start {
+                if let Some(last) = context.messages.last_mut() {
+                    *last = msg.clone();
+                }
+            } else {
+                context.messages.push(msg.clone());
+                emit(AgentEvent::MessageStart {
+                    message: msg.clone(),
+                });
+            }
+            emit(AgentEvent::MessageEnd { message: msg });
+            Ok(Message::Assistant(failure))
+        }
     }
 }
 
-/// Default message conversion: pass through user/assistant/tool_result.
-fn default_convert_to_llm(messages: &[Message]) -> Vec<Message> {
-    messages.to_vec()
+fn synthesize_aborted_message(model: &model::Model, reason: &str) -> AssistantMessage {
+    AssistantMessage {
+        role: "assistant".into(),
+        content: vec![],
+        api: model.api,
+        provider: model.provider,
+        model: model.id.clone(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+        usage: model::Usage::default(),
+        stop_reason: StopReason::Aborted,
+        error_message: Some(reason.into()),
+        timestamp: now_ms(),
+    }
 }
 
-/// Execute tool calls from an assistant message.
+pub(crate) fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn default_convert_to_llm(messages: Vec<Message>) -> Vec<Message> {
+    // The default keeps user / assistant / tool-result messages as-is.
+    // Custom message types (if introduced via wrappers) should be filtered upstream.
+    messages
+}
+
+// ---------------------------------------------------------------------------
+// Tool execution
+// ---------------------------------------------------------------------------
+
+struct ExecutedToolBatch {
+    messages: Vec<ToolResultMessage>,
+    terminate: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_calls(
     context: &AgentContext,
     assistant_message: &AssistantMessage,
@@ -363,36 +576,61 @@ async fn execute_tool_calls(
     tools: &[AgentTool],
     config: &AgentLoopConfig,
     emit: &AgentEventSink,
-) -> Vec<ToolResultMessage> {
-    match config.tool_execution {
+    cancel: &CancellationToken,
+) -> ExecutedToolBatch {
+    // Determine effective execution mode for this batch.
+    let any_sequential = tool_calls.iter().any(|tc| {
+        tools
+            .iter()
+            .find(|t| t.name == tc.name)
+            .and_then(|t| t.execution_mode)
+            == Some(ToolExecutionMode::Sequential)
+    });
+    let mode = if any_sequential || config.tool_execution == ToolExecutionMode::Sequential {
+        ToolExecutionMode::Sequential
+    } else {
+        ToolExecutionMode::Parallel
+    };
+
+    match mode {
         ToolExecutionMode::Sequential => {
-            execute_tool_calls_sequential(
+            execute_sequential(
                 context,
                 assistant_message,
                 tool_calls,
                 tools,
                 config,
                 emit,
+                cancel,
             )
             .await
         }
         ToolExecutionMode::Parallel => {
-            execute_tool_calls_parallel(context, assistant_message, tool_calls, tools, config, emit)
-                .await
+            execute_parallel(
+                context,
+                assistant_message,
+                tool_calls,
+                tools,
+                config,
+                emit,
+                cancel,
+            )
+            .await
         }
     }
 }
 
-/// Execute tool calls sequentially.
-async fn execute_tool_calls_sequential(
+async fn execute_sequential(
     context: &AgentContext,
     assistant_message: &AssistantMessage,
     tool_calls: &[&ToolCall],
     tools: &[AgentTool],
     config: &AgentLoopConfig,
     emit: &AgentEventSink,
-) -> Vec<ToolResultMessage> {
-    let mut results = Vec::new();
+    cancel: &CancellationToken,
+) -> ExecutedToolBatch {
+    let mut messages = Vec::with_capacity(tool_calls.len());
+    let mut all_terminate = !tool_calls.is_empty();
 
     for tool_call in tool_calls {
         emit(AgentEvent::ToolExecutionStart {
@@ -402,51 +640,65 @@ async fn execute_tool_calls_sequential(
         });
 
         let preparation =
-            prepare_tool_call(context, assistant_message, tool_call, tools, config).await;
-        match preparation {
-            ToolCallPreparation::Immediate { result } => {
-                results.push(emit_tool_call_outcome(tool_call, result, emit));
-            }
-            ToolCallPreparation::Prepared { tool, args, .. } => {
+            prepare_tool_call(context, assistant_message, tool_call, tools, config, cancel).await;
+
+        let (result, is_error) = match preparation {
+            ToolCallPreparation::Immediate { result, is_error } => (result, is_error),
+            ToolCallPreparation::Prepared { tool, args } => {
                 let executed =
-                    execute_prepared_tool_call(tool_call, tool, &args, config).await;
-                let finalized = finalize_executed_tool_call(
+                    execute_prepared_tool_call(tool_call, tool, &args, emit, cancel).await;
+                finalize_executed_tool_call(
                     context,
                     assistant_message,
                     tool_call,
                     &args,
                     executed,
                     config,
+                    cancel,
                 )
-                .await;
-                results.push(emit_tool_call_outcome(tool_call, finalized, emit));
+                .await
             }
+        };
+
+        // In sequential mode, completion order == source order, so we emit
+        // both the tool_execution_end and the tool-result message inline.
+        emit_tool_execution_end(tool_call, &result, is_error, emit);
+        if result.terminate != Some(true) {
+            all_terminate = false;
         }
+        let tr_msg = emit_tool_result_message(tool_call, result, is_error, emit);
+        messages.push(tr_msg);
     }
 
-    results
+    ExecutedToolBatch {
+        messages,
+        terminate: all_terminate,
+    }
 }
 
-/// Execute tool calls in parallel.
-async fn execute_tool_calls_parallel(
-    context: &AgentContext,
-    assistant_message: &AssistantMessage,
-    tool_calls: &[&ToolCall],
-    tools: &[AgentTool],
-    config: &AgentLoopConfig,
-    emit: &AgentEventSink,
-) -> Vec<ToolResultMessage> {
-    let mut results = Vec::new();
-
-    struct PreparedCall<'a> {
-        tool_call: &'a ToolCall,
-        tool: &'a AgentTool,
-        args: serde_json::Value,
+async fn execute_parallel<'a>(
+    context: &'a AgentContext,
+    assistant_message: &'a AssistantMessage,
+    tool_calls: &[&'a ToolCall],
+    tools: &'a [AgentTool],
+    config: &'a AgentLoopConfig,
+    emit: &'a AgentEventSink,
+    cancel: &'a CancellationToken,
+) -> ExecutedToolBatch {
+    enum Slot<'b> {
+        Immediate {
+            result: ToolResult,
+            is_error: bool,
+        },
+        Pending {
+            tool: &'b AgentTool,
+            args: serde_json::Value,
+        },
     }
 
-    let mut runnable_calls: Vec<PreparedCall<'_>> = Vec::new();
+    // Phase 1: prepare each call sequentially.
+    let mut slots: Vec<(&ToolCall, Slot<'a>)> = Vec::with_capacity(tool_calls.len());
 
-    // Prepare sequentially
     for tool_call in tool_calls {
         emit(AgentEvent::ToolExecutionStart {
             tool_call_id: tool_call.id.clone(),
@@ -455,44 +707,74 @@ async fn execute_tool_calls_parallel(
         });
 
         let preparation =
-            prepare_tool_call(context, assistant_message, tool_call, tools, config).await;
-        match preparation {
-            ToolCallPreparation::Immediate { result } => {
-                results.push(emit_tool_call_outcome(tool_call, result, emit));
+            prepare_tool_call(context, assistant_message, tool_call, tools, config, cancel).await;
+
+        let slot = match preparation {
+            ToolCallPreparation::Immediate { result, is_error } => {
+                Slot::Immediate { result, is_error }
             }
-            ToolCallPreparation::Prepared { tool, args, .. } => {
-                runnable_calls.push(PreparedCall {
-                    tool_call,
-                    tool,
-                    args,
-                });
+            ToolCallPreparation::Prepared { tool, args } => Slot::Pending { tool, args },
+        };
+        slots.push((*tool_call, slot));
+    }
+
+    // Phase 2: build a future per slot. Immediate slots return ready futures;
+    // pending slots run concurrently under `join_all`. Each future emits its own
+    // `tool_execution_end` so observers see completion order (matches the TS
+    // contract). The final `tool_result` message is emitted in source order in
+    // Phase 3.
+    let futs: Vec<_> = slots
+        .iter()
+        .map(|(tool_call, slot)| {
+            let tc: &ToolCall = tool_call;
+            async move {
+                let (result, is_error) = match slot {
+                    Slot::Immediate { result, is_error } => (result.clone(), *is_error),
+                    Slot::Pending { tool, args } => {
+                        let executed =
+                            execute_prepared_tool_call(tc, tool, args, emit, cancel).await;
+                        finalize_executed_tool_call(
+                            context,
+                            assistant_message,
+                            tc,
+                            args,
+                            executed,
+                            config,
+                            cancel,
+                        )
+                        .await
+                    }
+                };
+                emit_tool_execution_end(tc, &result, is_error, emit);
+                (result, is_error)
             }
+        })
+        .collect();
+
+    let outcomes = join_all(futs).await;
+
+    // Phase 3: emit tool-result messages in source order.
+    let mut messages = Vec::with_capacity(slots.len());
+    let mut all_terminate = !slots.is_empty();
+
+    for ((tool_call, _slot), (result, is_error)) in slots.iter().zip(outcomes) {
+        if result.terminate != Some(true) {
+            all_terminate = false;
         }
+        let tr_msg = emit_tool_result_message(tool_call, result, is_error, emit);
+        messages.push(tr_msg);
     }
 
-    // Await in source order (matching TS parallel behavior where results
-    // are collected in source order after concurrent preparation)
-    for call in &runnable_calls {
-        let executed =
-            execute_prepared_tool_call(call.tool_call, call.tool, &call.args, config).await;
-        let finalized = finalize_executed_tool_call(
-            context,
-            assistant_message,
-            call.tool_call,
-            &call.args,
-            executed,
-            config,
-        )
-        .await;
-        results.push(emit_tool_call_outcome(call.tool_call, finalized, emit));
+    ExecutedToolBatch {
+        messages,
+        terminate: all_terminate,
     }
-
-    results
 }
 
 enum ToolCallPreparation<'a> {
     Immediate {
         result: ToolResult,
+        is_error: bool,
     },
     Prepared {
         tool: &'a AgentTool,
@@ -501,80 +783,139 @@ enum ToolCallPreparation<'a> {
 }
 
 async fn prepare_tool_call<'a>(
-    _context: &AgentContext,
+    context: &AgentContext,
     assistant_message: &AssistantMessage,
     tool_call: &ToolCall,
     tools: &'a [AgentTool],
     config: &AgentLoopConfig,
+    cancel: &CancellationToken,
 ) -> ToolCallPreparation<'a> {
-    // Find tool
-    let tool = match tools.iter().find(|t| t.name == tool_call.name) {
-        Some(t) => t,
-        None => {
-            return ToolCallPreparation::Immediate {
-                result: ToolResult::error(format!("Tool {} not found", tool_call.name)),
-            };
-        }
+    let Some(tool) = tools.iter().find(|t| t.name == tool_call.name) else {
+        return ToolCallPreparation::Immediate {
+            result: ToolResult::error(format!("Tool '{}' not found", tool_call.name)),
+            is_error: true,
+        };
     };
 
-    let mut args = tool_call.arguments.clone();
+    // Apply prepare_arguments shim, if any.
+    let raw_args = tool_call.arguments.clone();
+    let prepared_args = match &tool.prepare_arguments {
+        Some(prep) => prep(raw_args),
+        None => raw_args,
+    };
 
-    // Run before_tool_call hook
+    // JSON-Schema validation, using a per-tool compiled cache.
+    if let Err(msg) = validate_tool_args(tool, &prepared_args) {
+        return ToolCallPreparation::Immediate {
+            result: ToolResult::error(format!("Invalid arguments for tool '{}': {msg}", tool.name)),
+            is_error: true,
+        };
+    }
+
+    // before_tool_call hook.
     if let Some(hook) = &config.before_tool_call {
         let ctx = BeforeToolCallContext {
             assistant_message,
             tool_call,
-            args: &args,
+            args: &prepared_args,
+            context,
         };
-        if let Some(before_result) = hook(ctx).await {
-            if before_result.block {
-                let reason = before_result
-                    .reason
-                    .unwrap_or_else(|| "Tool execution was blocked".to_string());
-                return ToolCallPreparation::Immediate {
-                    result: ToolResult::error(reason),
-                };
-            }
-            // Honor `replace_args`: swap the args fed to the tool while
-            // keeping the model-visible `tool_call.id` and original tool
-            // name so the conversation thread stays consistent.
-            if let Some(new_args) = before_result.replace_args {
-                args = new_args;
-            }
+        if let Some(before_result) = hook(ctx, cancel.clone()).await
+            && before_result.block
+        {
+            let reason = before_result
+                .reason
+                .unwrap_or_else(|| "Tool execution was blocked".into());
+            return ToolCallPreparation::Immediate {
+                result: ToolResult::error(reason),
+                is_error: true,
+            };
         }
     }
 
-    ToolCallPreparation::Prepared { tool, args }
+    ToolCallPreparation::Prepared {
+        tool,
+        args: prepared_args,
+    }
+}
+
+fn validate_tool_args(tool: &AgentTool, args: &serde_json::Value) -> Result<(), String> {
+    let Some(compiled) = tool.compiled_schema()? else {
+        return Ok(());
+    };
+    if let Err(errors) = compiled.validate(args) {
+        let messages: Vec<String> = errors
+            .map(|e| format!("{} (path: {})", e, e.instance_path))
+            .collect();
+        return Err(messages.join("; "));
+    }
+    Ok(())
 }
 
 async fn execute_prepared_tool_call(
     tool_call: &ToolCall,
     tool: &AgentTool,
     args: &serde_json::Value,
-    config: &AgentLoopConfig,
-) -> ToolResult {
-    let cwd = if config.cwd.as_os_str().is_empty() {
-        PathBuf::from(".")
-    } else {
-        config.cwd.clone()
+    emit: &AgentEventSink,
+    cancel: &CancellationToken,
+) -> (ToolResult, bool) {
+    let tool_call_id = tool_call.id.clone();
+    let tool_name = tool_call.name.clone();
+    let raw_args = tool_call.arguments.clone();
+
+    let on_update_emit = emit.clone();
+    let on_update: OnUpdate = Arc::new(move |partial: ToolResult| {
+        on_update_emit(AgentEvent::ToolExecutionUpdate {
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            args: raw_args.clone(),
+            partial_result: partial,
+        });
+    });
+
+    let ctx = ToolExecuteCtx {
+        tool_call_id: tool_call.id.clone(),
+        args: args.clone(),
+        cancel: cancel.clone(),
+        on_update,
     };
-    let cx = ToolExecutionContext {
-        cwd,
-        session_id: config.session_id.clone(),
-        call_id: tool_call.id.clone(),
+
+    // Race the tool future against cancellation. Tools constructed with
+    // `AgentTool::simple` cannot observe the cancel token directly, so the
+    // loop has to enforce the abort contract here; dropping the future
+    // releases any resources owned across the await point.
+    let exec_future = (tool.execute)(ctx);
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            return (
+                ToolResult::error(format!(
+                    "Tool '{}' aborted by caller",
+                    tool_call.name
+                )),
+                true,
+            );
+        }
+        res = exec_future => res,
     };
-    (tool.execute)(tool_call.id.clone(), args.clone(), cx).await
+
+    match result {
+        Ok(result) => (result, false),
+        Err(err) => (ToolResult::error(err.to_string()), true),
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_executed_tool_call(
-    _context: &AgentContext,
+    context: &AgentContext,
     assistant_message: &AssistantMessage,
     tool_call: &ToolCall,
     args: &serde_json::Value,
-    executed: ToolResult,
+    executed: (ToolResult, bool),
     config: &AgentLoopConfig,
-) -> ToolResult {
-    let mut result = executed;
+    cancel: &CancellationToken,
+) -> (ToolResult, bool) {
+    let (mut result, mut is_error) = executed;
 
     if let Some(hook) = &config.after_tool_call {
         let ctx = AfterToolCallContext {
@@ -582,64 +923,99 @@ async fn finalize_executed_tool_call(
             tool_call,
             args,
             result: &result,
-            is_error: result.is_error,
+            is_error,
+            context,
         };
-        if let Some(after_result) = hook(ctx).await {
-            if let Some(content) = after_result.content {
-                result.content = content;
-            }
-            if let Some(details) = after_result.details {
-                result.details = Some(details);
-            }
-            if let Some(err) = after_result.is_error {
-                result.is_error = err;
-            }
+        if let Some(override_result) = hook(ctx, cancel.clone()).await {
+            apply_after_override(&mut result, &mut is_error, override_result);
         }
     }
 
-    result
+    (result, is_error)
 }
 
-fn emit_tool_call_outcome(
+fn apply_after_override(
+    result: &mut ToolResult,
+    is_error: &mut bool,
+    override_result: AfterToolCallResult,
+) {
+    if let Some(content) = override_result.content {
+        result.content = content;
+    }
+    if let Some(details) = override_result.details {
+        result.details = Some(details);
+    }
+    if let Some(terminate) = override_result.terminate {
+        result.terminate = Some(terminate);
+    }
+    if let Some(err) = override_result.is_error {
+        *is_error = err;
+    }
+}
+
+/// Emit `tool_execution_end` for one finalized tool call. Called in completion
+/// order (sequential or as each parallel future resolves) so observers can
+/// drive per-tool completion UI without waiting on slower siblings.
+fn emit_tool_execution_end(
     tool_call: &ToolCall,
-    result: ToolResult,
+    result: &ToolResult,
+    is_error: bool,
     emit: &AgentEventSink,
-) -> ToolResultMessage {
-    let is_error = result.is_error;
+) {
     emit(AgentEvent::ToolExecutionEnd {
         tool_call_id: tool_call.id.clone(),
         tool_name: tool_call.name.clone(),
         result: result.clone(),
         is_error,
     });
+}
 
-    let tool_result_message =
+/// Build the `ToolResultMessage` and emit its `MessageStart`/`MessageEnd`.
+/// In parallel mode this is always called in source order (after `join_all`).
+fn emit_tool_result_message(
+    tool_call: &ToolCall,
+    result: ToolResult,
+    is_error: bool,
+    emit: &AgentEventSink,
+) -> ToolResultMessage {
+    let mut tr_msg =
         ToolResultMessage::new(tool_call.id.clone(), tool_call.name.clone(), result.content);
+    tr_msg.is_error = is_error;
+    tr_msg.details = result.details;
 
-    // Set is_error and details
-    let mut trm = tool_result_message;
-    trm.is_error = is_error;
-    trm.details = result.details;
-
-    let msg = Message::ToolResult(trm.clone());
+    let msg = Message::ToolResult(tr_msg.clone());
     emit(AgentEvent::MessageStart {
         message: msg.clone(),
     });
     emit(AgentEvent::MessageEnd { message: msg });
 
-    trm
+    tr_msg
 }
 
-/// Get steering messages from config hook.
-async fn get_steering_messages(config: &AgentLoopConfig) -> Vec<Message> {
+// ---------------------------------------------------------------------------
+// Steering / follow-up
+// ---------------------------------------------------------------------------
+
+async fn get_steering_messages(
+    config: &AgentLoopConfig,
+    cancel: &CancellationToken,
+) -> Vec<Message> {
+    if cancel.is_cancelled() {
+        return Vec::new();
+    }
     match &config.get_steering_messages {
         Some(hook) => hook().await,
         None => Vec::new(),
     }
 }
 
-/// Get follow-up messages from config hook.
-async fn get_follow_up_messages(config: &AgentLoopConfig) -> Vec<Message> {
+async fn get_follow_up_messages(
+    config: &AgentLoopConfig,
+    cancel: &CancellationToken,
+) -> Vec<Message> {
+    if cancel.is_cancelled() {
+        return Vec::new();
+    }
     match &config.get_follow_up_messages {
         Some(hook) => hook().await,
         None => Vec::new(),

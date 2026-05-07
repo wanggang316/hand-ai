@@ -198,6 +198,7 @@ fn build_fallback_model(provider: &str, model_id: &str) -> Model {
         max_tokens: 8192,
         headers: None,
         compat: None,
+        thinking_level_map: None,
     }
 }
 

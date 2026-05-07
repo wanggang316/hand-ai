@@ -195,7 +195,12 @@ pub trait Extension: Send + Sync {
     }
 
     /// Custom AgentTools this extension contributes. Default: none.
-    fn custom_tools(&self) -> Vec<AgentTool> {
+    ///
+    /// `cx` carries the live session metadata (cwd, session_id, the
+    /// extension's persistent data directory) so subprocess extensions can
+    /// stamp the same context into every RPC tool call dispatched from
+    /// inside the agent loop. Tier 1 extensions can ignore the argument.
+    fn custom_tools(&self, _cx: &ExtensionContext) -> Vec<AgentTool> {
         Vec::new()
     }
 
@@ -330,7 +335,7 @@ mod tests {
             .expect("default ok");
 
         assert!(ext.slash_commands().is_empty());
-        assert!(ext.custom_tools().is_empty());
+        assert!(ext.custom_tools(&cx).is_empty());
     }
 
     #[test]

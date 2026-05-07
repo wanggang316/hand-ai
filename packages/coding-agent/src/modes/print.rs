@@ -140,11 +140,16 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
                 eprintln!("\x1b[31m[{} failed]\x1b[0m", tool_name);
             }
         }
-        AgentEvent::ToolExecutionUpdate { update, .. } => {
-            if let Some(text) = update.as_str() {
-                eprint!("\x1b[2m{}\x1b[0m", text);
-                let _ = io::stderr().flush();
+        AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
+            // Origin renamed `update: serde_json::Value` to a typed
+            // `partial_result: ToolResult`. Render any text content
+            // blocks as dim output to keep the prior progress UX.
+            for block in &partial_result.content {
+                if let model::ToolResultContent::Text(t) = block {
+                    eprint!("\x1b[2m{}\x1b[0m", t.text);
+                }
             }
+            let _ = io::stderr().flush();
         }
         _ => {}
     }
