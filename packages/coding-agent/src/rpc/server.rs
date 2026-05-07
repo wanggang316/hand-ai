@@ -29,10 +29,13 @@
 //! pushing onto queue handles cloned from the session BEFORE the prompt
 //! starts. The agent loop drains those queues at the next turn boundary
 //! via the `get_steering_messages` / `get_follow_up_messages` callbacks
-//! wired in [`AgentSession::send_message`]. Everything else (including
-//! `abort` / `get_state`) is deferred until the prompt completes — wiring
-//! those inline requires `Arc`-based shared state for cancel + state
-//! reads, which is a follow-up.
+//! wired in [`AgentSession::send_message`]. `abort` and `abort_retry`
+//! are also dispatched inline — both call [`AgentSession::abort`], which
+//! only borrows `&self` and flips the cancellation token, making them
+//! symmetric with `abort_bash` during a `bash` race. `get_state` /
+//! `get_messages` remain deferred until the prompt completes — wiring
+//! those inline requires `Arc`-based shared state for the read paths,
+//! which is a follow-up.
 //!
 //! The TS port (`pi-coding-agent/src/modes/rpc/rpc-mode.ts`) is fully
 //! multitasking: it parks the in-flight prompt as a Promise and
@@ -330,6 +333,7 @@ where
             Ok(RpcCommand::Prompt { id, message, .. }) => {
                 let steering_q = session.steering_queue_handle();
                 let follow_up_q = session.follow_up_queue_handle();
+                let cancel_handle = session.cancel_handle();
                 let mut io_fatal: Option<io::Error> = None;
                 let result = {
                     let prompt_fut = session.send_message(&message);
@@ -356,6 +360,52 @@ where
                                     let resp = RpcResponse::new(
                                         fid,
                                         RpcResponseBody::FollowUp(RpcResultEmpty::ok()),
+                                    );
+                                    if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                        break prompt_fut.await;
+                                    }
+                                }
+                                Some(Ok(RpcCommand::Abort { id: aid })) => {
+                                    // `session.abort()` itself is
+                                    // unreachable mid-prompt because
+                                    // `send_message` exclusively borrows
+                                    // `&mut session`. We pre-cloned the
+                                    // cancel-token handle for exactly
+                                    // this — flipping it has identical
+                                    // semantics to `session.abort()` and
+                                    // unwinds the agent loop at its next
+                                    // await point. Symmetric with
+                                    // `abort_bash` during a `bash` race.
+                                    {
+                                        let token = cancel_handle.lock().unwrap();
+                                        if !token.is_cancelled() {
+                                            token.cancel();
+                                        }
+                                    }
+                                    let resp = RpcResponse::new(
+                                        aid,
+                                        RpcResponseBody::Abort(RpcResultEmpty::ok()),
+                                    );
+                                    if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                        break prompt_fut.await;
+                                    }
+                                }
+                                Some(Ok(RpcCommand::AbortRetry { id: aid })) => {
+                                    // Same primitive as `Abort` — both
+                                    // map to cancelling the turn token
+                                    // because there's no dedicated
+                                    // retry-only cancel hook yet (see
+                                    // the top-level `AbortRetry`
+                                    // handler).
+                                    {
+                                        let token = cancel_handle.lock().unwrap();
+                                        if !token.is_cancelled() {
+                                            token.cancel();
+                                        }
+                                    }
+                                    let resp = RpcResponse::new(
+                                        aid,
+                                        RpcResponseBody::AbortRetry(RpcResultEmpty::ok()),
                                     );
                                     if tx.send(Outbound::Response(Box::new(resp))).is_err() {
                                         break prompt_fut.await;
@@ -1952,6 +2002,88 @@ mod tests {
 
         // Clean up the dispatcher task — the prompt is hung forever.
         handle.abort();
+    }
+
+    /// Abort fired during an in-flight prompt is dispatched inline (not
+    /// deferred) — its ack arrives promptly and the dispatcher finishes
+    /// within a wall-clock budget instead of hanging on the
+    /// pending-forever provider. Mirrors the abort_bash-during-bash test
+    /// from T-A1.
+    #[tokio::test]
+    async fn abort_during_prompt_is_acked_immediately() {
+        // Provider that pends forever inside `stream` — only an inline
+        // `session.abort()` (flipping the cancellation token) can let
+        // the prompt unwind so the dispatcher exits cleanly.
+        struct PendingForeverProvider;
+        impl ApiProvider for PendingForeverProvider {
+            fn stream(
+                &self,
+                _model: Model,
+                _context: Context,
+                _options: Option<StreamOptions>,
+            ) -> AssistantMessageEventStream<'static> {
+                Box::pin(async_stream::stream! {
+                    let () = std::future::pending().await;
+                    yield AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        message: assistant_text_message("unreachable"),
+                    };
+                })
+            }
+            fn stream_simple(
+                &self,
+                model: Model,
+                context: Context,
+                options: Option<SimpleStreamOptions>,
+            ) -> AssistantMessageEventStream<'static> {
+                self.stream(model, context, options.map(|o| o.base))
+            }
+        }
+
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PendingForeverProvider),
+            Some("test".into()),
+        );
+        let session = AgentSession::in_memory_with_client(test_model(), Vec::new(), client);
+
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session).await;
+
+        in_tx
+            .write_all(b"{\"type\":\"prompt\",\"id\":\"1\",\"message\":\"hi\"}\n")
+            .await
+            .unwrap();
+        // Give the dispatcher a moment to enter the prompt's inner
+        // select before the abort arrives.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        in_tx
+            .write_all(b"{\"type\":\"abort\",\"id\":\"2\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        // Wall-clock budget: a regression (deferred abort) manifests as
+        // timeout because the pending-forever provider never returns.
+        let frames = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            drain_frames(out_rx),
+        )
+        .await
+        .expect("dispatcher must respond within 5s when prompt is aborted");
+
+        // The abort ack must be present. Order vs the prompt response
+        // doesn't matter — what's load-bearing is that the inline
+        // dispatch sent the ack before we ever returned to the deferred
+        // bucket, which is what allowed the dispatcher to finish at all.
+        let abort = frames
+            .iter()
+            .find(|f| f["id"] == "2")
+            .expect("abort response must be present");
+        assert_eq!(abort["command"], "abort");
+        assert_eq!(abort["success"], true);
+
+        handle.await.unwrap().unwrap();
     }
 
     /// Seed `session_manager` with `texts.len()` user messages and return

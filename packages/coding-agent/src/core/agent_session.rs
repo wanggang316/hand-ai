@@ -870,6 +870,15 @@ impl AgentSession {
         self.follow_up_queue.clone()
     }
 
+    /// Shared handle to the cancellation token used by [`Self::abort`].
+    /// The dispatcher clones this BEFORE driving `send_message` so it can
+    /// flip the token mid-flight (the prompt's `&mut self` borrow makes
+    /// `session.abort()` itself unreachable during the race). Cancelling
+    /// via this handle has identical semantics to [`Self::abort`].
+    pub fn cancel_handle(&self) -> Arc<Mutex<CancellationToken>> {
+        self.cancel.clone()
+    }
+
     /// Steering queue mode (mid-turn user-message delivery policy).
     pub fn steering_mode(&self) -> QueueMode {
         self.steering_mode
