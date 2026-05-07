@@ -77,7 +77,6 @@ pub struct MarkdownComponent {
     source: String,
     theme: MarkdownTheme,
     default_text_style: DefaultTextStyle,
-    cache: Option<(String, u16, Vec<String>)>,
 }
 
 impl MarkdownComponent {
@@ -86,7 +85,6 @@ impl MarkdownComponent {
             source: source.into(),
             theme: MarkdownTheme::default(),
             default_text_style: DefaultTextStyle::default(),
-            cache: None,
         }
     }
 
@@ -94,7 +92,6 @@ impl MarkdownComponent {
         let new_source = source.into();
         if new_source != self.source {
             self.source = new_source;
-            self.cache = None;
         }
     }
 
@@ -104,7 +101,6 @@ impl MarkdownComponent {
 
     pub fn set_theme(&mut self, theme: MarkdownTheme) {
         self.theme = theme;
-        self.cache = None;
     }
 
     pub fn theme(&self) -> &MarkdownTheme {
@@ -113,7 +109,6 @@ impl MarkdownComponent {
 
     pub fn set_default_style(&mut self, style: DefaultTextStyle) {
         self.default_text_style = style;
-        self.cache = None;
     }
 
     pub fn default_style(&self) -> &DefaultTextStyle {
@@ -173,17 +168,7 @@ impl MarkdownComponent {
 
 impl Component for MarkdownComponent {
     fn render(&self, width: u16) -> Vec<String> {
-        if let Some((cached_src, cached_w, cached_lines)) = &self.cache
-            && cached_src == &self.source
-            && *cached_w == width
-        {
-            return cached_lines.clone();
-        }
         self.render_markdown(width)
-    }
-
-    fn invalidate(&mut self) {
-        self.cache = None;
     }
 }
 
