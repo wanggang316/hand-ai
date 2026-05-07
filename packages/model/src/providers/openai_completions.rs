@@ -494,11 +494,11 @@ fn build_params(
             serde_json::json!(options.reasoning_effort.is_some()),
         );
         builder = builder.extra_params(extra);
-    } else if options.reasoning_effort.is_some()
+    } else if let Some(effort) = options.reasoning_effort
         && model.reasoning
         && compat.supports_reasoning_effort
     {
-        builder = builder.reasoning_effort(options.reasoning_effort.unwrap());
+        builder = builder.reasoning_effort(effort);
     }
 
     if model.base_url.contains("openrouter.ai")

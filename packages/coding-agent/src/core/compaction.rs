@@ -116,15 +116,13 @@ pub fn extract_file_operations(messages: &[Message]) -> FileOperations {
                 if let model::AssistantContentBlock::ToolCall(tc) = block {
                     if let Some(path) = tc.arguments.get("path").and_then(|v| v.as_str()) {
                         match tc.name.as_str() {
-                            "read" | "grep" | "find" | "ls" => {
-                                if !ops.read.contains(&path.to_string()) {
-                                    ops.read.push(path.to_string());
-                                }
+                            "read" | "grep" | "find" | "ls"
+                                if !ops.read.contains(&path.to_string()) =>
+                            {
+                                ops.read.push(path.to_string());
                             }
-                            "write" | "edit" => {
-                                if !ops.edited.contains(&path.to_string()) {
-                                    ops.edited.push(path.to_string());
-                                }
+                            "write" | "edit" if !ops.edited.contains(&path.to_string()) => {
+                                ops.edited.push(path.to_string());
                             }
                             _ => {}
                         }
@@ -132,15 +130,11 @@ pub fn extract_file_operations(messages: &[Message]) -> FileOperations {
                     // Also check file_path for edit tool
                     if let Some(path) = tc.arguments.get("file_path").and_then(|v| v.as_str()) {
                         match tc.name.as_str() {
-                            "edit" | "write" => {
-                                if !ops.edited.contains(&path.to_string()) {
-                                    ops.edited.push(path.to_string());
-                                }
+                            "edit" | "write" if !ops.edited.contains(&path.to_string()) => {
+                                ops.edited.push(path.to_string());
                             }
-                            "read" => {
-                                if !ops.read.contains(&path.to_string()) {
-                                    ops.read.push(path.to_string());
-                                }
+                            "read" if !ops.read.contains(&path.to_string()) => {
+                                ops.read.push(path.to_string());
                             }
                             _ => {}
                         }

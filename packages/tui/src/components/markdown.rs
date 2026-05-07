@@ -59,10 +59,10 @@ impl MarkdownComponent {
                             "\x1b[90m┌───────────────────────────────────┐\x1b[0m".to_string(),
                         );
                     }
-                    Tag::Paragraph => {
-                        if !lines.is_empty() && !lines.last().is_none_or(|l| l.is_empty()) {
-                            lines.push(String::new());
-                        }
+                    Tag::Paragraph
+                        if !lines.is_empty() && !lines.last().is_none_or(|l| l.is_empty()) =>
+                    {
+                        lines.push(String::new());
                     }
                     Tag::List(_) => {
                         _in_list = true;

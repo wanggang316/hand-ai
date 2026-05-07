@@ -821,7 +821,7 @@ pub(crate) fn map_stop_reason(reason: &str) -> StopReason {
 
 /// Check if a thought signature is valid base64.
 pub(crate) fn is_valid_thought_signature(sig: &str) -> bool {
-    if sig.is_empty() || sig.len() % 4 != 0 {
+    if sig.is_empty() || !sig.len().is_multiple_of(4) {
         return false;
     }
     sig.bytes()

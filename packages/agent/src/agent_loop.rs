@@ -757,7 +757,7 @@ async fn execute_parallel<'a>(
     let mut messages = Vec::with_capacity(slots.len());
     let mut all_terminate = !slots.is_empty();
 
-    for ((tool_call, _slot), (result, is_error)) in slots.iter().zip(outcomes.into_iter()) {
+    for ((tool_call, _slot), (result, is_error)) in slots.iter().zip(outcomes) {
         if result.terminate != Some(true) {
             all_terminate = false;
         }

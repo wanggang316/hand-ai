@@ -578,10 +578,8 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
             tool_name,
             is_error,
             ..
-        } => {
-            if *is_error {
-                eprintln!("\x1b[31m[{} failed]\x1b[0m", tool_name);
-            }
+        } if *is_error => {
+            eprintln!("\x1b[31m[{} failed]\x1b[0m", tool_name);
         }
         AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
             // Show progress updates from tools (e.g., bash streaming output)

@@ -265,16 +265,14 @@ pub(crate) fn drive_sse_stream(
                         }
                     }
 
-                    "response.content_part.done" => {
-                        if !text_buffer.is_empty() {
-                            output
-                                .content
-                                .push(AssistantContentBlock::Text(TextContent {
-                                    content_type: "text".to_string(),
-                                    text: text_buffer.clone(),
-                                    text_signature: None,
-                                }));
-                        }
+                    "response.content_part.done" if !text_buffer.is_empty() => {
+                        output
+                            .content
+                            .push(AssistantContentBlock::Text(TextContent {
+                                content_type: "text".to_string(),
+                                text: text_buffer.clone(),
+                                text_signature: None,
+                            }));
                     }
 
                     "response.completed" => {

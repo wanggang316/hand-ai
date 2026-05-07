@@ -74,10 +74,8 @@ fn repair_partial(input: &str) -> String {
             '"' => in_string = true,
             '{' => stack.push('}'),
             '[' => stack.push(']'),
-            '}' | ']' => {
-                if stack.last().copied() == Some(ch) {
-                    stack.pop();
-                }
+            '}' | ']' if stack.last().copied() == Some(ch) => {
+                stack.pop();
             }
             _ => {}
         }

@@ -362,22 +362,20 @@ fn stream_bedrock(
                                 current_tool_input.clear();
                             }
                     }
-                    "contentBlockStop" => {
-                        if !current_tool_name.is_empty() {
-                            let args: Value = serde_json::from_str(&current_tool_input)
-                                .unwrap_or(Value::Object(Default::default()));
-                            output.content.push(AssistantContentBlock::ToolCall(ToolCall {
-                                content_type: "tool_call".to_string(),
-                                id: current_tool_id.clone(),
-                                name: current_tool_name.clone(),
-                                arguments: args,
-                                thought_signature: None,
-                            }));
-                            output.stop_reason = StopReason::ToolUse;
-                            current_tool_name.clear();
-                            current_tool_id.clear();
-                            current_tool_input.clear();
-                        }
+                    "contentBlockStop" if !current_tool_name.is_empty() => {
+                        let args: Value = serde_json::from_str(&current_tool_input)
+                            .unwrap_or(Value::Object(Default::default()));
+                        output.content.push(AssistantContentBlock::ToolCall(ToolCall {
+                            content_type: "tool_call".to_string(),
+                            id: current_tool_id.clone(),
+                            name: current_tool_name.clone(),
+                            arguments: args,
+                            thought_signature: None,
+                        }));
+                        output.stop_reason = StopReason::ToolUse;
+                        current_tool_name.clear();
+                        current_tool_id.clear();
+                        current_tool_input.clear();
                     }
                     "messageStop" => {
                         if let Some(reason) = event.get("stopReason").and_then(|r| r.as_str()) {
