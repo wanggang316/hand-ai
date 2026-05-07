@@ -178,13 +178,16 @@ fn build_overlay_lines(overlay: &Overlay, overlay_width: usize) -> Vec<String> {
     };
 
     if overlay.border {
-        // Top border
+        // Top border. Use display width (not byte length) for the title so
+        // CJK / emoji titles don't underflow the saturating_sub and produce
+        // a too-short border.
         let title_str = overlay
             .title
             .as_ref()
             .map(|t| format!(" {t} "))
             .unwrap_or_default();
-        let remaining = inner_w.saturating_sub(title_str.len());
+        let title_w = visible_width(&title_str);
+        let remaining = inner_w.saturating_sub(title_w);
         lines.push(format!("┌{title_str}{}┐", "─".repeat(remaining)));
     }
 
@@ -671,6 +674,30 @@ mod tests {
         // Column offset: leading three spaces from the left margin.
         let col = stripped[2].find("MARGIN").unwrap();
         assert_eq!(col, 3, "expected col 3, got {col}");
+    }
+
+    /// Regression: border title with a CJK / wide character must not
+    /// underflow `inner_w - title_byte_len`. Prior to the fix, a 2-display
+    /// width title `中文` (6 bytes) on a width-10 overlay would compute
+    /// `inner_w (8) - 6 (bytes) = 2 dashes` and produce a misaligned border.
+    #[test]
+    fn build_overlay_title_uses_display_width_for_border() {
+        let overlay = Overlay {
+            content: vec!["body".to_string()],
+            position: OverlayPosition::TopLeft,
+            border: true,
+            dim_background: false,
+            title: Some("中文".to_string()),
+        };
+        let lines = build_overlay_lines(&overlay, 10);
+        let top = &lines[0];
+        // Top border must be exactly 10 display columns wide regardless of
+        // how many bytes the title used.
+        assert_eq!(
+            crate::utils::visible_width(top),
+            10,
+            "top border display width: {top:?}"
+        );
     }
 
     #[test]
