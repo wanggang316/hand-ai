@@ -49,6 +49,12 @@ pub async fn execute_bash(
     shell_path: &str,
     options: BashExecutorOptions,
 ) -> Result<BashResult, CodingAgentError> {
+    // `kill_on_drop(true)` ensures the child is reaped if this future
+    // is dropped — e.g. when an outer `tokio::select!` races us against
+    // a cancellation token. Without it, an `abort_bash` would return
+    // success on the wire while the destructive command kept running
+    // to natural completion (the timeout also lives in the dropped
+    // future, so it's bypassed too).
     let child = Command::new(shell_path)
         .arg("-c")
         .arg(command)
@@ -56,6 +62,7 @@ pub async fn execute_bash(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| CodingAgentError::Tool(format!("Failed to spawn bash: {}", e)))?;
 

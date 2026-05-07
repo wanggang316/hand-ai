@@ -1,253 +1,1742 @@
-//! Settings management — global + project settings with deep merge.
+//! User and project settings, merged from layered YAML files.
+//!
+//! Resolution order: project (`<cwd>/.hand/settings.yaml`) > global
+//! (`~/.hand/agent/settings.yaml`) > defaults. The first level that supplies
+//! a field wins; otherwise the default is used.
+//!
+//! All scalar fields are `Option<T>` so merging is mechanical (project's
+//! `Some` shadows base). Accessor methods on the sub-structs return concrete
+//! values with defaults applied — call sites that need the merged value of a
+//! sub-struct field should go through the accessor rather than reading the
+//! raw `Option` directly.
 
-use crate::core::error::CodingAgentError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+use thiserror::Error;
+use tokio::sync::broadcast;
 
-/// Application settings (merged from global + project).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Top-level settings shape.
+///
+/// Both YAML layers deserialize into this same struct. Field-by-field merge
+/// is performed in [`Settings::merge`].
+///
+/// The derived `Default` produces an "all-`None`" instance so that merging
+/// layered files preserves the "field was not specified in this layer"
+/// signal. The user-facing default values live in [`Settings::defaults`] and
+/// are applied as the lowest layer in [`Settings::load`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case", default)]
 pub struct Settings {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_provider: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_thinking_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_thinking_level: Option<ThinkingLevelSetting>,
+    pub shell_path: Option<PathBuf>,
     pub shell_command_prefix: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub theme: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compaction: Option<CompactionSettings>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry: Option<RetrySettings>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ThemeSetting>,
+    pub compaction: CompactionSettings,
+    pub retry: RetrySettings,
     pub quiet_startup: Option<bool>,
+    /// Anonymous install-telemetry attribution headers on outbound provider
+    /// calls. Default: `true` (matches the TS reference). Read effective
+    /// value via [`Settings::enable_install_telemetry`] — direct field
+    /// access is `Option<bool>` so layered merging is mechanical.
+    pub enable_install_telemetry: Option<bool>,
 }
 
-/// Compaction settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Compaction tuning, in YAML-parse shape.
+///
+/// **Read effective values via the accessor methods** ([`enabled`](Self::enabled),
+/// [`threshold`](Self::threshold), [`keep_recent_tokens`](Self::keep_recent_tokens),
+/// [`max_context_tokens`](Self::max_context_tokens)) — direct field access yields
+/// `Option<T>` because the struct represents the raw YAML layer (all fields are
+/// optional so layered merging via [`Settings::merge`] works mechanically). The
+/// accessors apply the documented defaults when a field is `None`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case", default)]
 pub struct CompactionSettings {
-    pub enabled: bool,
-    pub reserve_tokens: u32,
-    pub keep_recent_tokens: u32,
+    pub enabled: Option<bool>,
+    pub threshold: Option<f32>,
+    pub keep_recent_tokens: Option<u32>,
+    pub max_context_tokens: Option<u32>,
 }
 
-impl Default for CompactionSettings {
-    fn default() -> Self {
+impl CompactionSettings {
+    /// Build the populated default form (all `Some`) — the lowest layer
+    /// beneath user-supplied YAML.
+    pub fn with_defaults() -> Self {
         Self {
-            enabled: true,
-            reserve_tokens: 16384,
-            keep_recent_tokens: 20000,
+            enabled: Some(true),
+            threshold: Some(0.8),
+            keep_recent_tokens: Some(32_000),
+            max_context_tokens: Some(200_000),
+        }
+    }
+
+    /// Whether auto-compaction is enabled. Default: `true`.
+    //
+    // The literal default here is intentionally duplicated with
+    // `with_defaults()`: it covers both `Settings::default()` callers (whose
+    // sub-struct is all-`None`) and accessor-direct callers that never went
+    // through layered merging. Same pattern applies to the sibling accessors.
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    /// Fraction of `max_context_tokens` at which compaction kicks in.
+    /// Default: `0.8`.
+    pub fn threshold(&self) -> f32 {
+        self.threshold.unwrap_or(0.8)
+    }
+
+    /// Token budget reserved for the most recent messages (which are kept
+    /// verbatim during compaction). Default: `32_000`.
+    pub fn keep_recent_tokens(&self) -> u32 {
+        self.keep_recent_tokens.unwrap_or(32_000)
+    }
+
+    /// Total context window assumed for the model. Default: `200_000`.
+    pub fn max_context_tokens(&self) -> u32 {
+        self.max_context_tokens.unwrap_or(200_000)
+    }
+
+    /// Merge `project` on top of `base`: project's `Some` wins per field.
+    fn merge(base: Self, project: Self) -> Self {
+        Self {
+            enabled: project.enabled.or(base.enabled),
+            threshold: project.threshold.or(base.threshold),
+            keep_recent_tokens: project.keep_recent_tokens.or(base.keep_recent_tokens),
+            max_context_tokens: project.max_context_tokens.or(base.max_context_tokens),
         }
     }
 }
 
-/// Retry settings for API calls.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Retry tuning for API calls, in YAML-parse shape.
+///
+/// **Read effective values via the accessor methods** ([`enabled`](Self::enabled),
+/// [`max_retries`](Self::max_retries), [`initial_delay_ms`](Self::initial_delay_ms),
+/// [`max_delay_ms`](Self::max_delay_ms)) — direct field access yields `Option<T>`
+/// because the struct represents the raw YAML layer (all fields are optional so
+/// layered merging via [`Settings::merge`] works mechanically). The accessors
+/// apply the documented defaults when a field is `None`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case", default)]
 pub struct RetrySettings {
-    pub enabled: bool,
-    pub max_retries: u32,
-    pub base_delay_ms: u64,
-    pub max_delay_ms: u64,
+    pub enabled: Option<bool>,
+    pub max_retries: Option<u32>,
+    pub initial_delay_ms: Option<u32>,
+    pub max_delay_ms: Option<u32>,
 }
 
-impl Default for RetrySettings {
-    fn default() -> Self {
+impl RetrySettings {
+    /// Build the populated default form (all `Some`).
+    pub fn with_defaults() -> Self {
         Self {
-            enabled: true,
-            max_retries: 3,
-            base_delay_ms: 1000,
-            max_delay_ms: 30000,
+            enabled: Some(true),
+            max_retries: Some(3),
+            initial_delay_ms: Some(1_000),
+            max_delay_ms: Some(30_000),
+        }
+    }
+
+    /// Whether retries are enabled. Default: `true`.
+    //
+    // The literal default here is intentionally duplicated with
+    // `with_defaults()`: it covers both `Settings::default()` callers (whose
+    // sub-struct is all-`None`) and accessor-direct callers that never went
+    // through layered merging. Same pattern applies to the sibling accessors.
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+
+    pub fn max_retries(&self) -> u32 {
+        self.max_retries.unwrap_or(3)
+    }
+
+    pub fn initial_delay_ms(&self) -> u32 {
+        self.initial_delay_ms.unwrap_or(1_000)
+    }
+
+    pub fn max_delay_ms(&self) -> u32 {
+        self.max_delay_ms.unwrap_or(30_000)
+    }
+
+    fn merge(base: Self, project: Self) -> Self {
+        Self {
+            enabled: project.enabled.or(base.enabled),
+            max_retries: project.max_retries.or(base.max_retries),
+            initial_delay_ms: project.initial_delay_ms.or(base.initial_delay_ms),
+            max_delay_ms: project.max_delay_ms.or(base.max_delay_ms),
         }
     }
 }
 
-/// Manages loading and saving of settings from global and project files.
+/// UI theme.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeSetting {
+    #[default]
+    Dark,
+    Light,
+    HighContrast,
+    System,
+}
+
+/// Default reasoning effort for thinking-capable models.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThinkingLevelSetting {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+/// Errors raised by [`Settings::load`].
+#[derive(Debug, Error)]
+pub enum SettingsError {
+    #[error("I/O error reading {path}: {source}", path = .path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("YAML parse error in {path}: {source}", path = .path.display())]
+    Yaml {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
+}
+
+impl Settings {
+    /// User-facing defaults — the values documented in the README. Used as
+    /// the lowest layer beneath the global and project YAML files.
+    ///
+    /// Distinct from [`Settings::default`] (derived) which produces an
+    /// "all-`None`" instance so that layer merging can tell apart "not
+    /// specified" from "explicitly the default value".
+    pub fn defaults() -> Self {
+        Self {
+            default_provider: Some("anthropic".into()),
+            default_model: Some("claude-sonnet-4-20250514".into()),
+            default_thinking_level: None,
+            shell_path: None,
+            shell_command_prefix: None,
+            theme: Some(ThemeSetting::Dark),
+            compaction: CompactionSettings::with_defaults(),
+            retry: RetrySettings::with_defaults(),
+            quiet_startup: Some(false),
+            enable_install_telemetry: Some(true),
+        }
+    }
+
+    /// Effective theme — the merged value or [`ThemeSetting::Dark`] if unset.
+    pub fn theme(&self) -> ThemeSetting {
+        self.theme.unwrap_or_default()
+    }
+
+    /// Effective `quiet_startup` flag — defaults to `false` if unset.
+    pub fn quiet_startup(&self) -> bool {
+        self.quiet_startup.unwrap_or(false)
+    }
+
+    /// Effective `enable-install-telemetry` flag — defaults to `true` if
+    /// unset, matching the TS reference (`enableInstallTelemetry ?? true`).
+    pub fn enable_install_telemetry(&self) -> bool {
+        self.enable_install_telemetry.unwrap_or(true)
+    }
+
+    /// Merge `project` on top of `base` (typically the global layer or
+    /// [`Settings::default`]). Pure: produces a new `Settings`, mutates
+    /// nothing. Field-by-field — for `Option<T>` fields a `Some` in
+    /// `project` wins; sub-structs merge recursively per the same rule.
+    pub fn merge(base: Self, project: Self) -> Self {
+        Self {
+            default_provider: project.default_provider.or(base.default_provider),
+            default_model: project.default_model.or(base.default_model),
+            default_thinking_level: project
+                .default_thinking_level
+                .or(base.default_thinking_level),
+            shell_path: project.shell_path.or(base.shell_path),
+            shell_command_prefix: project.shell_command_prefix.or(base.shell_command_prefix),
+            theme: project.theme.or(base.theme),
+            compaction: CompactionSettings::merge(base.compaction, project.compaction),
+            retry: RetrySettings::merge(base.retry, project.retry),
+            quiet_startup: project.quiet_startup.or(base.quiet_startup),
+            enable_install_telemetry: project
+                .enable_install_telemetry
+                .or(base.enable_install_telemetry),
+        }
+    }
+
+    /// Load global and project layers from disk and merge them on top of
+    /// [`Settings::default`].
+    ///
+    /// A path that points to a non-existent file is treated as "not
+    /// configured" (no error). YAML parse errors and other I/O errors are
+    /// surfaced as [`SettingsError`].
+    ///
+    /// Unknown top-level YAML keys are ignored with a `tracing::warn!`
+    /// diagnostic — matches the TS implementation in `pi-mono`.
+    pub fn load(
+        global_path: Option<&Path>,
+        project_path: Option<&Path>,
+    ) -> Result<Self, SettingsError> {
+        let global = match global_path {
+            Some(p) => load_yaml_layer(p)?.unwrap_or_default(),
+            None => Settings::default(),
+        };
+        let project = match project_path {
+            Some(p) => load_yaml_layer(p)?.unwrap_or_default(),
+            None => Settings::default(),
+        };
+        // Order: defaults < global < project. Each layer above only
+        // contributes the fields it explicitly set (everything else is
+        // `None` and falls through).
+        let with_global = Settings::merge(Settings::defaults(), global);
+        Ok(Settings::merge(with_global, project))
+    }
+}
+
+/// Read one layer from disk. Returns `Ok(None)` if the file does not exist;
+/// `Ok(Some(settings))` if it loaded (even if it was empty); a
+/// [`SettingsError`] for any other I/O or parse failure.
+fn load_yaml_layer(path: &Path) -> Result<Option<Settings>, SettingsError> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(SettingsError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+
+    parse_yaml_with_warning(path, &content).map(Some)
+}
+
+/// Parse a YAML string into [`Settings`]. Unknown top-level keys emit a
+/// `tracing::warn!` but do not error.
+fn parse_yaml_with_warning(path: &Path, content: &str) -> Result<Settings, SettingsError> {
+    if content.trim().is_empty() {
+        return Ok(Settings::default());
+    }
+
+    // First pass: parse as a generic mapping so we can detect unknown
+    // top-level keys for the warning. `serde(default)` on `Settings`
+    // already silently ignores unknown keys, so the second pass is the
+    // one whose result we keep.
+    if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(content)
+    {
+        let known: &[&str] = &[
+            "default-provider",
+            "default-model",
+            "default-thinking-level",
+            "shell-path",
+            "shell-command-prefix",
+            "theme",
+            "compaction",
+            "retry",
+            "quiet-startup",
+            "enable-install-telemetry",
+        ];
+        for (k, _) in map.iter() {
+            if let Some(key) = k.as_str().filter(|k| !known.contains(k)) {
+                tracing::warn!(
+                    path = %path.display(),
+                    key = %key,
+                    "ignoring unknown settings key",
+                );
+            }
+        }
+    }
+
+    serde_yaml::from_str::<Settings>(content).map_err(|source| SettingsError::Yaml {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Event broadcast on settings change. Holds both the previous and the
+/// freshly-loaded settings so subscribers can diff fields they care about.
+#[derive(Debug, Clone)]
+pub struct SettingsChanged {
+    pub previous: Settings,
+    pub current: Settings,
+}
+
+/// Internal handle owned by [`SettingsManager`] when a watcher is active.
+/// Holding the `RecommendedWatcher` keeps the OS-level subscription alive;
+/// holding the `JoinHandle` keeps the debounce/reload task alive — dropping
+/// the handle aborts the task (tokio detaches and reaps it).
+struct WatchHandle {
+    sender: broadcast::Sender<SettingsChanged>,
+    _watcher: notify::RecommendedWatcher,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for WatchHandle {
+    fn drop(&mut self) {
+        // Best-effort: ensure the task wakes up and observes the dropped
+        // notify channel quickly. Aborting is idempotent.
+        self.task.abort();
+    }
+}
+
+/// Manages loading settings from the standard hand layout.
+///
+/// Holds the merged [`Settings`] together with the resolved layer paths.
+/// Persistence (writing back to disk) is intentionally out of scope here —
+/// the TUI does not edit YAML.
+///
+/// Hot-reload: call [`SettingsManager::watch`] to receive a
+/// [`broadcast::Receiver<SettingsChanged>`] that fires whenever the YAML
+/// files on disk change to a value different from the in-memory copy. The
+/// watcher is started lazily on first call and shared across subsequent
+/// callers.
 pub struct SettingsManager {
-    global_path: PathBuf,
+    settings: Settings,
     project_path: Option<PathBuf>,
-    merged: Settings,
+    global_path: Option<PathBuf>,
+    watch_handle: Option<WatchHandle>,
 }
 
 impl SettingsManager {
-    /// Create a new settings manager.
-    pub fn new(cwd: &Path) -> Self {
-        let global_path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".hand")
-            .join("agent")
-            .join("settings.json");
+    /// Construct from the standard hand paths:
+    /// - global: `~/.hand/agent/settings.yaml`
+    /// - project: `<cwd>/.hand/settings.yaml`
+    ///
+    /// Either layer being absent is fine — defaults are used. YAML parse
+    /// errors propagate.
+    ///
+    /// Before loading, attempts a one-shot migration of any legacy
+    /// `settings.json` next to either expected YAML location. See
+    /// [`migrate_legacy_json_settings`].
+    pub fn from_cwd(cwd: &Path) -> Result<Self, SettingsError> {
+        let global_path = dirs::home_dir().map(|h| h.join(".hand/agent/settings.yaml"));
+        let project_path = Some(cwd.join(".hand/settings.yaml"));
 
-        let project_path = Some(cwd.join(".hand").join("settings.json"));
+        // Best-effort migration of legacy JSON settings, BEFORE load. The
+        // base directory for each layer is the parent of its YAML path.
+        if let Some(p) = global_path.as_ref().and_then(|p| p.parent()) {
+            let _ = migrate_legacy_json_settings(p);
+        }
+        if let Some(p) = project_path.as_ref().and_then(|p| p.parent()) {
+            let _ = migrate_legacy_json_settings(p);
+        }
 
-        let mut mgr = Self {
-            global_path,
+        let settings = Settings::load(global_path.as_deref(), project_path.as_deref())?;
+        Ok(Self {
+            settings,
             project_path,
-            merged: Settings::default(),
-        };
-        mgr.reload();
-        mgr
+            global_path,
+            watch_handle: None,
+        })
     }
 
-    /// Create with in-memory defaults (no file I/O).
+    /// Construct with in-memory defaults — no disk I/O. Intended for tests.
     pub fn in_memory() -> Self {
         Self {
-            global_path: PathBuf::new(),
+            settings: Settings::defaults(),
             project_path: None,
-            merged: Settings::default(),
+            global_path: None,
+            watch_handle: None,
         }
     }
 
-    /// Reload settings from disk.
-    pub fn reload(&mut self) {
-        let global = Self::load_file(&self.global_path);
-        let project = self
-            .project_path
-            .as_ref()
-            .map(|p| Self::load_file(p))
-            .unwrap_or_default();
-
-        self.merged = Self::merge(global, project);
+    /// Borrow the merged settings.
+    pub fn current(&self) -> &Settings {
+        &self.settings
     }
 
-    /// Get the merged settings.
+    /// Backward-compatible alias for [`Self::current`]. Some call sites use
+    /// `mgr.settings()` from the previous JSON-backed API.
     pub fn settings(&self) -> &Settings {
-        &self.merged
+        &self.settings
     }
 
-    /// Get compaction settings with defaults.
+    /// Effective compaction settings. The returned value is a clone — call
+    /// sites that need scalar fields should go through the accessor methods
+    /// (e.g. `mgr.compaction_settings().keep_recent_tokens()`).
     pub fn compaction_settings(&self) -> CompactionSettings {
-        self.merged.compaction.clone().unwrap_or_default()
+        self.settings.compaction.clone()
     }
 
-    /// Get retry settings with defaults.
+    /// Effective retry settings.
     pub fn retry_settings(&self) -> RetrySettings {
-        self.merged.retry.clone().unwrap_or_default()
+        self.settings.retry.clone()
     }
 
-    /// Get shell path.
-    pub fn shell_path(&self) -> &str {
-        self.merged.shell_path.as_deref().unwrap_or("/bin/bash")
+    /// Effective `enable-install-telemetry` flag — defaults to `true` if
+    /// unset, matching the TS reference.
+    pub fn enable_install_telemetry(&self) -> bool {
+        self.settings.enable_install_telemetry()
     }
 
-    /// Save a setting to the global file.
-    pub fn set_global(&mut self, key: &str, value: &str) -> Result<(), CodingAgentError> {
-        let mut global = Self::load_file(&self.global_path);
+    /// Test-only constructor: build a manager wrapping a pre-merged
+    /// [`Settings`] value with no on-disk paths and no watcher. Used by
+    /// unit tests that need to inject specific settings without touching
+    /// the filesystem.
+    #[doc(hidden)]
+    pub fn from_raw_for_test(settings: Settings) -> Self {
+        Self {
+            settings,
+            project_path: None,
+            global_path: None,
+            watch_handle: None,
+        }
+    }
 
-        match key {
-            "default_provider" => global.default_provider = Some(value.to_string()),
-            "default_model" => global.default_model = Some(value.to_string()),
-            "theme" => global.theme = Some(value.to_string()),
-            "shell_path" => global.shell_path = Some(value.to_string()),
-            _ => {
-                return Err(CodingAgentError::Settings(format!(
-                    "Unknown setting: {}",
-                    key
-                )));
+    /// Resolved `shell-path` setting if configured.
+    pub fn shell_path(&self) -> Option<&Path> {
+        self.settings.shell_path.as_deref()
+    }
+
+    /// Resolved `shell-command-prefix` setting if configured.
+    pub fn shell_command_prefix(&self) -> Option<&str> {
+        self.settings.shell_command_prefix.as_deref()
+    }
+
+    /// Path of the global layer, if known.
+    pub fn global_path(&self) -> Option<&Path> {
+        self.global_path.as_deref()
+    }
+
+    /// Path of the project layer, if known.
+    pub fn project_path(&self) -> Option<&Path> {
+        self.project_path.as_deref()
+    }
+
+    /// Subscribe to settings changes. Returns a [`broadcast::Receiver`] that
+    /// yields a [`SettingsChanged`] event each time the disk YAML files
+    /// reload to a value different from the current in-memory copy.
+    ///
+    /// The watcher task is started lazily on the first call; subsequent
+    /// calls return additional subscribers attached to the same task.
+    /// Multiple subscribers are supported (broadcast semantics).
+    ///
+    /// Behaviour notes:
+    /// - The watcher debounces filesystem events with a sliding 200ms
+    ///   window: events arriving within 200ms of each other coalesce
+    ///   into a single reload, regardless of total burst duration.
+    /// - On transient errors (file mid-rewrite, permission denied,
+    ///   malformed YAML), the watcher logs via `tracing::warn!` and keeps
+    ///   running — the next valid write will fire as normal.
+    /// - The notify subscription targets the *parent directory* of each
+    ///   settings file (not the file itself) so editor save-rename patterns
+    ///   are observed.
+    /// - Channel capacity is 16. Subscribers that lag receive
+    ///   `RecvError::Lagged`; that's a documented signal to re-load and
+    ///   resync, not a fatal error.
+    /// - Must be called from inside a tokio runtime — the internal task is
+    ///   spawned via [`tokio::spawn`].
+    pub fn watch(&mut self) -> broadcast::Receiver<SettingsChanged> {
+        if let Some(handle) = self.watch_handle.as_ref() {
+            return handle.sender.subscribe();
+        }
+
+        let (sender, _initial_rx) = broadcast::channel::<SettingsChanged>(16);
+        let (notify_tx, mut notify_rx) =
+            tokio::sync::mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+
+        // Build the notify watcher. The closure runs on a notify-internal
+        // thread; we forward each event into the tokio mpsc for the
+        // debounce task to consume.
+        let watcher_result = <notify::RecommendedWatcher as notify::Watcher>::new(
+            move |res| {
+                let _ = notify_tx.send(res);
+            },
+            notify::Config::default().with_poll_interval(Duration::from_secs(2)),
+        );
+        let mut watcher = match watcher_result {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(?e, "failed to create settings watcher; hot-reload disabled");
+                // Return a receiver to a never-fired channel; callers can
+                // hold it without surprise.
+                let rx = sender.subscribe();
+                drop(sender);
+                return rx;
+            }
+        };
+
+        // Watch the parent directory of each configured layer path. We
+        // dedupe by canonical parent so a single dir is registered once.
+        let mut watched_parents: Vec<PathBuf> = Vec::new();
+        for path in [self.global_path.as_deref(), self.project_path.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(parent) = path.parent() {
+                // Create the parent if it doesn't exist — notify can't
+                // watch a missing directory and the file may legitimately
+                // be created later.
+                if !parent.exists()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    tracing::warn!(
+                        path = %parent.display(),
+                        ?e,
+                        "could not create settings parent dir for watcher",
+                    );
+                    continue;
+                }
+                let parent_buf = parent.to_path_buf();
+                if watched_parents.contains(&parent_buf) {
+                    continue;
+                }
+                if let Err(e) = notify::Watcher::watch(
+                    &mut watcher,
+                    parent,
+                    notify::RecursiveMode::NonRecursive,
+                ) {
+                    tracing::warn!(
+                        path = %parent.display(),
+                        ?e,
+                        "failed to watch settings parent dir",
+                    );
+                    continue;
+                }
+                watched_parents.push(parent_buf);
             }
         }
 
-        Self::save_file(&self.global_path, &global)?;
-        self.reload();
-        Ok(())
+        // Snapshot of inputs the spawned task needs.
+        let global_path = self.global_path.clone();
+        let project_path = self.project_path.clone();
+        let mut current_settings = self.settings.clone();
+        let task_sender = sender.clone();
+        // Filter events to ones touching one of our settings files. Build
+        // both literal and canonicalised forms — FSEvents on macOS reports
+        // canonical paths (e.g. `/private/var/...`) while the configured
+        // path may be the symlinked alias (e.g. `/var/...`). Including
+        // parent dirs lets us catch coarse "directory changed" events too.
+        let target_files: Vec<PathBuf> =
+            build_match_targets(self.global_path.as_deref(), self.project_path.as_deref());
+
+        let task = tokio::spawn(async move {
+            loop {
+                // Block until the first relevant event arrives.
+                let first = match notify_rx.recv().await {
+                    Some(ev) => ev,
+                    None => break, // channel closed — watcher dropped
+                };
+                if !event_matches_targets(&first, &target_files) {
+                    continue;
+                }
+
+                // Debounce with a sliding 200ms window: each new event
+                // resets the idle timer so a continuous burst coalesces
+                // into a single reload regardless of total duration.
+                const DEBOUNCE: Duration = Duration::from_millis(200);
+                loop {
+                    match tokio::time::timeout(DEBOUNCE, notify_rx.recv()).await {
+                        Ok(Some(_ev)) => continue, // got another event, reset window
+                        // Channel closed mid-debounce — process the batch
+                        // we have, then exit the outer loop.
+                        Ok(None) => break,
+                        Err(_) => break, // 200ms idle elapsed
+                    }
+                }
+
+                // Re-load settings from disk.
+                let new_settings =
+                    match Settings::load(global_path.as_deref(), project_path.as_deref()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(?e, "settings reload failed; keeping previous value");
+                            continue;
+                        }
+                    };
+
+                if new_settings != current_settings {
+                    let event = SettingsChanged {
+                        previous: current_settings.clone(),
+                        current: new_settings.clone(),
+                    };
+                    // Ignore "no subscribers" — that's a benign state.
+                    let _ = task_sender.send(event);
+                    current_settings = new_settings;
+                }
+            }
+        });
+
+        let receiver = sender.subscribe();
+        self.watch_handle = Some(WatchHandle {
+            sender,
+            _watcher: watcher,
+            task,
+        });
+        receiver
     }
 
-    fn load_file(path: &Path) -> Settings {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or_default()
+    /// Stop the watcher (used in tests and on shutdown). Idempotent.
+    /// Already-issued [`broadcast::Receiver`] handles will see the channel
+    /// close on their next `recv()`.
+    pub fn stop_watching(&mut self) {
+        // Dropping the handle drops the notify watcher (closing the
+        // forward channel) and aborts the spawned task. Dropping the
+        // sender closes the broadcast channel for surviving receivers.
+        self.watch_handle.take();
     }
+}
 
-    fn save_file(path: &Path, settings: &Settings) -> Result<(), CodingAgentError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+/// Build the set of paths (literal + canonicalised, plus parent dirs) we
+/// will match notify events against. Matching is permissive: we'd rather
+/// over-fire and let the post-reload diff filter than miss a real change.
+fn build_match_targets(global: Option<&Path>, project: Option<&Path>) -> Vec<PathBuf> {
+    let mut targets = Vec::new();
+    for p in [global, project].into_iter().flatten() {
+        targets.push(p.to_path_buf());
+        if let Ok(canon) = p.canonicalize()
+            && !targets.contains(&canon)
+        {
+            targets.push(canon);
         }
-        let json = serde_json::to_string_pretty(settings)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        if let Some(parent) = p.parent() {
+            let parent_buf = parent.to_path_buf();
+            if !targets.contains(&parent_buf) {
+                targets.push(parent_buf);
+            }
+            if let Ok(canon_parent) = parent.canonicalize()
+                && !targets.contains(&canon_parent)
+            {
+                targets.push(canon_parent);
+            }
+        }
+    }
+    targets
+}
+
+/// Predicate: does this notify event refer to one of our target files
+/// (or live inside one of our watched directories)?
+///
+/// `notify::Event::paths` lists every path the event covers. We match on:
+/// - exact equality with a target;
+/// - prefix-match against a watched parent dir (FSEvents often reports
+///   directory-level events).
+///
+/// If no paths are populated (rare; some platforms emit a generic
+/// "something changed" event) or the event is an error, return `true` so
+/// the reload step can decide whether anything actually moved.
+fn event_matches_targets(res: &notify::Result<notify::Event>, targets: &[PathBuf]) -> bool {
+    let event = match res {
+        Ok(e) => e,
+        Err(_) => return true,
+    };
+    if event.paths.is_empty() {
+        return true;
+    }
+    event
+        .paths
+        .iter()
+        .any(|p| targets.iter().any(|t| p == t || p.starts_with(t)))
+}
+
+// ---------------------------------------------------------------------------
+// Legacy JSON → YAML migration
+// ---------------------------------------------------------------------------
+
+/// Result of one [`migrate_legacy_json_settings`] invocation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MigrationOutcome {
+    /// No JSON file at the given base; nothing to do.
+    NotApplicable,
+    /// YAML already exists; assumed previously migrated.
+    AlreadyMigrated,
+    /// Successfully migrated. `.bak` left at `<base>/settings.json.bak`.
+    Migrated {
+        yaml_path: PathBuf,
+        backup_path: PathBuf,
+    },
+    /// JSON exists but couldn't be parsed/converted/written. JSON untouched.
+    Failed { reason: String },
+}
+
+/// Top-level keys recognised by the new [`Settings`] struct, in kebab-case.
+const KNOWN_TOP_LEVEL: &[&str] = &[
+    "default-provider",
+    "default-model",
+    "default-thinking-level",
+    "shell-path",
+    "shell-command-prefix",
+    "theme",
+    "compaction",
+    "retry",
+    "quiet-startup",
+    "enable-install-telemetry",
+];
+
+/// Sub-struct keys we recognise (kebab-case) for `compaction` / `retry`.
+const KNOWN_COMPACTION: &[&str] = &[
+    "enabled",
+    "threshold",
+    "keep-recent-tokens",
+    "max-context-tokens",
+];
+const KNOWN_RETRY: &[&str] = &["enabled", "max-retries", "initial-delay-ms", "max-delay-ms"];
+
+/// Convert one snake_case identifier to kebab-case (`a_b_c` → `a-b-c`).
+fn snake_to_kebab(s: &str) -> String {
+    s.replace('_', "-")
+}
+
+/// Top-level fields whose string value is a kebab-cased enum tag in the
+/// new schema. Legacy JSON often serialised these as snake_case; when the
+/// raw value (after kebab conversion) still doesn't match a known tag we
+/// fall back to the original.
+///
+/// Each entry is `(field_name_in_kebab_case, &[allowed_kebab_values])`.
+const ENUM_VALUE_FIELDS: &[(&str, &[&str])] = &[
+    ("theme", &["dark", "light", "high-contrast", "system"]),
+    (
+        "default-thinking-level",
+        &["off", "minimal", "low", "medium", "high", "xhigh"],
+    ),
+];
+
+/// Walk a `serde_json::Value` and rewrite every map key from snake_case to
+/// kebab-case. Recurses through nested maps and arrays.
+///
+/// Object values whose key is one of [`ENUM_VALUE_FIELDS`] also have their
+/// **string value** snake→kebab-converted, but only when the converted
+/// form is a known enum tag — otherwise we leave the original alone so a
+/// genuinely unknown value still surfaces a deserialization error.
+fn rekey_to_kebab(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                let new_key = snake_to_kebab(&k);
+                let new_value = match (&v, lookup_enum_field(&new_key)) {
+                    (serde_json::Value::String(s), Some(allowed)) => {
+                        let kebab = snake_to_kebab(s);
+                        if allowed.contains(&kebab.as_str()) {
+                            serde_json::Value::String(kebab)
+                        } else {
+                            serde_json::Value::String(s.clone())
+                        }
+                    }
+                    _ => rekey_to_kebab(v),
+                };
+                out.insert(new_key, new_value);
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(rekey_to_kebab).collect())
+        }
+        other => other,
+    }
+}
+
+fn lookup_enum_field(field: &str) -> Option<&'static [&'static str]> {
+    ENUM_VALUE_FIELDS
+        .iter()
+        .find(|(name, _)| *name == field)
+        .map(|(_, values)| *values)
+}
+
+/// Filter a (kebab-cased) JSON value to keep only fields recognised by the
+/// current [`Settings`] schema. Unknown top-level and known-substruct fields
+/// are dropped with a `tracing::warn!`. Special-case rewrites:
+///
+/// - `retry.base-delay-ms` (legacy) → `retry.initial-delay-ms` (new schema).
+fn filter_known_fields(value: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = value else {
+        return value;
+    };
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (k, v) in map {
+        if !KNOWN_TOP_LEVEL.contains(&k.as_str()) {
+            tracing::warn!(field = %k, "settings migration: dropped unknown legacy field");
+            continue;
+        }
+        match k.as_str() {
+            "compaction" => out.insert(k, filter_sub_object(v, "compaction", KNOWN_COMPACTION)),
+            "retry" => {
+                let v = rewrite_retry_legacy_keys(v);
+                out.insert(k, filter_sub_object(v, "retry", KNOWN_RETRY))
+            }
+            _ => out.insert(k, v),
+        };
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Filter a sub-object's keys against `allowed`; warn-and-drop everything
+/// else. Pass-through for non-objects (serde will produce a clear error
+/// downstream if the shape is wrong).
+fn filter_sub_object(
+    value: serde_json::Value,
+    parent: &str,
+    allowed: &[&str],
+) -> serde_json::Value {
+    let serde_json::Value::Object(map) = value else {
+        return value;
+    };
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (k, v) in map {
+        if allowed.contains(&k.as_str()) {
+            out.insert(k, v);
+        } else {
+            tracing::warn!(
+                field = %format!("{parent}.{k}"),
+                "settings migration: dropped legacy field",
+            );
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Rename legacy `retry.base-delay-ms` to the new `retry.initial-delay-ms`.
+/// If both are present, the new key wins and we warn about the duplicate.
+fn rewrite_retry_legacy_keys(value: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(mut map) = value else {
+        return value;
+    };
+    if let Some(legacy) = map.remove("base-delay-ms") {
+        if map.contains_key("initial-delay-ms") {
+            tracing::warn!(
+                "settings migration: both retry.base-delay-ms and retry.initial-delay-ms present; preferring initial-delay-ms",
+            );
+        } else {
+            map.insert("initial-delay-ms".to_string(), legacy);
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Migrate legacy `<base>/settings.json` to `<base>/settings.yaml` if needed.
+///
+/// - If `settings.yaml` already exists at `base`: no-op (`AlreadyMigrated`).
+/// - If `settings.json` does not exist: no-op (`NotApplicable`).
+/// - Else: parse JSON, write YAML, rename JSON → `settings.json.bak`.
+///
+/// Per-step errors are logged but do not propagate; on any failure the
+/// JSON file is left untouched and YAML is not created. Re-runs are safe:
+/// once YAML exists the function short-circuits with `AlreadyMigrated`.
+pub fn migrate_legacy_json_settings(base: &Path) -> MigrationOutcome {
+    let json_path = base.join("settings.json");
+    let yaml_path = base.join("settings.yaml");
+    let backup_path = base.join("settings.json.bak");
+
+    // Order matters for idempotency: a successful previous run leaves
+    // YAML in place (and the original JSON renamed to `.bak`). If we
+    // checked JSON first, the second run would return `NotApplicable`
+    // even though a migration had already taken place. Checking YAML
+    // first keeps the post-migration steady state observable as
+    // `AlreadyMigrated`.
+    if yaml_path.exists() {
+        return MigrationOutcome::AlreadyMigrated;
+    }
+    if !json_path.exists() {
+        return MigrationOutcome::NotApplicable;
     }
 
-    /// Merge global and project settings (project overrides global).
-    fn merge(global: Settings, project: Settings) -> Settings {
-        Settings {
-            default_provider: project.default_provider.or(global.default_provider),
-            default_model: project.default_model.or(global.default_model),
-            default_thinking_level: project
-                .default_thinking_level
-                .or(global.default_thinking_level),
-            shell_path: project.shell_path.or(global.shell_path),
-            shell_command_prefix: project.shell_command_prefix.or(global.shell_command_prefix),
-            theme: project.theme.or(global.theme),
-            compaction: project.compaction.or(global.compaction),
-            retry: project.retry.or(global.retry),
-            quiet_startup: project.quiet_startup.or(global.quiet_startup),
+    // 1. Read + parse JSON.
+    let raw = match std::fs::read_to_string(&json_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                path = %json_path.display(),
+                error = %e,
+                "settings migration: failed to read legacy json",
+            );
+            return MigrationOutcome::Failed {
+                reason: format!("read: {e}"),
+            };
         }
+    };
+    let json_value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                path = %json_path.display(),
+                error = %e,
+                "settings migration: legacy json parse failed",
+            );
+            return MigrationOutcome::Failed {
+                reason: format!("json parse: {e}"),
+            };
+        }
+    };
+
+    // 2. Pre-process: snake_case → kebab-case keys, then drop fields the
+    //    new schema no longer carries (warning the user about each).
+    let kebabed = rekey_to_kebab(json_value);
+    let filtered = filter_known_fields(kebabed);
+
+    // 3. Deserialize into the strongly-typed Settings.
+    let settings: Settings = match serde_json::from_value(filtered) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                path = %json_path.display(),
+                error = %e,
+                "settings migration: structural conversion failed",
+            );
+            return MigrationOutcome::Failed {
+                reason: format!("conversion: {e}"),
+            };
+        }
+    };
+
+    // 4. Serialize to YAML and write next to the JSON. We deliberately do
+    //    NOT touch the JSON until the YAML write has succeeded — that
+    //    preserves user data on any failure.
+    let yaml = match serde_yaml::to_string(&settings) {
+        Ok(s) => s,
+        Err(e) => {
+            return MigrationOutcome::Failed {
+                reason: format!("yaml emit: {e}"),
+            };
+        }
+    };
+    // Atomic write: stage to a temp file in the same directory, then
+    // rename into place. A crashed/aborted run leaves the original YAML
+    // (or no YAML at all) intact rather than a half-written file.
+    {
+        use std::io::Write as _;
+        let parent = yaml_path.parent().unwrap_or_else(|| Path::new("."));
+        let mut tmp = match tempfile::NamedTempFile::new_in(parent) {
+            Ok(t) => t,
+            Err(e) => {
+                return MigrationOutcome::Failed {
+                    reason: format!("yaml write: {e}"),
+                };
+            }
+        };
+        if let Err(e) = tmp.write_all(yaml.as_bytes()) {
+            return MigrationOutcome::Failed {
+                reason: format!("yaml write: {e}"),
+            };
+        }
+        if let Err(e) = tmp.persist(&yaml_path) {
+            return MigrationOutcome::Failed {
+                reason: format!("yaml write: {e}"),
+            };
+        }
+    }
+
+    // 5. Rename JSON → .bak. On POSIX `rename` is atomic and overwrites
+    //    an existing target; on Windows it errors if the target exists.
+    //    If the rename fails we keep the YAML and log; the next call will
+    //    short-circuit on `AlreadyMigrated` because YAML now exists.
+    if let Err(e) = std::fs::rename(&json_path, &backup_path) {
+        tracing::warn!(
+            json = %json_path.display(),
+            backup = %backup_path.display(),
+            error = %e,
+            "settings: migration wrote yaml but failed to rename json to .bak",
+        );
+    }
+
+    tracing::info!(
+        json = %json_path.display(),
+        yaml = %yaml_path.display(),
+        backup = %backup_path.display(),
+        "settings: migrated legacy json to yaml",
+    );
+
+    MigrationOutcome::Migrated {
+        yaml_path,
+        backup_path,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
 
-    #[test]
-    fn test_settings_default() {
-        let settings = Settings::default();
-        assert!(settings.default_provider.is_none());
-        assert!(settings.default_model.is_none());
+    fn write_yaml(dir: &TempDir, name: &str, body: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        path
     }
 
     #[test]
-    fn test_compaction_settings_default() {
-        let cs = CompactionSettings::default();
-        assert!(cs.enabled);
-        assert_eq!(cs.reserve_tokens, 16384);
+    fn defaults_match_readme_table() {
+        let s = Settings::defaults();
+        assert_eq!(s.default_provider.as_deref(), Some("anthropic"));
+        assert_eq!(s.default_model.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert!(s.default_thinking_level.is_none());
+        assert!(s.shell_path.is_none());
+        assert!(s.shell_command_prefix.is_none());
+        assert_eq!(s.theme(), ThemeSetting::Dark);
+        assert!(s.compaction.enabled());
+        assert!((s.compaction.threshold() - 0.8).abs() < f32::EPSILON);
+        assert_eq!(s.compaction.keep_recent_tokens(), 32_000);
+        assert_eq!(s.compaction.max_context_tokens(), 200_000);
+        assert!(s.retry.enabled());
+        assert_eq!(s.retry.max_retries(), 3);
+        assert_eq!(s.retry.initial_delay_ms(), 1_000);
+        assert_eq!(s.retry.max_delay_ms(), 30_000);
+        assert!(!s.quiet_startup());
+        // Install telemetry defaults to ON, matching the TS reference.
+        assert!(s.enable_install_telemetry());
     }
 
     #[test]
-    fn test_retry_settings_default() {
-        let rs = RetrySettings::default();
-        assert!(rs.enabled);
-        assert_eq!(rs.max_retries, 3);
+    fn enable_install_telemetry_round_trips_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        // Explicit `false` survives a load.
+        let p = write_yaml(&dir, "off.yaml", "enable-install-telemetry: false\n");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.enable_install_telemetry, Some(false));
+        assert!(!s.enable_install_telemetry());
+
+        // Explicit `true` survives a load.
+        let p = write_yaml(&dir, "on.yaml", "enable-install-telemetry: true\n");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.enable_install_telemetry, Some(true));
+        assert!(s.enable_install_telemetry());
+
+        // Field absent → default ON via the accessor (matches TS).
+        let p = write_yaml(&dir, "absent.yaml", "default-model: foo\n");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert!(s.enable_install_telemetry());
     }
 
     #[test]
-    fn test_settings_merge() {
-        let global = Settings {
-            default_provider: Some("openai".into()),
-            default_model: Some("gpt-4".into()),
-            ..Default::default()
-        };
-        let project = Settings {
-            default_model: Some("claude-3".into()),
-            theme: Some("dark".into()),
-            ..Default::default()
-        };
-        let merged = SettingsManager::merge(global, project);
-        assert_eq!(merged.default_provider.as_deref(), Some("openai"));
-        assert_eq!(merged.default_model.as_deref(), Some("claude-3")); // Project wins
-        assert_eq!(merged.theme.as_deref(), Some("dark"));
+    fn empty_yaml_round_trips_to_defaults() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(&dir, "settings.yaml", "");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s, Settings::defaults());
     }
 
     #[test]
-    fn test_settings_in_memory() {
+    fn single_field_override_leaves_others_at_default() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(&dir, "settings.yaml", "default-model: gpt-4o\n");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.default_model.as_deref(), Some("gpt-4o"));
+        // Other fields still match defaults
+        assert_eq!(s.default_provider.as_deref(), Some("anthropic"));
+        assert_eq!(s.theme(), ThemeSetting::Dark);
+    }
+
+    #[test]
+    fn project_shadows_global() {
+        let dir = TempDir::new().unwrap();
+        let g = write_yaml(&dir, "global.yaml", "default-model: claude-x\n");
+        let p = write_yaml(&dir, "project.yaml", "default-model: gpt-4o\n");
+        let s = Settings::load(Some(&g), Some(&p)).unwrap();
+        assert_eq!(s.default_model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn project_doesnt_shadow_when_absent() {
+        let dir = TempDir::new().unwrap();
+        let g = write_yaml(&dir, "global.yaml", "default-model: claude-x\n");
+        let p = write_yaml(&dir, "project.yaml", "theme: light\n");
+        let s = Settings::load(Some(&g), Some(&p)).unwrap();
+        assert_eq!(s.default_model.as_deref(), Some("claude-x"));
+        assert_eq!(s.theme(), ThemeSetting::Light);
+    }
+
+    #[test]
+    fn sub_struct_field_merging() {
+        let dir = TempDir::new().unwrap();
+        let g = write_yaml(&dir, "global.yaml", "compaction:\n  threshold: 0.7\n");
+        let p = write_yaml(&dir, "project.yaml", "compaction:\n  enabled: false\n");
+        let s = Settings::load(Some(&g), Some(&p)).unwrap();
+        // Project supplied `enabled: false` — wins.
+        assert!(!s.compaction.enabled());
+        // Global supplied `threshold: 0.7` — survives because project did
+        // not override it.
+        assert!((s.compaction.threshold() - 0.7).abs() < f32::EPSILON);
+        // Untouched sub-fields still default.
+        assert_eq!(s.compaction.keep_recent_tokens(), 32_000);
+    }
+
+    #[test]
+    fn unknown_top_level_key_ignored_without_error() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(
+            &dir,
+            "settings.yaml",
+            "unknown-key: foo\ndefault-model: gpt-4o\n",
+        );
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.default_model.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn malformed_yaml_returns_yaml_error_with_path() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(&dir, "bad.yaml", "default-model: [unclosed\n");
+        let err = Settings::load(Some(&p), None).unwrap_err();
+        match err {
+            SettingsError::Yaml { path, .. } => assert_eq!(path, p),
+            other => panic!("expected Yaml error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_global_file_is_ok() {
+        let dir = TempDir::new().unwrap();
+        let nonexistent = dir.path().join("nonexistent.yaml");
+        let s = Settings::load(Some(&nonexistent), None).unwrap();
+        assert_eq!(s, Settings::defaults());
+    }
+
+    #[test]
+    fn missing_project_file_is_ok() {
+        let dir = TempDir::new().unwrap();
+        let g = write_yaml(&dir, "global.yaml", "default-model: claude-x\n");
+        let nonexistent = dir.path().join("nonexistent.yaml");
+        let s = Settings::load(Some(&g), Some(&nonexistent)).unwrap();
+        assert_eq!(s.default_model.as_deref(), Some("claude-x"));
+    }
+
+    #[test]
+    fn compaction_settings_accessor_returns_usable_shape() {
         let mgr = SettingsManager::in_memory();
-        assert!(mgr.settings().default_provider.is_none());
-        assert_eq!(mgr.shell_path(), "/bin/bash");
+        let cs = mgr.compaction_settings();
+        // Existing callers use field access on the returned struct via
+        // accessor methods — this test pins the API.
+        assert!(cs.enabled());
+        assert_eq!(cs.keep_recent_tokens(), 32_000);
+        assert_eq!(cs.max_context_tokens(), 200_000);
     }
 
     #[test]
-    fn test_settings_serialization() {
-        let settings = Settings {
-            default_provider: Some("anthropic".into()),
-            compaction: Some(CompactionSettings::default()),
-            ..Default::default()
+    fn from_cwd_resolves_standard_paths() {
+        let dir = TempDir::new().unwrap();
+        // No on-disk files needed: from_cwd should still succeed and use
+        // defaults. Verify the resolved project path points at the expected
+        // location under `<cwd>/.hand/`.
+        let mgr = SettingsManager::from_cwd(dir.path()).unwrap();
+        let project = mgr.project_path().expect("project path resolved");
+        assert!(project.ends_with(".hand/settings.yaml"));
+        assert!(project.starts_with(dir.path()));
+        // Global path resolution depends on `dirs::home_dir()` — assert it
+        // ends with the standard subpath when present.
+        if let Some(global) = mgr.global_path() {
+            assert!(global.ends_with(".hand/agent/settings.yaml"));
+        }
+    }
+
+    #[test]
+    fn pure_merge_does_not_touch_disk() {
+        // Sanity: `Settings::merge` is a pure function over two values.
+        let g = Settings {
+            default_model: Some("a".into()),
+            ..Settings::default()
         };
-        let json = serde_json::to_string(&settings).unwrap();
-        let parsed: Settings = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.default_provider.as_deref(), Some("anthropic"));
+        let p = Settings {
+            default_model: Some("b".into()),
+            ..Settings::default()
+        };
+        let merged = Settings::merge(g.clone(), p.clone());
+        assert_eq!(merged.default_model.as_deref(), Some("b"));
+        // Inputs are unchanged.
+        assert_eq!(g.default_model.as_deref(), Some("a"));
+        assert_eq!(p.default_model.as_deref(), Some("b"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Hot-reload watcher tests (T4.2)
+    // ---------------------------------------------------------------------
+
+    use tokio::sync::broadcast::error::RecvError;
+
+    /// Build a manager whose project layer points at the given file path
+    /// (without requiring the file to exist yet) and no global layer.
+    fn manager_for_project(project: PathBuf) -> SettingsManager {
+        // Bypass `from_cwd` (which forces the standard layout) and use
+        // `Settings::load` directly so we control which files exist.
+        let settings =
+            Settings::load(None, Some(project.as_path())).unwrap_or_else(|_| Settings::defaults());
+        SettingsManager {
+            settings,
+            project_path: Some(project),
+            global_path: None,
+            watch_handle: None,
+        }
+    }
+
+    /// Atomic file rewrite via tmp + rename — closer to how editors save
+    /// and a robust way to trigger a single coalescable filesystem event.
+    fn atomic_write(path: &Path, content: &str) {
+        use std::io::Write;
+        let parent = path.parent().expect("path has a parent");
+        let tmp = parent.join(format!(
+            ".{}.tmp",
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("settings")
+        ));
+        let mut f = std::fs::File::create(&tmp).unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.sync_all().ok();
+        drop(f);
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn watcher_delivers_event_to_single_subscriber() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: alpha\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        assert_eq!(mgr.current().default_model.as_deref(), Some("alpha"));
+
+        let mut rx = mgr.watch();
+
+        // Modify after the watcher is up.
+        atomic_write(&project, "default-model: beta\n");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event arrived within timeout")
+            .expect("broadcast not closed");
+        assert_eq!(event.previous.default_model.as_deref(), Some("alpha"));
+        assert_eq!(event.current.default_model.as_deref(), Some("beta"));
+    }
+
+    #[tokio::test]
+    async fn watcher_broadcasts_to_multiple_subscribers() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: alpha\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx_a = mgr.watch();
+        let mut rx_b = mgr.watch();
+
+        atomic_write(&project, "default-model: gamma\n");
+
+        let ev_a = tokio::time::timeout(Duration::from_secs(2), rx_a.recv())
+            .await
+            .expect("a: timed out")
+            .expect("a: closed");
+        let ev_b = tokio::time::timeout(Duration::from_secs(2), rx_b.recv())
+            .await
+            .expect("b: timed out")
+            .expect("b: closed");
+
+        assert_eq!(ev_a.current.default_model.as_deref(), Some("gamma"));
+        assert_eq!(ev_b.current.default_model.as_deref(), Some("gamma"));
+    }
+
+    #[tokio::test]
+    async fn watcher_suppresses_event_when_content_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        let body = "default-model: alpha\n";
+        std::fs::write(&project, body).unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx = mgr.watch();
+
+        // Re-write the same content.
+        atomic_write(&project, body);
+
+        // Allow the debounce + reload to run, then assert no event.
+        let outcome = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+        assert!(
+            outcome.is_err(),
+            "expected no event for identical write, got {outcome:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_debounces_rapid_writes_into_one_event() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: v0\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx = mgr.watch();
+
+        // 5 rapid writes; final state is `default-model: v5`.
+        for i in 1..=5 {
+            atomic_write(&project, &format!("default-model: v{i}\n"));
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // First event must arrive.
+        let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("first event timed out")
+            .expect("broadcast closed");
+        assert_eq!(first.current.default_model.as_deref(), Some("v5"));
+
+        // Within a generous window, no further events should arrive — the
+        // debounce should have coalesced the burst.
+        let second = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await;
+        assert!(
+            second.is_err(),
+            "expected only one event from a debounced burst, got {second:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn watcher_survives_malformed_yaml_then_recovers() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: alpha\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx = mgr.watch();
+
+        // Bad write — watcher should log + skip.
+        atomic_write(&project, "default-model: [unterminated\n");
+        // Give the debounce window time to fire and the reload to fail.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // Good write — should fire.
+        atomic_write(&project, "default-model: recovered\n");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event after recovery timed out")
+            .expect("broadcast closed");
+        assert_eq!(event.current.default_model.as_deref(), Some("recovered"));
+    }
+
+    #[tokio::test]
+    async fn stop_watching_closes_existing_subscribers() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("settings.yaml");
+        std::fs::write(&project, "default-model: alpha\n").unwrap();
+
+        let mut mgr = manager_for_project(project.clone());
+        let mut rx = mgr.watch();
+
+        mgr.stop_watching();
+
+        let res = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("recv resolved within timeout");
+        assert!(matches!(res, Err(RecvError::Closed)), "got {res:?}");
+
+        // Idempotent.
+        mgr.stop_watching();
+    }
+
+    #[tokio::test]
+    async fn project_layer_overrides_global_under_watcher() {
+        let dir = TempDir::new().unwrap();
+        // Use distinct directories so the watcher registers two parents.
+        let global_dir = dir.path().join("global");
+        let project_dir = dir.path().join("project");
+        std::fs::create_dir_all(&global_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let global = global_dir.join("settings.yaml");
+        let project = project_dir.join("settings.yaml");
+        std::fs::write(&global, "default-model: A\n").unwrap();
+        // Project file does not yet exist.
+
+        let settings = Settings::load(Some(global.as_path()), Some(project.as_path())).unwrap();
+        let mut mgr = SettingsManager {
+            settings,
+            project_path: Some(project.clone()),
+            global_path: Some(global.clone()),
+            watch_handle: None,
+        };
+        assert_eq!(mgr.current().default_model.as_deref(), Some("A"));
+
+        let mut rx = mgr.watch();
+
+        // Create the project file mid-watch — it should shadow global.
+        atomic_write(&project, "default-model: B\n");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("event timed out")
+            .expect("broadcast closed");
+        assert_eq!(event.previous.default_model.as_deref(), Some("A"));
+        assert_eq!(event.current.default_model.as_deref(), Some("B"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Legacy JSON → YAML migration (T4.4)
+    // ---------------------------------------------------------------------
+
+    fn write_text(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn migration_no_files_is_not_applicable() {
+        let dir = TempDir::new().unwrap();
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert_eq!(outcome, MigrationOutcome::NotApplicable);
+        // Nothing created.
+        assert!(!dir.path().join("settings.yaml").exists());
+        assert!(!dir.path().join("settings.json").exists());
+        assert!(!dir.path().join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn migration_writes_yaml_and_backup_when_only_json_exists() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(&json, r#"{"default_model": "gpt-4o"}"#);
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        let yaml_path = dir.path().join("settings.yaml");
+        let backup_path = dir.path().join("settings.json.bak");
+        assert_eq!(
+            outcome,
+            MigrationOutcome::Migrated {
+                yaml_path: yaml_path.clone(),
+                backup_path: backup_path.clone(),
+            }
+        );
+        assert!(yaml_path.exists());
+        assert!(backup_path.exists());
+        assert!(!json.exists());
+        let yaml_body = std::fs::read_to_string(&yaml_path).unwrap();
+        assert!(
+            yaml_body.contains("default-model: gpt-4o"),
+            "expected kebab-case key + value, got: {yaml_body}",
+        );
+    }
+
+    #[test]
+    fn migration_is_already_migrated_when_yaml_exists() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        let yaml = dir.path().join("settings.yaml");
+        let json_body = r#"{"default_model": "gpt-4o"}"#;
+        let yaml_body = "default-model: claude-x\n";
+        write_text(&json, json_body);
+        write_text(&yaml, yaml_body);
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert_eq!(outcome, MigrationOutcome::AlreadyMigrated);
+        // Both files unchanged.
+        assert_eq!(std::fs::read_to_string(&json).unwrap(), json_body);
+        assert_eq!(std::fs::read_to_string(&yaml).unwrap(), yaml_body);
+        assert!(!dir.path().join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn migration_failed_leaves_files_untouched_on_bad_json() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(&json, "not json");
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        match outcome {
+            MigrationOutcome::Failed { reason } => {
+                assert!(reason.contains("json parse"), "unexpected reason: {reason}",)
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // JSON survives, YAML never created.
+        assert!(json.exists());
+        assert_eq!(std::fs::read_to_string(&json).unwrap(), "not json");
+        assert!(!dir.path().join("settings.yaml").exists());
+        assert!(!dir.path().join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn migrated_yaml_loads_via_settings_load() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(
+            &json,
+            r#"{
+                "default_provider": "openai",
+                "default_model": "gpt-4o",
+                "compaction": {"enabled": false}
+            }"#,
+        );
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        let yaml_path = match outcome {
+            MigrationOutcome::Migrated { yaml_path, .. } => yaml_path,
+            other => panic!("expected Migrated, got {other:?}"),
+        };
+
+        let s = Settings::load(None, Some(&yaml_path)).unwrap();
+        assert_eq!(s.default_provider.as_deref(), Some("openai"));
+        assert_eq!(s.default_model.as_deref(), Some("gpt-4o"));
+        assert!(!s.compaction.enabled());
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(&json, r#"{"default_model": "gpt-4o"}"#);
+
+        let first = migrate_legacy_json_settings(dir.path());
+        assert!(matches!(first, MigrationOutcome::Migrated { .. }));
+
+        let yaml = dir.path().join("settings.yaml");
+        let backup = dir.path().join("settings.json.bak");
+        let yaml_before = std::fs::read_to_string(&yaml).unwrap();
+        let backup_before = std::fs::read_to_string(&backup).unwrap();
+
+        let second = migrate_legacy_json_settings(dir.path());
+        assert_eq!(second, MigrationOutcome::AlreadyMigrated);
+
+        // No mutation between runs.
+        assert_eq!(std::fs::read_to_string(&yaml).unwrap(), yaml_before);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn migration_drops_legacy_compaction_reserve_tokens() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(
+            &json,
+            r#"{
+                "compaction": {
+                    "enabled": true,
+                    "reserve_tokens": 5000,
+                    "keep_recent_tokens": 12345
+                }
+            }"#,
+        );
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+
+        let yaml_body = std::fs::read_to_string(dir.path().join("settings.yaml")).unwrap();
+        assert!(
+            !yaml_body.contains("reserve"),
+            "legacy field leaked into yaml: {yaml_body}",
+        );
+        // Recognised fields survive.
+        assert!(yaml_body.contains("keep-recent-tokens: 12345"));
+
+        // And it round-trips through Settings::load with the surviving value.
+        let yaml_path = dir.path().join("settings.yaml");
+        let s = Settings::load(None, Some(&yaml_path)).unwrap();
+        assert_eq!(s.compaction.keep_recent_tokens(), 12_345);
+    }
+
+    #[test]
+    fn from_cwd_triggers_project_migration() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+        let project_json = cwd.join(".hand").join("settings.json");
+        write_text(&project_json, r#"{"default_model": "gpt-4o"}"#);
+
+        let mgr = SettingsManager::from_cwd(cwd).unwrap();
+        // Settings actually loaded the migrated value.
+        assert_eq!(mgr.current().default_model.as_deref(), Some("gpt-4o"));
+
+        // YAML + .bak in place; original JSON gone.
+        assert!(cwd.join(".hand").join("settings.yaml").exists());
+        assert!(cwd.join(".hand").join("settings.json.bak").exists());
+        assert!(!project_json.exists());
+    }
+
+    /// F31: Guard against `KNOWN_*` allow-lists drifting from the actual
+    /// `Settings` schema. If a new field is added to `Settings` but not
+    /// added to `KNOWN_TOP_LEVEL`, every legacy migration silently drops
+    /// it. Same logic for `KNOWN_COMPACTION` / `KNOWN_RETRY`.
+    #[test]
+    fn migration_known_field_lists_match_schema() {
+        // Top-level fields: serialize defaults to a JSON object and
+        // assert every kebab-case key appears in `KNOWN_TOP_LEVEL`.
+        let value = serde_json::to_value(Settings::defaults()).unwrap();
+        let serde_json::Value::Object(map) = value else {
+            panic!("Settings should serialize to an object")
+        };
+        for k in map.keys() {
+            let kebab = k.replace('_', "-");
+            assert!(
+                KNOWN_TOP_LEVEL.contains(&kebab.as_str()),
+                "KNOWN_TOP_LEVEL missing field: {kebab}",
+            );
+        }
+
+        // Sub-struct fields: same check for compaction / retry.
+        let value = serde_json::to_value(CompactionSettings::with_defaults()).unwrap();
+        let serde_json::Value::Object(map) = value else {
+            panic!("CompactionSettings should serialize to an object")
+        };
+        for k in map.keys() {
+            let kebab = k.replace('_', "-");
+            assert!(
+                KNOWN_COMPACTION.contains(&kebab.as_str()),
+                "KNOWN_COMPACTION missing field: {kebab}",
+            );
+        }
+
+        let value = serde_json::to_value(RetrySettings::with_defaults()).unwrap();
+        let serde_json::Value::Object(map) = value else {
+            panic!("RetrySettings should serialize to an object")
+        };
+        for k in map.keys() {
+            let kebab = k.replace('_', "-");
+            assert!(
+                KNOWN_RETRY.contains(&kebab.as_str()),
+                "KNOWN_RETRY missing field: {kebab}",
+            );
+        }
+    }
+
+    /// F33: legacy JSON values that are themselves snake_case enum tags
+    /// (e.g. `theme: "high_contrast"`) must be rewritten to kebab-case
+    /// during migration so they match the new `ThemeSetting` shape.
+    #[test]
+    fn migration_rewrites_snake_case_enum_values() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(&json, r#"{"theme": "high_contrast"}"#);
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+
+        let yaml_body = std::fs::read_to_string(dir.path().join("settings.yaml")).unwrap();
+        assert!(
+            yaml_body.contains("theme: high-contrast"),
+            "expected kebab-case enum value, got: {yaml_body}",
+        );
+
+        let yaml_path = dir.path().join("settings.yaml");
+        let s = Settings::load(None, Some(&yaml_path)).unwrap();
+        assert_eq!(s.theme(), ThemeSetting::HighContrast);
+    }
+
+    #[test]
+    fn migration_renames_retry_base_delay_ms_to_initial_delay_ms() {
+        // Sanity check on the legacy-rename path: pre-T4.1 retry settings
+        // used `base_delay_ms`; new schema uses `initial-delay-ms`.
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(
+            &json,
+            r#"{
+                "retry": {
+                    "enabled": true,
+                    "max_retries": 5,
+                    "base_delay_ms": 2500,
+                    "max_delay_ms": 60000
+                }
+            }"#,
+        );
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+
+        let yaml_path = dir.path().join("settings.yaml");
+        let s = Settings::load(None, Some(&yaml_path)).unwrap();
+        assert_eq!(s.retry.max_retries(), 5);
+        assert_eq!(s.retry.initial_delay_ms(), 2_500);
+        assert_eq!(s.retry.max_delay_ms(), 60_000);
     }
 }

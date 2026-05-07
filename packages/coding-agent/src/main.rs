@@ -1,101 +1,37 @@
 //! Hand — interactive AI coding agent CLI.
 
 use clap::Parser;
+use hand_coding_agent::cli::Args;
 use hand_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
+use hand_coding_agent::core::diagnostics;
 use hand_coding_agent::core::export;
 use hand_coding_agent::core::model_resolver;
-use hand_coding_agent::tools;
-use model::SimpleStreamOptions;
+use hand_coding_agent::core::timings;
+use hand_coding_agent::modes;
+use hand_coding_agent::modes::session_setup::SessionSetup;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Parser)]
-#[command(
-    name = "hand",
-    about = "Hand — AI coding agent",
-    version = VERSION,
-    long_about = "Hand is an interactive AI coding agent that helps you write, edit, and understand code."
-)]
-struct Cli {
-    /// Initial prompt (non-interactive mode)
-    #[arg(short, long)]
-    prompt: Option<String>,
-
-    /// Model pattern (e.g., "sonnet", "claude-sonnet:high", "openai/gpt-4o")
-    #[arg(short, long)]
-    model: Option<String>,
-
-    /// Provider (e.g., "anthropic", "openai", "google")
-    #[arg(long)]
-    provider: Option<String>,
-
-    /// API key override (not persisted)
-    #[arg(long)]
-    api_key: Option<String>,
-
-    /// Resume a previous session by ID
-    #[arg(short, long)]
-    resume: Option<String>,
-
-    /// Continue the most recent session
-    #[arg(short, long = "continue")]
-    continue_session: bool,
-
-    /// Fork from a session file path or ID prefix
-    #[arg(long)]
-    fork: Option<String>,
-
-    /// Working directory
-    #[arg(short = 'd', long)]
-    cwd: Option<PathBuf>,
-
-    /// Custom system prompt (overrides default)
-    #[arg(long)]
-    system_prompt: Option<String>,
-
-    /// Append text to the system prompt
-    #[arg(long)]
-    append_system_prompt: Option<String>,
-
-    /// Thinking level: off, minimal, low, medium, high, xhigh
-    #[arg(long)]
-    thinking: Option<String>,
-
-    /// Comma-separated tools to enable (read,write,edit,bash,grep,find,ls)
-    #[arg(long)]
-    tools: Option<String>,
-
-    /// Disable all tools
-    #[arg(long)]
-    no_tools: bool,
-
-    /// Run in ephemeral mode (don't save session)
-    #[arg(long)]
-    no_session: bool,
-
-    /// Non-interactive print mode
-    #[arg(long)]
-    print: bool,
-
-    /// Export session to file (HTML or JSONL based on extension)
-    #[arg(long)]
-    export: Option<PathBuf>,
-
-    /// List available models (optional search filter)
-    #[arg(long)]
-    list_models: Option<Option<String>>,
-
-    /// Enable verbose logging
-    #[arg(short, long)]
-    verbose: bool,
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    timings::reset();
+    let cli = Args::parse();
+    timings::time("parse_args");
+
+    // Handle --diagnostics: print system report and exit. Runs before
+    // logging setup so the report is the only thing on stdout.
+    if cli.diagnostics {
+        timings::print();
+        let report = diagnostics::run_diagnostics();
+        diagnostics::print_report(&report);
+        if report.has_errors() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     // Handle --list-models
     if let Some(ref search) = cli.list_models {
@@ -121,80 +57,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    // Determine working directory
-    let cwd = cli
-        .cwd
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    // Resolve model
-    let provider = cli.provider.as_deref().unwrap_or("anthropic");
-    let model_pattern = cli
-        .model
-        .as_deref()
-        .unwrap_or_else(|| model_resolver::default_model_for_provider(provider));
-
-    let resolved = model_resolver::resolve_model(Some(provider), model_pattern);
-
-    // Parse thinking level (CLI flag overrides model pattern suffix)
-    let thinking_level = cli
-        .thinking
-        .as_deref()
-        .and_then(model_resolver::parse_thinking_level)
-        .or(resolved.thinking_level);
-
-    // Build stream options
-    let mut stream_options = SimpleStreamOptions::default();
-    if let Some(level) = thinking_level {
-        stream_options.reasoning = Some(level);
+    // Headless RPC dispatch loop: takes precedence over interactive/print modes.
+    if cli.rpc {
+        timings::print();
+        return run_rpc(cli).await;
     }
 
-    // Create tools
-    let agent_tools = if cli.no_tools {
-        vec![]
-    } else if let Some(ref tool_list) = cli.tools {
-        create_selected_tools(&cwd, tool_list)
-    } else {
-        tools::create_default_tools(&cwd)
-    };
+    // Non-interactive print mode: single prompt + exit.
+    if cli.print {
+        timings::print();
+        return modes::print::run(cli).await;
+    }
 
-    // Determine custom guidelines (append-system-prompt)
-    let custom_guidelines = cli.append_system_prompt;
+    // Interactive flow.
+    let setup = SessionSetup::resolve(&cli)?;
+    timings::time("session_setup");
+    let cwd = setup.cwd.clone();
 
-    // Create session config
+    // Determine resume id, mirroring the pre-extraction logic: --continue
+    // defers to `SessionManager::continue_recent` below; otherwise --resume
+    // is honoured directly.
     let resume_session = if cli.continue_session {
-        // Will be handled via continue_recent below
         None
     } else {
-        cli.resume
+        cli.resume.clone()
     };
 
-    let config = AgentSessionConfig {
-        cwd: cwd.clone(),
-        model: resolved.model,
-        stream_options,
-        custom_system_prompt: cli.system_prompt,
-        custom_guidelines,
-        resume_session,
-    };
+    let base_config = setup.to_config(resume_session);
+    let agent_tools = setup.agent_tools;
 
     let mut session = if cli.continue_session {
         // Continue most recent session
         match hand_coding_agent::SessionManager::continue_recent(&cwd) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
-                    cwd: cwd.clone(),
-                    model: config.model,
-                    stream_options: config.stream_options,
-                    custom_system_prompt: config.custom_system_prompt,
-                    custom_guidelines: config.custom_guidelines,
                     resume_session: Some(sm.id().to_string()),
+                    ..base_config.clone()
                 };
                 drop(sm);
                 AgentSession::new(config, agent_tools)?
             }
             Err(e) => {
                 eprintln!("No session to continue: {}. Starting new session.", e);
-                AgentSession::new(config, agent_tools)?
+                AgentSession::new(base_config, agent_tools)?
             }
         }
     } else if let Some(ref fork_source) = cli.fork {
@@ -203,24 +108,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match hand_coding_agent::SessionManager::fork_from(&fork_path, &cwd) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
-                    cwd: cwd.clone(),
-                    model: config.model,
-                    stream_options: config.stream_options,
-                    custom_system_prompt: config.custom_system_prompt,
-                    custom_guidelines: config.custom_guidelines,
                     resume_session: Some(sm.id().to_string()),
+                    ..base_config.clone()
                 };
                 drop(sm);
                 AgentSession::new(config, agent_tools)?
             }
             Err(e) => {
                 eprintln!("Failed to fork session: {}. Starting new session.", e);
-                AgentSession::new(config, agent_tools)?
+                AgentSession::new(base_config, agent_tools)?
             }
         }
     } else {
-        AgentSession::new(config, agent_tools)?
+        AgentSession::new(base_config, agent_tools)?
     };
+    timings::time("session_create");
 
     // Subscribe to events for output
     session.subscribe(|event| match event {
@@ -243,24 +145,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return handle_export(&session, &export_path);
     }
 
-    if cli.print {
-        // Non-interactive: process single prompt
-        if let Some(prompt) = cli.prompt {
-            session.send_message(&prompt).await?;
-        } else {
-            // Read from stdin
-            let stdin = io::stdin();
-            let input: String = stdin
-                .lock()
-                .lines()
-                .map_while(Result::ok)
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !input.is_empty() {
-                session.send_message(&input).await?;
-            }
-        }
-    } else if let Some(prompt) = cli.prompt {
+    timings::print();
+
+    if let Some(prompt) = cli.prompt {
         // Single prompt then interactive
         session.send_message(&prompt).await?;
         run_interactive(&mut session, &cwd).await?;
@@ -270,6 +157,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_interactive(&mut session, &cwd).await?;
     }
 
+    Ok(())
+}
+
+/// Run in headless RPC mode: JSONL frames on stdin/stdout, no terminal UI.
+///
+/// Honors `--no-session` (in-memory session) and `--cwd`/`--model`/`--tools`
+/// in the same way as interactive/print modes. SIGINT (Ctrl-C) cancels the
+/// dispatcher future cleanly via `tokio::select!`; the writer task exits
+/// when its sender is dropped, and the process returns `Ok`.
+async fn run_rpc(cli: Args) -> Result<(), Box<dyn std::error::Error>> {
+    // F5: --continue / --fork are not yet supported in RPC mode. Surface a
+    // one-line warning and fall through; the session below is constructed
+    // ignoring those flags.
+    if cli.continue_session || cli.fork.is_some() {
+        eprintln!("rpc: --continue/--fork are not yet supported in RPC mode (ignored)");
+    }
+
+    // F6: --no-session drops thinking level under RPC because in-memory
+    // sessions do not yet carry through stream options. Warn the user
+    // explicitly so the silent drop is visible.
+    if cli.no_session && cli.thinking.is_some() {
+        eprintln!(
+            "rpc: --thinking is dropped under --no-session in this version (use a persisted session)"
+        );
+    }
+
+    let setup = SessionSetup::resolve(&cli)?;
+
+    // Build the session: persisted to disk by default, in-memory under --no-session.
+    let session = if cli.no_session {
+        AgentSession::in_memory_with_client(
+            setup.model.clone(),
+            setup.agent_tools,
+            model::Client::new(),
+        )
+    } else {
+        let config = setup.to_config(cli.resume.clone());
+        AgentSession::new(config, setup.agent_tools)?
+    };
+
+    let stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let stdout = tokio::io::stdout();
+
+    tokio::select! {
+        result = hand_coding_agent::rpc::run_rpc_server(stdin, stdout, session) => result?,
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("rpc: received SIGINT, shutting down");
+            // Dropping the dispatcher future closes its mpsc senders; the
+            // writer task drains and exits.
+        }
+    }
     Ok(())
 }
 
@@ -361,6 +299,7 @@ async fn handle_slash_command(
 
         "/help" | "/h" => {
             print_help();
+            print_extension_commands(session);
         }
 
         "/model" => {
@@ -383,11 +322,11 @@ async fn handle_slash_command(
 
         "/compact" => {
             println!("\x1b[36mRunning compaction...\x1b[0m");
+            // `session.compact()` now returns the summary string and
+            // forces compaction unconditionally (matching the user's
+            // intent when they type `/compact` explicitly).
             match session.compact().await {
-                Ok(true) => println!("\x1b[32mCompaction complete.\x1b[0m"),
-                Ok(false) => {
-                    println!("\x1b[33mNo compaction needed (context within limits).\x1b[0m")
-                }
+                Ok(summary) => println!("\x1b[32mCompaction complete.\x1b[0m\n{}", summary,),
                 Err(e) => eprintln!("\x1b[31mCompaction failed: {}\x1b[0m", e),
             }
         }
@@ -456,21 +395,25 @@ async fn handle_slash_command(
         "/settings" => {
             let settings = session.settings();
             println!("Settings:");
-            println!("  Shell: {}", settings.shell_path());
+            match settings.shell_path() {
+                Some(p) => println!("  Shell: {}", p.display()),
+                None => println!("  Shell: <system default>"),
+            }
             let cs = settings.compaction_settings();
             println!(
-                "  Compaction: {} (reserve: {}k, keep: {}k)",
-                if cs.enabled { "enabled" } else { "disabled" },
-                cs.reserve_tokens / 1024,
-                cs.keep_recent_tokens / 1024,
+                "  Compaction: {} (threshold: {:.0}%, keep recent: {}k, max ctx: {}k)",
+                if cs.enabled() { "enabled" } else { "disabled" },
+                cs.threshold() * 100.0,
+                cs.keep_recent_tokens() / 1024,
+                cs.max_context_tokens() / 1024,
             );
             let rs = settings.retry_settings();
             println!(
-                "  Retry: {} (max: {}, delay: {}ms–{}ms)",
-                if rs.enabled { "enabled" } else { "disabled" },
-                rs.max_retries,
-                rs.base_delay_ms,
-                rs.max_delay_ms,
+                "  Retry: {} (max: {}, delay: {}ms-{}ms)",
+                if rs.enabled() { "enabled" } else { "disabled" },
+                rs.max_retries(),
+                rs.initial_delay_ms(),
+                rs.max_delay_ms(),
             );
         }
 
@@ -538,10 +481,29 @@ async fn handle_slash_command(
         }
 
         _ => {
-            println!(
-                "\x1b[33mUnknown command: {}. Type /help for available commands.\x1b[0m",
-                input
-            );
+            // Try routing to an extension-contributed slash command before
+            // declaring the input unknown. Strip the leading slash from the
+            // command name; `args` is already the raw remainder.
+            let bare = command.strip_prefix('/').unwrap_or(command);
+            let mut registry = hand_coding_agent::SlashCommandRegistry::new();
+            for (spec, ext) in session.collected_slash_commands() {
+                registry.register_extension_command(spec, ext);
+            }
+            let cx = session.extension_context();
+            match registry.dispatch_extension_command(bare, args, &cx).await {
+                Ok(Some(output)) => {
+                    println!("{}", output);
+                }
+                Ok(None) => {
+                    println!(
+                        "\x1b[33mUnknown command: {}. Type /help for available commands.\x1b[0m",
+                        input
+                    );
+                }
+                Err(e) => {
+                    eprintln!("\x1b[31mExtension command failed: {}\x1b[0m", e);
+                }
+            }
         }
     }
 
@@ -632,6 +594,40 @@ fn print_welcome(session: &AgentSession) {
     println!("Type \x1b[1m/help\x1b[0m for commands, \x1b[1m/quit\x1b[0m to exit.\n");
 }
 
+/// Print extension-contributed slash commands grouped by their owning
+/// extension. No-ops if no extensions are registered or none contribute
+/// any slash commands.
+fn print_extension_commands(session: &AgentSession) {
+    let collected = session.collected_slash_commands();
+    if collected.is_empty() {
+        return;
+    }
+    // Group by extension name preserving registration order within a group.
+    let mut groups: std::collections::BTreeMap<
+        String,
+        Vec<&hand_coding_agent::core::extensions::api::SlashCommandSpec>,
+    > = std::collections::BTreeMap::new();
+    for (spec, ext) in &collected {
+        groups
+            .entry(ext.manifest().name.clone())
+            .or_default()
+            .push(spec);
+    }
+    println!();
+    println!("\x1b[1mExtensions:\x1b[0m");
+    for (ext_name, specs) in &groups {
+        println!("  [{}]", ext_name);
+        for spec in specs {
+            let usage = spec.usage.as_deref().unwrap_or("");
+            if usage.is_empty() {
+                println!("    /{:<14}  {}", spec.name, spec.description);
+            } else {
+                println!("    /{:<14}  {} ({})", spec.name, spec.description, usage);
+            }
+        }
+    }
+}
+
 fn print_help() {
     println!("\x1b[1mCommands:\x1b[0m");
     println!("  /quit, /exit, /q     Exit the session");
@@ -654,30 +650,6 @@ fn print_help() {
     println!("  !<command>           Run shell command (added to context)");
     println!("  !!<command>          Run shell command (not added to context)");
     println!("  @<filepath>          Include file contents in message");
-}
-
-fn create_selected_tools(
-    cwd: &std::path::Path,
-    tool_list: &str,
-) -> Vec<hand_agent::types::AgentTool> {
-    let cwd = cwd.to_path_buf();
-    let selected: Vec<&str> = tool_list.split(',').map(|s| s.trim()).collect();
-    let mut result = Vec::new();
-
-    for name in selected {
-        match name {
-            "read" => result.push(tools::read::create_read_tool(cwd.clone())),
-            "write" => result.push(tools::write::create_write_tool(cwd.clone())),
-            "edit" => result.push(tools::edit::create_edit_tool(cwd.clone())),
-            "bash" => result.push(tools::bash::create_bash_tool(cwd.clone())),
-            "grep" => result.push(tools::grep::create_grep_tool(cwd.clone())),
-            "find" => result.push(tools::find::create_find_tool(cwd.clone())),
-            "ls" => result.push(tools::ls::create_ls_tool(cwd.clone())),
-            other => eprintln!("Warning: unknown tool '{}'", other),
-        }
-    }
-
-    result
 }
 
 fn resolve_session_path(cwd: &std::path::Path, source: &str) -> PathBuf {

@@ -153,6 +153,80 @@ impl SessionManager {
         &self.header.id
     }
 
+    /// Borrow the entry list. Used by callers that need to inspect raw
+    /// JSONL entries (e.g. [`crate::core::agent_session::AgentSession::fork`]
+    /// to look up a message by `entry_id`).
+    pub fn entries(&self) -> &[SessionEntry] {
+        &self.entries
+    }
+
+    /// Build a fresh session manager that adopts the given body entries
+    /// verbatim under a freshly-generated session header. Used by
+    /// `AgentSession::fork` and `AgentSession::clone_session` to create
+    /// the replacement session — the body entries (messages,
+    /// model-changes, compactions, labels) keep their original IDs so
+    /// that internal cross-references (e.g. `Compaction::first_kept_entry_id`)
+    /// remain valid after the branch.
+    ///
+    /// `body_entries` must be free of `SessionEntry::Session` headers;
+    /// the new header is generated here.
+    ///
+    /// `parent_id` is recorded on the new header (when present) for
+    /// provenance, mirroring [`Self::fork_from`].
+    pub fn from_branched_entries(
+        cwd: &Path,
+        in_memory: bool,
+        parent_id: Option<&str>,
+        body_entries: Vec<SessionEntry>,
+    ) -> Result<Self, CodingAgentError> {
+        let id = generate_session_id();
+        let header = SessionHeader {
+            version: 3,
+            id: id.clone(),
+            timestamp: Utc::now().timestamp_millis(),
+            cwd: cwd.to_string_lossy().to_string(),
+            parent_session: parent_id.map(|s| s.to_string()),
+        };
+
+        let mut entries = Vec::with_capacity(body_entries.len() + 1);
+        entries.push(SessionEntry::Session(header.clone()));
+        entries.extend(body_entries);
+
+        if in_memory {
+            return Ok(Self {
+                path: PathBuf::new(),
+                session_dir: PathBuf::new(),
+                header,
+                entries,
+                in_memory: true,
+            });
+        }
+
+        let session_dir = Self::default_session_dir(cwd);
+        std::fs::create_dir_all(&session_dir)?;
+        let path = session_dir.join(format!("{}.jsonl", id));
+
+        let mgr = Self {
+            path,
+            session_dir,
+            header,
+            entries,
+            in_memory: false,
+        };
+        mgr.flush()?;
+        Ok(mgr)
+    }
+
+    /// Whether this session manager is purely in-memory (no JSONL file
+    /// backing it). Used by callers like
+    /// [`crate::core::agent_session::AgentSession::reset_session`] to pick
+    /// the right constructor for the replacement manager — an in-memory
+    /// session must reset to an in-memory session, otherwise we would
+    /// suddenly try to write `./.hand/sessions/*.jsonl` from a test.
+    pub fn is_in_memory(&self) -> bool {
+        self.in_memory
+    }
+
     /// Get the session file path.
     pub fn path(&self) -> &Path {
         &self.path
