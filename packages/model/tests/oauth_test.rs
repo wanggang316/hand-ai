@@ -19,7 +19,11 @@ use model::oauth::github_copilot::{GithubCopilotOAuthProvider, GithubEndpoints};
 use model::oauth::openai_codex::OpenAiCodexOAuthProvider;
 use model::oauth::pkce::generate_pkce;
 use model::oauth::types::{OAuthLoginCallbacks, OAuthProvider};
-use model::{OAuthAuthInfo, OAuthCredentials, OAuthProviderId, OAuthRegistry};
+use model::{
+    OAuthAuthInfo, OAuthCredentials, OAuthProviderId, OAuthRegistry, github_copilot_base_url,
+    normalize_domain,
+};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 #[test]
@@ -41,6 +45,20 @@ fn pkce_generates_valid_pair() {
         .decode(&pair.challenge)
         .expect("challenge is base64url");
     assert_eq!(decoded.len(), 32, "sha256 output is 32 bytes");
+}
+
+#[test]
+fn pkce_challenge_is_sha256_of_verifier() {
+    // RFC 7636 §4.2: code_challenge = BASE64URL(SHA256(ASCII(code_verifier))).
+    // Re-derive the challenge here and assert byte-for-byte equality.
+    let pair = generate_pkce();
+    let mut hasher = Sha256::new();
+    hasher.update(pair.verifier.as_bytes());
+    let expected = URL_SAFE_NO_PAD.encode(hasher.finalize());
+    assert_eq!(
+        pair.challenge, expected,
+        "challenge != base64url(sha256(verifier))"
+    );
 }
 
 #[test]
@@ -240,6 +258,78 @@ fn registry_lists_all_builtin_ids() {
     assert!(ids.contains(&OAuthProviderId::Anthropic));
     assert!(ids.contains(&OAuthProviderId::OpenAICodex));
     assert!(ids.contains(&OAuthProviderId::GithubCopilot));
+}
+
+#[test]
+fn normalize_domain_handles_common_inputs() {
+    // Bare hostname.
+    assert_eq!(normalize_domain("github.com"), Some("github.com".into()));
+    // Whitespace is trimmed.
+    assert_eq!(
+        normalize_domain("  github.com  "),
+        Some("github.com".into())
+    );
+    // Schemes are stripped.
+    assert_eq!(
+        normalize_domain("https://company.ghe.com"),
+        Some("company.ghe.com".into())
+    );
+    // Path/query are stripped, hostname preserved.
+    assert_eq!(
+        normalize_domain("https://company.ghe.com/some/path?x=1"),
+        Some("company.ghe.com".into())
+    );
+    // Port is dropped.
+    assert_eq!(
+        normalize_domain("https://company.ghe.com:8443/path"),
+        Some("company.ghe.com".into())
+    );
+    // Hostname is normalized to lower case.
+    assert_eq!(
+        normalize_domain("HTTPS://Company.GHE.com"),
+        Some("company.ghe.com".into())
+    );
+    // Empty / whitespace-only -> None.
+    assert_eq!(normalize_domain(""), None);
+    assert_eq!(normalize_domain("   "), None);
+}
+
+#[test]
+fn github_copilot_base_url_extracts_proxy_ep_from_token() {
+    // Tokens are `key=value;key=value;...` strings; we want the `proxy-ep`
+    // host translated from `proxy.<rest>` to `https://api.<rest>`.
+    let token = "tid=abc;exp=123;proxy-ep=proxy.individual.githubcopilot.com;more=1";
+    assert_eq!(
+        github_copilot_base_url(Some(token), None),
+        "https://api.individual.githubcopilot.com"
+    );
+    // Trailing segment (no semicolon after proxy-ep) is also accepted.
+    let token_tail = "tid=abc;proxy-ep=proxy.business.githubcopilot.com";
+    assert_eq!(
+        github_copilot_base_url(Some(token_tail), None),
+        "https://api.business.githubcopilot.com"
+    );
+}
+
+#[test]
+fn github_copilot_base_url_falls_back_to_enterprise_or_default() {
+    // No token, no enterprise: documented public default.
+    assert_eq!(
+        github_copilot_base_url(None, None),
+        "https://api.individual.githubcopilot.com"
+    );
+    // No token, enterprise domain supplied: copilot-api subdomain.
+    assert_eq!(
+        github_copilot_base_url(None, Some("company.ghe.com")),
+        "https://copilot-api.company.ghe.com"
+    );
+    // Token present but missing proxy-ep: still falls back through token-first
+    // path to enterprise default.
+    let token = "tid=abc;exp=123";
+    assert_eq!(
+        github_copilot_base_url(Some(token), Some("company.ghe.com")),
+        "https://copilot-api.company.ghe.com"
+    );
 }
 
 // ---------------------------------------------------------------------------
