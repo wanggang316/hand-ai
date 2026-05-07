@@ -32,3 +32,12 @@ pub use utils::{
     build_compaction_prompt, estimate_context_tokens, estimate_tokens, extract_file_operations,
     should_compact, split_for_compaction, CompactionResult, FileOperations,
 };
+
+// Newly ported pi-mono surface — primarily for branch summarization
+// and the future compactor pipeline. Lives alongside the legacy
+// helpers above; the legacy `FileOperations` and the new TS-port
+// helpers share the same struct (now `BTreeSet`-backed).
+pub use utils::{
+    compute_file_lists, create_file_ops, extract_file_ops_from_message, format_file_operations,
+    serialize_conversation, FileOps, SUMMARIZATION_SYSTEM_PROMPT,
+};
