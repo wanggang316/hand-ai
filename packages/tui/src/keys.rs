@@ -86,17 +86,12 @@ impl KeyModifiers {
 
 /// Kitty event type. Only meaningful when Kitty keyboard protocol with flag 2
 /// (report event types) is active; otherwise every event is a `Press`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KeyEventType {
+    #[default]
     Press,
     Repeat,
     Release,
-}
-
-impl Default for KeyEventType {
-    fn default() -> Self {
-        Self::Press
-    }
 }
 
 /// Parsed key event. Mirrors the legacy `Key` struct used by built-in
