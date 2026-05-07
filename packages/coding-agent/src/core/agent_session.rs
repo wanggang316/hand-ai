@@ -135,6 +135,13 @@ pub struct AgentSession {
     /// Set around the `agent_loop_compaction` invocation. Surfaced via
     /// `get_state.is_compacting`.
     is_compacting: bool,
+    /// Cancellation token threaded into the agent loop. Held behind a
+    /// `Mutex` so [`Self::abort`] (and the RPC `abort` handler) can
+    /// trigger cancellation from another task without borrowing `&mut
+    /// self`. The token is *replaced* at the start of every
+    /// `send_message` so a single token cancellation only affects the
+    /// turn it was associated with — subsequent turns get a fresh token.
+    cancel: Arc<Mutex<CancellationToken>>,
 }
 
 impl AgentSession {
@@ -225,6 +232,7 @@ impl AgentSession {
             auto_retry_enabled: true,
             is_streaming: false,
             is_compacting: false,
+            cancel: Arc::new(Mutex::new(CancellationToken::new())),
         })
     }
 
@@ -275,6 +283,7 @@ impl AgentSession {
             auto_retry_enabled: true,
             is_streaming: false,
             is_compacting: false,
+            cancel: Arc::new(Mutex::new(CancellationToken::new())),
         }
     }
 
@@ -332,9 +341,16 @@ impl AgentSession {
         loop_config.steering_mode = queue_mode_to_delivery(self.steering_mode);
         loop_config.follow_up_mode = queue_mode_to_delivery(self.follow_up_mode);
 
-        // Create event sink for the agent loop
+        // Create event sink for the agent loop. Replace the session's
+        // cancellation token with a fresh one so a previous turn's
+        // `abort()` can't poison this turn — and so the new token is
+        // observable by `Self::abort()` while this turn is running.
         let emit = self.build_event_sink();
-        let cancel = CancellationToken::new();
+        let cancel = {
+            let new_token = CancellationToken::new();
+            *self.cancel.lock().unwrap() = new_token.clone();
+            new_token
+        };
 
         // Merge built-in tools with extension-contributed custom tools so
         // the model can call them through the same agent loop tool list.
@@ -607,6 +623,22 @@ impl AgentSession {
     /// Whether the session is currently performing a compaction summary.
     pub fn is_compacting(&self) -> bool {
         self.is_compacting
+    }
+
+    /// Cancel the in-flight `send_message` (if any). Idempotent — safe
+    /// to call when no turn is running. Returns `true` if a token was
+    /// cancelled, `false` if there was nothing to cancel (token was
+    /// already cancelled or no turn ever started). The agent loop
+    /// observes the cancellation at its next await point and unwinds
+    /// the future, restoring tool state via `ToolsRestoreGuard`.
+    pub fn abort(&self) -> bool {
+        let token = self.cancel.lock().unwrap();
+        if token.is_cancelled() {
+            false
+        } else {
+            token.cancel();
+            true
+        }
     }
 
     /// Path to the on-disk JSONL session file, if any. Returns `None`

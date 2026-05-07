@@ -331,7 +331,14 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
         // TODO(rpc-server): wire `Abort` to `AgentLoopConfig`'s abort
         // signal once `AgentSession` exposes an abort hook. See the
         // `packages/agent/src/agent_loop.rs` abort mechanism.
-        RpcCommand::Abort { id } => not_impl_empty(id, RpcResponseBody::Abort),
+        RpcCommand::Abort { id } => {
+            // Cancel the in-flight turn (if any). Idempotent: returning
+            // `success: true` for both "cancelled a running turn" and
+            // "nothing to cancel" matches the TS reference, which
+            // treats abort as a fire-and-forget signal.
+            let _ = session.abort();
+            RpcResponse::new(id, RpcResponseBody::Abort(RpcResultEmpty::ok()))
+        }
         RpcCommand::Steer { id, .. } => not_impl_empty(id, RpcResponseBody::Steer),
         RpcCommand::FollowUp { id, .. } => not_impl_empty(id, RpcResponseBody::FollowUp),
         RpcCommand::SetModel {
@@ -484,7 +491,16 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             session.set_auto_retry(enabled);
             RpcResponse::new(id, RpcResponseBody::SetAutoRetry(RpcResultEmpty::ok()))
         }
-        RpcCommand::AbortRetry { id } => not_impl_empty(id, RpcResponseBody::AbortRetry),
+        RpcCommand::AbortRetry { id } => {
+            // Without dedicated retry-state tracking, abort_retry maps
+            // to abort: cancelling the cancellation token unwinds the
+            // current retry-with-backoff sleep along with the rest of
+            // the turn. A finer-grained "cancel just the backoff, let
+            // the loop surface the underlying error" can be added once
+            // hand-agent exposes a retry-only cancel hook.
+            let _ = session.abort();
+            RpcResponse::new(id, RpcResponseBody::AbortRetry(RpcResultEmpty::ok()))
+        }
         RpcCommand::Bash { id, .. } => not_impl_data(id, RpcResponseBody::Bash),
         RpcCommand::AbortBash { id } => not_impl_empty(id, RpcResponseBody::AbortBash),
         RpcCommand::GetSessionStats { id } => {
@@ -1112,6 +1128,35 @@ mod tests {
         assert_eq!(ok["command"], "get_state");
         assert_eq!(ok["success"], true);
         assert_eq!(ok["id"], "7");
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `abort` returns success even when no turn is running, and a
+    /// subsequent `abort` is also idempotent. The token is replaced at
+    /// the next `send_message` so a stale cancel doesn't poison future
+    /// turns.
+    #[tokio::test]
+    async fn abort_with_no_inflight_turn_succeeds() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                br#"{"type":"abort","id":"1"}
+{"type":"abort","id":"2"}
+"#,
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 2, "frames: {frames:#?}");
+        for f in &frames {
+            assert_eq!(f["command"], "abort");
+            assert_eq!(f["success"], true);
+        }
 
         handle.await.unwrap().unwrap();
     }
