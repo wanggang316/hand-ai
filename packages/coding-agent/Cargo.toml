@@ -36,6 +36,8 @@ notify = "8"
 tempfile = "3"
 mime_guess = "2"
 reqwest = { version = "0.12", features = ["json"] }
+arboard = "3"
+base64 = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["process", "signal"] }

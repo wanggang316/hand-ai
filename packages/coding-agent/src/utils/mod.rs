@@ -7,6 +7,7 @@
 
 pub mod changelog;
 pub mod child_process;
+pub mod clipboard;
 pub mod frontmatter;
 pub mod mime;
 pub mod paths;
