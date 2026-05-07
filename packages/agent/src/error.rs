@@ -24,4 +24,8 @@ pub enum AgentError {
     /// Other unrecoverable error (used for lifecycle failures).
     #[error("Agent error: {0}")]
     Other(String),
+
+    /// Errors from the proxy transport (HTTP failures, malformed proxy events).
+    #[error("Proxy error: HTTP {status}: {message}")]
+    Proxy { status: u16, message: String },
 }

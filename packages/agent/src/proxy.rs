@@ -9,10 +9,15 @@
 //! Mirrors the TypeScript implementation at
 //! `pi-mono/packages/agent/src/proxy.ts`.
 //!
-//! Scaffold-only: types and functions land in subsequent tasks of the
-//! agent-proxy port (see `docs/exec-plans/agent-proxy-port.md`).
+//! Reducer and request types are in place; the streaming driver `stream_proxy`
+//! lands in T5 of the agent-proxy port (see
+//! `docs/exec-plans/agent-proxy-port.md`).
+
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::AgentError;
 
 /// Wire-format event from a proxy server. The proxy strips the `partial`
 /// field from `AssistantMessageEvent` to save bandwidth; the client
@@ -116,9 +121,9 @@ struct ProxyRequestOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    headers: Option<std::collections::HashMap<String, String>>,
+    headers: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
+    metadata: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     transport: Option<model::Transport>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,6 +176,254 @@ fn build_request_options(opts: &model::SimpleStreamOptions) -> ProxyRequestOptio
         transport: opts.base.transport,
         thinking_budgets: opts.thinking_budgets.clone(),
         max_retry_delay_ms: opts.base.max_retry_delay_ms,
+    }
+}
+
+/// Pure reducer that applies a wire-format [`ProxyAssistantMessageEvent`] to
+/// the running [`model::AssistantMessage`] and a per-tool streaming-JSON
+/// buffer, producing the corresponding [`model::AssistantMessageEvent`].
+///
+/// No I/O. Mirrors `processProxyEvent` at
+/// `pi-mono/packages/agent/src/proxy.ts:238-367`.
+///
+/// `tool_partial_json` accumulates the raw JSON fragments per `content_index`
+/// while a tool call is being streamed; the buffer is removed when the tool
+/// call ends. The TS implementation hides this on the `ToolCall` block via
+/// `partialJson`; the Rust port keeps it as an explicit side channel so the
+/// `model::ToolCall` type stays clean.
+///
+/// Wrong-shape transitions surface as `Err(AgentError::Proxy { status: 0, .. })`
+/// (TS would `throw`), with the single exception of `toolcall_end` on a
+/// non-tool-call slot which returns `Ok(None)` to mirror TS' `return undefined`
+/// at `proxy.ts:347`.
+#[allow(dead_code)] // Wired up in T5 (stream_proxy driver).
+fn process_proxy_event(
+    event: ProxyAssistantMessageEvent,
+    partial: &mut model::AssistantMessage,
+    tool_partial_json: &mut HashMap<u32, String>,
+) -> Result<Option<model::AssistantMessageEvent>, AgentError> {
+    use model::{AssistantContentBlock, AssistantMessageEvent, TextContent, ThinkingContent, ToolCall};
+
+    /// Insert at `idx` into `vec`, growing by one if `idx == len`. Existing
+    /// slots are replaced. The proxy server emits `*_start` events in order,
+    /// so we never observe `idx > len`; if it ever does, we treat it as a
+    /// shape error rather than padding silently.
+    fn place<T>(vec: &mut Vec<T>, idx: usize, value: T) -> Result<(), AgentError> {
+        if idx == vec.len() {
+            vec.push(value);
+            Ok(())
+        } else if idx < vec.len() {
+            vec[idx] = value;
+            Ok(())
+        } else {
+            Err(AgentError::Proxy {
+                status: 0,
+                message: format!(
+                    "Proxy emitted content at index {idx} but only {} slots exist",
+                    vec.len()
+                ),
+            })
+        }
+    }
+
+    match event {
+        ProxyAssistantMessageEvent::Start {} => Ok(Some(AssistantMessageEvent::Start {
+            partial: partial.clone(),
+        })),
+
+        ProxyAssistantMessageEvent::TextStart { content_index } => {
+            place(
+                &mut partial.content,
+                content_index as usize,
+                AssistantContentBlock::Text(TextContent::new("")),
+            )?;
+            Ok(Some(AssistantMessageEvent::TextStart {
+                content_index,
+                partial: partial.clone(),
+            }))
+        }
+
+        ProxyAssistantMessageEvent::TextDelta {
+            content_index,
+            delta,
+        } => match partial.content.get_mut(content_index as usize) {
+            Some(AssistantContentBlock::Text(text)) => {
+                text.text.push_str(&delta);
+                Ok(Some(AssistantMessageEvent::TextDelta {
+                    content_index,
+                    delta,
+                    partial: partial.clone(),
+                }))
+            }
+            _ => Err(AgentError::Proxy {
+                status: 0,
+                message: format!(
+                    "Received text_delta for non-text content at index {content_index}"
+                ),
+            }),
+        },
+
+        ProxyAssistantMessageEvent::TextEnd {
+            content_index,
+            content_signature,
+        } => match partial.content.get_mut(content_index as usize) {
+            Some(AssistantContentBlock::Text(text)) => {
+                text.text_signature = content_signature;
+                let content = text.text.clone();
+                Ok(Some(AssistantMessageEvent::TextEnd {
+                    content_index,
+                    content,
+                    partial: partial.clone(),
+                }))
+            }
+            _ => Err(AgentError::Proxy {
+                status: 0,
+                message: format!(
+                    "Received text_end for non-text content at index {content_index}"
+                ),
+            }),
+        },
+
+        ProxyAssistantMessageEvent::ThinkingStart { content_index } => {
+            place(
+                &mut partial.content,
+                content_index as usize,
+                AssistantContentBlock::Thinking(ThinkingContent::new("")),
+            )?;
+            Ok(Some(AssistantMessageEvent::ThinkingStart {
+                content_index,
+                partial: partial.clone(),
+            }))
+        }
+
+        ProxyAssistantMessageEvent::ThinkingDelta {
+            content_index,
+            delta,
+        } => match partial.content.get_mut(content_index as usize) {
+            Some(AssistantContentBlock::Thinking(thinking)) => {
+                thinking.thinking.push_str(&delta);
+                Ok(Some(AssistantMessageEvent::ThinkingDelta {
+                    content_index,
+                    delta,
+                    partial: partial.clone(),
+                }))
+            }
+            _ => Err(AgentError::Proxy {
+                status: 0,
+                message: format!(
+                    "Received thinking_delta for non-thinking content at index {content_index}"
+                ),
+            }),
+        },
+
+        ProxyAssistantMessageEvent::ThinkingEnd {
+            content_index,
+            content_signature,
+        } => match partial.content.get_mut(content_index as usize) {
+            Some(AssistantContentBlock::Thinking(thinking)) => {
+                thinking.thinking_signature = content_signature;
+                let content = thinking.thinking.clone();
+                Ok(Some(AssistantMessageEvent::ThinkingEnd {
+                    content_index,
+                    content,
+                    partial: partial.clone(),
+                }))
+            }
+            _ => Err(AgentError::Proxy {
+                status: 0,
+                message: format!(
+                    "Received thinking_end for non-thinking content at index {content_index}"
+                ),
+            }),
+        },
+
+        ProxyAssistantMessageEvent::ToolcallStart {
+            content_index,
+            id,
+            tool_name,
+        } => {
+            place(
+                &mut partial.content,
+                content_index as usize,
+                AssistantContentBlock::ToolCall(ToolCall::new(
+                    id,
+                    tool_name,
+                    serde_json::Value::Object(Default::default()),
+                )),
+            )?;
+            tool_partial_json.insert(content_index, String::new());
+            Ok(Some(AssistantMessageEvent::ToolCallStart {
+                content_index,
+                partial: partial.clone(),
+            }))
+        }
+
+        ProxyAssistantMessageEvent::ToolcallDelta {
+            content_index,
+            delta,
+        } => match partial.content.get_mut(content_index as usize) {
+            Some(AssistantContentBlock::ToolCall(tc)) => {
+                let buffer = tool_partial_json.entry(content_index).or_default();
+                buffer.push_str(&delta);
+                if let Some(parsed) = model::safe_parse_partial(buffer) {
+                    tc.arguments = parsed;
+                }
+                // On parse failure: leave `tc.arguments` at the last good
+                // value. `safe_parse_partial` already tolerates dangling
+                // commas/strings, so failures here mean the buffer is
+                // genuinely invalid.
+                Ok(Some(AssistantMessageEvent::ToolCallDelta {
+                    content_index,
+                    delta,
+                    partial: partial.clone(),
+                }))
+            }
+            _ => Err(AgentError::Proxy {
+                status: 0,
+                message: format!(
+                    "Received toolcall_delta for non-tool-call content at index {content_index}"
+                ),
+            }),
+        },
+
+        ProxyAssistantMessageEvent::ToolcallEnd { content_index } => {
+            match partial.content.get(content_index as usize) {
+                Some(AssistantContentBlock::ToolCall(tc)) => {
+                    let tool_call = tc.clone();
+                    tool_partial_json.remove(&content_index);
+                    Ok(Some(AssistantMessageEvent::ToolCallEnd {
+                        content_index,
+                        tool_call,
+                        partial: partial.clone(),
+                    }))
+                }
+                // TS swallows this case (`return undefined;`) — mirror that.
+                _ => Ok(None),
+            }
+        }
+
+        ProxyAssistantMessageEvent::Done { reason, usage } => {
+            partial.stop_reason = reason;
+            partial.usage = usage;
+            Ok(Some(AssistantMessageEvent::Done {
+                reason,
+                message: partial.clone(),
+            }))
+        }
+
+        ProxyAssistantMessageEvent::Error {
+            reason,
+            error_message,
+            usage,
+        } => {
+            partial.stop_reason = reason;
+            partial.error_message = error_message;
+            partial.usage = usage;
+            Ok(Some(AssistantMessageEvent::Error {
+                reason,
+                error: partial.clone(),
+            }))
+        }
     }
 }
 
@@ -464,5 +717,742 @@ mod tests {
             !obj.contains_key("cacheRetention"),
             "cacheRetention should be absent in {obj:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Reducer tests (T4): `process_proxy_event`.
+    // ---------------------------------------------------------------------
+
+    /// Build a fresh `AssistantMessage` analogous to TS' seed at
+    /// `pi-mono/packages/agent/src/proxy.ts:121-137`. Tests don't depend on
+    /// `timestamp`, so `0` is fine.
+    fn fresh_partial(model: &model::Model) -> model::AssistantMessage {
+        model::AssistantMessage {
+            role: "assistant".to_string(),
+            content: Vec::new(),
+            api: model.api,
+            provider: model.provider,
+            model: model.id.clone(),
+            usage: model::Usage::default(),
+            stop_reason: model::StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    fn proxy_status(err: &AgentError) -> u16 {
+        match err {
+            AgentError::Proxy { status, .. } => *status,
+            other => panic!("expected AgentError::Proxy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reducer_start_emits_start_with_cloned_partial() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(ProxyAssistantMessageEvent::Start {}, &mut partial, &mut buf)
+            .expect("ok")
+            .expect("some");
+
+        match out {
+            model::AssistantMessageEvent::Start { partial: p } => {
+                assert!(p.content.is_empty(), "fresh partial should have no content");
+            }
+            other => panic!("expected Start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reducer_text_start_inserts_empty_text_block() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::TextStart { content_index: 0 },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        assert!(matches!(out, model::AssistantMessageEvent::TextStart { content_index: 0, .. }));
+        match &partial.content[0] {
+            model::AssistantContentBlock::Text(t) => assert_eq!(t.text, ""),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reducer_text_delta_appends_text() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: " there".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        match out {
+            model::AssistantMessageEvent::TextDelta {
+                content_index,
+                delta,
+                ..
+            } => {
+                assert_eq!(content_index, 0);
+                assert_eq!(delta, " there");
+            }
+            other => panic!("expected TextDelta, got {other:?}"),
+        }
+        match &partial.content[0] {
+            model::AssistantContentBlock::Text(t) => assert_eq!(t.text, "hi there"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reducer_text_end_sets_signature_and_returns_text() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Text(model::TextContent::new("done")));
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::TextEnd {
+                content_index: 0,
+                content_signature: Some("sig".into()),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        match out {
+            model::AssistantMessageEvent::TextEnd {
+                content_index,
+                content,
+                ..
+            } => {
+                assert_eq!(content_index, 0);
+                assert_eq!(content, "done");
+            }
+            other => panic!("expected TextEnd, got {other:?}"),
+        }
+        match &partial.content[0] {
+            model::AssistantContentBlock::Text(t) => {
+                assert_eq!(t.text_signature.as_deref(), Some("sig"));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reducer_thinking_start_inserts_empty_thinking_block() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::ThinkingStart { content_index: 0 },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        assert!(matches!(
+            out,
+            model::AssistantMessageEvent::ThinkingStart { content_index: 0, .. }
+        ));
+        match &partial.content[0] {
+            model::AssistantContentBlock::Thinking(t) => assert_eq!(t.thinking, ""),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reducer_thinking_delta_appends_thinking() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Thinking(
+                model::ThinkingContent::new("ponder"),
+            ));
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::ThinkingDelta {
+                content_index: 0,
+                delta: "ing".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        assert!(matches!(out, model::AssistantMessageEvent::ThinkingDelta { .. }));
+        match &partial.content[0] {
+            model::AssistantContentBlock::Thinking(t) => assert_eq!(t.thinking, "pondering"),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reducer_thinking_end_sets_signature() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Thinking(
+                model::ThinkingContent::new("done"),
+            ));
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::ThinkingEnd {
+                content_index: 0,
+                content_signature: Some("tsig".into()),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        match out {
+            model::AssistantMessageEvent::ThinkingEnd { content, .. } => {
+                assert_eq!(content, "done");
+            }
+            other => panic!("expected ThinkingEnd, got {other:?}"),
+        }
+        match &partial.content[0] {
+            model::AssistantContentBlock::Thinking(t) => {
+                assert_eq!(t.thinking_signature.as_deref(), Some("tsig"));
+            }
+            other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reducer_toolcall_start_inserts_block_and_seeds_buffer() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallStart {
+                content_index: 0,
+                id: "tc1".into(),
+                tool_name: "echo".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        assert!(matches!(
+            out,
+            model::AssistantMessageEvent::ToolCallStart { content_index: 0, .. }
+        ));
+        match &partial.content[0] {
+            model::AssistantContentBlock::ToolCall(tc) => {
+                assert_eq!(tc.id, "tc1");
+                assert_eq!(tc.name, "echo");
+                assert_eq!(tc.arguments, serde_json::json!({}));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        assert_eq!(buf.get(&0).map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn reducer_toolcall_delta_parses_partial_json_into_arguments() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::ToolCall(model::ToolCall::new(
+                "tc1",
+                "echo",
+                serde_json::json!({}),
+            )));
+        let mut buf = HashMap::new();
+        buf.insert(0, String::new());
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallDelta {
+                content_index: 0,
+                delta: r#"{"x":1}"#.into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        assert!(matches!(out, model::AssistantMessageEvent::ToolCallDelta { .. }));
+        match &partial.content[0] {
+            model::AssistantContentBlock::ToolCall(tc) => {
+                assert_eq!(tc.arguments, serde_json::json!({"x": 1}));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+        assert_eq!(buf.get(&0).map(String::as_str), Some(r#"{"x":1}"#));
+    }
+
+    #[test]
+    fn reducer_toolcall_end_clears_buffer_and_returns_tool_call() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::ToolCall(model::ToolCall::new(
+                "tc1",
+                "echo",
+                serde_json::json!({"x": 1}),
+            )));
+        let mut buf = HashMap::new();
+        buf.insert(0, r#"{"x":1}"#.to_string());
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallEnd { content_index: 0 },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        match out {
+            model::AssistantMessageEvent::ToolCallEnd {
+                content_index,
+                tool_call,
+                ..
+            } => {
+                assert_eq!(content_index, 0);
+                assert_eq!(tool_call.id, "tc1");
+                assert_eq!(tool_call.arguments, serde_json::json!({"x": 1}));
+            }
+            other => panic!("expected ToolCallEnd, got {other:?}"),
+        }
+        assert!(!buf.contains_key(&0), "buffer entry should be removed");
+    }
+
+    #[test]
+    fn reducer_done_sets_stop_reason_and_usage() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+
+        let usage = model::Usage {
+            input: 5,
+            output: 7,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 12,
+            cost: model::UsageCost::default(),
+        };
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::Done {
+                reason: model::StopReason::ToolUse,
+                usage: usage.clone(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        match out {
+            model::AssistantMessageEvent::Done { reason, message } => {
+                assert_eq!(reason, model::StopReason::ToolUse);
+                assert_eq!(message.usage.total_tokens, 12);
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+        assert_eq!(partial.stop_reason, model::StopReason::ToolUse);
+        assert_eq!(partial.usage.input, 5);
+    }
+
+    #[test]
+    fn reducer_error_sets_stop_reason_message_and_usage() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::Error {
+                reason: model::StopReason::Error,
+                error_message: Some("boom".into()),
+                usage: model::Usage::default(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok")
+        .expect("some");
+
+        match out {
+            model::AssistantMessageEvent::Error { reason, error } => {
+                assert_eq!(reason, model::StopReason::Error);
+                assert_eq!(error.error_message.as_deref(), Some("boom"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert_eq!(partial.stop_reason, model::StopReason::Error);
+        assert_eq!(partial.error_message.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn reducer_text_delta_on_thinking_slot_returns_proxy_error() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Thinking(
+                model::ThinkingContent::new("ponder"),
+            ));
+        let mut buf = HashMap::new();
+
+        let err = process_proxy_event(
+            ProxyAssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: "x".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect_err("expected Err for wrong-shape transition");
+
+        assert_eq!(proxy_status(&err), 0);
+    }
+
+    #[test]
+    fn reducer_text_end_on_thinking_slot_returns_proxy_error() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Thinking(
+                model::ThinkingContent::new("ponder"),
+            ));
+        let mut buf = HashMap::new();
+
+        let err = process_proxy_event(
+            ProxyAssistantMessageEvent::TextEnd {
+                content_index: 0,
+                content_signature: None,
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect_err("expected Err for wrong-shape transition");
+
+        assert_eq!(proxy_status(&err), 0);
+    }
+
+    #[test]
+    fn reducer_thinking_delta_on_text_slot_returns_proxy_error() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+        let mut buf = HashMap::new();
+
+        let err = process_proxy_event(
+            ProxyAssistantMessageEvent::ThinkingDelta {
+                content_index: 0,
+                delta: "x".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect_err("expected Err for wrong-shape transition");
+
+        assert_eq!(proxy_status(&err), 0);
+    }
+
+    #[test]
+    fn reducer_thinking_end_on_text_slot_returns_proxy_error() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+        let mut buf = HashMap::new();
+
+        let err = process_proxy_event(
+            ProxyAssistantMessageEvent::ThinkingEnd {
+                content_index: 0,
+                content_signature: None,
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect_err("expected Err for wrong-shape transition");
+
+        assert_eq!(proxy_status(&err), 0);
+    }
+
+    #[test]
+    fn reducer_toolcall_delta_on_text_slot_returns_proxy_error() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+        let mut buf = HashMap::new();
+
+        let err = process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallDelta {
+                content_index: 0,
+                delta: r#"{"x":1}"#.into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect_err("expected Err for wrong-shape transition");
+
+        assert_eq!(proxy_status(&err), 0);
+    }
+
+    #[test]
+    fn reducer_text_start_at_idx_beyond_len_returns_proxy_error() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+        let err = process_proxy_event(
+            ProxyAssistantMessageEvent::TextStart { content_index: 5 },
+            &mut partial,
+            &mut buf,
+        )
+        .expect_err("idx > len must error");
+        match err {
+            AgentError::Proxy { status, message } => {
+                assert_eq!(status, 0);
+                assert!(
+                    message.contains("5") || message.to_lowercase().contains("index"),
+                    "unexpected message: {message}",
+                );
+            }
+            other => panic!("expected AgentError::Proxy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_round_trip() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+
+        let r1 = process_proxy_event(
+            ProxyAssistantMessageEvent::TextStart { content_index: 0 },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+        assert!(matches!(
+            r1,
+            Some(model::AssistantMessageEvent::TextStart { content_index: 0, .. })
+        ));
+
+        let r2 = process_proxy_event(
+            ProxyAssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: " hello".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+        assert!(matches!(r2, Some(model::AssistantMessageEvent::TextDelta { .. })));
+
+        let r3 = process_proxy_event(
+            ProxyAssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: " world".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+        assert!(matches!(r3, Some(model::AssistantMessageEvent::TextDelta { .. })));
+
+        let r4 = process_proxy_event(
+            ProxyAssistantMessageEvent::TextEnd {
+                content_index: 0,
+                content_signature: Some("sig".into()),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+        assert!(matches!(r4, Some(model::AssistantMessageEvent::TextEnd { .. })));
+
+        match &partial.content[0] {
+            model::AssistantContentBlock::Text(t) => {
+                assert_eq!(t.text, " hello world");
+                assert_eq!(t.text_signature.as_deref(), Some("sig"));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toolcall_round_trip() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+
+        process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallStart {
+                content_index: 0,
+                id: "tc1".into(),
+                tool_name: "echo".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+
+        process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallDelta {
+                content_index: 0,
+                delta: r#"{"x":"#.into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+
+        process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallDelta {
+                content_index: 0,
+                delta: "1}".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+
+        match &partial.content[0] {
+            model::AssistantContentBlock::ToolCall(tc) => {
+                assert_eq!(tc.arguments, serde_json::json!({"x": 1}));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+
+        process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallEnd { content_index: 0 },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+
+        assert!(
+            !buf.contains_key(&0),
+            "buffer entry should be cleared after toolcall_end"
+        );
+    }
+
+    #[test]
+    fn toolcall_partial_json_keeps_prior_value_when_unparseable() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        let mut buf = HashMap::new();
+
+        process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallStart {
+                content_index: 0,
+                id: "tc1".into(),
+                tool_name: "echo".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+
+        process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallDelta {
+                content_index: 0,
+                delta: r#"{"x":1}"#.into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+
+        // Sanity check: arguments parsed.
+        match &partial.content[0] {
+            model::AssistantContentBlock::ToolCall(tc) => {
+                assert_eq!(tc.arguments, serde_json::json!({"x": 1}));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+
+        // Now feed garbage that, when concatenated, no longer parses.
+        process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallDelta {
+                content_index: 0,
+                delta: "garbage".into(),
+            },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+
+        // Arguments should still hold the last good value.
+        match &partial.content[0] {
+            model::AssistantContentBlock::ToolCall(tc) => {
+                assert_eq!(
+                    tc.arguments,
+                    serde_json::json!({"x": 1}),
+                    "arguments should survive an unparseable buffer"
+                );
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toolcall_end_on_wrong_slot_returns_none() {
+        let m = test_model();
+        let mut partial = fresh_partial(&m);
+        partial
+            .content
+            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+        let mut buf = HashMap::new();
+
+        let out = process_proxy_event(
+            ProxyAssistantMessageEvent::ToolcallEnd { content_index: 0 },
+            &mut partial,
+            &mut buf,
+        )
+        .expect("ok");
+
+        assert!(out.is_none(), "toolcall_end on non-tool-call slot should yield None");
     }
 }
