@@ -379,8 +379,11 @@ impl AgentSession {
         loop_config.tool_execution = hand_agent::types::ToolExecutionMode::Parallel;
         loop_config.before_tool_call = before_hook;
         loop_config.after_tool_call = after_hook;
-        loop_config.steering_mode = queue_mode_to_delivery(self.steering_mode);
-        loop_config.follow_up_mode = queue_mode_to_delivery(self.follow_up_mode);
+        // Mode is honored caller-side inside the `get_steering_messages` /
+        // `get_follow_up_messages` closures via `drain_queue`. The agent
+        // loop does not consult `loop_config.{steering,follow_up}_mode`, so
+        // we deliberately leave them at their defaults to avoid a misleading
+        // signal that the runtime enforces the mode.
 
         // Wire steering / follow-up queues into the agent loop. The queues
         // live on `self` behind `Arc<Mutex<Vec<Message>>>`; clone the Arcs
@@ -1030,19 +1033,6 @@ fn drain_queue(queue: &Mutex<Vec<Message>>, mode: QueueMode) -> Vec<Message> {
     match mode {
         QueueMode::All => std::mem::take(&mut *q),
         QueueMode::OneAtATime => vec![q.remove(0)],
-    }
-}
-
-/// Build a `BeforeToolCallHook` that drives `dispatch_before_tool_call`.
-///
-/// Map the RPC-level [`QueueMode`] enum to the hand-agent runtime
-/// equivalent. Both have the same shape but live in different layers;
-/// keep the conversion exhaustive so a new variant on either side
-/// surfaces as a compile error.
-fn queue_mode_to_delivery(mode: QueueMode) -> hand_agent::QueueDeliveryMode {
-    match mode {
-        QueueMode::All => hand_agent::QueueDeliveryMode::All,
-        QueueMode::OneAtATime => hand_agent::QueueDeliveryMode::OneAtATime,
     }
 }
 
