@@ -6,6 +6,18 @@ use model::Message;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Current session schema version. Bumped whenever the on-disk JSONL
+/// shape changes in a way that requires migration. Mirrors
+/// `CURRENT_SESSION_VERSION` in pi-mono's `core/session-manager.ts`.
+///
+/// Note: pi-mono is at v3 because it also does v1->v2 (add tree
+/// structure) and v2->v3 (rename `hookMessage` role). The Rust port
+/// chose the flat-list shape from the start (no per-entry `parent_id`),
+/// so neither migration applies. The constant is exposed for callers
+/// that want to stamp v3 headers consistently and for future
+/// migrations.
+pub const CURRENT_SESSION_VERSION: u32 = 3;
+
 /// Session header (first line in JSONL).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionHeader {
@@ -57,6 +69,106 @@ pub struct SessionInfo {
     pub message_count: usize,
 }
 
+/// Parse JSONL session content into entries. Malformed lines are
+/// silently skipped (matches the TS `parseSessionEntries` behaviour:
+/// best-effort tolerance for partially-corrupted files). The session
+/// header line, when present, is included as `SessionEntry::Session`.
+///
+/// This standalone helper is exposed for testing and for callers that
+/// need to inspect a session's raw entries without instantiating a
+/// [`SessionManager`].
+pub fn parse_session_entries(content: &str) -> Vec<SessionEntry> {
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(entry) = serde_json::from_str::<SessionEntry>(line) {
+            entries.push(entry);
+        }
+    }
+    entries
+}
+
+/// Load JSONL entries from a file. Returns an empty vector when the
+/// file is missing or has no valid session header (matching
+/// `loadEntriesFromFile` in TS, which treats header-less files as
+/// non-sessions).
+///
+/// I/O errors other than "not found" propagate as
+/// [`CodingAgentError::Session`].
+pub fn load_entries_from_file(path: &Path) -> Result<Vec<SessionEntry>, CodingAgentError> {
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| CodingAgentError::Session(format!("Failed to read session: {}", e)))?;
+
+    let entries = parse_session_entries(&content);
+
+    // Validate that the first entry is a session header. Mirrors the TS
+    // guard: corrupted or non-session files load as empty.
+    match entries.first() {
+        Some(SessionEntry::Session(_)) => Ok(entries),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Find the most recent session file in `session_dir` by file mtime.
+/// Returns `None` if the directory is missing, empty, or contains no
+/// valid `.jsonl` session files (header validated cheaply by reading
+/// the first line). Mirrors `findMostRecentSession` in TS.
+pub fn find_most_recent_session(session_dir: &Path) -> Option<PathBuf> {
+    let read_dir = std::fs::read_dir(session_dir).ok()?;
+
+    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if !is_valid_session_file(&path) {
+            continue;
+        }
+        let mtime = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        match &best {
+            Some((_, best_mtime)) if mtime <= *best_mtime => {}
+            _ => best = Some((path, mtime)),
+        }
+    }
+
+    best.map(|(p, _)| p)
+}
+
+/// Cheap session-header check: read up to 512 bytes from the start of
+/// the file and confirm the first line parses as a `SessionEntry::Session`.
+/// Used by [`find_most_recent_session`] to skip corrupted / unrelated
+/// `.jsonl` files without loading the whole content.
+fn is_valid_session_file(path: &Path) -> bool {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 512];
+    let n = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    let head = match std::str::from_utf8(&buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let first_line = head.lines().next().unwrap_or("");
+    matches!(
+        serde_json::from_str::<SessionEntry>(first_line),
+        Ok(SessionEntry::Session(_))
+    )
+}
+
 /// Manages session files (JSONL format).
 pub struct SessionManager {
     path: PathBuf,
@@ -74,7 +186,7 @@ impl SessionManager {
 
         let id = generate_session_id();
         let header = SessionHeader {
-            version: 3,
+            version: CURRENT_SESSION_VERSION,
             id: id.clone(),
             timestamp: Utc::now().timestamp_millis(),
             cwd: cwd.to_string_lossy().to_string(),
@@ -97,26 +209,21 @@ impl SessionManager {
 
     /// Open an existing session file.
     pub fn open(path: &Path) -> Result<Self, CodingAgentError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| CodingAgentError::Session(format!("Failed to read session: {}", e)))?;
-
-        let mut entries = Vec::new();
-        let mut header = None;
-
-        for line in content.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Ok(entry) = serde_json::from_str::<SessionEntry>(line) {
-                if let SessionEntry::Session(h) = &entry {
-                    header = Some(h.clone());
-                }
-                entries.push(entry);
-            }
+        let entries = load_entries_from_file(path)?;
+        if entries.is_empty() {
+            return Err(CodingAgentError::Session(format!(
+                "No session header found in {}",
+                path.display()
+            )));
         }
-
-        let header =
-            header.ok_or_else(|| CodingAgentError::Session("No session header found".into()))?;
+        // load_entries_from_file guarantees entries[0] is a Session
+        // header when the vec is non-empty.
+        let header = match &entries[0] {
+            SessionEntry::Session(h) => h.clone(),
+            _ => {
+                return Err(CodingAgentError::Session("No session header found".into()));
+            }
+        };
 
         let session_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
@@ -133,7 +240,7 @@ impl SessionManager {
     pub fn in_memory() -> Self {
         let id = generate_session_id();
         let header = SessionHeader {
-            version: 3,
+            version: CURRENT_SESSION_VERSION,
             id,
             timestamp: Utc::now().timestamp_millis(),
             cwd: ".".into(),
@@ -181,7 +288,7 @@ impl SessionManager {
     ) -> Result<Self, CodingAgentError> {
         let id = generate_session_id();
         let header = SessionHeader {
-            version: 3,
+            version: CURRENT_SESSION_VERSION,
             id: id.clone(),
             timestamp: Utc::now().timestamp_millis(),
             cwd: cwd.to_string_lossy().to_string(),
@@ -376,7 +483,7 @@ impl SessionManager {
 
         let id = generate_session_id();
         let header = SessionHeader {
-            version: 3,
+            version: CURRENT_SESSION_VERSION,
             id: id.clone(),
             timestamp: Utc::now().timestamp_millis(),
             cwd: cwd.to_string_lossy().to_string(),
@@ -589,5 +696,112 @@ mod tests {
         let id2 = generate_entry_id();
         assert_ne!(id1, id2);
         assert!(id1.starts_with("e_"));
+    }
+
+    #[test]
+    fn test_parse_session_entries_skips_blank_and_malformed() {
+        // Build a valid header line, then add blank + garbage in the middle
+        let header = SessionEntry::Session(SessionHeader {
+            version: CURRENT_SESSION_VERSION,
+            id: "s_1".into(),
+            timestamp: 1,
+            cwd: "/x".into(),
+            parent_session: None,
+        });
+        let header_line = serde_json::to_string(&header).unwrap();
+
+        let content = format!("{}\n\n   \nnot json\n{}\n", header_line, header_line);
+        let parsed = parse_session_entries(&content);
+
+        // blank lines + "not json" skipped, two valid headers kept
+        assert_eq!(parsed.len(), 2);
+        assert!(matches!(parsed[0], SessionEntry::Session(_)));
+    }
+
+    #[test]
+    fn test_load_entries_from_file_missing_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("does-not-exist.jsonl");
+        let entries = load_entries_from_file(&path).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_load_entries_from_file_no_header_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("headerless.jsonl");
+        // Valid JSONL but no Session header up front
+        std::fs::write(
+            &path,
+            "{\"type\":\"message\",\"data\":{\"id\":\"e_1\",\"message\":{\"role\":\"user\",\"content\":\"hi\"},\"timestamp\":1}}\n",
+        )
+        .unwrap();
+
+        let entries = load_entries_from_file(&path).unwrap();
+        // TS guard: header-less files are treated as non-sessions.
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_load_entries_from_file_round_trips_real_session() {
+        let dir = TempDir::new().unwrap();
+        let mut mgr = SessionManager::create(dir.path()).unwrap();
+        mgr.append_message(Message::User(UserMessage::new_text("hello")))
+            .unwrap();
+        let path = mgr.path().to_path_buf();
+
+        let entries = load_entries_from_file(&path).unwrap();
+        assert!(matches!(entries[0], SessionEntry::Session(_)));
+        assert!(
+            entries
+                .iter()
+                .any(|e| matches!(e, SessionEntry::Message { .. }))
+        );
+    }
+
+    #[test]
+    fn test_find_most_recent_session_picks_latest_mtime() {
+        let dir = TempDir::new().unwrap();
+        let older = SessionManager::create(dir.path()).unwrap();
+        // Tiny sleep so mtimes differ even on coarse filesystems.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newer = SessionManager::create(dir.path()).unwrap();
+
+        let found = find_most_recent_session(&dir.path().join(".hand").join("sessions"))
+            .expect("should find a session");
+        assert_eq!(found, newer.path());
+        assert_ne!(found, older.path());
+    }
+
+    #[test]
+    fn test_find_most_recent_session_skips_invalid_files() {
+        let dir = TempDir::new().unwrap();
+        let mgr = SessionManager::create(dir.path()).unwrap();
+        let session_dir = dir.path().join(".hand").join("sessions");
+
+        // Add a stray `.jsonl` file that has no session header — should be ignored.
+        std::fs::write(
+            session_dir.join("garbage.jsonl"),
+            "this is definitely not jsonl\n",
+        )
+        .unwrap();
+
+        let found = find_most_recent_session(&session_dir).expect("session present");
+        assert_eq!(found, mgr.path());
+    }
+
+    #[test]
+    fn test_find_most_recent_session_missing_dir() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nope");
+        assert!(find_most_recent_session(&missing).is_none());
+    }
+
+    #[test]
+    fn test_current_session_version_constant() {
+        // Sanity: stamp the current value so a change is intentional.
+        assert_eq!(CURRENT_SESSION_VERSION, 3);
+        let mgr = SessionManager::in_memory();
+        assert_eq!(mgr.header().version, CURRENT_SESSION_VERSION);
     }
 }
