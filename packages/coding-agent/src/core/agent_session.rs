@@ -5,11 +5,19 @@
 
 use crate::core::compaction;
 use crate::core::error::CodingAgentError;
+use crate::core::extensions::api::{
+    Extension, ExtensionContext, HookDecision, ToolCallEvent, ToolResultEvent,
+};
+use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_before_tool_call};
+use crate::core::extensions::registry::builtin_tier1_extensions;
 use crate::core::session_manager::SessionManager;
 use crate::core::settings::SettingsManager;
 use crate::core::skills::{self, Skill, SkillError};
 use crate::core::system_prompt::{self, BuildSystemPromptOptions};
-use hand_agent::types::{AgentContext, AgentEvent, AgentLoopConfig, AgentTool};
+use hand_agent::types::{
+    AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AfterToolCallContext,
+    AfterToolCallResult, BeforeToolCallContext, BeforeToolCallResult, BoxFuture,
+};
 use hand_agent::{AgentEventSink, agent_loop};
 use model::{Message, SimpleStreamOptions};
 use std::path::{Path, PathBuf};
@@ -63,6 +71,10 @@ pub struct AgentSession {
     /// Per-skill discovery errors. Surfaced via [`Self::skill_errors`] for
     /// diagnostics; one bad skill never aborts session construction.
     skill_errors: Vec<SkillError>,
+    /// Tier 1 extensions registered with this session, in dispatch order.
+    /// Empty for in-memory test sessions; populated from
+    /// [`builtin_tier1_extensions`] for [`Self::new`] / [`Self::new_with_skill_dirs`].
+    extensions: Vec<Arc<dyn Extension>>,
 }
 
 impl AgentSession {
@@ -143,6 +155,7 @@ impl AgentSession {
             event_listeners: Arc::new(Mutex::new(Vec::new())),
             skills: skills_discovered,
             skill_errors,
+            extensions: builtin_tier1_extensions(),
         })
     }
 
@@ -184,6 +197,7 @@ impl AgentSession {
             event_listeners: Arc::new(Mutex::new(Vec::new())),
             skills: Vec::new(),
             skill_errors: Vec::new(),
+            extensions: Vec::new(),
         }
     }
 
@@ -204,13 +218,27 @@ impl AgentSession {
 
         let prompts = vec![user_msg];
 
+        // Snapshot the extension chain and per-session context so the hook
+        // closures can own them as `'static` data captured by the `Box<dyn Fn>`.
+        // Cloning the `Vec<Arc<...>>` is cheap (Arc bumps).
+        let (before_hook, after_hook) = if self.extensions.is_empty() {
+            (None, None)
+        } else {
+            let extensions: Arc<Vec<Arc<dyn Extension>>> = Arc::new(self.extensions.clone());
+            let cx = Arc::new(self.extension_context());
+            (
+                Some(build_before_tool_call_hook(extensions.clone(), cx.clone())),
+                Some(build_after_tool_call_hook(extensions, cx)),
+            )
+        };
+
         // Build agent loop config
         let loop_config = AgentLoopConfig {
             model: self.config.model.clone(),
             stream_options: self.config.stream_options.clone(),
             tool_execution: hand_agent::types::ToolExecutionMode::Parallel,
-            before_tool_call: None,
-            after_tool_call: None,
+            before_tool_call: before_hook,
+            after_tool_call: after_hook,
             get_steering_messages: None,
             get_follow_up_messages: None,
             convert_to_llm: None,
@@ -384,6 +412,33 @@ impl AgentSession {
         &self.skills
     }
 
+    /// Tier 1 extensions registered on this session, in dispatch order.
+    pub fn extensions(&self) -> &[Arc<dyn Extension>] {
+        &self.extensions
+    }
+
+    /// Append an extension to the dispatch chain. Useful for tests and
+    /// dynamic registration scenarios that don't go through
+    /// [`builtin_tier1_extensions`].
+    pub fn register_extension(&mut self, ext: Arc<dyn Extension>) {
+        self.extensions.push(ext);
+    }
+
+    /// Build the [`ExtensionContext`] passed to hooks for this session.
+    ///
+    /// `data_dir` is computed as `<cwd>/.hand/extensions/<unspecified>/data/`
+    /// at the session level — extensions get a per-extension subdirectory
+    /// resolved when they're invoked. For now we surface the session-wide
+    /// root so callers and tests can verify it's well-formed; lazy creation
+    /// of the per-extension subdir lands in T3.4.
+    pub fn extension_context(&self) -> ExtensionContext {
+        ExtensionContext {
+            cwd: self.config.cwd.clone(),
+            session_id: self.session_manager.id().to_string(),
+            data_dir: self.config.cwd.join(".hand").join("extensions"),
+        }
+    }
+
     /// Generate a compaction summary using the LLM.
     async fn generate_compaction_summary(&self, prompt: &str) -> Result<String, CodingAgentError> {
         use futures::StreamExt;
@@ -436,6 +491,75 @@ impl AgentSession {
             listener(event.clone());
         }
     }
+}
+
+/// Build a `BeforeToolCallHook` that drives `dispatch_before_tool_call`.
+///
+/// Note on `Replace`: `hand-agent`'s `BeforeToolCallResult` only exposes
+/// `block` / `reason` — there is no field for replaced arguments. So
+/// `HookDecision::Replace` from a Tier 1 extension is observable to
+/// **subsequent extensions in the same chain** (the dispatcher updates the
+/// working `ToolCallEvent::arguments`) but the host cannot push the replaced
+/// args back to the agent loop's tool execution. Treat `Replace` from the
+/// final aggregated decision the same as `Continue`. Lifting this limitation
+/// requires a `hand-agent` API change and is tracked separately.
+fn build_before_tool_call_hook(
+    extensions: Arc<Vec<Arc<dyn Extension>>>,
+    cx: Arc<ExtensionContext>,
+) -> hand_agent::types::BeforeToolCallHook {
+    Box::new(move |ctx: BeforeToolCallContext<'_>| -> BoxFuture<'_, Option<BeforeToolCallResult>> {
+        let extensions = extensions.clone();
+        let cx = cx.clone();
+        let event = ToolCallEvent {
+            tool_name: ctx.tool_call.name.clone(),
+            arguments: ctx.args.clone(),
+            call_id: ctx.tool_call.id.clone(),
+        };
+        Box::pin(async move {
+            let decision = dispatch_before_tool_call(&extensions, &cx, &event).await;
+            match decision {
+                HookDecision::Continue | HookDecision::Replace(_) => {
+                    // None == "no override"; agent loop runs the tool with
+                    // the original args. Replace is a no-op at the host
+                    // boundary; see function docs.
+                    None
+                }
+                HookDecision::Cancel(reason) => Some(BeforeToolCallResult {
+                    block: true,
+                    reason: Some(reason),
+                }),
+            }
+        })
+    })
+}
+
+/// Build an `AfterToolCallHook` that fans the result event out to every
+/// registered extension. The result is read-only — extensions cannot
+/// rewrite it — so the hook always returns `None`.
+fn build_after_tool_call_hook(
+    extensions: Arc<Vec<Arc<dyn Extension>>>,
+    cx: Arc<ExtensionContext>,
+) -> hand_agent::types::AfterToolCallHook {
+    Box::new(move |ctx: AfterToolCallContext<'_>| -> BoxFuture<'_, Option<AfterToolCallResult>> {
+        let extensions = extensions.clone();
+        let cx = cx.clone();
+        // Render the tool result content as JSON for the extension. The
+        // ToolResult shape is internal to hand-agent; for the v1 event
+        // surface we expose `success` (== !is_error) and the JSON body.
+        let event = ToolResultEvent {
+            tool_name: ctx.tool_call.name.clone(),
+            call_id: ctx.tool_call.id.clone(),
+            success: !ctx.is_error,
+            result: serde_json::to_value(ctx.result).unwrap_or_else(|err| {
+                tracing::warn!(error = %err, "failed to serialize tool result for after-hook; using null");
+                serde_json::Value::Null
+            }),
+        };
+        Box::pin(async move {
+            dispatch_after_tool_call(&extensions, &cx, &event).await;
+            None
+        })
+    })
 }
 
 #[cfg(test)]
@@ -594,5 +718,333 @@ mod tests {
             AgentSessionEvent::Agent(AgentEvent::AgentStart) => {}
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Extension wiring tests
+    // ------------------------------------------------------------------
+
+    use crate::core::extensions::api::{
+        ExtensionCapabilities, ExtensionError, ExtensionManifest, HookDecision, ToolCallEvent,
+        ToolResultEvent,
+    };
+    use async_trait::async_trait;
+
+    fn ext_manifest(name: &str) -> ExtensionManifest {
+        ExtensionManifest {
+            name: name.into(),
+            version: "0.1.0".into(),
+            description: None,
+            capabilities: ExtensionCapabilities::default(),
+            exec: None,
+            env: Default::default(),
+        }
+    }
+
+    /// A test extension that records every before/after invocation it sees.
+    /// `before_decision` is what `on_before_tool_call` returns; `after_ok`
+    /// controls whether `on_after_tool_call` returns Ok or Err.
+    struct RecordingExt {
+        manifest: ExtensionManifest,
+        before_decision: HookDecision,
+        before_calls: Mutex<Vec<ToolCallEvent>>,
+        after_calls: Mutex<Vec<ToolResultEvent>>,
+    }
+
+    impl RecordingExt {
+        fn new(name: &str, before_decision: HookDecision) -> Arc<Self> {
+            Arc::new(Self {
+                manifest: ext_manifest(name),
+                before_decision,
+                before_calls: Mutex::new(Vec::new()),
+                after_calls: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Extension for RecordingExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn on_before_tool_call(
+            &self,
+            _cx: &ExtensionContext,
+            event: &ToolCallEvent,
+        ) -> Result<HookDecision, ExtensionError> {
+            self.before_calls.lock().unwrap().push(event.clone());
+            Ok(self.before_decision.clone())
+        }
+
+        async fn on_after_tool_call(
+            &self,
+            _cx: &ExtensionContext,
+            event: &ToolResultEvent,
+        ) -> Result<(), ExtensionError> {
+            self.after_calls.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn register_extension_appends_to_chain() {
+        let mut session = AgentSession::in_memory(test_model(), vec![]);
+        assert!(session.extensions().is_empty());
+
+        let ext = RecordingExt::new("recorder", HookDecision::Continue);
+        session.register_extension(ext.clone());
+
+        assert_eq!(session.extensions().len(), 1);
+        assert_eq!(session.extensions()[0].manifest().name, "recorder");
+    }
+
+    #[test]
+    fn extension_context_returns_well_formed_values() {
+        let session = AgentSession::in_memory(test_model(), vec![]);
+        let cx = session.extension_context();
+
+        assert!(!cx.session_id.is_empty(), "session id must not be empty");
+        assert!(!cx.cwd.as_os_str().is_empty(), "cwd must not be empty");
+        assert!(
+            cx.data_dir.ends_with("extensions"),
+            "data_dir should be rooted at .hand/extensions, got {:?}",
+            cx.data_dir
+        );
+    }
+
+    // -- Integration: send_message fires hooks via a mock tool-call provider.
+    //
+    // The mock returns a tool_use turn first and a text turn afterwards so
+    // the agent loop terminates. The session is configured with a single
+    // `noop` AgentTool so the tool execution succeeds.
+
+    use model::types::{Api, Provider};
+    use model::{
+        ApiProvider, AssistantContentBlock, AssistantMessage, AssistantMessageEvent,
+        AssistantMessageEventStream, Context, StopReason, StreamOptions, TextContent, ToolCall,
+        Usage,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn assistant_text_message(text: &str) -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".into(),
+            content: vec![AssistantContentBlock::Text(TextContent::new(text))],
+            api: Api::OpenAICompletions,
+            provider: Provider::OpenAI,
+            model: "test-model".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+        }
+    }
+
+    fn assistant_tool_call_message(
+        tool_name: &str,
+        tool_id: &str,
+        args: serde_json::Value,
+    ) -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".into(),
+            content: vec![AssistantContentBlock::ToolCall(ToolCall::new(
+                tool_id, tool_name, args,
+            ))],
+            api: Api::OpenAICompletions,
+            provider: Provider::OpenAI,
+            model: "test-model".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+        }
+    }
+
+    /// Mock provider: turn 1 emits a tool call, turn 2+ emit text and stop.
+    struct ToolThenTextProvider {
+        tool_name: String,
+        args: serde_json::Value,
+        invocation: AtomicUsize,
+    }
+
+    impl ApiProvider for ToolThenTextProvider {
+        fn stream(
+            &self,
+            _model: model::Model,
+            _context: Context,
+            _options: Option<StreamOptions>,
+        ) -> AssistantMessageEventStream<'static> {
+            let n = self.invocation.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                let tool_name = self.tool_name.clone();
+                let args = self.args.clone();
+                Box::pin(async_stream::stream! {
+                    let msg = assistant_tool_call_message(&tool_name, "call_1", args);
+                    let tool_call = match &msg.content[0] {
+                        AssistantContentBlock::ToolCall(tc) => tc.clone(),
+                        _ => unreachable!("constructed with ToolCall block"),
+                    };
+                    yield AssistantMessageEvent::Start { partial: msg.clone() };
+                    yield AssistantMessageEvent::ToolCallStart {
+                        content_index: 0,
+                        partial: msg.clone(),
+                    };
+                    yield AssistantMessageEvent::ToolCallEnd {
+                        content_index: 0,
+                        tool_call,
+                        partial: msg.clone(),
+                    };
+                    yield AssistantMessageEvent::Done {
+                        reason: StopReason::ToolUse,
+                        message: msg,
+                    };
+                })
+            } else {
+                Box::pin(async_stream::stream! {
+                    let msg = assistant_text_message("done");
+                    yield AssistantMessageEvent::Start { partial: msg.clone() };
+                    yield AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        message: msg,
+                    };
+                })
+            }
+        }
+
+        fn stream_simple(
+            &self,
+            model: model::Model,
+            context: Context,
+            options: Option<SimpleStreamOptions>,
+        ) -> AssistantMessageEventStream<'static> {
+            self.stream(model, context, options.map(|o| o.base))
+        }
+    }
+
+    fn noop_tool() -> AgentTool {
+        let execute: hand_agent::types::ToolExecuteFn = Box::new(move |_id, _args| {
+            Box::pin(async move {
+                hand_agent::types::ToolResult::text("noop ok")
+            })
+        });
+        AgentTool::new(
+            "noop",
+            "A no-op test tool.",
+            serde_json::json!({"type": "object", "properties": {}}),
+            "Noop",
+            execute,
+        )
+    }
+
+    /// Same shape as `test_model()` but on `OpenAICompletions` so the mock
+    /// provider registered for that API actually matches.
+    fn openai_test_model() -> model::Model {
+        let mut m = test_model();
+        m.api = Api::OpenAICompletions;
+        m.provider = Provider::OpenAI;
+        m
+    }
+
+    #[tokio::test]
+    async fn send_message_fires_before_and_after_hooks_on_tool_call() {
+        // Register the mock provider on a Client.
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(ToolThenTextProvider {
+                tool_name: "noop".into(),
+                args: serde_json::json!({}),
+                invocation: AtomicUsize::new(0),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![noop_tool()], client);
+
+        let ext = RecordingExt::new("recorder", HookDecision::Continue);
+        session.register_extension(ext.clone());
+
+        let _ = session
+            .send_message("please call noop")
+            .await
+            .expect("send_message should succeed");
+
+        let before_calls = ext.before_calls.lock().unwrap();
+        assert_eq!(
+            before_calls.len(),
+            1,
+            "before hook should fire exactly once for the tool call"
+        );
+        assert_eq!(before_calls[0].tool_name, "noop");
+
+        let after_calls = ext.after_calls.lock().unwrap();
+        assert_eq!(
+            after_calls.len(),
+            1,
+            "after hook should fire exactly once for the tool result"
+        );
+        assert_eq!(after_calls[0].tool_name, "noop");
+        assert!(after_calls[0].success, "noop tool should report success");
+    }
+
+    #[tokio::test]
+    async fn send_message_cancel_blocks_tool_execution() {
+        // The recording extension cancels every tool call. The tool executor
+        // increments a counter — assert the counter stays at 0 because the
+        // host short-circuited before running the tool.
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(ToolThenTextProvider {
+                tool_name: "noop".into(),
+                args: serde_json::json!({}),
+                invocation: AtomicUsize::new(0),
+            }),
+            Some("test".into()),
+        );
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let executions_for_tool = executions.clone();
+        let execute: hand_agent::types::ToolExecuteFn = Box::new(move |_id, _args| {
+            let counter = executions_for_tool.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                hand_agent::types::ToolResult::text("ran")
+            })
+        });
+        let counted_tool = AgentTool::new(
+            "noop",
+            "A no-op test tool.",
+            serde_json::json!({"type": "object", "properties": {}}),
+            "Noop",
+            execute,
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![counted_tool], client);
+
+        let ext = RecordingExt::new("blocker", HookDecision::Cancel("nope".into()));
+        session.register_extension(ext.clone());
+
+        let _ = session
+            .send_message("please call noop")
+            .await
+            .expect("send_message should succeed even when hook cancels");
+
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            0,
+            "tool must NOT run when before-hook returns Cancel"
+        );
+        // before fires once; after does NOT fire because the agent loop emits an
+        // Immediate error result for blocked calls and skips finalize_executed_tool_call.
+        assert_eq!(ext.before_calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            ext.after_calls.lock().unwrap().len(),
+            0,
+            "after hook must not fire when the call was blocked",
+        );
     }
 }
