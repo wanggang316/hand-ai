@@ -162,8 +162,12 @@ async fn subscribe_receives_events_and_unsubscribes_on_drop() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn lifecycle_error_emits_agent_end_and_records_error() {
-    // Truncated stream → loop returns Err(StreamEndedWithoutResult) → lifecycle fallback fires.
+async fn truncated_stream_synthesizes_error_message() {
+    // Provider closes the stream after `Start` without ever sending `Done` or
+    // `Error`. The loop must (1) replace the partial with a synthesized error
+    // assistant in the transcript so there are no orphan partials, (2) emit a
+    // matched `MessageEnd` so subscribers see balanced lifecycle events, and
+    // (3) record the failure on runtime state and emit exactly one `AgentEnd`.
     let client = Client::new();
     client.registry.register(
         Api::OpenAICompletions,
@@ -181,12 +185,30 @@ async fn lifecycle_error_emits_agent_end_and_records_error() {
     });
 
     let result = agent.prompt("hi").await;
-    assert!(result.is_err(), "expected stream error, got {:?}", result);
-    // We get one AgentEnd from the synthesized fallback path.
+    // Provider-level failure surfaces as Ok(stop_reason=Error), matching the
+    // `AssistantMessageEvent::Error` path. Callers detect failure via
+    // `stop_reason` / runtime `error`, not via Err.
+    assert!(
+        result.is_ok(),
+        "truncated stream should be handled in-place, got {result:?}"
+    );
     assert_eq!(*agent_end_count.lock().unwrap(), 1);
     assert!(agent.state().error.is_some());
+
+    // Transcript must contain exactly one assistant message (no orphan partial).
+    let assistants: Vec<_> = agent
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, Message::Assistant(_)))
+        .collect();
+    assert_eq!(
+        assistants.len(),
+        1,
+        "expected a single closed assistant message, got {}",
+        assistants.len()
+    );
     assert!(matches!(
-        agent.messages().last(),
+        assistants.last(),
         Some(Message::Assistant(a)) if a.stop_reason == StopReason::Error
     ));
 }
@@ -230,6 +252,66 @@ async fn abort_cancels_in_flight_run() {
         _ => panic!("expected last message to be assistant"),
     };
     assert_eq!(stop_reason, StopReason::Aborted);
+}
+
+#[tokio::test]
+async fn abort_drops_long_running_tool_future() {
+    // Provider returns a tool call quickly, the tool would otherwise block for
+    // 500ms. abort() must race the tool future against `cancel.cancelled()`
+    // so the run unwinds well before the tool's natural completion. Tools
+    // built via `AgentTool::simple` cannot observe the cancel token directly,
+    // so this is a load-bearing guarantee of the loop itself.
+    let client = Client::new();
+    client.registry.register(
+        Api::OpenAICompletions,
+        Box::new(MockToolProvider::new(
+            "slow",
+            serde_json::json!({}),
+            "after",
+        )),
+        Some("test".into()),
+    );
+    let mut agent = Agent::new(client, test_model());
+    agent.add_tool(sleep_tool("slow", 500));
+
+    let abort_handle = agent.abort_handle();
+    let abort_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        abort_handle.abort();
+    });
+
+    let start = std::time::Instant::now();
+    agent.prompt("Hi").await.unwrap();
+    let elapsed = start.elapsed();
+    abort_task.await.unwrap();
+
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "abort during tool execution took {elapsed:?}; expected < 300ms"
+    );
+
+    // Last message must be the synthesized aborted tool result; the run did
+    // not wait for the natural 500ms tool completion.
+    let last = agent.messages().last().unwrap();
+    match last {
+        Message::ToolResult(tr) => {
+            assert!(tr.is_error, "aborted tool result must be flagged is_error");
+            let body = tr
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    model::ToolResultContent::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                body.contains("aborted"),
+                "expected tool-result body to mention abort, got: {body:?}"
+            );
+        }
+        other => panic!("expected last message to be ToolResult, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------

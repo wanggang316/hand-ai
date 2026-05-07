@@ -17,10 +17,6 @@ pub enum AgentError {
     #[error("Tool '{tool_name}' argument validation failed: {message}")]
     SchemaValidation { tool_name: String, message: String },
 
-    /// The stream ended without producing a final assistant message.
-    #[error("Agent stream ended without a final assistant message")]
-    StreamEndedWithoutResult,
-
     /// Misuse of the API: invalid state transition.
     #[error("Invalid state: {0}")]
     InvalidState(String),

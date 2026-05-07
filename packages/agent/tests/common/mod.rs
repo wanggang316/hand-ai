@@ -302,7 +302,8 @@ impl ApiProvider for MockErrorProvider {
 }
 
 /// Provider that closes the stream after `Start` without ever producing `Done`/`Error`.
-/// Triggers `AgentError::StreamEndedWithoutResult` (used to test lifecycle fallback).
+/// Closes the stream after `Start` without `Done`/`Error`; the loop must
+/// synthesize an error assistant in place and emit a balanced `MessageEnd`.
 pub struct TruncatedStreamProvider;
 
 impl ApiProvider for TruncatedStreamProvider {

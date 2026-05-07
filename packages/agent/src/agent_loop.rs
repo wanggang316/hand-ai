@@ -501,7 +501,32 @@ async fn stream_assistant_response(
 
     match final_message {
         Some(msg) => Ok(Message::Assistant(msg)),
-        None => Err(AgentError::StreamEndedWithoutResult),
+        None => {
+            // Stream ended without `Done` or `Error`. Treat as a provider-side
+            // failure (like `AssistantMessageEvent::Error`): synthesize an
+            // error assistant message in place, replacing the partial that was
+            // emitted on `Start`, so subscribers see a balanced
+            // `MessageStart`/`MessageEnd` pair and the transcript holds a
+            // single closed assistant message.
+            let mut failure = synthesize_aborted_message(
+                &config.model,
+                "Stream ended without a final message",
+            );
+            failure.stop_reason = StopReason::Error;
+            let msg = Message::Assistant(failure.clone());
+            if emitted_start {
+                if let Some(last) = context.messages.last_mut() {
+                    *last = msg.clone();
+                }
+            } else {
+                context.messages.push(msg.clone());
+                emit(AgentEvent::MessageStart {
+                    message: msg.clone(),
+                });
+            }
+            emit(AgentEvent::MessageEnd { message: msg });
+            Ok(Message::Assistant(failure))
+        }
     }
 }
 
@@ -835,7 +860,26 @@ async fn execute_prepared_tool_call(
         on_update,
     };
 
-    match (tool.execute)(ctx).await {
+    // Race the tool future against cancellation. Tools constructed with
+    // `AgentTool::simple` cannot observe the cancel token directly, so the
+    // loop has to enforce the abort contract here; dropping the future
+    // releases any resources owned across the await point.
+    let exec_future = (tool.execute)(ctx);
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            return (
+                ToolResult::error(format!(
+                    "Tool '{}' aborted by caller",
+                    tool_call.name
+                )),
+                true,
+            );
+        }
+        res = exec_future => res,
+    };
+
+    match result {
         Ok(result) => (result, false),
         Err(err) => (ToolResult::error(err.to_string()), true),
     }
