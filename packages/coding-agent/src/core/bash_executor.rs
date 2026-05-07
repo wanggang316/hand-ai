@@ -108,7 +108,14 @@ pub async fn execute_bash(
 
     let mut truncated = false;
     if output.len() > options.max_bytes {
-        output.truncate(options.max_bytes);
+        // String::truncate panics if the cut point lands inside a multi-byte
+        // UTF-8 sequence (CJK, emoji, accented Latin). Step back to the
+        // nearest char boundary so a 64 KiB cap is safe for any payload.
+        let mut cut = options.max_bytes;
+        while cut > 0 && !output.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        output.truncate(cut);
         truncated = true;
     }
 
@@ -218,5 +225,30 @@ mod tests {
     fn test_sanitize_output() {
         assert_eq!(sanitize_output("hello\x1b[31m world\x1b[0m"), "hello world");
         assert_eq!(sanitize_output("foo\0bar"), "foobar");
+    }
+
+    /// Regression: a UTF-8 multi-byte sequence straddling the truncate boundary
+    /// must not panic — `String::truncate` requires a char boundary.
+    #[tokio::test]
+    async fn test_truncate_respects_utf8_boundary() {
+        let dir = TempDir::new().unwrap();
+        // 4-byte emoji repeated; 16 KiB / 4 = 4096 emojis. Pick max_bytes that
+        // does NOT divide evenly into 4 to land mid-codepoint.
+        let result = execute_bash(
+            "printf '\\xf0\\x9f\\x98\\x80%.0s' $(seq 1 1000)",
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions {
+                max_bytes: 1023, // mid-codepoint cut: 1023 = 4*255 + 3
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.truncated);
+        // Output must be valid UTF-8 (it already is — String guarantees that —
+        // but confirm we cut on a boundary, not panicked en route).
+        assert!(result.output.is_char_boundary(result.output.len()));
+        assert!(result.output.len() <= 1023);
     }
 }
