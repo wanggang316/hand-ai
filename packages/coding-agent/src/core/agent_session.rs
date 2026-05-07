@@ -778,8 +778,18 @@ impl AgentSession {
             Err(_) => format!(
                 "[Compacted {} messages. Files read: {}. Files edited: {}.]",
                 to_compact.len(),
-                file_ops.read.join(", "),
-                file_ops.edited.join(", "),
+                file_ops
+                    .read
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                file_ops
+                    .edited
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
             ),
         };
 
