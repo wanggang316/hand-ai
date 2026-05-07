@@ -475,9 +475,36 @@ impl SessionManager {
         Self::open(&most_recent.path)
     }
 
-    /// Fork a session from an existing session file.
+    /// Fork a session from an existing session file: produce a new
+    /// session in `cwd`'s session dir whose header points at the source
+    /// session as `parent_session`, carrying every non-header entry
+    /// from the source verbatim.
+    ///
+    /// Mirrors `SessionManager.forkFrom` in pi-mono: the new session
+    /// gets a freshly-generated id, but body entries (messages,
+    /// compactions, model changes, labels) keep their original ids and
+    /// timestamps so cross-references like
+    /// `Compaction::first_kept_entry_id` and
+    /// `Label::target_id` remain valid after the fork.
     pub fn fork_from(source_path: &Path, cwd: &Path) -> Result<Self, CodingAgentError> {
-        let source = Self::open(source_path)?;
+        let source_entries = load_entries_from_file(source_path)?;
+        if source_entries.is_empty() {
+            return Err(CodingAgentError::Session(format!(
+                "Cannot fork: source session is empty or has no header: {}",
+                source_path.display()
+            )));
+        }
+
+        let source_header = match &source_entries[0] {
+            SessionEntry::Session(h) => h.clone(),
+            _ => {
+                return Err(CodingAgentError::Session(format!(
+                    "Cannot fork: source session has no header: {}",
+                    source_path.display()
+                )));
+            }
+        };
+
         let session_dir = Self::default_session_dir(cwd);
         std::fs::create_dir_all(&session_dir)?;
 
@@ -487,19 +514,18 @@ impl SessionManager {
             id: id.clone(),
             timestamp: Utc::now().timestamp_millis(),
             cwd: cwd.to_string_lossy().to_string(),
-            parent_session: Some(source.header.id.clone()),
+            parent_session: Some(source_header.id.clone()),
         };
 
-        let mut entries = vec![SessionEntry::Session(header.clone())];
-        // Copy all message entries from source
-        for entry in &source.entries {
-            if let SessionEntry::Message { message, .. } = entry {
-                entries.push(SessionEntry::Message {
-                    id: generate_entry_id(),
-                    message: message.clone(),
-                    timestamp: Utc::now().timestamp_millis(),
-                });
+        // Preserve every non-header entry from the source verbatim —
+        // ids included, so downstream cross-references stay valid.
+        let mut entries = Vec::with_capacity(source_entries.len());
+        entries.push(SessionEntry::Session(header.clone()));
+        for entry in source_entries.into_iter().skip(1) {
+            if matches!(entry, SessionEntry::Session(_)) {
+                continue;
             }
+            entries.push(entry);
         }
 
         let path = session_dir.join(format!("{}.jsonl", id));
@@ -795,6 +821,106 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nope");
         assert!(find_most_recent_session(&missing).is_none());
+    }
+
+    #[test]
+    fn test_fork_from_preserves_all_non_header_entries() {
+        let dir = TempDir::new().unwrap();
+        let mut source = SessionManager::create(dir.path()).unwrap();
+        let msg_id = source
+            .append_message(Message::User(UserMessage::new_text("first")))
+            .unwrap();
+        source.append_model_change("openai", "gpt-x").unwrap();
+        source
+            .append_compaction("rolled-up history", &msg_id)
+            .unwrap();
+        source.append_label("named").unwrap();
+        let source_path = source.path().to_path_buf();
+        let source_id = source.id().to_string();
+
+        let target_dir = TempDir::new().unwrap();
+        let forked = SessionManager::fork_from(&source_path, target_dir.path()).unwrap();
+
+        // Header references source by id.
+        assert_eq!(
+            forked.header().parent_session.as_deref(),
+            Some(source_id.as_str())
+        );
+        // New id, not the source's.
+        assert_ne!(forked.id(), source_id);
+
+        // Body entries: every variant preserved with original ids.
+        let mut saw_message_with_orig_id = false;
+        let mut saw_model_change = false;
+        let mut saw_compaction = false;
+        let mut saw_label = false;
+        for entry in forked.entries() {
+            match entry {
+                SessionEntry::Session(_) => {}
+                SessionEntry::Message { id, .. } => {
+                    if id == &msg_id {
+                        saw_message_with_orig_id = true;
+                    }
+                }
+                SessionEntry::ModelChange { provider, .. } => {
+                    if provider == "openai" {
+                        saw_model_change = true;
+                    }
+                }
+                SessionEntry::Compaction {
+                    summary,
+                    first_kept_entry_id,
+                    ..
+                } => {
+                    if summary == "rolled-up history" && first_kept_entry_id == &msg_id {
+                        saw_compaction = true;
+                    }
+                }
+                SessionEntry::Label { label, .. } => {
+                    if label.as_deref() == Some("named") {
+                        saw_label = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_message_with_orig_id, "message id was rewritten");
+        assert!(saw_model_change, "model change dropped during fork");
+        assert!(saw_compaction, "compaction dropped during fork");
+        assert!(saw_label, "label dropped during fork");
+    }
+
+    #[test]
+    fn test_fork_from_round_trips_through_disk() {
+        let dir = TempDir::new().unwrap();
+        let mut source = SessionManager::create(dir.path()).unwrap();
+        source
+            .append_message(Message::User(UserMessage::new_text("hi")))
+            .unwrap();
+        let source_path = source.path().to_path_buf();
+
+        let target_dir = TempDir::new().unwrap();
+        let forked = SessionManager::fork_from(&source_path, target_dir.path()).unwrap();
+        let forked_path = forked.path().to_path_buf();
+
+        // Re-open from disk to confirm the fork was actually flushed.
+        let reloaded = SessionManager::open(&forked_path).unwrap();
+        assert_eq!(
+            reloaded.header().parent_session,
+            forked.header().parent_session
+        );
+        assert_eq!(reloaded.message_count(), 1);
+    }
+
+    #[test]
+    fn test_fork_from_missing_source_errs() {
+        let dir = TempDir::new().unwrap();
+        let bogus = dir.path().join("nope.jsonl");
+        let target = TempDir::new().unwrap();
+        match SessionManager::fork_from(&bogus, target.path()) {
+            Err(CodingAgentError::Session(msg)) => assert!(msg.contains("Cannot fork")),
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("expected Err for missing source"),
+        }
     }
 
     #[test]
