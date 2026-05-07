@@ -21,7 +21,8 @@ use hand_agent::types::{
     AgentTool, BeforeToolCallContext, BeforeToolCallResult, BoxFuture,
 };
 use hand_agent::{AgentEventSink, CancellationToken, agent_loop};
-use model::{Message, SimpleStreamOptions};
+use model::types::ImageContent;
+use model::{Message, SimpleStreamOptions, UserContentBlock};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -163,6 +164,19 @@ pub struct AgentSession {
     /// the start of every `run_bash` call so a stale `abort_bash` from
     /// before the call can't poison it.
     bash_cancel: Arc<Mutex<CancellationToken>>,
+    /// Queue of user messages submitted via the RPC `steer` command.
+    /// Drained by the `get_steering_messages` callback at mid-turn
+    /// boundaries inside an active agent loop. Held behind an
+    /// `Arc<Mutex<>>` so the RPC dispatcher can enqueue from another task
+    /// while `send_message` exclusively borrows `&mut self`. The
+    /// `steering_mode` field decides how many messages are dequeued per
+    /// turn (`OneAtATime` returns at most one; `All` returns the full
+    /// queue).
+    steering_queue: Arc<Mutex<Vec<Message>>>,
+    /// Queue of user messages submitted via the RPC `follow_up` command.
+    /// Drained by `get_follow_up_messages` at the end of each turn.
+    /// Mirrors `steering_queue` in shape and concurrency.
+    follow_up_queue: Arc<Mutex<Vec<Message>>>,
 }
 
 impl AgentSession {
@@ -255,6 +269,8 @@ impl AgentSession {
             is_compacting: false,
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
             bash_cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            steering_queue: Arc::new(Mutex::new(Vec::new())),
+            follow_up_queue: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -307,6 +323,8 @@ impl AgentSession {
             is_compacting: false,
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
             bash_cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            steering_queue: Arc::new(Mutex::new(Vec::new())),
+            follow_up_queue: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -363,6 +381,31 @@ impl AgentSession {
         loop_config.after_tool_call = after_hook;
         loop_config.steering_mode = queue_mode_to_delivery(self.steering_mode);
         loop_config.follow_up_mode = queue_mode_to_delivery(self.follow_up_mode);
+
+        // Wire steering / follow-up queues into the agent loop. The queues
+        // live on `self` behind `Arc<Mutex<Vec<Message>>>`; clone the Arcs
+        // into the callbacks so the dispatcher can enqueue concurrently
+        // while `send_message` exclusively borrows `&mut self`.
+        //
+        // The queue mode is snapshotted by value here. Within a single
+        // `send_message`, `set_steering_mode` is deferred by the dispatcher
+        // (it requires `&mut self`), so the snapshot is effectively the
+        // live mode for every drain in this turn.
+        let steering_queue = self.steering_queue.clone();
+        let steering_mode = self.steering_mode;
+        loop_config.get_steering_messages = Some(Arc::new(move || -> BoxFuture<'static, Vec<Message>> {
+            let queue = steering_queue.clone();
+            let mode = steering_mode;
+            Box::pin(async move { drain_queue(&queue, mode) })
+        }));
+
+        let follow_up_queue = self.follow_up_queue.clone();
+        let follow_up_mode = self.follow_up_mode;
+        loop_config.get_follow_up_messages = Some(Arc::new(move || -> BoxFuture<'static, Vec<Message>> {
+            let queue = follow_up_queue.clone();
+            let mode = follow_up_mode;
+            Box::pin(async move { drain_queue(&queue, mode) })
+        }));
 
         // Create event sink for the agent loop. Replace the session's
         // cancellation token with a fresh one so a previous turn's
@@ -487,6 +530,11 @@ impl AgentSession {
         // from a cancelled prior turn.
         self.is_streaming = false;
         self.is_compacting = false;
+        // Drop any queued steer/follow-up messages — they belonged to
+        // the prior conversation and would leak into the fresh one on
+        // the next turn boundary.
+        self.steering_queue.lock().unwrap().clear();
+        self.follow_up_queue.lock().unwrap().clear();
         Ok(())
     }
 
@@ -595,6 +643,54 @@ impl AgentSession {
     /// Get message count.
     pub fn message_count(&self) -> usize {
         self.session_manager.message_count()
+    }
+
+    /// Push a user message onto the steering queue. Returns the new
+    /// queue length (post-push). Wakes nothing — the agent loop
+    /// observes the queue at the next turn boundary inside the active
+    /// prompt run via the `get_steering_messages` callback. If no prompt
+    /// is in flight the message just waits there until the next
+    /// `send_message` starts (it will be drained as soon as the loop
+    /// polls `get_steering_messages`).
+    pub fn enqueue_steer(&self, text: &str, images: Option<Vec<ImageContent>>) -> usize {
+        let msg = Message::User(build_user_message(text, images));
+        let mut queue = self.steering_queue.lock().unwrap();
+        queue.push(msg);
+        queue.len()
+    }
+
+    /// Push a user message onto the follow-up queue. Returns the new
+    /// queue length. Picked up at the end of the current turn (or the
+    /// start of the next idle turn) via `get_follow_up_messages`.
+    pub fn enqueue_follow_up(&self, text: &str, images: Option<Vec<ImageContent>>) -> usize {
+        let msg = Message::User(build_user_message(text, images));
+        let mut queue = self.follow_up_queue.lock().unwrap();
+        queue.push(msg);
+        queue.len()
+    }
+
+    /// Total queued user messages across the steer + follow-up queues.
+    /// Surfaced via `get_state.pending_message_count`.
+    pub fn pending_message_count(&self) -> u64 {
+        let steer = self.steering_queue.lock().unwrap().len() as u64;
+        let follow_up = self.follow_up_queue.lock().unwrap().len() as u64;
+        steer + follow_up
+    }
+
+    /// Shared handle to the steering queue. Used by the RPC dispatcher
+    /// to enqueue messages while `send_message` exclusively borrows
+    /// `&mut self`. The dispatcher must clone this handle BEFORE driving
+    /// `send_message` — once `&mut self` is taken, the session itself is
+    /// unreachable for the duration of the call.
+    pub fn steering_queue_handle(&self) -> Arc<Mutex<Vec<Message>>> {
+        self.steering_queue.clone()
+    }
+
+    /// Shared handle to the follow-up queue. See
+    /// [`Self::steering_queue_handle`] for the same dispatcher-side
+    /// concurrency caveat.
+    pub fn follow_up_queue_handle(&self) -> Arc<Mutex<Vec<Message>>> {
+        self.follow_up_queue.clone()
     }
 
     /// Steering queue mode (mid-turn user-message delivery policy).
@@ -889,6 +985,51 @@ impl AgentSession {
         for listener in listeners {
             listener(event.clone());
         }
+    }
+}
+
+/// Build a [`model::UserMessage`] for the steer / follow-up queues.
+///
+/// `pub(crate)` so the RPC dispatcher can construct messages directly
+/// when enqueuing into a session's queue handle while `send_message`
+/// holds `&mut self` (see `rpc/server.rs` Prompt arm).
+///
+/// Mirrors [`AgentSession::send_message`]'s prompt path: when no images
+/// are attached, use [`UserMessage::new_text`] for the cheap text-only
+/// shape; otherwise emit a `Blocks` message with the text first and the
+/// images appended. An empty text + non-empty images list still produces
+/// a valid `Blocks` payload (the leading text block is always present
+/// even when empty, matching the wire shape the model sees for
+/// multi-modal user turns).
+pub(crate) fn build_user_message(text: &str, images: Option<Vec<ImageContent>>) -> model::UserMessage {
+    match images {
+        Some(images) if !images.is_empty() => {
+            let mut blocks: Vec<UserContentBlock> = Vec::with_capacity(images.len() + 1);
+            blocks.push(UserContentBlock::Text(model::TextContent::new(text)));
+            for img in images {
+                blocks.push(UserContentBlock::Image(img));
+            }
+            model::UserMessage::new_blocks(blocks)
+        }
+        _ => model::UserMessage::new_text(text),
+    }
+}
+
+/// Drain the queue according to the requested delivery mode.
+///
+/// `OneAtATime` removes and returns the first message; `All` returns the
+/// full queue and leaves it empty. Anything not returned stays in the
+/// queue for the next drain. Holding the lock across the read+write is
+/// safe because the closure body never awaits between `lock()` and
+/// release — the drained messages are owned, not lock-borrowed.
+fn drain_queue(queue: &Mutex<Vec<Message>>, mode: QueueMode) -> Vec<Message> {
+    let mut q = queue.lock().unwrap();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    match mode {
+        QueueMode::All => std::mem::take(&mut *q),
+        QueueMode::OneAtATime => vec![q.remove(0)],
     }
 }
 

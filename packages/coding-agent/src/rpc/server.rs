@@ -24,7 +24,7 @@
 //! subscribe callback, which forwards through an `mpsc` channel to a
 //! separate writer task.
 //!
-//! `bash` is the one exception: it races [`AgentSession::run_bash`]
+//! `bash` is one exception: it races [`AgentSession::run_bash`]
 //! against further input frames so an `abort_bash` arriving mid-flight
 //! can cancel the executor (see [`AgentSession::abort_bash`]).
 //! `AbortBash` is dispatched inline during the race — it only borrows
@@ -33,14 +33,24 @@
 //! arriving during a `bash` are deferred and processed through the
 //! normal path once `run_bash` returns.
 //!
+//! `prompt` is the second exception: while `send_message` is in flight
+//! (which exclusively borrows `&mut session`), the dispatcher continues
+//! to read further frames and services `steer` / `follow_up` inline by
+//! pushing onto queue handles cloned from the session BEFORE the prompt
+//! starts. The agent loop drains those queues at the next turn boundary
+//! via the `get_steering_messages` / `get_follow_up_messages` callbacks
+//! wired in [`AgentSession::send_message`]. Everything else (including
+//! `abort` / `get_state`) is deferred until the prompt completes — wiring
+//! those inline requires `Arc`-based shared state for cancel + state
+//! reads, which is a follow-up.
+//!
 //! The TS port (`pi-coding-agent/src/modes/rpc/rpc-mode.ts`) is fully
 //! multitasking: it parks the in-flight prompt as a Promise and
-//! continues reading commands so that `abort`/`get_state`/etc. can
-//! interrupt a turn. Porting that for `prompt` requires a thread-safe
-//! abort path on [`AgentSession`] which we do not have in Phase 1 —
-//! see brief.
+//! continues reading commands so every command type can interrupt a
+//! turn. The Rust port is incrementally getting there, one in-flight
+//! command-class at a time.
 
-use crate::core::agent_session::{AgentSession, AgentSessionEvent};
+use crate::core::agent_session::{AgentSession, AgentSessionEvent, build_user_message};
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
 use crate::rpc::types::{
     BashRpcData, CommandsData, ExportHtmlData, ForkData, ForkMessagesData, LastAssistantTextData,
@@ -49,6 +59,7 @@ use crate::rpc::types::{
 };
 use futures::StreamExt;
 use hand_agent::types::AgentEvent;
+use model::Message;
 use model::types::ThinkingLevel;
 use serde::Serialize;
 use std::io;
@@ -318,6 +329,114 @@ where
                     break;
                 }
             }
+            // Special case: `prompt` drives `send_message`, which holds
+            // `&mut session` for the duration of the agent loop turn. To
+            // service `steer` / `follow_up` arriving mid-stream we clone
+            // the session's queue handles BEFORE starting the prompt and
+            // push to them inline during the race. Everything else is
+            // deferred (no `&self` access path is available while
+            // `send_message` borrows mutably). See module docs.
+            Ok(RpcCommand::Prompt { id, message, .. }) => {
+                let steering_q = session.steering_queue_handle();
+                let follow_up_q = session.follow_up_queue_handle();
+                let mut io_fatal: Option<io::Error> = None;
+                let result = {
+                    let prompt_fut = session.send_message(&message);
+                    tokio::pin!(prompt_fut);
+                    loop {
+                        tokio::select! {
+                            biased;
+                            res = &mut prompt_fut => break res,
+                            next = stream.next() => match next {
+                                Some(Ok(RpcCommand::Steer { id: sid, message: smsg, images })) => {
+                                    let user = Message::User(build_user_message(&smsg, images));
+                                    steering_q.lock().unwrap().push(user);
+                                    let resp = RpcResponse::new(
+                                        sid,
+                                        RpcResponseBody::Steer(RpcResultEmpty::ok()),
+                                    );
+                                    if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                        break prompt_fut.await;
+                                    }
+                                }
+                                Some(Ok(RpcCommand::FollowUp { id: fid, message: fmsg, images })) => {
+                                    let user = Message::User(build_user_message(&fmsg, images));
+                                    follow_up_q.lock().unwrap().push(user);
+                                    let resp = RpcResponse::new(
+                                        fid,
+                                        RpcResponseBody::FollowUp(RpcResultEmpty::ok()),
+                                    );
+                                    if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                        break prompt_fut.await;
+                                    }
+                                }
+                                Some(Ok(other)) => {
+                                    // Defer everything else until the
+                                    // prompt completes — `&mut session`
+                                    // is unreachable from here.
+                                    deferred.insert(0, other);
+                                }
+                                Some(Err(JsonlReadError::Parse { source, .. })) => {
+                                    let resp = RpcResponse::new(
+                                        None,
+                                        RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
+                                            "invalid JSON: {source}"
+                                        ))),
+                                    );
+                                    if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                        break prompt_fut.await;
+                                    }
+                                }
+                                Some(Err(JsonlReadError::Utf8(e))) => {
+                                    let resp = RpcResponse::new(
+                                        None,
+                                        RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
+                                            "invalid UTF-8 in command frame: {e}"
+                                        ))),
+                                    );
+                                    if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                        break prompt_fut.await;
+                                    }
+                                }
+                                Some(Err(JsonlReadError::Io(e))) => {
+                                    // Reader I/O is fatal. Finish the
+                                    // prompt future first so the
+                                    // borrow on `session` ends before
+                                    // we drop it below.
+                                    io_fatal = Some(e);
+                                    break prompt_fut.await;
+                                }
+                                None => {
+                                    // EOF: still deliver the prompt
+                                    // response, then exit normally.
+                                    break prompt_fut.await;
+                                }
+                            }
+                        }
+                    }
+                };
+                if let Some(e) = io_fatal {
+                    drop(tx);
+                    drop(session);
+                    let _ = writer_task.await;
+                    return Err(RpcServerError::Io(e));
+                }
+                let response = match result {
+                    Ok(_) => RpcResponse::new(
+                        id,
+                        RpcResponseBody::Prompt(RpcResultEmpty::ok()),
+                    ),
+                    Err(e) => RpcResponse::new(
+                        id,
+                        RpcResponseBody::Prompt(RpcResultEmpty::err(format!(
+                            "prompt failed: {e}"
+                        ))),
+                    ),
+                };
+                if tx.send(Outbound::Response(Box::new(response))).is_err() {
+                    break;
+                }
+            }
             Ok(cmd) => {
                 let response = handle_command(&mut session, cmd).await;
                 if tx.send(Outbound::Response(Box::new(response))).is_err() {
@@ -486,8 +605,20 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             let _ = session.abort();
             RpcResponse::new(id, RpcResponseBody::Abort(RpcResultEmpty::ok()))
         }
-        RpcCommand::Steer { id, .. } => not_impl_empty(id, RpcResponseBody::Steer),
-        RpcCommand::FollowUp { id, .. } => not_impl_empty(id, RpcResponseBody::FollowUp),
+        RpcCommand::Steer { id, message, images } => {
+            // Enqueue + ack regardless of whether a prompt is in flight.
+            // The agent loop drains the queue at the next turn boundary
+            // via `get_steering_messages`; if no prompt is running the
+            // message just waits there until the next `send_message`.
+            session.enqueue_steer(&message, images);
+            RpcResponse::new(id, RpcResponseBody::Steer(RpcResultEmpty::ok()))
+        }
+        RpcCommand::FollowUp { id, message, images } => {
+            // Same enqueue-and-ack semantics as Steer; the follow-up
+            // queue is drained between turns by `get_follow_up_messages`.
+            session.enqueue_follow_up(&message, images);
+            RpcResponse::new(id, RpcResponseBody::FollowUp(RpcResultEmpty::ok()))
+        }
         RpcCommand::SetModel {
             id,
             provider,
@@ -850,13 +981,6 @@ fn builtin_command_specs() -> Vec<RpcSlashCommand> {
 /// so the round-trip tests can assert against it.
 const NOT_IMPLEMENTED: &str = "not implemented in Phase 1";
 
-fn not_impl_empty(
-    id: Option<String>,
-    wrap: impl FnOnce(RpcResultEmpty) -> RpcResponseBody,
-) -> RpcResponse {
-    RpcResponse::new(id, wrap(RpcResultEmpty::err(NOT_IMPLEMENTED)))
-}
-
 /// Helper for variants whose Failure arm is `RpcResultWithData<T>::Failure`.
 /// `T` is inferred from the wrapping variant; the closure picks one.
 fn not_impl_data<T>(
@@ -868,9 +992,9 @@ fn not_impl_data<T>(
 
 /// Build a snapshot of the session for `get_state`.
 ///
-/// Pulls runtime state directly from `AgentSession` accessors. The only
-/// remaining placeholder is `pending_message_count`: the steer / follow-up
-/// queue is not yet ported, so we report 0 until the queue lands.
+/// Pulls runtime state directly from `AgentSession` accessors.
+/// `pending_message_count` is the sum of the steer + follow-up queue
+/// lengths.
 fn build_session_state(session: &AgentSession) -> RpcSessionState {
     let model_value = serde_json::to_value(session.model()).ok();
     let thinking_level = session
@@ -892,7 +1016,7 @@ fn build_session_state(session: &AgentSession) -> RpcSessionState {
         session_name: session.label().map(str::to_string),
         auto_compaction_enabled: session.auto_compaction_enabled(),
         message_count: session.message_count() as u64,
-        pending_message_count: 0,
+        pending_message_count: session.pending_message_count(),
     }
 }
 
@@ -1189,11 +1313,14 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_scope_variant_returns_not_implemented_error() {
+        // `clone` is still out-of-scope and routes through `not_impl_data`.
+        // (Previously this test pinned `steer` as "not implemented"; that
+        // moved into the dispatcher proper in T-A2.)
         let (mut in_tx, out_rx, handle) =
             spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
-            .write_all(b"{\"type\":\"steer\",\"message\":\"x\",\"id\":\"5\"}\n")
+            .write_all(b"{\"type\":\"clone\",\"id\":\"5\"}\n")
             .await
             .unwrap();
         drop(in_tx);
@@ -1201,7 +1328,7 @@ mod tests {
         let frames = drain_frames(out_rx).await;
         assert_eq!(frames.len(), 1);
         let resp = &frames[0];
-        assert_eq!(resp["command"], "steer");
+        assert_eq!(resp["command"], "clone");
         assert_eq!(resp["success"], false);
         assert_eq!(resp["error"], "not implemented in Phase 1");
 
@@ -1661,5 +1788,192 @@ mod tests {
         );
 
         handle.await.unwrap().unwrap();
+    }
+
+    /// `steer` sent with no prompt in flight enqueues + acks immediately,
+    /// and the queued message shows up in `get_state.pending_message_count`.
+    #[tokio::test]
+    async fn steer_enqueues_and_acks() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                br#"{"type":"steer","id":"1","message":"hi"}
+{"type":"get_state","id":"2"}
+"#,
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 2, "frames: {frames:#?}");
+        assert_eq!(frames[0]["command"], "steer");
+        assert_eq!(frames[0]["success"], true);
+        assert_eq!(frames[0]["id"], "1");
+        assert_eq!(frames[1]["command"], "get_state");
+        assert_eq!(frames[1]["data"]["pendingMessageCount"], 1);
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `follow_up` sent with no prompt in flight enqueues + acks
+    /// immediately, with the same `pending_message_count` round-trip as
+    /// `steer`.
+    #[tokio::test]
+    async fn follow_up_enqueues_and_acks() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                br#"{"type":"follow_up","id":"1","message":"later"}
+{"type":"get_state","id":"2"}
+"#,
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 2, "frames: {frames:#?}");
+        assert_eq!(frames[0]["command"], "follow_up");
+        assert_eq!(frames[0]["success"], true);
+        assert_eq!(frames[0]["id"], "1");
+        assert_eq!(frames[1]["data"]["pendingMessageCount"], 1);
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `pending_message_count` reports the SUM of the two queues, not just
+    /// one of them. Pin the contract so a future regression that reads
+    /// only `steering_queue` (or only `follow_up_queue`) is caught.
+    #[tokio::test]
+    async fn pending_message_count_sums_both_queues() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                br#"{"type":"steer","id":"1","message":"a"}
+{"type":"follow_up","id":"2","message":"b"}
+{"type":"get_state","id":"3"}
+"#,
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 3, "frames: {frames:#?}");
+        assert_eq!(frames[2]["data"]["pendingMessageCount"], 2);
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// While a long-running `prompt` is in flight, a `steer` frame is
+    /// dispatched inline by the dispatcher loop and its response arrives
+    /// BEFORE the prompt's. Wall-clock timeout guards against
+    /// regressions: a deferred `steer` would only surface after the
+    /// pending-forever provider returned, which it never does.
+    #[tokio::test]
+    async fn steer_during_prompt_is_acked_immediately() {
+        // Provider that pends forever inside `stream` so the agent loop
+        // never returns naturally. The dispatcher's mid-flight
+        // interrupt is the only way the test can finish.
+        struct PendingForeverProvider;
+        impl ApiProvider for PendingForeverProvider {
+            fn stream(
+                &self,
+                _model: Model,
+                _context: Context,
+                _options: Option<StreamOptions>,
+            ) -> AssistantMessageEventStream<'static> {
+                Box::pin(async_stream::stream! {
+                    let () = std::future::pending().await;
+                    yield AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        message: assistant_text_message("unreachable"),
+                    };
+                })
+            }
+            fn stream_simple(
+                &self,
+                model: Model,
+                context: Context,
+                options: Option<SimpleStreamOptions>,
+            ) -> AssistantMessageEventStream<'static> {
+                self.stream(model, context, options.map(|o| o.base))
+            }
+        }
+
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PendingForeverProvider),
+            Some("test".into()),
+        );
+        let session = AgentSession::in_memory_with_client(test_model(), Vec::new(), client);
+
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session).await;
+
+        in_tx
+            .write_all(b"{\"type\":\"prompt\",\"id\":\"1\",\"message\":\"hello\"}\n")
+            .await
+            .unwrap();
+        // Give the dispatcher a moment to enter `send_message` before
+        // the steer arrives — otherwise the steer races with the
+        // prompt's own initial steering-queue poll.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        in_tx
+            .write_all(b"{\"type\":\"steer\",\"id\":\"2\",\"message\":\"mid-stream\"}\n")
+            .await
+            .unwrap();
+        // Give the dispatcher a chance to ack the steer, then close
+        // the input. Closing alone is not enough to unblock the
+        // pending provider — we abort the dispatcher task via the
+        // wall-clock timeout below.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(in_tx);
+
+        // The steer ack must arrive within the budget. The prompt
+        // response will never arrive (pending forever), so we time
+        // out the drain and abort the dispatcher.
+        let frames = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            async {
+                use tokio::io::AsyncReadExt;
+                let mut bytes = Vec::new();
+                let mut rx = out_rx;
+                // Read until we have at least one frame for "steer";
+                // the prompt frame will never come.
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = rx.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 { break; }
+                    bytes.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&bytes).contains("\"command\":\"steer\"") {
+                        break;
+                    }
+                }
+                bytes
+            },
+        )
+        .await
+        .expect("steer ack must arrive within 5s during in-flight prompt");
+
+        let text = String::from_utf8_lossy(&frames);
+        assert!(
+            text.contains("\"command\":\"steer\""),
+            "expected steer ack frame, got: {text}"
+        );
+        assert!(
+            text.contains("\"id\":\"2\""),
+            "expected steer ack to carry id=2, got: {text}"
+        );
+
+        // Clean up the dispatcher task — the prompt is hung forever.
+        handle.abort();
     }
 }
