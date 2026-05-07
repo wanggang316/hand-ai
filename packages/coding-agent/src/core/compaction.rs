@@ -39,15 +39,22 @@ pub fn estimate_context_tokens(messages: &[Message]) -> usize {
 }
 
 /// Check whether compaction should be triggered.
+///
+/// Compaction fires when the estimated context usage crosses
+/// `threshold * max_context_tokens`. Both `threshold` and `max_context_tokens`
+/// are read from the merged settings; the explicit `max_context_tokens`
+/// argument lets callers override the model-window assumption (e.g. when the
+/// active model is known to have a smaller window).
 pub fn should_compact(
     context_tokens: usize,
     max_context_tokens: usize,
     settings: &CompactionSettings,
 ) -> bool {
-    if !settings.enabled {
+    if !settings.enabled() {
         return false;
     }
-    context_tokens + settings.reserve_tokens as usize > max_context_tokens
+    let trigger = (max_context_tokens as f32 * settings.threshold()) as usize;
+    context_tokens >= trigger
 }
 
 /// Build a compaction summary prompt from messages.
@@ -200,7 +207,7 @@ mod tests {
     #[test]
     fn test_should_compact() {
         let settings = CompactionSettings::default();
-        // With default reserve_tokens = 16384
+        // With default threshold = 0.8, trigger at 160_000 of 200_000.
         assert!(should_compact(190_000, 200_000, &settings));
         assert!(!should_compact(100_000, 200_000, &settings));
     }
@@ -208,7 +215,7 @@ mod tests {
     #[test]
     fn test_should_compact_disabled() {
         let settings = CompactionSettings {
-            enabled: false,
+            enabled: Some(false),
             ..Default::default()
         };
         assert!(!should_compact(999_999, 200_000, &settings));

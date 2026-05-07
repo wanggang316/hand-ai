@@ -357,21 +357,25 @@ async fn handle_slash_command(
         "/settings" => {
             let settings = session.settings();
             println!("Settings:");
-            println!("  Shell: {}", settings.shell_path());
+            match settings.shell_path() {
+                Some(p) => println!("  Shell: {}", p.display()),
+                None => println!("  Shell: <system default>"),
+            }
             let cs = settings.compaction_settings();
             println!(
-                "  Compaction: {} (reserve: {}k, keep: {}k)",
-                if cs.enabled { "enabled" } else { "disabled" },
-                cs.reserve_tokens / 1024,
-                cs.keep_recent_tokens / 1024,
+                "  Compaction: {} (threshold: {:.0}%, keep recent: {}k, max ctx: {}k)",
+                if cs.enabled() { "enabled" } else { "disabled" },
+                cs.threshold() * 100.0,
+                cs.keep_recent_tokens() / 1024,
+                cs.max_context_tokens() / 1024,
             );
             let rs = settings.retry_settings();
             println!(
-                "  Retry: {} (max: {}, delay: {}ms–{}ms)",
-                if rs.enabled { "enabled" } else { "disabled" },
-                rs.max_retries,
-                rs.base_delay_ms,
-                rs.max_delay_ms,
+                "  Retry: {} (max: {}, delay: {}ms-{}ms)",
+                if rs.enabled() { "enabled" } else { "disabled" },
+                rs.max_retries(),
+                rs.initial_delay_ms(),
+                rs.max_delay_ms(),
             );
         }
 

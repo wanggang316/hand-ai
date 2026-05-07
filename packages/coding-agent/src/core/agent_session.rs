@@ -136,7 +136,8 @@ impl AgentSession {
         user_dir: Option<&Path>,
         builtin_dir: Option<&Path>,
     ) -> Result<Self, CodingAgentError> {
-        let settings_manager = SettingsManager::new(&config.cwd);
+        let settings_manager = SettingsManager::from_cwd(&config.cwd)
+            .map_err(|e| CodingAgentError::Settings(e.to_string()))?;
         let client = model::Client::new();
 
         // Create or resume session
@@ -343,9 +344,7 @@ impl AgentSession {
     async fn maybe_compact(&mut self) -> Result<(), CodingAgentError> {
         let settings = self.settings_manager.compaction_settings();
         let context_tokens = compaction::estimate_context_tokens(&self.context.messages);
-
-        // Use a reasonable default for max context tokens
-        let max_context_tokens = 200_000;
+        let max_context_tokens = settings.max_context_tokens() as usize;
 
         if !compaction::should_compact(context_tokens, max_context_tokens, &settings) {
             return Ok(());
@@ -355,7 +354,7 @@ impl AgentSession {
 
         let (to_compact, _to_keep, _split_idx) = compaction::split_for_compaction(
             &self.context.messages,
-            settings.keep_recent_tokens as usize,
+            settings.keep_recent_tokens() as usize,
         );
 
         let file_ops = compaction::extract_file_operations(&to_compact);
@@ -427,7 +426,7 @@ impl AgentSession {
     pub async fn compact(&mut self) -> Result<bool, CodingAgentError> {
         let settings = self.settings_manager.compaction_settings();
         let context_tokens = compaction::estimate_context_tokens(&self.context.messages);
-        let max_context_tokens = 200_000;
+        let max_context_tokens = settings.max_context_tokens() as usize;
 
         if !compaction::should_compact(context_tokens, max_context_tokens, &settings) {
             return Ok(false);
