@@ -385,7 +385,24 @@ impl Agent {
         }
     }
 
-    /// Cancel the current run, if any. Subsequent runs use a fresh token.
+    /// Cancel the in-flight run, if any.
+    ///
+    /// # Semantics
+    ///
+    /// `abort` only cancels a run that is *currently executing*. Calling
+    /// `abort` between runs (when no `prompt`/`continue` is in flight) is
+    /// silently lost: the next run's [`start_run`] installs a fresh
+    /// cancellation token before any cancellable work begins.
+    ///
+    /// Cancellation surfaces in two places:
+    /// - `prompt()` and `continue()` return `Ok(_)` with the final assistant
+    ///   message's [`crate::types::StopReason`] set to `Aborted`. They do
+    ///   **not** return `Err(AgentError::Aborted)` — `Err` is reserved for
+    ///   transport / lifecycle errors. Callers that need to distinguish a
+    ///   normal completion from an aborted one should inspect
+    ///   `result.stop_reason`.
+    /// - In-flight tool futures racing on the same cancellation token are
+    ///   dropped via `tokio::select!`.
     pub fn abort(&self) {
         self.cancel.lock().unwrap().cancel();
     }
@@ -732,15 +749,28 @@ impl std::fmt::Debug for Agent {
 
 /// A cheap clone-able handle that can cancel the agent's in-flight run
 /// from any task or thread.
+///
+/// The handle holds an `Arc` to the agent's shared cancellation cell. Each
+/// [`Agent::start_run`] replaces the cell's contents with a fresh
+/// [`CancellationToken`], so a handle created before run N still cancels
+/// run N+1 if that run is what's in flight when [`Self::abort`] is called.
+///
+/// # Threading model
+///
+/// `Agent` itself is held by `&mut self` in [`Agent::prompt`] /
+/// [`Agent::r#continue`], so concurrent prompts on the same agent require
+/// external synchronization. `AbortHandle`, [`Agent::steer`],
+/// [`Agent::follow_up`], and [`Agent::subscribe`] all take `&self` and are
+/// safe to call from any task or thread while a prompt is running.
 #[derive(Clone)]
 pub struct AbortHandle {
     cancel: Arc<Mutex<CancellationToken>>,
 }
 
 impl AbortHandle {
-    /// Cancel the run associated with the agent at the moment this handle was created
-    /// (or any later run that reused the same handle, since `start_run` mutates the
-    /// shared cell rather than replacing the whole `Arc`).
+    /// Cancel the in-flight run, if any. See [`Agent::abort`] for the full
+    /// semantics — the same caveats apply: between runs, `abort` is silently
+    /// lost because [`Agent::start_run`] installs a fresh token.
     pub fn abort(&self) {
         self.cancel.lock().unwrap().cancel();
     }
