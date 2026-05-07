@@ -1,18 +1,13 @@
 //! Edit tool — find-and-replace edits with diff output.
 
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use similar::TextDiff;
 use std::path::{Path, PathBuf};
 
 /// Create the edit tool.
 pub fn create_edit_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
-        let cwd = cwd.clone();
-        Box::pin(async move { execute_edit(&cwd, args) })
-    });
-
-    AgentTool::new(
+    AgentTool::simple(
         "edit",
         "Edit a file by replacing an exact string match. The old_string must appear \
          exactly once in the file. Returns a unified diff of the changes.",
@@ -39,7 +34,10 @@ pub fn create_edit_tool(cwd: PathBuf) -> AgentTool {
             "required": ["file_path", "old_string", "new_string"]
         }),
         "Edit",
-        execute,
+        move |_tool_call_id, args| {
+            let cwd = cwd.clone();
+            async move { execute_edit(&cwd, args) }
+        },
     )
 }
 
@@ -145,7 +143,7 @@ mod tests {
         std::fs::write(&file, "hello world").unwrap();
 
         let result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "world",
@@ -165,7 +163,7 @@ mod tests {
         std::fs::write(&file, "hello").unwrap();
 
         let result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "nonexistent",
@@ -183,7 +181,7 @@ mod tests {
         std::fs::write(&file, "aaa bbb aaa").unwrap();
 
         let result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "aaa",
@@ -201,7 +199,7 @@ mod tests {
         std::fs::write(&file, "aaa bbb aaa").unwrap();
 
         let _result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "aaa",
@@ -230,7 +228,7 @@ mod tests {
         std::fs::write(&file, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
 
         let _result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "    println!(\"hello\");",

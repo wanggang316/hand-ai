@@ -1,6 +1,6 @@
 //! Ls tool — list directory contents.
 
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -9,12 +9,7 @@ const DEFAULT_MAX_ENTRIES: usize = 500;
 
 /// Create the ls tool.
 pub fn create_ls_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
-        let cwd = cwd.clone();
-        Box::pin(async move { execute_ls(&cwd, args) })
-    });
-
-    AgentTool::new(
+    AgentTool::simple(
         "ls",
         "List the contents of a directory. Shows file names, types (file/dir), \
          and sizes. Use this instead of running ls via bash.",
@@ -32,7 +27,10 @@ pub fn create_ls_tool(cwd: PathBuf) -> AgentTool {
             }
         }),
         "Ls",
-        execute,
+        move |_tool_call_id, args| {
+            let cwd = cwd.clone();
+            async move { execute_ls(&cwd, args) }
+        },
     )
 }
 
@@ -135,7 +133,7 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
         std::fs::create_dir(dir.path().join("subdir")).unwrap();
 
-        let result = execute_ls(&dir.path().to_path_buf(), json!({}));
+        let result = execute_ls(dir.path(), json!({}));
         let text = get_text(&result);
         assert!(text.contains("subdir/"));
         assert!(text.contains("a.txt"));
@@ -144,7 +142,7 @@ mod tests {
     #[test]
     fn test_ls_empty_dir() {
         let dir = TempDir::new().unwrap();
-        let result = execute_ls(&dir.path().to_path_buf(), json!({}));
+        let result = execute_ls(dir.path(), json!({}));
         let text = get_text(&result);
         assert!(text.contains("empty directory"));
     }
@@ -152,10 +150,7 @@ mod tests {
     #[test]
     fn test_ls_nonexistent() {
         let dir = TempDir::new().unwrap();
-        let result = execute_ls(
-            &dir.path().to_path_buf(),
-            json!({"path": "/nonexistent_dir_xyz"}),
-        );
+        let result = execute_ls(dir.path(), json!({"path": "/nonexistent_dir_xyz"}));
         let text = get_text(&result);
         assert!(text.contains("Failed to read directory"));
     }
@@ -166,7 +161,7 @@ mod tests {
         std::fs::write(dir.path().join("z_file.txt"), "").unwrap();
         std::fs::create_dir(dir.path().join("a_dir")).unwrap();
 
-        let result = execute_ls(&dir.path().to_path_buf(), json!({}));
+        let result = execute_ls(dir.path(), json!({}));
         let text = get_text(&result);
         let dir_pos = text.find("a_dir/").unwrap();
         let file_pos = text.find("z_file.txt").unwrap();

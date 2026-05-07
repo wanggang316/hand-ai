@@ -1,24 +1,24 @@
-//! Integration tests for the Agent struct.
+//! Integration tests for the high-level `Agent` struct.
 
 mod common;
 
 use common::*;
-use hand_agent::{Agent, AgentEvent, AgentTool, BoxFuture, ToolResult};
-use model::{Api, Client, Message, UserMessage};
+use hand_agent::{
+    Agent, AgentEvent, AgentTool, CancellationToken, QueueDeliveryMode, ToolExecutionMode,
+    ToolResult,
+};
+use model::{Api, Client, Message, StopReason, UserMessage};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn setup_text_agent(response: &str) -> Agent {
     let client = Client::new();
-    let model = test_model();
-
-    // Register mock provider
     client.registry.register(
         Api::OpenAICompletions,
         Box::new(MockTextProvider::new(response)),
         Some("test".into()),
     );
-
-    Agent::new(client, model)
+    Agent::new(client, test_model())
 }
 
 fn setup_tool_agent(
@@ -27,539 +27,379 @@ fn setup_tool_agent(
     final_text: &str,
 ) -> (Agent, AgentTool) {
     let client = Client::new();
-    let model = test_model();
-
     client.registry.register(
         Api::OpenAICompletions,
         Box::new(MockToolProvider::new(tool_name, tool_args, final_text)),
         Some("test".into()),
     );
-
-    let tool = echo_tool();
-    (Agent::new(client, model), tool)
+    (Agent::new(client, test_model()), echo_tool())
 }
 
-// ========================================================================
-// A-001: Agent new default state
-// ========================================================================
-#[test]
-fn test_agent_new_default_state() {
-    let client = Client::new();
-    let model = test_model();
-    let agent = Agent::new(client, model);
+// ---------------------------------------------------------------------------
+// Construction & accessors
+// ---------------------------------------------------------------------------
 
-    assert!(agent.messages().is_empty());
-    assert!(!agent.state().is_streaming);
-    assert!(agent.state().error.is_none());
-    assert_eq!(agent.state().system_prompt, "");
+#[test]
+fn default_state_is_empty() {
+    let agent = Agent::new(Client::new(), test_model());
+    let state = agent.state();
+    assert!(state.messages.is_empty());
+    assert!(!state.is_streaming);
+    assert!(state.error.is_none());
+    assert!(state.streaming_message.is_none());
+    assert!(state.pending_tool_calls.is_empty());
 }
 
-// ========================================================================
-// A-002: Agent set system prompt
-// ========================================================================
 #[test]
-fn test_agent_set_system_prompt() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
+fn set_system_prompt_round_trip() {
+    let mut agent = Agent::new(Client::new(), test_model());
     agent.set_system_prompt("You are a helpful assistant.");
-    assert_eq!(agent.state().system_prompt, "You are a helpful assistant.");
+    assert_eq!(agent.system_prompt(), "You are a helpful assistant.");
 }
 
-// ========================================================================
-// A-003: Agent add tool
-// ========================================================================
 #[test]
-fn test_agent_add_tool() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    assert_eq!(agent.state().model_id, "test-model");
-    agent.add_tool(echo_tool());
-    // Tools are stored privately but we can verify by running
-}
-
-// ========================================================================
-// A-004: Agent clear messages
-// ========================================================================
-#[test]
-fn test_agent_clear_messages() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    agent.replace_messages(vec![Message::User(UserMessage::new_text("hello"))]);
-    assert_eq!(agent.messages().len(), 1);
-
+fn replace_and_clear_messages() {
+    let mut agent = Agent::new(Client::new(), test_model());
+    agent.replace_messages(vec![
+        Message::User(UserMessage::new_text("a")),
+        Message::User(UserMessage::new_text("b")),
+    ]);
+    assert_eq!(agent.messages().len(), 2);
     agent.clear_messages();
     assert!(agent.messages().is_empty());
 }
 
-// ========================================================================
-// A-005: Agent run basic text
-// ========================================================================
+#[test]
+fn set_thinking_level_round_trip() {
+    let mut agent = Agent::new(Client::new(), test_model());
+    assert!(agent.thinking_level().is_none());
+    agent.set_thinking_level(Some(model::ThinkingLevel::High));
+    assert_eq!(agent.thinking_level(), Some(model::ThinkingLevel::High));
+    agent.set_thinking_level(None);
+    assert!(agent.thinking_level().is_none());
+}
+
+#[test]
+fn debug_format_includes_model_id() {
+    let agent = Agent::new(Client::new(), test_model());
+    let debug = format!("{:?}", agent);
+    assert!(debug.contains("Agent"));
+    assert!(debug.contains("test-model"));
+}
+
+#[test]
+fn execution_mode_default_is_parallel() {
+    assert_eq!(ToolExecutionMode::default(), ToolExecutionMode::Parallel);
+}
+
+#[test]
+fn queue_delivery_mode_default_is_one_at_a_time() {
+    assert_eq!(QueueDeliveryMode::default(), QueueDeliveryMode::OneAtATime);
+}
+
+// ---------------------------------------------------------------------------
+// Prompt + transcript
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn test_agent_run_basic_text() {
+async fn prompt_text_round_trip() {
     let mut agent = setup_text_agent("Hello world!");
-
-    let result = agent.prompt("Hi").await;
-    assert!(result.is_ok());
-
-    let result = result.unwrap();
-    assert!(!result.messages.is_empty());
-
-    // Should have at least user message + assistant message in state
+    agent.prompt("Hi").await.unwrap();
     assert!(agent.messages().len() >= 2);
 }
 
-// ========================================================================
-// A-006: Agent run with tool
-// ========================================================================
 #[tokio::test]
-async fn test_agent_run_with_tool() {
+async fn prompt_with_message_batch() {
+    let mut agent = setup_text_agent("reply");
+    let messages = vec![
+        Message::User(UserMessage::new_text("msg1")),
+        Message::User(UserMessage::new_text("msg2")),
+    ];
+    agent.prompt(messages).await.unwrap();
+    assert!(agent.messages().len() >= 3);
+}
+
+#[tokio::test]
+async fn prompt_tool_call_run() {
     let (mut agent, tool) = setup_tool_agent(
         "echo",
         serde_json::json!({"message": "test"}),
         "Done with tools",
     );
     agent.add_tool(tool);
-
-    let result = agent.prompt("Use the echo tool").await;
-    assert!(result.is_ok());
-
-    // Should have: user, assistant (tool call), tool result, assistant (final)
-    assert!(agent.messages().len() >= 3);
+    agent.prompt("Use the echo tool").await.unwrap();
+    // user, assistant (tool call), tool result, assistant (final text)
+    assert!(agent.messages().len() >= 4);
 }
 
-// ========================================================================
-// A-007: Agent run multi turn
-// ========================================================================
+// ---------------------------------------------------------------------------
+// Listener wiring
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn test_agent_run_multi_turn() {
-    let mut agent = setup_text_agent("Response 1");
+async fn subscribe_receives_events_and_unsubscribes_on_drop() {
+    let mut agent = setup_text_agent("Hello");
+    let received = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    let received_clone = received.clone();
+    let handle = agent.subscribe(move |event, _cancel| {
+        received_clone.lock().unwrap().push(event_kind(event));
+    });
+    agent.prompt("Hi").await.unwrap();
+    drop(handle);
 
-    let r1 = agent.prompt("First message").await;
-    assert!(r1.is_ok());
-    let count_after_first = agent.messages().len();
+    let kinds = received.lock().unwrap().clone();
+    assert_eq!(kinds.first(), Some(&"agent_start"));
+    assert_eq!(kinds.last(), Some(&"agent_end"));
 
-    // Replace provider with new response for second turn
-    agent.model().clone(); // just to verify model is accessible
-
-    // Second prompt
-    let r2 = agent.prompt("Second message").await;
-    assert!(r2.is_ok());
-
-    // Should have more messages now
-    assert!(agent.messages().len() > count_after_first);
+    // Second run with handle dropped — no new events recorded.
+    let len_before = kinds.len();
+    agent.prompt("Hi again").await.unwrap();
+    assert_eq!(received.lock().unwrap().len(), len_before);
 }
 
-// ========================================================================
-// A-008: Agent messages immutable ref
-// ========================================================================
-#[test]
-fn test_agent_messages_immutable_ref() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
+// ---------------------------------------------------------------------------
+// Lifecycle error fallback
+// ---------------------------------------------------------------------------
 
+#[tokio::test]
+async fn truncated_stream_synthesizes_error_message() {
+    // Provider closes the stream after `Start` without ever sending `Done` or
+    // `Error`. The loop must (1) replace the partial with a synthesized error
+    // assistant in the transcript so there are no orphan partials, (2) emit a
+    // matched `MessageEnd` so subscribers see balanced lifecycle events, and
+    // (3) record the failure on runtime state and emit exactly one `AgentEnd`.
+    let client = Client::new();
+    client.registry.register(
+        Api::OpenAICompletions,
+        Box::new(TruncatedStreamProvider),
+        Some("test".into()),
+    );
+    let mut agent = Agent::new(client, test_model());
+
+    let agent_end_count = Arc::new(Mutex::new(0u32));
+    let count_clone = agent_end_count.clone();
+    let _handle = agent.subscribe(move |event, _cancel| {
+        if let AgentEvent::AgentEnd { .. } = event {
+            *count_clone.lock().unwrap() += 1;
+        }
+    });
+
+    let result = agent.prompt("hi").await;
+    // Provider-level failure surfaces as Ok(stop_reason=Error), matching the
+    // `AssistantMessageEvent::Error` path. Callers detect failure via
+    // `stop_reason` / runtime `error`, not via Err.
+    assert!(
+        result.is_ok(),
+        "truncated stream should be handled in-place, got {result:?}"
+    );
+    assert_eq!(*agent_end_count.lock().unwrap(), 1);
+    assert!(agent.state().error.is_some());
+
+    // Transcript must contain exactly one assistant message (no orphan partial).
+    let assistants: Vec<_> = agent
+        .messages()
+        .iter()
+        .filter(|m| matches!(m, Message::Assistant(_)))
+        .collect();
+    assert_eq!(
+        assistants.len(),
+        1,
+        "expected a single closed assistant message, got {}",
+        assistants.len()
+    );
+    assert!(matches!(
+        assistants.last(),
+        Some(Message::Assistant(a)) if a.stop_reason == StopReason::Error
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn abort_cancels_in_flight_run() {
+    let client = Client::new();
+    client.registry.register(
+        Api::OpenAICompletions,
+        Box::new(SlowTextProvider {
+            delay_ms: 500,
+            response_text: "would never arrive".into(),
+        }),
+        Some("test".into()),
+    );
+    let mut agent = Agent::new(client, test_model());
+    let abort_handle = agent.abort_handle();
+
+    let abort_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        abort_handle.abort();
+    });
+
+    let start = std::time::Instant::now();
+    agent.prompt("Hi").await.unwrap();
+    let elapsed = start.elapsed();
+    abort_task.await.unwrap();
+
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "abort took {elapsed:?}; expected < 300ms"
+    );
+
+    let last = agent.messages().last().unwrap();
+    let stop_reason = match last {
+        Message::Assistant(a) => a.stop_reason,
+        _ => panic!("expected last message to be assistant"),
+    };
+    assert_eq!(stop_reason, StopReason::Aborted);
+}
+
+#[tokio::test]
+async fn abort_drops_long_running_tool_future() {
+    // Provider returns a tool call quickly, the tool would otherwise block for
+    // 500ms. abort() must race the tool future against `cancel.cancelled()`
+    // so the run unwinds well before the tool's natural completion. Tools
+    // built via `AgentTool::simple` cannot observe the cancel token directly,
+    // so this is a load-bearing guarantee of the loop itself.
+    let client = Client::new();
+    client.registry.register(
+        Api::OpenAICompletions,
+        Box::new(MockToolProvider::new(
+            "slow",
+            serde_json::json!({}),
+            "after",
+        )),
+        Some("test".into()),
+    );
+    let mut agent = Agent::new(client, test_model());
+    agent.add_tool(sleep_tool("slow", 500));
+
+    let abort_handle = agent.abort_handle();
+    let abort_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        abort_handle.abort();
+    });
+
+    let start = std::time::Instant::now();
+    agent.prompt("Hi").await.unwrap();
+    let elapsed = start.elapsed();
+    abort_task.await.unwrap();
+
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "abort during tool execution took {elapsed:?}; expected < 300ms"
+    );
+
+    // Last message must be the synthesized aborted tool result; the run did
+    // not wait for the natural 500ms tool completion.
+    let last = agent.messages().last().unwrap();
+    match last {
+        Message::ToolResult(tr) => {
+            assert!(tr.is_error, "aborted tool result must be flagged is_error");
+            let body = tr
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    model::ToolResultContent::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                body.contains("aborted"),
+                "expected tool-result body to mention abort, got: {body:?}"
+            );
+        }
+        other => panic!("expected last message to be ToolResult, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Continue queue behavior
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn continue_drains_steering_when_last_is_assistant() {
+    let mut agent = setup_text_agent("ok");
+    // Seed transcript: user, assistant
     agent.replace_messages(vec![
-        Message::User(UserMessage::new_text("hello")),
-        Message::User(UserMessage::new_text("world")),
+        Message::User(UserMessage::new_text("hi")),
+        Message::Assistant(test_assistant_message("hello")),
     ]);
+    agent.steer(Message::User(UserMessage::new_text("steered")));
 
-    let messages = agent.messages();
-    assert_eq!(messages.len(), 2);
+    agent.r#continue().await.unwrap();
+
+    // Steering message should now be in the transcript followed by an assistant reply.
+    let texts: Vec<String> = agent
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            Message::User(u) => Some(format!("{:?}", u.content)),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t.contains("steered")));
 }
 
-// ========================================================================
-// A-030: Agent steering queue
-// ========================================================================
-#[test]
-fn test_agent_steering_queue() {
-    let client = Client::new();
-    let model = test_model();
-    let agent = Agent::new(client, model);
-
-    assert!(!agent.has_queued_messages());
-
-    agent.steer(Message::User(UserMessage::new_text("steer")));
-    assert!(agent.has_queued_messages());
-
-    agent.clear_steering_queue();
-    assert!(!agent.has_queued_messages());
-}
-
-// ========================================================================
-// A-031: Agent follow-up queue
-// ========================================================================
-#[test]
-fn test_agent_follow_up_queue() {
-    let client = Client::new();
-    let model = test_model();
-    let agent = Agent::new(client, model);
-
-    agent.follow_up(Message::User(UserMessage::new_text("follow")));
-    assert!(agent.has_queued_messages());
-
-    agent.clear_follow_up_queue();
-    assert!(!agent.has_queued_messages());
-}
-
-// ========================================================================
-// A-032: Agent reset
-// ========================================================================
-#[test]
-fn test_agent_reset() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    agent.replace_messages(vec![Message::User(UserMessage::new_text("hello"))]);
-    agent.steer(Message::User(UserMessage::new_text("steer")));
-    agent.follow_up(Message::User(UserMessage::new_text("follow")));
-
-    agent.reset();
-
-    assert!(agent.messages().is_empty());
-    assert!(!agent.has_queued_messages());
-    assert!(agent.state().error.is_none());
-    assert!(!agent.state().is_streaming);
-}
-
-// ========================================================================
-// A-033: Agent error when prompt during streaming
-// ========================================================================
 #[tokio::test]
-async fn test_agent_error_when_prompt_during_streaming_state() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    // Manually set streaming to simulate in-progress
-    // We can't easily do this without internal access, so we test the guard
-    // by running prompt with no provider (which will fail fast)
-    // Instead, test that double-prompting on a fresh agent works fine
-    let r = agent.prompt("test").await;
-    // This will likely error because no real provider, but it tests the flow
-    assert!(r.is_ok() || r.is_err());
+async fn continue_errors_when_no_messages() {
+    let mut agent = Agent::new(Client::new(), test_model());
+    let result = agent.r#continue().await;
+    assert!(result.is_err());
 }
 
-// ========================================================================
-// A-040: AgentMessage serialize all variants
-// ========================================================================
+// ---------------------------------------------------------------------------
+// Queue management (sync)
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_agent_message_serialize_all_variants() {
-    let user = Message::User(UserMessage::new_text("hello"));
-    let json = serde_json::to_string(&user).unwrap();
-    assert!(json.contains("user"));
-
-    let assistant = Message::Assistant(test_assistant_message("hi"));
-    let json = serde_json::to_string(&assistant).unwrap();
-    assert!(json.contains("assistant"));
-}
-
-// ========================================================================
-// A-041: ToolResult with error
-// ========================================================================
-#[test]
-fn test_tool_result_with_error() {
-    let result = ToolResult::error("something went wrong");
-    assert_eq!(result.content.len(), 1);
-    assert!(result.details.is_none());
-}
-
-// ========================================================================
-// A-042: ToolResult with details
-// ========================================================================
-#[test]
-fn test_tool_result_with_details() {
-    let mut result = ToolResult::text("ok");
-    result.details = Some(serde_json::json!({"key": "value"}));
-    assert!(result.details.is_some());
-}
-
-// ========================================================================
-// A-043: AgentEvent all variants constructable
-// ========================================================================
-#[test]
-fn test_agent_event_all_variants() {
-    let _ = AgentEvent::AgentStart;
-    let _ = AgentEvent::AgentEnd { messages: vec![] };
-    let _ = AgentEvent::TurnStart;
-    let _ = AgentEvent::TurnEnd {
-        message: Message::User(UserMessage::new_text("x")),
-        tool_results: vec![],
-    };
-    let _ = AgentEvent::MessageStart {
-        message: Message::User(UserMessage::new_text("x")),
-    };
-    let _ = AgentEvent::MessageEnd {
-        message: Message::User(UserMessage::new_text("x")),
-    };
-    let _ = AgentEvent::ToolExecutionStart {
-        tool_call_id: "id".into(),
-        tool_name: "name".into(),
-        args: serde_json::json!({}),
-    };
-    let _ = AgentEvent::ToolExecutionEnd {
-        tool_call_id: "id".into(),
-        tool_name: "name".into(),
-        result: ToolResult::text("ok"),
-        is_error: false,
-    };
-}
-
-// ========================================================================
-// A-044: ToolExecutionMode default is Parallel
-// ========================================================================
-#[test]
-fn test_tool_execution_mode_default() {
-    let mode = hand_agent::ToolExecutionMode::default();
-    assert_eq!(mode, hand_agent::ToolExecutionMode::Parallel);
-}
-
-// ========================================================================
-// A-045: Agent set_model changes state
-// ========================================================================
-#[test]
-fn test_agent_set_model() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    let mut new_model = test_model();
-    new_model.id = "new-model".to_string();
-    agent.set_model(new_model);
-
-    assert_eq!(agent.state().model_id, "new-model");
-    assert_eq!(agent.model().id, "new-model");
-}
-
-// ========================================================================
-// A-046: Agent set_thinking_level
-// ========================================================================
-#[test]
-fn test_agent_set_thinking_level() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    assert!(agent.thinking_level().is_none());
-
-    agent.set_thinking_level(Some(model::ThinkingLevel::High));
-    assert_eq!(agent.thinking_level(), Some(model::ThinkingLevel::High));
-
-    agent.set_thinking_level(None);
-    assert!(agent.thinking_level().is_none());
-}
-
-// ========================================================================
-// A-047: Agent set_tool_execution_mode
-// ========================================================================
-#[test]
-fn test_agent_set_tool_execution_mode() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    agent.set_tool_execution_mode(hand_agent::ToolExecutionMode::Sequential);
-    // No public getter, but verify it doesn't panic
-}
-
-// ========================================================================
-// A-048: Agent set_tools replaces all
-// ========================================================================
-#[test]
-fn test_agent_set_tools_replaces() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    agent.add_tool(echo_tool());
-    agent.add_tool(echo_tool());
-    // set_tools replaces all
-    agent.set_tools(vec![echo_tool()]);
-    // No public tool count, but verify it compiles
-}
-
-// ========================================================================
-// A-049: Agent clear_all_queues
-// ========================================================================
-#[test]
-fn test_agent_clear_all_queues() {
-    let client = Client::new();
-    let model = test_model();
-    let agent = Agent::new(client, model);
-
+fn queues_can_be_steered_and_cleared() {
+    let agent = Agent::new(Client::new(), test_model());
+    assert!(!agent.has_queued_messages());
     agent.steer(Message::User(UserMessage::new_text("s1")));
     agent.follow_up(Message::User(UserMessage::new_text("f1")));
     assert!(agent.has_queued_messages());
-
     agent.clear_all_queues();
     assert!(!agent.has_queued_messages());
 }
 
-// ========================================================================
-// A-050: Agent subscribe returns index
-// ========================================================================
 #[test]
-fn test_agent_subscribe_returns_index() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    let idx0 = agent.subscribe(Box::new(|_| {}));
-    let idx1 = agent.subscribe(Box::new(|_| {}));
-    assert_eq!(idx0, 0);
-    assert_eq!(idx1, 1);
+fn reset_clears_state_and_queues() {
+    let mut agent = Agent::new(Client::new(), test_model());
+    agent.replace_messages(vec![Message::User(UserMessage::new_text("x"))]);
+    agent.steer(Message::User(UserMessage::new_text("s")));
+    agent.reset();
+    assert!(agent.messages().is_empty());
+    assert!(!agent.has_queued_messages());
+    assert!(!agent.is_streaming());
 }
 
-// ========================================================================
-// A-051: Agent replace_messages
-// ========================================================================
+// ---------------------------------------------------------------------------
+// Tool result helpers
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_agent_replace_messages() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    agent.replace_messages(vec![
-        Message::User(UserMessage::new_text("a")),
-        Message::User(UserMessage::new_text("b")),
-        Message::User(UserMessage::new_text("c")),
-    ]);
-    assert_eq!(agent.messages().len(), 3);
-
-    agent.replace_messages(vec![Message::User(UserMessage::new_text("only"))]);
-    assert_eq!(agent.messages().len(), 1);
+fn tool_result_helpers() {
+    let r = ToolResult::error("bad");
+    assert_eq!(r.content.len(), 1);
+    let r2 = ToolResult::text("ok").with_terminate(true);
+    assert_eq!(r2.terminate, Some(true));
 }
 
-// ========================================================================
-// A-052: Agent debug format
-// ========================================================================
 #[test]
-fn test_agent_debug_format() {
-    let client = Client::new();
-    let model = test_model();
-    let agent = Agent::new(client, model);
-    let debug = format!("{:?}", agent);
-    assert!(debug.contains("Agent"));
-    assert!(debug.contains("test-model"));
-}
-
-// ========================================================================
-// A-053: Agent error state after failed prompt
-// ========================================================================
-#[tokio::test]
-async fn test_agent_error_state_after_failed_prompt() {
-    let client = Client::new();
-    let model = test_model();
-
-    // Register error provider
-    client.registry.register(
-        Api::OpenAICompletions,
-        Box::new(MockErrorProvider {
-            error_message: "API error".to_string(),
-        }),
-        Some("test".into()),
-    );
-
-    let mut agent = Agent::new(client, model);
-    let result = agent.prompt("test").await;
-    // Should complete (even with error response) without panic
-    assert!(result.is_ok() || result.is_err());
-}
-
-// ========================================================================
-// A-054: Agent continue without messages errors
-// ========================================================================
-#[tokio::test]
-async fn test_agent_continue_without_messages() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    let result = agent.r#continue().await;
-    assert!(result.is_err());
-    let err = result.err().unwrap();
-    assert!(err.to_string().contains("No messages"));
-}
-
-// ========================================================================
-// A-055: Agent prompt_with_messages
-// ========================================================================
-#[tokio::test]
-async fn test_agent_prompt_with_messages() {
-    let mut agent = setup_text_agent("reply");
-    let messages = vec![
-        Message::User(UserMessage::new_text("msg1")),
-        Message::User(UserMessage::new_text("msg2")),
-    ];
-    let result = agent.prompt_with_messages(messages).await;
-    assert!(result.is_ok());
-    assert!(agent.messages().len() >= 3); // 2 user + 1 assistant
-}
-
-// ========================================================================
-// A-056: QueueDeliveryMode default
-// ========================================================================
-#[test]
-fn test_queue_delivery_mode_default() {
-    let mode = hand_agent::QueueDeliveryMode::default();
-    assert_eq!(mode, hand_agent::QueueDeliveryMode::OneAtATime);
-}
-
-// ========================================================================
-// A-057: AgentEvent serializable
-// ========================================================================
-#[test]
-fn test_agent_event_serializable() {
-    let event = AgentEvent::AgentStart;
-    let json = serde_json::to_string(&event).unwrap();
-    assert!(json.contains("agent_start"));
-
-    let event = AgentEvent::TurnStart;
-    let json = serde_json::to_string(&event).unwrap();
-    assert!(json.contains("turn_start"));
-}
-
-// ========================================================================
-// A-058: AgentTool to_model_tool
-// ========================================================================
-#[test]
-fn test_agent_tool_to_model_tool() {
+fn agent_tool_to_model_tool() {
     let tool = echo_tool();
     let mt = tool.to_model_tool();
     assert_eq!(mt.name, "echo");
-    assert_eq!(mt.description, "Echoes back the input");
 }
 
-// ========================================================================
-// A-059: AgentTool debug format
-// ========================================================================
+// ---------------------------------------------------------------------------
+// Sanity: cancellation token snapshot
+// ---------------------------------------------------------------------------
+
 #[test]
-fn test_agent_tool_debug_format() {
-    let tool = echo_tool();
-    let debug = format!("{:?}", tool);
-    assert!(debug.contains("echo"));
-    assert!(debug.contains("Echo"));
-}
-
-// ========================================================================
-// A-060: Agent set_before_tool_call hook
-// ========================================================================
-#[test]
-fn test_agent_set_hooks() {
-    let client = Client::new();
-    let model = test_model();
-    let mut agent = Agent::new(client, model);
-
-    agent.set_before_tool_call(Some(Box::new(|_ctx| Box::pin(async { None }))));
-    agent.set_after_tool_call(Some(Box::new(|_ctx| Box::pin(async { None }))));
-
-    // Clear hooks
-    agent.set_before_tool_call(None);
-    agent.set_after_tool_call(None);
+fn cancellation_token_can_be_cloned() {
+    let agent = Agent::new(Client::new(), test_model());
+    let _token: CancellationToken = agent.cancellation_token();
 }

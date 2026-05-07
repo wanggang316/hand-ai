@@ -135,7 +135,7 @@ impl Component for ImageComponent {
                 // For now, show placeholder with [SIXEL] indicator.
                 let mut lines = self.render_placeholder(width);
                 if let Some(first) = lines.first_mut() {
-                    *first = format!("┌─[SIXEL]{}┐", "─".repeat(width.saturating_sub(12).max(0)));
+                    *first = format!("┌─[SIXEL]{}┐", "─".repeat(width.saturating_sub(12)));
                 }
                 lines
             }
@@ -143,7 +143,7 @@ impl Component for ImageComponent {
                 // Kitty protocol would use ESC sequences.
                 let mut lines = self.render_placeholder(width);
                 if let Some(first) = lines.first_mut() {
-                    *first = format!("┌─[KITTY]{}┐", "─".repeat(width.saturating_sub(12).max(0)));
+                    *first = format!("┌─[KITTY]{}┐", "─".repeat(width.saturating_sub(12)));
                 }
                 lines
             }

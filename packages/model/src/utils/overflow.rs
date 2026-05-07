@@ -81,6 +81,9 @@ mod tests {
             stop_reason: StopReason::Error,
             error_message: Some(error_msg.to_string()),
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         }
     }
 
@@ -98,6 +101,9 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         }
     }
 

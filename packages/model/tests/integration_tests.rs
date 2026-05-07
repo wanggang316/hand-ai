@@ -452,13 +452,13 @@ fn test_usage_serialization_roundtrip() {
 
 #[test]
 fn test_compat_serialization() {
-    let compat = Compat::OpenAICompletions(OpenAICompletionsCompat {
+    let compat = Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
         supports_store: Some(true),
         supports_developer_role: Some(false),
         supports_reasoning_effort: None,
         thinking_format: Some("openai".to_string()),
         ..Default::default()
-    });
+    }));
 
     let json = serde_json::to_string(&compat).expect("should serialize");
     assert!(json.contains("openai-completions"));
@@ -542,5 +542,6 @@ fn create_test_model() -> Model {
         max_tokens: 4096,
         headers: None,
         compat: None,
+        thinking_level_map: None,
     }
 }

@@ -99,6 +99,9 @@ fn stream_anthropic_messages_with_reasoning(
                     stop_reason: StopReason::Error,
                     error_message: Some(e),
                     timestamp: current_timestamp_ms(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 };
                 yield AssistantMessageEvent::Error {
                     reason: StopReason::Error,
@@ -529,6 +532,9 @@ async fn parse_sse_stream(
         stop_reason: StopReason::Stop,
         error_message: None,
         timestamp: current_timestamp_ms(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
     };
 
     let mut content_blocks: HashMap<usize, ContentBlockState> = HashMap::new();
@@ -942,6 +948,7 @@ mod tests {
             max_tokens: 64000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 
@@ -1001,6 +1008,9 @@ mod tests {
             stop_reason: StopReason::ToolUse,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         };
 
         let msgs = vec![Message::Assistant(asst)];
@@ -1106,6 +1116,9 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         };
         let result = convert_assistant_content(&asst, &model);
         assert_eq!(result.len(), 1);

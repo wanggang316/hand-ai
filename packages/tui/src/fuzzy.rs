@@ -106,7 +106,7 @@ pub fn fuzzy_filter(query: &str, items: &[&str]) -> Vec<(usize, FuzzyMatch)> {
         .filter_map(|(i, item)| fuzzy_match(query, item).map(|m| (i, m)))
         .collect();
 
-    matches.sort_by(|a, b| b.1.score.cmp(&a.1.score));
+    matches.sort_by_key(|m| std::cmp::Reverse(m.1.score));
     matches
 }
 

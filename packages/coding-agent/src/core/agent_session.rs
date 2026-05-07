@@ -9,7 +9,7 @@ use crate::core::session_manager::SessionManager;
 use crate::core::settings::SettingsManager;
 use crate::core::system_prompt::{self, BuildSystemPromptOptions};
 use hand_agent::types::{AgentContext, AgentEvent, AgentLoopConfig, AgentTool};
-use hand_agent::{AgentEventSink, agent_loop};
+use hand_agent::{AgentEventSink, CancellationToken, agent_loop};
 use model::{Message, SimpleStreamOptions};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ type EventListeners = Arc<Mutex<Vec<EventListener>>>;
 #[derive(Debug, Clone)]
 pub enum AgentSessionEvent {
     /// Forwarded agent event.
-    Agent(AgentEvent),
+    Agent(Box<AgentEvent>),
     /// Compaction started.
     CompactionStart,
     /// Compaction completed.
@@ -152,24 +152,14 @@ impl AgentSession {
         let prompts = vec![user_msg];
 
         // Build agent loop config
-        let loop_config = AgentLoopConfig {
-            model: self.config.model.clone(),
-            stream_options: self.config.stream_options.clone(),
-            tool_execution: hand_agent::types::ToolExecutionMode::Parallel,
-            before_tool_call: None,
-            after_tool_call: None,
-            get_steering_messages: None,
-            get_follow_up_messages: None,
-            convert_to_llm: None,
-            transform_context: None,
-            get_api_key: None,
-            steering_mode: hand_agent::QueueDeliveryMode::OneAtATime,
-            follow_up_mode: hand_agent::QueueDeliveryMode::OneAtATime,
-            max_retry_delay_ms: None,
-        };
+        let loop_config = AgentLoopConfig::new(
+            self.config.model.clone(),
+            self.config.stream_options.clone(),
+        );
 
         // Create event sink for the agent loop
         let emit = self.build_event_sink();
+        let cancel = CancellationToken::new();
 
         let result = agent_loop::run_agent_loop(
             prompts,
@@ -178,6 +168,7 @@ impl AgentSession {
             &loop_config,
             &self.client,
             &emit,
+            &cancel,
         )
         .await
         .map_err(CodingAgentError::Agent)?;
@@ -351,8 +342,8 @@ impl AgentSession {
 
     fn build_event_sink(&self) -> AgentEventSink {
         let listeners = Arc::clone(&self.event_listeners);
-        Box::new(move |event: AgentEvent| {
-            Self::emit_to_listeners(&listeners, AgentSessionEvent::Agent(event));
+        Arc::new(move |event: AgentEvent| {
+            Self::emit_to_listeners(&listeners, AgentSessionEvent::Agent(Box::new(event)));
         })
     }
 
@@ -388,6 +379,7 @@ mod tests {
             max_tokens: 4096,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 
@@ -429,7 +421,7 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            AgentSessionEvent::Agent(AgentEvent::AgentStart) => {}
+            AgentSessionEvent::Agent(e) if matches!(**e, AgentEvent::AgentStart) => {}
             other => panic!("unexpected event: {other:?}"),
         }
     }

@@ -1,17 +1,12 @@
 //! Write tool — create or overwrite files.
 
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
 /// Create the write tool.
 pub fn create_write_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
-        let cwd = cwd.clone();
-        Box::pin(async move { execute_write(&cwd, args) })
-    });
-
-    AgentTool::new(
+    AgentTool::simple(
         "write",
         "Write content to a file. Creates the file and any parent directories if they don't exist. \
          Overwrites the file if it already exists.",
@@ -30,7 +25,10 @@ pub fn create_write_tool(cwd: PathBuf) -> AgentTool {
             "required": ["path", "content"]
         }),
         "Write",
-        execute,
+        move |_tool_call_id, args| {
+            let cwd = cwd.clone();
+            async move { execute_write(&cwd, args) }
+        },
     )
 }
 
@@ -93,7 +91,7 @@ mod tests {
         let file = dir.path().join("new.txt");
 
         let result = execute_write(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({"path": file.to_str().unwrap(), "content": "hello\nworld"}),
         );
         let text = get_text(&result);
@@ -108,7 +106,7 @@ mod tests {
         std::fs::write(&file, "old").unwrap();
 
         let result = execute_write(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({"path": file.to_str().unwrap(), "content": "new"}),
         );
         let text = get_text(&result);
@@ -122,7 +120,7 @@ mod tests {
         let file = dir.path().join("a").join("b").join("c.txt");
 
         let result = execute_write(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({"path": file.to_str().unwrap(), "content": "deep"}),
         );
         let text = get_text(&result);
@@ -133,7 +131,7 @@ mod tests {
     #[test]
     fn test_write_missing_params() {
         let dir = TempDir::new().unwrap();
-        let result = execute_write(&dir.path().to_path_buf(), json!({"path": "foo.txt"}));
+        let result = execute_write(dir.path(), json!({"path": "foo.txt"}));
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter: content"));
     }

@@ -1,18 +1,13 @@
 //! Bash tool — execute shell commands.
 
 use crate::core::bash_executor;
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
 /// Create the bash tool.
 pub fn create_bash_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
-        let cwd = cwd.clone();
-        Box::pin(async move { execute_bash(&cwd, args).await })
-    });
-
-    AgentTool::new(
+    AgentTool::simple(
         "bash",
         "Execute a bash command in the project working directory. \
          Returns the stdout/stderr output and exit code. \
@@ -32,7 +27,10 @@ pub fn create_bash_tool(cwd: PathBuf) -> AgentTool {
             "required": ["command"]
         }),
         "Bash",
-        execute,
+        move |_tool_call_id, args| {
+            let cwd = cwd.clone();
+            async move { execute_bash(&cwd, args).await }
+        },
     )
 }
 
@@ -81,8 +79,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_echo() {
         let dir = TempDir::new().unwrap();
-        let result =
-            execute_bash(&dir.path().to_path_buf(), json!({"command": "echo hello"})).await;
+        let result = execute_bash(dir.path(), json!({"command": "echo hello"})).await;
         let text = get_text(&result);
         assert!(text.contains("hello"));
     }
@@ -90,7 +87,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_exit_code() {
         let dir = TempDir::new().unwrap();
-        let result = execute_bash(&dir.path().to_path_buf(), json!({"command": "exit 1"})).await;
+        let result = execute_bash(dir.path(), json!({"command": "exit 1"})).await;
         let text = get_text(&result);
         assert!(text.contains("Exit code: 1"));
     }
@@ -98,7 +95,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_missing_command() {
         let dir = TempDir::new().unwrap();
-        let result = execute_bash(&dir.path().to_path_buf(), json!({})).await;
+        let result = execute_bash(dir.path(), json!({})).await;
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
     }

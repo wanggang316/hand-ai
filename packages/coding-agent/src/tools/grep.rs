@@ -1,6 +1,6 @@
 //! Grep tool — search file contents using regex patterns.
 
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,12 +10,7 @@ const DEFAULT_MAX_MATCHES: usize = 100;
 
 /// Create the grep tool.
 pub fn create_grep_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
-        let cwd = cwd.clone();
-        Box::pin(async move { execute_grep(&cwd, args) })
-    });
-
-    AgentTool::new(
+    AgentTool::simple(
         "grep",
         "Search file contents using regex patterns. Uses ripgrep (rg) if available, \
          falls back to grep. Returns matching lines with file paths and line numbers.",
@@ -50,7 +45,10 @@ pub fn create_grep_tool(cwd: PathBuf) -> AgentTool {
             "required": ["pattern"]
         }),
         "Grep",
-        execute,
+        move |_tool_call_id, args| {
+            let cwd = cwd.clone();
+            async move { execute_grep(&cwd, args) }
+        },
     )
 }
 
@@ -215,7 +213,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = execute_grep(&dir.path().to_path_buf(), json!({"pattern": "hello"}));
+        let result = execute_grep(dir.path(), json!({"pattern": "hello"}));
         let text = get_text(&result);
         assert!(text.contains("hello"));
     }
@@ -225,10 +223,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("test.txt"), "hello world").unwrap();
 
-        let result = execute_grep(
-            &dir.path().to_path_buf(),
-            json!({"pattern": "nonexistent_xyz_12345"}),
-        );
+        let result = execute_grep(dir.path(), json!({"pattern": "nonexistent_xyz_12345"}));
         let text = get_text(&result);
         assert!(text.contains("No matches") || text.is_empty());
     }
@@ -236,7 +231,7 @@ mod tests {
     #[test]
     fn test_grep_missing_pattern() {
         let dir = TempDir::new().unwrap();
-        let result = execute_grep(&dir.path().to_path_buf(), json!({}));
+        let result = execute_grep(dir.path(), json!({}));
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
     }

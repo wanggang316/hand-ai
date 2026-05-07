@@ -19,6 +19,13 @@ pub enum ClientError {
     },
     /// The stream ended without producing a result.
     StreamEndedWithoutResult,
+    /// An OAuth-backed provider has no credentials and the caller did
+    /// not supply an explicit `api_key`. Surfaced primarily through the
+    /// stream itself as an `Error` event; this variant is here for
+    /// callers that synthesize the error eagerly.
+    OAuthRequired {
+        provider: crate::oauth::OAuthProviderId,
+    },
 }
 
 impl fmt::Display for ClientError {
@@ -32,6 +39,12 @@ impl fmt::Display for ClientError {
             }
             ClientError::StreamEndedWithoutResult => {
                 write!(f, "Stream ended without producing a result")
+            }
+            ClientError::OAuthRequired { provider } => {
+                write!(
+                    f,
+                    "OAuth credentials required for provider {provider:?} (run `oauth login`)",
+                )
             }
         }
     }
@@ -48,79 +61,9 @@ pub struct Client {
 impl Client {
     /// Create a new client with all built-in providers registered.
     pub fn new() -> Self {
-        let client = Self {
-            registry: Arc::new(ApiProviderRegistry::new()),
-        };
-        client.register_builtin_providers();
-        client
-    }
-
-    fn register_builtin_providers(&self) {
-        use crate::providers::anthropic_messages::AnthropicMessagesProvider;
-        use crate::providers::bedrock::BedrockProvider;
-        use crate::providers::google_generative_ai::GoogleGenerativeAiProvider;
-        use crate::providers::openai_completions::OpenAICompletionsProvider;
-        use crate::providers::openai_responses::OpenAIResponsesProvider;
-
-        self.registry.register(
-            crate::types::Api::AnthropicMessages,
-            Box::new(AnthropicMessagesProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        self.registry.register(
-            crate::types::Api::OpenAICompletions,
-            Box::new(OpenAICompletionsProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        self.registry.register(
-            crate::types::Api::GoogleGenerativeAi,
-            Box::new(GoogleGenerativeAiProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // Google Vertex and Gemini CLI use the same provider with different base URLs.
-        // The model's base_url field determines the actual endpoint.
-        self.registry.register(
-            crate::types::Api::GoogleVertex,
-            Box::new(GoogleGenerativeAiProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        self.registry.register(
-            crate::types::Api::GoogleGeminiCli,
-            Box::new(GoogleGenerativeAiProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // OpenAI Responses API (o1, o3, and newer models)
-        self.registry.register(
-            crate::types::Api::OpenAIResponses,
-            Box::new(OpenAIResponsesProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // Azure OpenAI Responses uses the same provider with different base URL
-        self.registry.register(
-            crate::types::Api::AzureOpenAiResponses,
-            Box::new(OpenAIResponsesProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // OpenAI Codex Responses uses the same provider
-        self.registry.register(
-            crate::types::Api::OpenAICodexResponses,
-            Box::new(OpenAIResponsesProvider::new()),
-            Some("builtin".to_string()),
-        );
-
-        // AWS Bedrock ConverseStream
-        self.registry.register(
-            crate::types::Api::BedrockConverseStream,
-            Box::new(BedrockProvider::new()),
-            Some("builtin".to_string()),
-        );
+        let registry = Arc::new(ApiProviderRegistry::new());
+        crate::providers::register_builtins(&registry);
+        Self { registry }
     }
 
     /// Stream a response from the model.
@@ -145,6 +88,11 @@ impl Client {
 
     /// Stream a simple response from the model.
     ///
+    /// Delegates to [`crate::stream::stream_simple`] so callers automatically
+    /// pick up cancellation, timeout, and retry semantics. The returned
+    /// `EventStream` is converted back to the trait-level
+    /// `AssistantMessageEventStream` boxed alias for backwards compatibility.
+    ///
     /// # Errors
     ///
     /// Returns `ClientError::ProviderNotFound` if no provider is registered for the model's API.
@@ -154,13 +102,8 @@ impl Client {
         context: Context,
         options: Option<SimpleStreamOptions>,
     ) -> Result<AssistantMessageEventStream<'static>, ClientError> {
-        match self.registry.get(&model.api) {
-            Some(provider) => Ok(provider.stream_simple(model.clone(), context, options)),
-            None => Err(ClientError::ProviderNotFound {
-                api: model.api,
-                model_id: model.id.clone(),
-            }),
-        }
+        let event_stream = crate::stream::stream_simple(&self.registry, model, context, options)?;
+        Ok(Box::pin(event_stream))
     }
 
     /// Complete a request and return the full message.
@@ -190,6 +133,8 @@ impl Client {
 
     /// Complete a simple request and return the full message.
     ///
+    /// Delegates to [`crate::stream::complete_simple`].
+    ///
     /// # Errors
     ///
     /// Returns `ClientError::ProviderNotFound` if no provider is registered.
@@ -200,17 +145,7 @@ impl Client {
         context: Context,
         options: Option<SimpleStreamOptions>,
     ) -> Result<AssistantMessage, ClientError> {
-        let mut s = self.stream_simple(model, context, options)?;
-
-        while let Some(event) = s.next().await {
-            match event {
-                AssistantMessageEvent::Done { message, .. } => return Ok(message),
-                AssistantMessageEvent::Error { error, .. } => return Ok(error),
-                _ => {}
-            }
-        }
-
-        Err(ClientError::StreamEndedWithoutResult)
+        crate::stream::complete_simple(&self.registry, model, context, options).await
     }
 }
 
@@ -244,6 +179,7 @@ mod tests {
             max_tokens: 4096,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 

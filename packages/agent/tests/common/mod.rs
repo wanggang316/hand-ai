@@ -1,14 +1,19 @@
 //! Shared test utilities for the agent crate.
+#![allow(dead_code)]
 
-use hand_agent::{AgentEvent, AgentTool, BoxFuture, ToolResult};
+use hand_agent::{AgentEvent, AgentEventSink, AgentTool, ToolResult};
 use model::types::Provider;
 use model::{
     Api, ApiProvider, AssistantContentBlock, AssistantMessage, AssistantMessageEvent,
     AssistantMessageEventStream, Context, Cost, InputType, Message, Model, SimpleStreamOptions,
     StopReason, StreamOptions, TextContent, ToolCall, Usage,
 };
+use std::sync::{Arc, Mutex};
 
-/// Create a minimal test model.
+// ---------------------------------------------------------------------------
+// Models / messages
+// ---------------------------------------------------------------------------
+
 pub fn test_model() -> Model {
     Model {
         id: "test-model".into(),
@@ -28,10 +33,10 @@ pub fn test_model() -> Model {
         max_tokens: 4096,
         headers: None,
         compat: None,
+        thinking_level_map: None,
     }
 }
 
-/// Create a test assistant message with text content.
 pub fn test_assistant_message(text: &str) -> AssistantMessage {
     AssistantMessage {
         role: "assistant".into(),
@@ -39,6 +44,9 @@ pub fn test_assistant_message(text: &str) -> AssistantMessage {
         api: Api::OpenAICompletions,
         provider: Provider::OpenAI,
         model: "test-model".into(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
         error_message: None,
@@ -46,7 +54,6 @@ pub fn test_assistant_message(text: &str) -> AssistantMessage {
     }
 }
 
-/// Create a test assistant message with a tool call.
 pub fn test_assistant_message_with_tool_call(
     tool_name: &str,
     tool_id: &str,
@@ -60,6 +67,9 @@ pub fn test_assistant_message_with_tool_call(
         api: Api::OpenAICompletions,
         provider: Provider::OpenAI,
         model: "test-model".into(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
         usage: Usage::default(),
         stop_reason: StopReason::ToolUse,
         error_message: None,
@@ -67,7 +77,34 @@ pub fn test_assistant_message_with_tool_call(
     }
 }
 
-/// Mock provider that returns a fixed text response.
+pub fn test_assistant_message_with_tool_calls(
+    calls: Vec<(&str, &str, serde_json::Value)>,
+) -> AssistantMessage {
+    let content = calls
+        .into_iter()
+        .map(|(name, id, args)| AssistantContentBlock::ToolCall(ToolCall::new(id, name, args)))
+        .collect();
+    AssistantMessage {
+        role: "assistant".into(),
+        content,
+        api: Api::OpenAICompletions,
+        provider: Provider::OpenAI,
+        model: "test-model".into(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+        usage: Usage::default(),
+        stop_reason: StopReason::ToolUse,
+        error_message: None,
+        timestamp: 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mock providers
+// ---------------------------------------------------------------------------
+
+/// Returns a fixed text response on every call.
 pub struct MockTextProvider {
     pub response_text: String,
 }
@@ -93,7 +130,6 @@ impl ApiProvider for MockTextProvider {
             yield AssistantMessageEvent::Start { partial: partial.clone() };
             yield AssistantMessageEvent::TextStart { content_index: 0, partial: partial.clone() };
             yield AssistantMessageEvent::TextDelta { content_index: 0, delta: text.clone(), partial: partial.clone() };
-
             let final_msg = test_assistant_message(&text);
             yield AssistantMessageEvent::TextEnd { content_index: 0, content: text.clone(), partial: final_msg.clone() };
             yield AssistantMessageEvent::Done { reason: StopReason::Stop, message: final_msg };
@@ -110,7 +146,7 @@ impl ApiProvider for MockTextProvider {
     }
 }
 
-/// Mock provider that returns a tool call, then text on the second call.
+/// Returns a single tool call on the first call, then plain text on subsequent calls.
 pub struct MockToolProvider {
     pub tool_name: String,
     pub tool_args: serde_json::Value,
@@ -138,7 +174,6 @@ impl ApiProvider for MockToolProvider {
         context: Context,
         _options: Option<StreamOptions>,
     ) -> AssistantMessageEventStream<'static> {
-        // Check if there are tool results in context — if so, return text
         let has_tool_result = context
             .messages
             .iter()
@@ -156,11 +191,15 @@ impl ApiProvider for MockToolProvider {
             let tool_args = self.tool_args.clone();
             Box::pin(async_stream::stream! {
                 let msg = test_assistant_message_with_tool_call(&tool_name, "call_1", tool_args);
+                let tc = match &msg.content[0] {
+                    AssistantContentBlock::ToolCall(tc) => tc.clone(),
+                    _ => unreachable!(),
+                };
                 yield AssistantMessageEvent::Start { partial: msg.clone() };
                 yield AssistantMessageEvent::ToolCallStart { content_index: 0, partial: msg.clone() };
                 yield AssistantMessageEvent::ToolCallEnd {
                     content_index: 0,
-                    tool_call: msg.content[0].clone().into_tool_call().unwrap(),
+                    tool_call: tc,
                     partial: msg.clone(),
                 };
                 yield AssistantMessageEvent::Done { reason: StopReason::ToolUse, message: msg };
@@ -178,7 +217,72 @@ impl ApiProvider for MockToolProvider {
     }
 }
 
-/// Mock provider that returns an error.
+/// Returns multiple tool calls on the first invocation, then plain text.
+pub struct MockMultiToolProvider {
+    pub tool_calls: Vec<(String, String, serde_json::Value)>, // (name, id, args)
+    pub final_text: String,
+}
+
+impl MockMultiToolProvider {
+    pub fn new(
+        tool_calls: Vec<(impl Into<String>, impl Into<String>, serde_json::Value)>,
+        final_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            tool_calls: tool_calls
+                .into_iter()
+                .map(|(n, i, a)| (n.into(), i.into(), a))
+                .collect(),
+            final_text: final_text.into(),
+        }
+    }
+}
+
+impl ApiProvider for MockMultiToolProvider {
+    fn stream(
+        &self,
+        _model: Model,
+        context: Context,
+        _options: Option<StreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        let has_tool_result = context
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::ToolResult(_)));
+
+        if has_tool_result {
+            let text = self.final_text.clone();
+            Box::pin(async_stream::stream! {
+                let msg = test_assistant_message(&text);
+                yield AssistantMessageEvent::Start { partial: msg.clone() };
+                yield AssistantMessageEvent::Done { reason: StopReason::Stop, message: msg };
+            })
+        } else {
+            let calls = self.tool_calls.clone();
+            Box::pin(async_stream::stream! {
+                let blocks: Vec<AssistantContentBlock> = calls
+                    .iter()
+                    .map(|(n, i, a)| AssistantContentBlock::ToolCall(ToolCall::new(i.clone(), n.clone(), a.clone())))
+                    .collect();
+                let mut msg = test_assistant_message("");
+                msg.content = blocks;
+                msg.stop_reason = StopReason::ToolUse;
+                yield AssistantMessageEvent::Start { partial: msg.clone() };
+                yield AssistantMessageEvent::Done { reason: StopReason::ToolUse, message: msg };
+            })
+        }
+    }
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: Context,
+        options: Option<SimpleStreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        self.stream(model, context, options.map(|o| o.base))
+    }
+}
+
 pub struct MockErrorProvider {
     pub error_message: String,
 }
@@ -209,79 +313,146 @@ impl ApiProvider for MockErrorProvider {
     }
 }
 
-/// Create a simple echo tool for testing.
+/// Provider that closes the stream after `Start` without ever producing `Done`/`Error`.
+/// Closes the stream after `Start` without `Done`/`Error`; the loop must
+/// synthesize an error assistant in place and emit a balanced `MessageEnd`.
+pub struct TruncatedStreamProvider;
+
+impl ApiProvider for TruncatedStreamProvider {
+    fn stream(
+        &self,
+        _model: Model,
+        _context: Context,
+        _options: Option<StreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        Box::pin(async_stream::stream! {
+            let partial = test_assistant_message("");
+            yield AssistantMessageEvent::Start { partial };
+            // Stream ends here without Done/Error.
+        })
+    }
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: Context,
+        options: Option<SimpleStreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        self.stream(model, context, options.map(|o| o.base))
+    }
+}
+
+/// Provider that sleeps before producing a (non-tool) text response. Used to test cancellation.
+pub struct SlowTextProvider {
+    pub delay_ms: u64,
+    pub response_text: String,
+}
+
+impl ApiProvider for SlowTextProvider {
+    fn stream(
+        &self,
+        _model: Model,
+        _context: Context,
+        _options: Option<StreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        let delay_ms = self.delay_ms;
+        let text = self.response_text.clone();
+        Box::pin(async_stream::stream! {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            let msg = test_assistant_message(&text);
+            yield AssistantMessageEvent::Start { partial: msg.clone() };
+            yield AssistantMessageEvent::Done { reason: StopReason::Stop, message: msg };
+        })
+    }
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: Context,
+        options: Option<SimpleStreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        self.stream(model, context, options.map(|o| o.base))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tools
+// ---------------------------------------------------------------------------
+
+/// A simple echo tool using the `simple` constructor.
 pub fn echo_tool() -> AgentTool {
-    AgentTool::new(
+    AgentTool::simple(
         "echo",
         "Echoes back the input",
         serde_json::json!({
             "type": "object",
-            "properties": {
-                "message": { "type": "string" }
-            },
+            "properties": { "message": { "type": "string" } },
             "required": ["message"]
         }),
         "Echo",
-        Box::new(|_id, args| -> BoxFuture<'static, ToolResult> {
-            Box::pin(async move {
-                let msg = args
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("no message");
-                ToolResult::text(format!("Echo: {msg}"))
-            })
-        }),
+        |_id, args| async move {
+            let msg = args
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("no message");
+            ToolResult::text(format!("Echo: {msg}"))
+        },
     )
 }
 
-/// Create a calculator tool for testing.
-pub fn calculator_tool() -> AgentTool {
-    AgentTool::new(
-        "calculate",
-        "Performs basic math",
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "expression": { "type": "string" }
-            },
-            "required": ["expression"]
-        }),
-        "Calculator",
-        Box::new(|_id, args| -> BoxFuture<'static, ToolResult> {
-            Box::pin(async move {
-                let expr = args
-                    .get("expression")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("0");
-                ToolResult::text(format!("Result: {expr} = 42"))
-            })
-        }),
+/// A tool that sleeps for `delay_ms` and returns a label. Used for parallelism tests.
+pub fn sleep_tool(name: &'static str, delay_ms: u64) -> AgentTool {
+    AgentTool::simple(
+        name,
+        "Sleeps for a fixed duration and returns a label",
+        serde_json::json!({ "type": "object", "properties": {} }),
+        "Sleep",
+        move |_id, _args| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            ToolResult::text(format!("done: {name}"))
+        },
     )
 }
 
-/// Collect events from an AgentEventSink into a shared vec.
-pub fn collecting_event_sink() -> (
-    hand_agent::AgentEventSink,
-    std::sync::Arc<std::sync::Mutex<Vec<AgentEvent>>>,
-) {
-    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+/// Tool that always returns terminate=true.
+pub fn terminate_tool(name: &'static str) -> AgentTool {
+    AgentTool::simple(
+        name,
+        "Returns terminate=true",
+        serde_json::json!({ "type": "object", "properties": {} }),
+        "Terminate",
+        move |_id, _args| async move { ToolResult::text("stopping").with_terminate(true) },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Event collection helpers
+// ---------------------------------------------------------------------------
+
+pub fn collecting_event_sink() -> (AgentEventSink, Arc<Mutex<Vec<AgentEvent>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
     let events_clone = events.clone();
-    let sink: hand_agent::AgentEventSink = Box::new(move |event: AgentEvent| {
+    let sink: AgentEventSink = Arc::new(move |event: AgentEvent| {
         events_clone.lock().unwrap().push(event);
     });
     (sink, events)
 }
 
-/// Helper trait to extract ToolCall from AssistantContentBlock.
-trait IntoToolCall {
-    fn into_tool_call(self) -> Option<ToolCall>;
+pub fn event_kind(event: &AgentEvent) -> &'static str {
+    match event {
+        AgentEvent::AgentStart => "agent_start",
+        AgentEvent::AgentEnd { .. } => "agent_end",
+        AgentEvent::TurnStart => "turn_start",
+        AgentEvent::TurnEnd { .. } => "turn_end",
+        AgentEvent::MessageStart { .. } => "message_start",
+        AgentEvent::MessageUpdate { .. } => "message_update",
+        AgentEvent::MessageEnd { .. } => "message_end",
+        AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
+        AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
+        AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+    }
 }
 
-impl IntoToolCall for AssistantContentBlock {
-    fn into_tool_call(self) -> Option<ToolCall> {
-        match self {
-            AssistantContentBlock::ToolCall(tc) => Some(tc),
-            _ => None,
-        }
-    }
+pub fn event_kinds(events: &[AgentEvent]) -> Vec<&'static str> {
+    events.iter().map(event_kind).collect()
 }
