@@ -5,16 +5,6 @@
 //! back out to the JSONL output stream. The dispatcher exits cleanly when
 //! the input stream ends.
 //!
-//! # Phase 1 scope
-//!
-//! Only five commands are dispatched: `prompt`, `abort`, `new_session`,
-//! `get_state`, `get_messages`. Everything else replies with
-//! `{success: false, error: "not implemented in Phase 1"}`. `abort` is in
-//! that list for now: the underlying [`AgentSession`] does not yet expose
-//! an abort hook, so the variant is reported as not implemented (TODO at
-//! the call site below — wire to `hand_agent::AgentLoopConfig`'s abort
-//! signal in a follow-up).
-//!
 //! # Concurrency model
 //!
 //! Mostly single-task. Commands are processed sequentially on the
@@ -585,19 +575,6 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             )
         }
 
-        // ---- Out-of-scope ----------------------------------------------
-        //
-        // Each variant returns the same "not implemented in Phase 1"
-        // failure but on its own discriminator (the wire `command` field
-        // must echo the request's). The branches are tedious but typed
-        // — `RpcResponseBody`'s per-command variant is non-uniform
-        // (some carry `RpcResultEmpty`, some `RpcResultWithData<T>`),
-        // so we cannot compress them into a single `not_implemented(id,
-        // kind)` helper without losing type safety.
-        //
-        // TODO(rpc-server): wire `Abort` to `AgentLoopConfig`'s abort
-        // signal once `AgentSession` exposes an abort hook. See the
-        // `packages/agent/src/agent_loop.rs` abort mechanism.
         RpcCommand::Abort { id } => {
             // Cancel the in-flight turn (if any). Idempotent: returning
             // `success: true` for both "cancelled a running turn" and
@@ -869,12 +846,22 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                 ),
             }
         }
-        RpcCommand::SwitchSession { id, .. } => RpcResponse::new(
-            id,
-            RpcResponseBody::SwitchSession(RpcResultWithData::<SwitchSessionData>::err(
-                NOT_IMPLEMENTED,
-            )),
-        ),
+        RpcCommand::SwitchSession { id, session_path } => {
+            match session.switch_session(std::path::Path::new(&session_path)) {
+                Ok(()) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::SwitchSession(RpcResultWithData::ok(SwitchSessionData {
+                        cancelled: false,
+                    })),
+                ),
+                Err(e) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::SwitchSession(RpcResultWithData::<SwitchSessionData>::err(
+                        format!("switch_session failed: {e}"),
+                    )),
+                ),
+            }
+        }
         RpcCommand::Fork { id, entry_id } => match session.fork(&entry_id) {
             Ok(text) => RpcResponse::new(
                 id,
@@ -902,12 +889,15 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                 ))),
             ),
         },
-        RpcCommand::GetForkMessages { id } => RpcResponse::new(
-            id,
-            RpcResponseBody::GetForkMessages(RpcResultWithData::<ForkMessagesData>::err(
-                NOT_IMPLEMENTED,
-            )),
-        ),
+        RpcCommand::GetForkMessages { id } => {
+            let messages = session.fork_messages();
+            RpcResponse::new(
+                id,
+                RpcResponseBody::GetForkMessages(RpcResultWithData::ok(ForkMessagesData {
+                    messages,
+                })),
+            )
+        }
         RpcCommand::GetLastAssistantText { id } => {
             // Walk messages in reverse, find the last assistant message with a
             // text block, and return its concatenated text. If no assistant
@@ -999,10 +989,6 @@ fn builtin_command_specs() -> Vec<RpcSlashCommand> {
         })
         .collect()
 }
-
-/// Canonical "not implemented" error string. Matches the brief verbatim
-/// so the round-trip tests can assert against it.
-const NOT_IMPLEMENTED: &str = "not implemented in Phase 1";
 
 /// Build a snapshot of the session for `get_state`.
 ///
@@ -1321,33 +1307,6 @@ mod tests {
         assert_eq!(resp["command"], "new_session");
         assert_eq!(resp["success"], true);
         assert_eq!(resp["data"]["cancelled"], false);
-
-        handle.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn out_of_scope_variant_returns_not_implemented_error() {
-        // `switch_session` is still out-of-scope. (Previously this test
-        // pinned `steer` then `clone` as "not implemented"; both moved
-        // into the dispatcher proper — `steer` in T-A2 and `clone` in
-        // T-A3 — so we rotate to the next still-unimplemented variant.)
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
-
-        in_tx
-            .write_all(
-                b"{\"type\":\"switch_session\",\"sessionPath\":\"/tmp/x.jsonl\",\"id\":\"5\"}\n",
-            )
-            .await
-            .unwrap();
-        drop(in_tx);
-
-        let frames = drain_frames(out_rx).await;
-        assert_eq!(frames.len(), 1);
-        let resp = &frames[0];
-        assert_eq!(resp["command"], "switch_session");
-        assert_eq!(resp["success"], false);
-        assert_eq!(resp["error"], "not implemented in Phase 1");
 
         handle.await.unwrap().unwrap();
     }
@@ -2178,6 +2137,202 @@ mod tests {
             .find(|f| f["type"] == "response" && f["command"] == "prompt")
             .expect("expected a prompt response");
         assert_eq!(prompt_resp["success"], true, "frames: {frames:#?}");
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// Build a real on-disk session under `cwd` containing `texts` as
+    /// successive user messages. Returns the JSONL path and the session
+    /// id of the constructed file. Used by `switch_session` tests; the
+    /// dispatcher's session is in-memory by default, so the source side
+    /// of the switch needs a separate, real `SessionManager`.
+    fn write_session_with_users(
+        cwd: &std::path::Path,
+        texts: &[&str],
+    ) -> (std::path::PathBuf, String) {
+        use crate::core::session_manager::SessionManager;
+        use model::UserMessage;
+        let mut sm = SessionManager::create(cwd).expect("create session");
+        for t in texts {
+            sm.append_message(Message::User(UserMessage::new_text(*t)))
+                .expect("append message");
+        }
+        (sm.path().to_path_buf(), sm.id().to_string())
+    }
+
+    #[tokio::test]
+    async fn switch_session_loads_jsonl_and_replaces_active() {
+        // Materialize a real on-disk session under a tempdir, then ask
+        // the dispatcher (whose session is in-memory and empty) to
+        // switch to it. After the switch, `get_state` must reflect the
+        // loaded file's id and message count.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (path, src_id) =
+            write_session_with_users(tmp.path(), &["hello", "world", "third"]);
+        let path_str = path.to_str().unwrap().to_string();
+
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        let cmd = format!(
+            "{{\"type\":\"switch_session\",\"id\":\"sw-1\",\"sessionPath\":\"{}\"}}\n",
+            path_str
+        );
+        in_tx.write_all(cmd.as_bytes()).await.unwrap();
+        in_tx
+            .write_all(b"{\"type\":\"get_state\",\"id\":\"gs-sw-1\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+
+        let switch_resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "switch_session")
+            .expect("expected a switch_session response");
+        assert_eq!(switch_resp["success"], true, "frames: {frames:#?}");
+        assert_eq!(switch_resp["id"], "sw-1");
+        assert_eq!(switch_resp["data"]["cancelled"], false);
+
+        let state_resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "get_state")
+            .expect("expected a get_state response");
+        assert_eq!(state_resp["success"], true);
+        assert_eq!(
+            state_resp["data"]["sessionId"], src_id,
+            "switch must adopt the loaded file's session id; frames: {frames:#?}"
+        );
+        assert_eq!(
+            state_resp["data"]["messageCount"], 3,
+            "switch must adopt the loaded file's message count; frames: {frames:#?}"
+        );
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn switch_session_unknown_path_returns_error() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                b"{\"type\":\"switch_session\",\"id\":\"sw-2\",\"sessionPath\":\"/tmp/does-not-exist-zzzz.jsonl\"}\n",
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        let resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "switch_session")
+            .expect("expected a switch_session response");
+        assert_eq!(resp["success"], false, "frames: {frames:#?}");
+        assert_eq!(resp["id"], "sw-2");
+        let err = resp["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("failed"),
+            "expected 'failed' in error, got: {err}"
+        );
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_fork_messages_returns_user_messages_only() {
+        // Seed two user messages and one assistant message; the
+        // response must list only the user entries, in order, with
+        // their assigned entry ids and concatenated text.
+        use model::UserMessage;
+        let mut session = session_with_mock("ignored");
+        let mgr = session.session_manager_mut();
+        let id_first = mgr
+            .append_message(Message::User(UserMessage::new_text("first user")))
+            .unwrap();
+        // Assistant message in between — must not appear in fork list.
+        mgr.append_message(Message::Assistant(assistant_text_message("hi")))
+            .unwrap();
+        let id_second = mgr
+            .append_message(Message::User(UserMessage::new_text("second user")))
+            .unwrap();
+
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session).await;
+
+        in_tx
+            .write_all(b"{\"type\":\"get_fork_messages\",\"id\":\"gfm-1\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        let resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "get_fork_messages")
+            .expect("expected a get_fork_messages response");
+        assert_eq!(resp["success"], true, "frames: {frames:#?}");
+        assert_eq!(resp["id"], "gfm-1");
+
+        let messages = resp["data"]["messages"].as_array().expect("messages array");
+        assert_eq!(
+            messages.len(),
+            2,
+            "expected exactly the 2 user messages, got: {messages:?}"
+        );
+        assert_eq!(messages[0]["entryId"], id_first);
+        assert_eq!(messages[0]["text"], "first user");
+        assert_eq!(messages[1]["entryId"], id_second);
+        assert_eq!(messages[1]["text"], "second user");
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn switch_session_preserves_listeners() {
+        // Mirrors `fork_preserves_listeners_*`: the dispatcher subscribes
+        // once at startup. If `switch_session` regressed to wholesale-
+        // replacing the session, post-switch responses (and any future
+        // events) would never reach the wire because the subscription
+        // would be attached to the dropped session. Issue a `get_state`
+        // AFTER the switch and assert it round-trips — that response
+        // can only be emitted by the post-switch dispatcher loop, which
+        // requires the writer task and event-pump glue to have survived.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (path, src_id) = write_session_with_users(tmp.path(), &["alpha", "beta"]);
+        let path_str = path.to_str().unwrap().to_string();
+
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        let cmd = format!(
+            "{{\"type\":\"switch_session\",\"id\":\"sw-3\",\"sessionPath\":\"{}\"}}\n",
+            path_str
+        );
+        in_tx.write_all(cmd.as_bytes()).await.unwrap();
+        in_tx
+            .write_all(b"{\"type\":\"get_state\",\"id\":\"gs-sw-3\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+
+        let switch_idx = frames
+            .iter()
+            .position(|f| f["type"] == "response" && f["command"] == "switch_session")
+            .expect("expected a switch_session response");
+        let state_resp = frames
+            .iter()
+            .skip(switch_idx + 1)
+            .find(|f| f["type"] == "response" && f["command"] == "get_state")
+            .expect("expected a get_state response after the switch");
+        assert_eq!(state_resp["success"], true, "frames: {frames:#?}");
+        assert_eq!(
+            state_resp["data"]["sessionId"], src_id,
+            "post-switch get_state must report the new session id"
+        );
 
         handle.await.unwrap().unwrap();
     }

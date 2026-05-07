@@ -12,7 +12,7 @@ use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_befor
 use crate::core::extensions::registry::builtin_tier1_extensions;
 use crate::core::model_registry::ModelRegistry;
 use crate::core::session_manager::{SessionEntry, SessionManager};
-use crate::rpc::types::QueueMode;
+use crate::rpc::types::{ForkMessageEntry, QueueMode};
 use crate::core::settings::SettingsManager;
 use crate::core::skills::{self, Skill, SkillError};
 use crate::core::system_prompt::{self, BuildSystemPromptOptions};
@@ -647,13 +647,72 @@ impl AgentSession {
             Some(&parent_id),
             body,
         )?;
+        self.adopt_session_manager(new_sm);
+        Ok(())
+    }
+
+    /// Replace the active session in place with one loaded from the
+    /// given JSONL path. Same preservation/reset contract as
+    /// [`Self::fork`] / [`Self::clone_session`]: listeners, extensions,
+    /// tools, client, model, settings, and skills are preserved;
+    /// `is_streaming` / `is_compacting` and the steer / follow-up
+    /// queues are reset.
+    ///
+    /// Unlike fork/clone, switch_session adopts the loaded file's
+    /// session id verbatim — it is a *switch*, not a branch. The prior
+    /// session file is left intact on disk. Mirrors the TS reference
+    /// `agent-session-runtime.ts::switchSession` (with `position` /
+    /// extension hooks deferred — those land with the extension API).
+    ///
+    /// Returns `Err` if the file is missing or malformed (no session
+    /// header).
+    pub fn switch_session(&mut self, path: &Path) -> Result<(), CodingAgentError> {
+        let new_sm = SessionManager::open(path)?;
+        self.adopt_session_manager(new_sm);
+        Ok(())
+    }
+
+    /// Adopt `new_sm` as the active session manager: rebuild the
+    /// in-memory message context from it, swap it in, and reset the
+    /// runtime flags + queues. Shared between `replace_session_with_body`
+    /// (fork / clone) and [`Self::switch_session`].
+    fn adopt_session_manager(&mut self, new_sm: SessionManager) {
         self.context.messages = new_sm.build_context();
         self.session_manager = new_sm;
         self.is_streaming = false;
         self.is_compacting = false;
         self.steering_queue.lock().unwrap().clear();
         self.follow_up_queue.lock().unwrap().clear();
-        Ok(())
+    }
+
+    /// User-message-only summary of the current session's entries,
+    /// ordered chronologically. Each item carries the JSONL `entry_id`
+    /// (usable as `fork.entryId`) and the concatenated text content.
+    /// Empty-text entries are filtered out (parity with the TS
+    /// `getUserMessagesForForking`'s `if (text)` guard, which skips
+    /// image-only user messages).
+    pub fn fork_messages(&self) -> Vec<ForkMessageEntry> {
+        self.session_manager
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionEntry::Message { id, message, .. } => match message.as_ref() {
+                    Message::User(user) => {
+                        let text = extract_user_message_text(&user.content);
+                        if text.is_empty() {
+                            None
+                        } else {
+                            Some(ForkMessageEntry {
+                                entry_id: id.clone(),
+                                text,
+                            })
+                        }
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
     }
 
     /// Get the working directory.
