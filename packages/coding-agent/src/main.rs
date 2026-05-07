@@ -5,6 +5,7 @@ use hand_coding_agent::cli::Args;
 use hand_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 use hand_coding_agent::core::export;
 use hand_coding_agent::core::model_resolver;
+use hand_coding_agent::core::timings;
 use hand_coding_agent::modes;
 use hand_coding_agent::modes::session_setup::SessionSetup;
 use std::io::{self, BufRead, Write};
@@ -15,7 +16,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    timings::reset();
     let cli = Args::parse();
+    timings::time("parse_args");
 
     // Handle --list-models
     if let Some(ref search) = cli.list_models {
@@ -53,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Interactive flow.
     let setup = SessionSetup::resolve(&cli)?;
+    timings::time("session_setup");
     let cwd = setup.cwd.clone();
 
     // Determine resume id, mirroring the pre-extraction logic: --continue
@@ -103,6 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         AgentSession::new(base_config, agent_tools)?
     };
+    timings::time("session_create");
 
     // Subscribe to events for output
     session.subscribe(|event| match event {
@@ -124,6 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(export_path) = cli.export {
         return handle_export(&session, &export_path);
     }
+
+    timings::print();
 
     if let Some(prompt) = cli.prompt {
         // Single prompt then interactive
