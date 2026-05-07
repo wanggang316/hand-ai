@@ -985,7 +985,7 @@ impl AgentSession {
             new_token
         };
 
-        let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let shell_path = crate::core::bash_executor::resolve_shell();
         let options = crate::core::bash_executor::BashExecutorOptions {
             on_chunk: None,
             timeout_secs,

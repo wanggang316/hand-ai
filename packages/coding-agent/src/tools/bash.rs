@@ -47,7 +47,8 @@ async fn execute_bash(cwd: &Path, args: serde_json::Value) -> ToolResult {
         ..Default::default()
     };
 
-    match bash_executor::execute_bash(command, cwd, "/bin/bash", options).await {
+    let shell = bash_executor::resolve_shell();
+    match bash_executor::execute_bash(command, cwd, &shell, options).await {
         Ok(result) => {
             let mut output = result.output;
             if result.truncated {

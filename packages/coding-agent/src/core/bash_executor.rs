@@ -126,6 +126,14 @@ pub async fn execute_bash(
     })
 }
 
+/// Resolve the shell to invoke for `bash`-tagged commands. Honors `$SHELL`
+/// when set (so users who configure a non-default shell get consistent
+/// behavior across the model-tool path and the RPC `runBash` path), and
+/// falls back to `/bin/bash`.
+pub fn resolve_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+}
+
 /// Sanitize output by stripping problematic characters.
 pub fn sanitize_output(output: &str) -> String {
     // Strip ANSI escape sequences
