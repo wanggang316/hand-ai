@@ -77,8 +77,7 @@ fn spawn_watcher(tx: mpsc::UnboundedSender<(u16, u16)>, mut shutdown: watch::Rec
     const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
     tokio::spawn(async move {
-        let (mut last_cols, mut last_rows) =
-            crossterm::terminal::size().unwrap_or((0, 0));
+        let (mut last_cols, mut last_rows) = crossterm::terminal::size().unwrap_or((0, 0));
         loop {
             tokio::select! {
                 biased;
