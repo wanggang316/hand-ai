@@ -255,11 +255,17 @@ fn load_resource_file<T: DeserializeOwned>(
         // an extension's name must come from elsewhere. Callers using the
         // generic loader for extensions should populate that themselves; here
         // we surface the path with no name so it can be patched later.
-        SourceScope::Extension => SourceInfo {
-            scope: SourceScope::Extension,
-            path: path.to_path_buf(),
-            extension_name: None,
-        },
+        SourceScope::Extension => {
+            debug_assert!(
+                false,
+                "discover_resources cannot resolve Extension scope; callers must wrap and set extension_name explicitly",
+            );
+            SourceInfo {
+                scope: SourceScope::Extension,
+                path: path.to_path_buf(),
+                extension_name: None,
+            }
+        }
     };
 
     Ok(Some(DiscoveredResource {

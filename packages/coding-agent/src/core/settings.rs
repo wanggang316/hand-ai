@@ -758,14 +758,45 @@ fn snake_to_kebab(s: &str) -> String {
     s.replace('_', "-")
 }
 
+/// Top-level fields whose string value is a kebab-cased enum tag in the
+/// new schema. Legacy JSON often serialised these as snake_case; when the
+/// raw value (after kebab conversion) still doesn't match a known tag we
+/// fall back to the original.
+///
+/// Each entry is `(field_name_in_kebab_case, &[allowed_kebab_values])`.
+const ENUM_VALUE_FIELDS: &[(&str, &[&str])] = &[
+    ("theme", &["dark", "light", "high-contrast", "system"]),
+    (
+        "default-thinking-level",
+        &["off", "minimal", "low", "medium", "high", "xhigh"],
+    ),
+];
+
 /// Walk a `serde_json::Value` and rewrite every map key from snake_case to
 /// kebab-case. Recurses through nested maps and arrays.
+///
+/// Object values whose key is one of [`ENUM_VALUE_FIELDS`] also have their
+/// **string value** snake→kebab-converted, but only when the converted
+/// form is a known enum tag — otherwise we leave the original alone so a
+/// genuinely unknown value still surfaces a deserialization error.
 fn rekey_to_kebab(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                out.insert(snake_to_kebab(&k), rekey_to_kebab(v));
+                let new_key = snake_to_kebab(&k);
+                let new_value = match (&v, lookup_enum_field(&new_key)) {
+                    (serde_json::Value::String(s), Some(allowed)) => {
+                        let kebab = snake_to_kebab(s);
+                        if allowed.contains(&kebab.as_str()) {
+                            serde_json::Value::String(kebab)
+                        } else {
+                            serde_json::Value::String(s.clone())
+                        }
+                    }
+                    _ => rekey_to_kebab(v),
+                };
+                out.insert(new_key, new_value);
             }
             serde_json::Value::Object(out)
         }
@@ -774,6 +805,13 @@ fn rekey_to_kebab(value: serde_json::Value) -> serde_json::Value {
         }
         other => other,
     }
+}
+
+fn lookup_enum_field(field: &str) -> Option<&'static [&'static str]> {
+    ENUM_VALUE_FIELDS
+        .iter()
+        .find(|(name, _)| *name == field)
+        .map(|(_, values)| *values)
 }
 
 /// Filter a (kebab-cased) JSON value to keep only fields recognised by the
@@ -932,10 +970,30 @@ pub fn migrate_legacy_json_settings(base: &Path) -> MigrationOutcome {
             };
         }
     };
-    if let Err(e) = std::fs::write(&yaml_path, &yaml) {
-        return MigrationOutcome::Failed {
-            reason: format!("yaml write: {e}"),
+    // Atomic write: stage to a temp file in the same directory, then
+    // rename into place. A crashed/aborted run leaves the original YAML
+    // (or no YAML at all) intact rather than a half-written file.
+    {
+        use std::io::Write as _;
+        let parent = yaml_path.parent().unwrap_or_else(|| Path::new("."));
+        let mut tmp = match tempfile::NamedTempFile::new_in(parent) {
+            Ok(t) => t,
+            Err(e) => {
+                return MigrationOutcome::Failed {
+                    reason: format!("yaml write: {e}"),
+                };
+            }
         };
+        if let Err(e) = tmp.write_all(yaml.as_bytes()) {
+            return MigrationOutcome::Failed {
+                reason: format!("yaml write: {e}"),
+            };
+        }
+        if let Err(e) = tmp.persist(&yaml_path) {
+            return MigrationOutcome::Failed {
+                reason: format!("yaml write: {e}"),
+            };
+        }
     }
 
     // 5. Rename JSON → .bak. On POSIX `rename` is atomic and overwrites
@@ -1540,6 +1598,75 @@ mod tests {
         assert!(cwd.join(".hand").join("settings.yaml").exists());
         assert!(cwd.join(".hand").join("settings.json.bak").exists());
         assert!(!project_json.exists());
+    }
+
+    /// F31: Guard against `KNOWN_*` allow-lists drifting from the actual
+    /// `Settings` schema. If a new field is added to `Settings` but not
+    /// added to `KNOWN_TOP_LEVEL`, every legacy migration silently drops
+    /// it. Same logic for `KNOWN_COMPACTION` / `KNOWN_RETRY`.
+    #[test]
+    fn migration_known_field_lists_match_schema() {
+        // Top-level fields: serialize defaults to a JSON object and
+        // assert every kebab-case key appears in `KNOWN_TOP_LEVEL`.
+        let value = serde_json::to_value(Settings::defaults()).unwrap();
+        let serde_json::Value::Object(map) = value else {
+            panic!("Settings should serialize to an object")
+        };
+        for k in map.keys() {
+            let kebab = k.replace('_', "-");
+            assert!(
+                KNOWN_TOP_LEVEL.contains(&kebab.as_str()),
+                "KNOWN_TOP_LEVEL missing field: {kebab}",
+            );
+        }
+
+        // Sub-struct fields: same check for compaction / retry.
+        let value = serde_json::to_value(CompactionSettings::with_defaults()).unwrap();
+        let serde_json::Value::Object(map) = value else {
+            panic!("CompactionSettings should serialize to an object")
+        };
+        for k in map.keys() {
+            let kebab = k.replace('_', "-");
+            assert!(
+                KNOWN_COMPACTION.contains(&kebab.as_str()),
+                "KNOWN_COMPACTION missing field: {kebab}",
+            );
+        }
+
+        let value = serde_json::to_value(RetrySettings::with_defaults()).unwrap();
+        let serde_json::Value::Object(map) = value else {
+            panic!("RetrySettings should serialize to an object")
+        };
+        for k in map.keys() {
+            let kebab = k.replace('_', "-");
+            assert!(
+                KNOWN_RETRY.contains(&kebab.as_str()),
+                "KNOWN_RETRY missing field: {kebab}",
+            );
+        }
+    }
+
+    /// F33: legacy JSON values that are themselves snake_case enum tags
+    /// (e.g. `theme: "high_contrast"`) must be rewritten to kebab-case
+    /// during migration so they match the new `ThemeSetting` shape.
+    #[test]
+    fn migration_rewrites_snake_case_enum_values() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(&json, r#"{"theme": "high_contrast"}"#);
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+
+        let yaml_body = std::fs::read_to_string(dir.path().join("settings.yaml")).unwrap();
+        assert!(
+            yaml_body.contains("theme: high-contrast"),
+            "expected kebab-case enum value, got: {yaml_body}",
+        );
+
+        let yaml_path = dir.path().join("settings.yaml");
+        let s = Settings::load(None, Some(&yaml_path)).unwrap();
+        assert_eq!(s.theme(), ThemeSetting::HighContrast);
     }
 
     #[test]

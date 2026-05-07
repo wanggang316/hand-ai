@@ -4,6 +4,11 @@
 //! is scoped to coding-agent's needs. The agent crate's `common` module is
 //! private to that crate's tests, so we re-implement the equivalents here.
 
+// Cargo compiles `tests/common/mod.rs` once per integration test binary; any
+// helper that's unused by a particular binary triggers `dead_code` warnings.
+// The blanket allow is the standard pattern for shared test helpers.
+#![allow(dead_code)]
+
 use model::types::Provider;
 use model::{
     Api, ApiProvider, AssistantContentBlock, AssistantMessage, AssistantMessageEvent,

@@ -5,11 +5,39 @@ use hand_agent::types::{AgentTool, ToolExecuteFn, ToolExecutionContext, ToolResu
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-/// Create the bash tool.
+/// Configuration for the bash tool.
+///
+/// `shell_path` selects the interpreter used to evaluate `bash` tool calls.
+/// Defaults to `/bin/bash`; settings can override via `shell-path`.
+#[derive(Debug, Clone)]
+pub struct BashToolConfig {
+    pub shell_path: PathBuf,
+}
+
+impl Default for BashToolConfig {
+    fn default() -> Self {
+        Self {
+            shell_path: PathBuf::from("/bin/bash"),
+        }
+    }
+}
+
+/// Create the bash tool with the default shell (`/bin/bash`).
+///
+/// Convenience for callers that don't need to thread a `BashToolConfig`
+/// through. New call sites should prefer
+/// [`create_bash_tool_with_config`].
 pub fn create_bash_tool(cwd: PathBuf) -> AgentTool {
+    create_bash_tool_with_config(cwd, BashToolConfig::default())
+}
+
+/// Create the bash tool with an explicit shell path.
+pub fn create_bash_tool_with_config(cwd: PathBuf, config: BashToolConfig) -> AgentTool {
+    let shell_path = config.shell_path;
     let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args, _cx: ToolExecutionContext| {
         let cwd = cwd.clone();
-        Box::pin(async move { execute_bash(&cwd, args).await })
+        let shell_path = shell_path.clone();
+        Box::pin(async move { execute_bash(&cwd, &shell_path, args).await })
     });
 
     AgentTool::new(
@@ -36,7 +64,7 @@ pub fn create_bash_tool(cwd: PathBuf) -> AgentTool {
     )
 }
 
-async fn execute_bash(cwd: &Path, args: serde_json::Value) -> ToolResult {
+async fn execute_bash(cwd: &Path, shell_path: &Path, args: serde_json::Value) -> ToolResult {
     let command = match args.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => return ToolResult::error("Missing required parameter: command"),
@@ -49,7 +77,8 @@ async fn execute_bash(cwd: &Path, args: serde_json::Value) -> ToolResult {
         ..Default::default()
     };
 
-    match bash_executor::execute_bash(command, cwd, "/bin/bash", options).await {
+    let shell_str = shell_path.to_str().unwrap_or("/bin/bash");
+    match bash_executor::execute_bash(command, cwd, shell_str, options).await {
         Ok(result) => {
             let mut output = result.output;
             if result.truncated {
@@ -78,11 +107,20 @@ mod tests {
         }
     }
 
+    fn default_shell() -> PathBuf {
+        PathBuf::from("/bin/bash")
+    }
+
     #[tokio::test]
     async fn test_bash_echo() {
         let dir = TempDir::new().unwrap();
-        let result =
-            execute_bash(&dir.path().to_path_buf(), json!({"command": "echo hello"})).await;
+        let shell = default_shell();
+        let result = execute_bash(
+            dir.path(),
+            &shell,
+            json!({"command": "echo hello"}),
+        )
+        .await;
         let text = get_text(&result);
         assert!(text.contains("hello"));
     }
@@ -90,7 +128,13 @@ mod tests {
     #[tokio::test]
     async fn test_bash_exit_code() {
         let dir = TempDir::new().unwrap();
-        let result = execute_bash(&dir.path().to_path_buf(), json!({"command": "exit 1"})).await;
+        let shell = default_shell();
+        let result = execute_bash(
+            dir.path(),
+            &shell,
+            json!({"command": "exit 1"}),
+        )
+        .await;
         let text = get_text(&result);
         assert!(text.contains("Exit code: 1"));
     }
@@ -98,7 +142,8 @@ mod tests {
     #[tokio::test]
     async fn test_bash_missing_command() {
         let dir = TempDir::new().unwrap();
-        let result = execute_bash(&dir.path().to_path_buf(), json!({})).await;
+        let shell = default_shell();
+        let result = execute_bash(dir.path(), &shell, json!({})).await;
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
     }

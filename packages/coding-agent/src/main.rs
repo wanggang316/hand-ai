@@ -145,6 +145,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// dispatcher future cleanly via `tokio::select!`; the writer task exits
 /// when its sender is dropped, and the process returns `Ok`.
 async fn run_rpc(cli: Args) -> Result<(), Box<dyn std::error::Error>> {
+    // F5: --continue / --fork are not yet supported in RPC mode. Surface a
+    // one-line warning and fall through; the session below is constructed
+    // ignoring those flags.
+    if cli.continue_session || cli.fork.is_some() {
+        eprintln!("rpc: --continue/--fork are not yet supported in RPC mode (ignored)");
+    }
+
+    // F6: --no-session drops thinking level under RPC because in-memory
+    // sessions do not yet carry through stream options. Warn the user
+    // explicitly so the silent drop is visible.
+    if cli.no_session && cli.thinking.is_some() {
+        eprintln!(
+            "rpc: --thinking is dropped under --no-session in this version (use a persisted session)"
+        );
+    }
+
     let setup = SessionSetup::resolve(&cli)?;
 
     // Build the session: persisted to disk by default, in-memory under --no-session.

@@ -38,6 +38,11 @@ pub struct ParsedFrontmatter<T> {
 pub fn parse_frontmatter<T: DeserializeOwned>(
     input: &str,
 ) -> Result<ParsedFrontmatter<T>, FrontmatterError> {
+    // Strip a leading UTF-8 BOM if present. Editors on Windows occasionally
+    // save markdown with a BOM; without this, `"\u{FEFF}---\n..."` would
+    // miss the `---\n` opener and the whole file would be treated as body.
+    let input = input.strip_prefix('\u{FEFF}').unwrap_or(input);
+
     // Frontmatter is only recognized when the input starts with `---` followed
     // by a newline. A bare `---` with no newline (e.g. `"---name: foo---"`)
     // is treated as body-only content.
@@ -307,6 +312,19 @@ mod tests {
         let parsed = parse_frontmatter::<serde_yaml::Value>(input).unwrap();
         assert!(parsed.metadata.as_ref().unwrap().is_null());
         assert_eq!(parsed.body, "body");
+    }
+
+    // BOM handling: a UTF-8 BOM at the very start of the input must not
+    // prevent frontmatter recognition.
+    #[test]
+    fn bom_prefixed_frontmatter_parses() {
+        let input = "\u{FEFF}---\nname: foo\n---\nhello";
+        let parsed = parse_frontmatter::<TestMeta>(input).unwrap();
+        assert_eq!(
+            parsed.metadata.as_ref().unwrap().name.as_deref(),
+            Some("foo"),
+        );
+        assert_eq!(parsed.body, "hello");
     }
 
     // Bonus: CRLF closer immediately followed by EOF.
