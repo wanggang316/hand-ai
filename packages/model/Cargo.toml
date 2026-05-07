@@ -51,3 +51,7 @@ tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Self-dep so integration tests get the `faux` feature compiled in. Production
+# builders that depend on `model` without the feature still won't pull in the
+# mock helpers (Decision Log D-04). See parity_*.rs and utils_test.rs.
+model = { path = ".", features = ["faux"] }
