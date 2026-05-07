@@ -34,6 +34,7 @@ async-trait = "0.1"
 toml = "0.8"
 notify = "8"
 tempfile = "3"
+mime_guess = "2"
 
 [dev-dependencies]
 async-trait = "0.1"
