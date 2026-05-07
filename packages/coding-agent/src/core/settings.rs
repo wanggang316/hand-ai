@@ -396,9 +396,22 @@ impl SettingsManager {
     ///
     /// Either layer being absent is fine — defaults are used. YAML parse
     /// errors propagate.
+    ///
+    /// Before loading, attempts a one-shot migration of any legacy
+    /// `settings.json` next to either expected YAML location. See
+    /// [`migrate_legacy_json_settings`].
     pub fn from_cwd(cwd: &Path) -> Result<Self, SettingsError> {
         let global_path = dirs::home_dir().map(|h| h.join(".hand/agent/settings.yaml"));
         let project_path = Some(cwd.join(".hand/settings.yaml"));
+
+        // Best-effort migration of legacy JSON settings, BEFORE load. The
+        // base directory for each layer is the parent of its YAML path.
+        if let Some(p) = global_path.as_ref().and_then(|p| p.parent()) {
+            let _ = migrate_legacy_json_settings(p);
+        }
+        if let Some(p) = project_path.as_ref().and_then(|p| p.parent()) {
+            let _ = migrate_legacy_json_settings(p);
+        }
 
         let settings = Settings::load(global_path.as_deref(), project_path.as_deref())?;
         Ok(Self {
@@ -691,6 +704,264 @@ fn event_matches_targets(
         .paths
         .iter()
         .any(|p| targets.iter().any(|t| p == t || p.starts_with(t)))
+}
+
+// ---------------------------------------------------------------------------
+// Legacy JSON → YAML migration
+// ---------------------------------------------------------------------------
+
+/// Result of one [`migrate_legacy_json_settings`] invocation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MigrationOutcome {
+    /// No JSON file at the given base; nothing to do.
+    NotApplicable,
+    /// YAML already exists; assumed previously migrated.
+    AlreadyMigrated,
+    /// Successfully migrated. `.bak` left at `<base>/settings.json.bak`.
+    Migrated {
+        yaml_path: PathBuf,
+        backup_path: PathBuf,
+    },
+    /// JSON exists but couldn't be parsed/converted/written. JSON untouched.
+    Failed { reason: String },
+}
+
+/// Top-level keys recognised by the new [`Settings`] struct, in kebab-case.
+const KNOWN_TOP_LEVEL: &[&str] = &[
+    "default-provider",
+    "default-model",
+    "default-thinking-level",
+    "shell-path",
+    "shell-command-prefix",
+    "theme",
+    "compaction",
+    "retry",
+    "quiet-startup",
+];
+
+/// Sub-struct keys we recognise (kebab-case) for `compaction` / `retry`.
+const KNOWN_COMPACTION: &[&str] = &[
+    "enabled",
+    "threshold",
+    "keep-recent-tokens",
+    "max-context-tokens",
+];
+const KNOWN_RETRY: &[&str] = &[
+    "enabled",
+    "max-retries",
+    "initial-delay-ms",
+    "max-delay-ms",
+];
+
+/// Convert one snake_case identifier to kebab-case (`a_b_c` → `a-b-c`).
+fn snake_to_kebab(s: &str) -> String {
+    s.replace('_', "-")
+}
+
+/// Walk a `serde_json::Value` and rewrite every map key from snake_case to
+/// kebab-case. Recurses through nested maps and arrays.
+fn rekey_to_kebab(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                out.insert(snake_to_kebab(&k), rekey_to_kebab(v));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(rekey_to_kebab).collect())
+        }
+        other => other,
+    }
+}
+
+/// Filter a (kebab-cased) JSON value to keep only fields recognised by the
+/// current [`Settings`] schema. Unknown top-level and known-substruct fields
+/// are dropped with a `tracing::warn!`. Special-case rewrites:
+///
+/// - `retry.base-delay-ms` (legacy) → `retry.initial-delay-ms` (new schema).
+fn filter_known_fields(value: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = value else {
+        return value;
+    };
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (k, v) in map {
+        if !KNOWN_TOP_LEVEL.contains(&k.as_str()) {
+            tracing::warn!(field = %k, "settings migration: dropped unknown legacy field");
+            continue;
+        }
+        match k.as_str() {
+            "compaction" => out.insert(k, filter_sub_object(v, "compaction", KNOWN_COMPACTION)),
+            "retry" => {
+                let v = rewrite_retry_legacy_keys(v);
+                out.insert(k, filter_sub_object(v, "retry", KNOWN_RETRY))
+            }
+            _ => out.insert(k, v),
+        };
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Filter a sub-object's keys against `allowed`; warn-and-drop everything
+/// else. Pass-through for non-objects (serde will produce a clear error
+/// downstream if the shape is wrong).
+fn filter_sub_object(
+    value: serde_json::Value,
+    parent: &str,
+    allowed: &[&str],
+) -> serde_json::Value {
+    let serde_json::Value::Object(map) = value else {
+        return value;
+    };
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (k, v) in map {
+        if allowed.contains(&k.as_str()) {
+            out.insert(k, v);
+        } else {
+            tracing::warn!(
+                field = %format!("{parent}.{k}"),
+                "settings migration: dropped legacy field",
+            );
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Rename legacy `retry.base-delay-ms` to the new `retry.initial-delay-ms`.
+/// If both are present, the new key wins and we warn about the duplicate.
+fn rewrite_retry_legacy_keys(value: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(mut map) = value else {
+        return value;
+    };
+    if let Some(legacy) = map.remove("base-delay-ms") {
+        if map.contains_key("initial-delay-ms") {
+            tracing::warn!(
+                "settings migration: both retry.base-delay-ms and retry.initial-delay-ms present; preferring initial-delay-ms",
+            );
+        } else {
+            map.insert("initial-delay-ms".to_string(), legacy);
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Migrate legacy `<base>/settings.json` to `<base>/settings.yaml` if needed.
+///
+/// - If `settings.yaml` already exists at `base`: no-op (`AlreadyMigrated`).
+/// - If `settings.json` does not exist: no-op (`NotApplicable`).
+/// - Else: parse JSON, write YAML, rename JSON → `settings.json.bak`.
+///
+/// Per-step errors are logged but do not propagate; on any failure the
+/// JSON file is left untouched and YAML is not created. Re-runs are safe:
+/// once YAML exists the function short-circuits with `AlreadyMigrated`.
+pub fn migrate_legacy_json_settings(base: &Path) -> MigrationOutcome {
+    let json_path = base.join("settings.json");
+    let yaml_path = base.join("settings.yaml");
+    let backup_path = base.join("settings.json.bak");
+
+    // Order matters for idempotency: a successful previous run leaves
+    // YAML in place (and the original JSON renamed to `.bak`). If we
+    // checked JSON first, the second run would return `NotApplicable`
+    // even though a migration had already taken place. Checking YAML
+    // first keeps the post-migration steady state observable as
+    // `AlreadyMigrated`.
+    if yaml_path.exists() {
+        return MigrationOutcome::AlreadyMigrated;
+    }
+    if !json_path.exists() {
+        return MigrationOutcome::NotApplicable;
+    }
+
+    // 1. Read + parse JSON.
+    let raw = match std::fs::read_to_string(&json_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                path = %json_path.display(),
+                error = %e,
+                "settings migration: failed to read legacy json",
+            );
+            return MigrationOutcome::Failed {
+                reason: format!("read: {e}"),
+            };
+        }
+    };
+    let json_value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                path = %json_path.display(),
+                error = %e,
+                "settings migration: legacy json parse failed",
+            );
+            return MigrationOutcome::Failed {
+                reason: format!("json parse: {e}"),
+            };
+        }
+    };
+
+    // 2. Pre-process: snake_case → kebab-case keys, then drop fields the
+    //    new schema no longer carries (warning the user about each).
+    let kebabed = rekey_to_kebab(json_value);
+    let filtered = filter_known_fields(kebabed);
+
+    // 3. Deserialize into the strongly-typed Settings.
+    let settings: Settings = match serde_json::from_value(filtered) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                path = %json_path.display(),
+                error = %e,
+                "settings migration: structural conversion failed",
+            );
+            return MigrationOutcome::Failed {
+                reason: format!("conversion: {e}"),
+            };
+        }
+    };
+
+    // 4. Serialize to YAML and write next to the JSON. We deliberately do
+    //    NOT touch the JSON until the YAML write has succeeded — that
+    //    preserves user data on any failure.
+    let yaml = match serde_yaml::to_string(&settings) {
+        Ok(s) => s,
+        Err(e) => {
+            return MigrationOutcome::Failed {
+                reason: format!("yaml emit: {e}"),
+            };
+        }
+    };
+    if let Err(e) = std::fs::write(&yaml_path, &yaml) {
+        return MigrationOutcome::Failed {
+            reason: format!("yaml write: {e}"),
+        };
+    }
+
+    // 5. Rename JSON → .bak. On POSIX `rename` is atomic and overwrites
+    //    an existing target; on Windows it errors if the target exists.
+    //    If the rename fails we keep the YAML and log; the next call will
+    //    short-circuit on `AlreadyMigrated` because YAML now exists.
+    if let Err(e) = std::fs::rename(&json_path, &backup_path) {
+        tracing::warn!(
+            json = %json_path.display(),
+            backup = %backup_path.display(),
+            error = %e,
+            "settings: migration wrote yaml but failed to rename json to .bak",
+        );
+    }
+
+    tracing::info!(
+        json = %json_path.display(),
+        yaml = %yaml_path.display(),
+        backup = %backup_path.display(),
+        "settings: migrated legacy json to yaml",
+    );
+
+    MigrationOutcome::Migrated {
+        yaml_path,
+        backup_path,
+    }
 }
 
 #[cfg(test)]
@@ -1086,5 +1357,216 @@ mod tests {
             .expect("broadcast closed");
         assert_eq!(event.previous.default_model.as_deref(), Some("A"));
         assert_eq!(event.current.default_model.as_deref(), Some("B"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Legacy JSON → YAML migration (T4.4)
+    // ---------------------------------------------------------------------
+
+    fn write_text(path: &Path, body: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn migration_no_files_is_not_applicable() {
+        let dir = TempDir::new().unwrap();
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert_eq!(outcome, MigrationOutcome::NotApplicable);
+        // Nothing created.
+        assert!(!dir.path().join("settings.yaml").exists());
+        assert!(!dir.path().join("settings.json").exists());
+        assert!(!dir.path().join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn migration_writes_yaml_and_backup_when_only_json_exists() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(&json, r#"{"default_model": "gpt-4o"}"#);
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        let yaml_path = dir.path().join("settings.yaml");
+        let backup_path = dir.path().join("settings.json.bak");
+        assert_eq!(
+            outcome,
+            MigrationOutcome::Migrated {
+                yaml_path: yaml_path.clone(),
+                backup_path: backup_path.clone(),
+            }
+        );
+        assert!(yaml_path.exists());
+        assert!(backup_path.exists());
+        assert!(!json.exists());
+        let yaml_body = std::fs::read_to_string(&yaml_path).unwrap();
+        assert!(
+            yaml_body.contains("default-model: gpt-4o"),
+            "expected kebab-case key + value, got: {yaml_body}",
+        );
+    }
+
+    #[test]
+    fn migration_is_already_migrated_when_yaml_exists() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        let yaml = dir.path().join("settings.yaml");
+        let json_body = r#"{"default_model": "gpt-4o"}"#;
+        let yaml_body = "default-model: claude-x\n";
+        write_text(&json, json_body);
+        write_text(&yaml, yaml_body);
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert_eq!(outcome, MigrationOutcome::AlreadyMigrated);
+        // Both files unchanged.
+        assert_eq!(std::fs::read_to_string(&json).unwrap(), json_body);
+        assert_eq!(std::fs::read_to_string(&yaml).unwrap(), yaml_body);
+        assert!(!dir.path().join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn migration_failed_leaves_files_untouched_on_bad_json() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(&json, "not json");
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        match outcome {
+            MigrationOutcome::Failed { reason } => assert!(
+                reason.contains("json parse"),
+                "unexpected reason: {reason}",
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // JSON survives, YAML never created.
+        assert!(json.exists());
+        assert_eq!(std::fs::read_to_string(&json).unwrap(), "not json");
+        assert!(!dir.path().join("settings.yaml").exists());
+        assert!(!dir.path().join("settings.json.bak").exists());
+    }
+
+    #[test]
+    fn migrated_yaml_loads_via_settings_load() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(
+            &json,
+            r#"{
+                "default_provider": "openai",
+                "default_model": "gpt-4o",
+                "compaction": {"enabled": false}
+            }"#,
+        );
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        let yaml_path = match outcome {
+            MigrationOutcome::Migrated { yaml_path, .. } => yaml_path,
+            other => panic!("expected Migrated, got {other:?}"),
+        };
+
+        let s = Settings::load(None, Some(&yaml_path)).unwrap();
+        assert_eq!(s.default_provider.as_deref(), Some("openai"));
+        assert_eq!(s.default_model.as_deref(), Some("gpt-4o"));
+        assert!(!s.compaction.enabled());
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(&json, r#"{"default_model": "gpt-4o"}"#);
+
+        let first = migrate_legacy_json_settings(dir.path());
+        assert!(matches!(first, MigrationOutcome::Migrated { .. }));
+
+        let yaml = dir.path().join("settings.yaml");
+        let backup = dir.path().join("settings.json.bak");
+        let yaml_before = std::fs::read_to_string(&yaml).unwrap();
+        let backup_before = std::fs::read_to_string(&backup).unwrap();
+
+        let second = migrate_legacy_json_settings(dir.path());
+        assert_eq!(second, MigrationOutcome::AlreadyMigrated);
+
+        // No mutation between runs.
+        assert_eq!(std::fs::read_to_string(&yaml).unwrap(), yaml_before);
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), backup_before);
+    }
+
+    #[test]
+    fn migration_drops_legacy_compaction_reserve_tokens() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(
+            &json,
+            r#"{
+                "compaction": {
+                    "enabled": true,
+                    "reserve_tokens": 5000,
+                    "keep_recent_tokens": 12345
+                }
+            }"#,
+        );
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+
+        let yaml_body = std::fs::read_to_string(dir.path().join("settings.yaml")).unwrap();
+        assert!(
+            !yaml_body.contains("reserve"),
+            "legacy field leaked into yaml: {yaml_body}",
+        );
+        // Recognised fields survive.
+        assert!(yaml_body.contains("keep-recent-tokens: 12345"));
+
+        // And it round-trips through Settings::load with the surviving value.
+        let yaml_path = dir.path().join("settings.yaml");
+        let s = Settings::load(None, Some(&yaml_path)).unwrap();
+        assert_eq!(s.compaction.keep_recent_tokens(), 12_345);
+    }
+
+    #[test]
+    fn from_cwd_triggers_project_migration() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path();
+        let project_json = cwd.join(".hand").join("settings.json");
+        write_text(&project_json, r#"{"default_model": "gpt-4o"}"#);
+
+        let mgr = SettingsManager::from_cwd(cwd).unwrap();
+        // Settings actually loaded the migrated value.
+        assert_eq!(mgr.current().default_model.as_deref(), Some("gpt-4o"));
+
+        // YAML + .bak in place; original JSON gone.
+        assert!(cwd.join(".hand").join("settings.yaml").exists());
+        assert!(cwd.join(".hand").join("settings.json.bak").exists());
+        assert!(!project_json.exists());
+    }
+
+    #[test]
+    fn migration_renames_retry_base_delay_ms_to_initial_delay_ms() {
+        // Sanity check on the legacy-rename path: pre-T4.1 retry settings
+        // used `base_delay_ms`; new schema uses `initial-delay-ms`.
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(
+            &json,
+            r#"{
+                "retry": {
+                    "enabled": true,
+                    "max_retries": 5,
+                    "base_delay_ms": 2500,
+                    "max_delay_ms": 60000
+                }
+            }"#,
+        );
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+
+        let yaml_path = dir.path().join("settings.yaml");
+        let s = Settings::load(None, Some(&yaml_path)).unwrap();
+        assert_eq!(s.retry.max_retries(), 5);
+        assert_eq!(s.retry.initial_delay_ms(), 2_500);
+        assert_eq!(s.retry.max_delay_ms(), 60_000);
     }
 }
