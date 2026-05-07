@@ -11,6 +11,7 @@ pub mod export;
 pub mod extensions;
 pub mod git_utils;
 pub mod keybindings;
+pub mod messages;
 pub mod model_registry;
 pub mod model_resolver;
 pub mod output_guard;
