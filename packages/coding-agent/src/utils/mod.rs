@@ -10,5 +10,6 @@ pub mod frontmatter;
 pub mod mime;
 pub mod paths;
 pub mod pi_user_agent;
+pub mod shell;
 pub mod sleep;
 pub mod version_check;
