@@ -11,7 +11,7 @@ use crate::core::extensions::api::{
 use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_before_tool_call};
 use crate::core::extensions::registry::builtin_tier1_extensions;
 use crate::core::model_registry::ModelRegistry;
-use crate::core::session_manager::SessionManager;
+use crate::core::session_manager::{SessionEntry, SessionManager};
 use crate::rpc::types::QueueMode;
 use crate::core::settings::SettingsManager;
 use crate::core::skills::{self, Skill, SkillError};
@@ -21,7 +21,7 @@ use hand_agent::types::{
     AgentTool, BeforeToolCallContext, BeforeToolCallResult, BoxFuture,
 };
 use hand_agent::{AgentEventSink, CancellationToken, agent_loop};
-use model::types::ImageContent;
+use model::types::{ImageContent, UserContent};
 use model::{Message, SimpleStreamOptions, UserContentBlock};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -487,6 +487,17 @@ impl AgentSession {
         self.session_manager.id()
     }
 
+    /// Mutably borrow the underlying [`SessionManager`]. `pub(crate)`
+    /// because the dispatcher unit tests seed JSONL entries directly
+    /// via `append_message` (capturing the assigned IDs to drive
+    /// fork/clone cases) — full `send_message` round-trips are too
+    /// heavy for that setup. Outside of `coding-agent` the abstraction
+    /// stays sealed.
+    #[cfg(test)]
+    pub(crate) fn session_manager_mut(&mut self) -> &mut SessionManager {
+        &mut self.session_manager
+    }
+
     /// Get the current model.
     pub fn model(&self) -> &model::Model {
         &self.config.model
@@ -536,6 +547,110 @@ impl AgentSession {
         // Drop any queued steer/follow-up messages — they belonged to
         // the prior conversation and would leak into the fresh one on
         // the next turn boundary.
+        self.steering_queue.lock().unwrap().clear();
+        self.follow_up_queue.lock().unwrap().clear();
+        Ok(())
+    }
+
+    /// Fork the session at the given JSONL entry id. The new session's
+    /// history contains every entry strictly BEFORE the entry identified
+    /// by `entry_id`; the entry itself and everything after it are
+    /// dropped. Mirrors the TS `agent-session-runtime.ts` `fork()` with
+    /// `position == "before"` (the default; the only mode the RPC
+    /// surface exposes).
+    ///
+    /// The session manager is replaced with a fresh on-disk JSONL file
+    /// (or in-memory if the parent was in-memory). Listeners,
+    /// extensions, tools, client, model, settings, and skills are
+    /// preserved — same preservation contract as
+    /// [`Self::reset_session`].
+    ///
+    /// Returns the text content of the forked-from user message so the
+    /// RPC handler can echo it on the wire (matches TS
+    /// `selectedText` semantics).
+    ///
+    /// Errors:
+    /// - `CodingAgentError::Session("entry_id not found: …")` if no
+    ///   entry has the given id.
+    /// - `CodingAgentError::Session("entry_id is not a user message …")`
+    ///   if the entry exists but is not a user message — TS rejects
+    ///   the same way under default `position`.
+    pub fn fork(&mut self, entry_id: &str) -> Result<String, CodingAgentError> {
+        let entries = self.session_manager.entries();
+
+        // Find the entry by id and capture its index + the user-message
+        // text. Reject non-user-message entries to match TS's default
+        // `position == "before"` validation.
+        let mut found: Option<(usize, String)> = None;
+        for (idx, entry) in entries.iter().enumerate() {
+            if let SessionEntry::Message { id, message, .. } = entry
+                && id == entry_id
+            {
+                let Message::User(user_msg) = message.as_ref() else {
+                    return Err(CodingAgentError::Session(format!(
+                        "entry_id is not a user message: {entry_id}"
+                    )));
+                };
+                let text = extract_user_message_text(&user_msg.content);
+                found = Some((idx, text));
+                break;
+            }
+        }
+        let (cut_idx, text) = found.ok_or_else(|| {
+            CodingAgentError::Session(format!("entry_id not found: {entry_id}"))
+        })?;
+
+        // Truncated body: every entry strictly BEFORE the cut point,
+        // skipping any session header (the new manager generates its
+        // own).
+        let body: Vec<SessionEntry> = entries[..cut_idx]
+            .iter()
+            .filter(|e| !matches!(e, SessionEntry::Session(_)))
+            .cloned()
+            .collect();
+
+        self.replace_session_with_body(body)?;
+        Ok(text)
+    }
+
+    /// Clone the session: produce a fresh session_manager carrying a
+    /// complete copy of the current session's body entries. Same
+    /// preservation contract as [`Self::fork`] / [`Self::reset_session`].
+    /// Mirrors the TS pattern in `interactive-mode.ts::handleCloneCommand`,
+    /// which calls `runtimeHost.fork(leafId, { position: "at" })` —
+    /// effectively "fork at the leaf with everything included".
+    pub fn clone_session(&mut self) -> Result<(), CodingAgentError> {
+        let body: Vec<SessionEntry> = self
+            .session_manager
+            .entries()
+            .iter()
+            .filter(|e| !matches!(e, SessionEntry::Session(_)))
+            .cloned()
+            .collect();
+        self.replace_session_with_body(body)
+    }
+
+    /// Shared replacement path used by [`Self::fork`] and
+    /// [`Self::clone_session`]: build a fresh session manager that
+    /// adopts `body` verbatim, swap it in, rebuild the in-memory
+    /// message context, and reset queues + runtime flags. The new
+    /// session's `parent_session` header points at the prior session's
+    /// id (provenance, matching `SessionManager::fork_from`).
+    fn replace_session_with_body(
+        &mut self,
+        body: Vec<SessionEntry>,
+    ) -> Result<(), CodingAgentError> {
+        let parent_id = self.session_manager.id().to_string();
+        let new_sm = SessionManager::from_branched_entries(
+            &self.config.cwd,
+            self.session_manager.is_in_memory(),
+            Some(&parent_id),
+            body,
+        )?;
+        self.context.messages = new_sm.build_context();
+        self.session_manager = new_sm;
+        self.is_streaming = false;
+        self.is_compacting = false;
         self.steering_queue.lock().unwrap().clear();
         self.follow_up_queue.lock().unwrap().clear();
         Ok(())
@@ -1015,6 +1130,27 @@ pub(crate) fn build_user_message(text: &str, images: Option<Vec<ImageContent>>) 
             model::UserMessage::new_blocks(blocks)
         }
         _ => model::UserMessage::new_text(text),
+    }
+}
+
+/// Concatenate the text parts of a user message's content.
+///
+/// Mirrors the TS reference's `extractUserMessageText` in
+/// `agent-session-runtime.ts`: text-only content returns its string
+/// directly; block content returns the concatenation of every text
+/// block (image blocks are ignored). Used by [`AgentSession::fork`]
+/// to echo the forked-from message text on the wire.
+fn extract_user_message_text(content: &UserContent) -> String {
+    match content {
+        UserContent::Text(s) => s.clone(),
+        UserContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|b| match b {
+                UserContentBlock::Text(t) => Some(t.text.as_str()),
+                UserContentBlock::Image(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join(""),
     }
 }
 

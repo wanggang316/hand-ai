@@ -53,9 +53,10 @@
 use crate::core::agent_session::{AgentSession, AgentSessionEvent, build_user_message};
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
 use crate::rpc::types::{
-    BashRpcData, CommandsData, ExportHtmlData, ForkData, ForkMessagesData, LastAssistantTextData,
-    MessagesData, NewSessionData, RpcCommand, RpcResponse, RpcResponseBody, RpcResultEmpty,
-    RpcResultWithData, RpcSessionState, RpcSlashCommand, SlashCommandSource, SwitchSessionData,
+    BashRpcData, CloneData, CommandsData, ExportHtmlData, ForkData, ForkMessagesData,
+    LastAssistantTextData, MessagesData, NewSessionData, RpcCommand, RpcResponse, RpcResponseBody,
+    RpcResultEmpty, RpcResultWithData, RpcSessionState, RpcSlashCommand, SlashCommandSource,
+    SwitchSessionData,
 };
 use futures::StreamExt;
 use hand_agent::types::AgentEvent;
@@ -874,11 +875,33 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                 NOT_IMPLEMENTED,
             )),
         ),
-        RpcCommand::Fork { id, .. } => RpcResponse::new(
-            id,
-            RpcResponseBody::Fork(RpcResultWithData::<ForkData>::err(NOT_IMPLEMENTED)),
-        ),
-        RpcCommand::Clone { id } => not_impl_data(id, RpcResponseBody::Clone),
+        RpcCommand::Fork { id, entry_id } => match session.fork(&entry_id) {
+            Ok(text) => RpcResponse::new(
+                id,
+                RpcResponseBody::Fork(RpcResultWithData::ok(ForkData {
+                    text,
+                    cancelled: false,
+                })),
+            ),
+            Err(e) => RpcResponse::new(
+                id,
+                RpcResponseBody::Fork(RpcResultWithData::<ForkData>::err(format!(
+                    "fork failed: {e}"
+                ))),
+            ),
+        },
+        RpcCommand::Clone { id } => match session.clone_session() {
+            Ok(()) => RpcResponse::new(
+                id,
+                RpcResponseBody::Clone(RpcResultWithData::ok(CloneData { cancelled: false })),
+            ),
+            Err(e) => RpcResponse::new(
+                id,
+                RpcResponseBody::Clone(RpcResultWithData::<CloneData>::err(format!(
+                    "clone failed: {e}"
+                ))),
+            ),
+        },
         RpcCommand::GetForkMessages { id } => RpcResponse::new(
             id,
             RpcResponseBody::GetForkMessages(RpcResultWithData::<ForkMessagesData>::err(
@@ -980,15 +1003,6 @@ fn builtin_command_specs() -> Vec<RpcSlashCommand> {
 /// Canonical "not implemented" error string. Matches the brief verbatim
 /// so the round-trip tests can assert against it.
 const NOT_IMPLEMENTED: &str = "not implemented in Phase 1";
-
-/// Helper for variants whose Failure arm is `RpcResultWithData<T>::Failure`.
-/// `T` is inferred from the wrapping variant; the closure picks one.
-fn not_impl_data<T>(
-    id: Option<String>,
-    wrap: impl FnOnce(RpcResultWithData<T>) -> RpcResponseBody,
-) -> RpcResponse {
-    RpcResponse::new(id, wrap(RpcResultWithData::<T>::err(NOT_IMPLEMENTED)))
-}
 
 /// Build a snapshot of the session for `get_state`.
 ///
@@ -1313,14 +1327,17 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_scope_variant_returns_not_implemented_error() {
-        // `clone` is still out-of-scope and routes through `not_impl_data`.
-        // (Previously this test pinned `steer` as "not implemented"; that
-        // moved into the dispatcher proper in T-A2.)
+        // `switch_session` is still out-of-scope. (Previously this test
+        // pinned `steer` then `clone` as "not implemented"; both moved
+        // into the dispatcher proper — `steer` in T-A2 and `clone` in
+        // T-A3 — so we rotate to the next still-unimplemented variant.)
         let (mut in_tx, out_rx, handle) =
             spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
-            .write_all(b"{\"type\":\"clone\",\"id\":\"5\"}\n")
+            .write_all(
+                b"{\"type\":\"switch_session\",\"sessionPath\":\"/tmp/x.jsonl\",\"id\":\"5\"}\n",
+            )
             .await
             .unwrap();
         drop(in_tx);
@@ -1328,7 +1345,7 @@ mod tests {
         let frames = drain_frames(out_rx).await;
         assert_eq!(frames.len(), 1);
         let resp = &frames[0];
-        assert_eq!(resp["command"], "clone");
+        assert_eq!(resp["command"], "switch_session");
         assert_eq!(resp["success"], false);
         assert_eq!(resp["error"], "not implemented in Phase 1");
 
@@ -1975,5 +1992,193 @@ mod tests {
 
         // Clean up the dispatcher task — the prompt is hung forever.
         handle.abort();
+    }
+
+    /// Seed `session_manager` with `texts.len()` user messages and return
+    /// the JSONL entry IDs assigned to each, in input order. Decouples
+    /// fork/clone tests from a full `send_message` round-trip.
+    fn seed_user_messages(session: &mut AgentSession, texts: &[&str]) -> Vec<String> {
+        use model::UserMessage;
+        let mgr = session.session_manager_mut();
+        texts
+            .iter()
+            .map(|t| {
+                mgr.append_message(Message::User(UserMessage::new_text(*t)))
+                    .expect("append_message must succeed on in-memory session")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn fork_truncates_history_and_returns_text() {
+        let mut session = session_with_mock("ignored");
+        let ids = seed_user_messages(&mut session, &["first", "second", "third"]);
+        let fork_target = ids[1].clone();
+
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session).await;
+
+        // Issue fork at the second user message — history should
+        // truncate to just the first.
+        let cmd = format!(
+            "{{\"type\":\"fork\",\"id\":\"f-1\",\"entryId\":\"{fork_target}\"}}\n"
+        );
+        in_tx.write_all(cmd.as_bytes()).await.unwrap();
+        in_tx
+            .write_all(b"{\"type\":\"get_state\",\"id\":\"gs-1\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+
+        let fork_resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "fork")
+            .expect("expected a fork response");
+        assert_eq!(fork_resp["success"], true, "frames: {frames:#?}");
+        assert_eq!(fork_resp["id"], "f-1");
+        assert_eq!(fork_resp["data"]["text"], "second");
+        assert_eq!(fork_resp["data"]["cancelled"], false);
+
+        let state_resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "get_state")
+            .expect("expected a get_state response");
+        assert_eq!(state_resp["success"], true);
+        assert_eq!(
+            state_resp["data"]["messageCount"], 1,
+            "fork must truncate to entries strictly before target; frames: {frames:#?}"
+        );
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_unknown_entry_id_returns_error() {
+        let session = session_with_mock("ignored");
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session).await;
+
+        in_tx
+            .write_all(
+                b"{\"type\":\"fork\",\"id\":\"f-2\",\"entryId\":\"bogus_entry_id\"}\n",
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        let resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "fork")
+            .expect("expected a fork response");
+        assert_eq!(resp["success"], false, "frames: {frames:#?}");
+        assert_eq!(resp["id"], "f-2");
+        let err = resp["error"].as_str().unwrap_or("");
+        assert!(
+            err.contains("not found"),
+            "expected 'not found' in error, got: {err}"
+        );
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_preserves_full_history_and_changes_session_id() {
+        let mut session = session_with_mock("ignored");
+        seed_user_messages(&mut session, &["a", "b", "c"]);
+        let pre_id = session.session_id().to_string();
+
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session).await;
+
+        in_tx
+            .write_all(b"{\"type\":\"clone\",\"id\":\"c-1\"}\n")
+            .await
+            .unwrap();
+        in_tx
+            .write_all(b"{\"type\":\"get_state\",\"id\":\"gs-2\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+
+        let clone_resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "clone")
+            .expect("expected a clone response");
+        assert_eq!(clone_resp["success"], true, "frames: {frames:#?}");
+        assert_eq!(clone_resp["id"], "c-1");
+        assert_eq!(clone_resp["data"]["cancelled"], false);
+
+        let state_resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "get_state")
+            .expect("expected a get_state response");
+        assert_eq!(
+            state_resp["data"]["messageCount"], 3,
+            "clone must keep all messages; frames: {frames:#?}"
+        );
+        let post_id = state_resp["data"]["sessionId"]
+            .as_str()
+            .expect("sessionId must be a string")
+            .to_string();
+        assert_ne!(
+            post_id, pre_id,
+            "clone must produce a fresh session id; pre={pre_id} post={post_id}"
+        );
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn fork_preserves_listeners_so_post_fork_events_reach_subscribers() {
+        // C1-style regression guard for fork: the dispatcher subscribed
+        // once at startup; if the fork handler regressed to wholesale-
+        // replacing the session, post-fork events would never reach
+        // the wire. After fork we issue a `prompt` whose mock provider
+        // emits at least one assistant-message event; counting any
+        // event frame received AFTER the fork response proves the
+        // subscription survived. Mirrors
+        // `new_session_preserves_client_registry_so_subsequent_prompt_works`.
+        let mut session = session_with_mock("post-fork-reply");
+        let ids = seed_user_messages(&mut session, &["seed-1", "seed-2"]);
+        let fork_target = ids[1].clone();
+
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session).await;
+
+        let cmd = format!(
+            "{{\"type\":\"fork\",\"id\":\"f-3\",\"entryId\":\"{fork_target}\"}}\n"
+        );
+        in_tx.write_all(cmd.as_bytes()).await.unwrap();
+        in_tx
+            .write_all(b"{\"type\":\"prompt\",\"message\":\"hi\",\"id\":\"p-1\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+
+        let fork_idx = frames
+            .iter()
+            .position(|f| f["type"] == "response" && f["command"] == "fork")
+            .expect("expected a fork response");
+        let events_after_fork = frames
+            .iter()
+            .skip(fork_idx + 1)
+            .filter(|f| f["type"] == "event")
+            .count();
+        assert!(
+            events_after_fork >= 1,
+            "expected at least one event frame after fork — listeners must \
+             survive fork. frames: {frames:#?}"
+        );
+
+        let prompt_resp = frames
+            .iter()
+            .find(|f| f["type"] == "response" && f["command"] == "prompt")
+            .expect("expected a prompt response");
+        assert_eq!(prompt_resp["success"], true, "frames: {frames:#?}");
+
+        handle.await.unwrap().unwrap();
     }
 }
