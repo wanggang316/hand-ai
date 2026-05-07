@@ -21,3 +21,4 @@ pub mod skills;
 pub mod slash_commands;
 pub mod source_info;
 pub mod system_prompt;
+pub mod telemetry;

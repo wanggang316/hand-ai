@@ -37,6 +37,11 @@ pub struct Settings {
     pub compaction: CompactionSettings,
     pub retry: RetrySettings,
     pub quiet_startup: Option<bool>,
+    /// Anonymous install-telemetry attribution headers on outbound provider
+    /// calls. Default: `true` (matches the TS reference). Read effective
+    /// value via [`Settings::enable_install_telemetry`] — direct field
+    /// access is `Option<bool>` so layered merging is mechanical.
+    pub enable_install_telemetry: Option<bool>,
 }
 
 /// Compaction tuning, in YAML-parse shape.
@@ -224,6 +229,7 @@ impl Settings {
             compaction: CompactionSettings::with_defaults(),
             retry: RetrySettings::with_defaults(),
             quiet_startup: Some(false),
+            enable_install_telemetry: Some(true),
         }
     }
 
@@ -235,6 +241,12 @@ impl Settings {
     /// Effective `quiet_startup` flag — defaults to `false` if unset.
     pub fn quiet_startup(&self) -> bool {
         self.quiet_startup.unwrap_or(false)
+    }
+
+    /// Effective `enable-install-telemetry` flag — defaults to `true` if
+    /// unset, matching the TS reference (`enableInstallTelemetry ?? true`).
+    pub fn enable_install_telemetry(&self) -> bool {
+        self.enable_install_telemetry.unwrap_or(true)
     }
 
     /// Merge `project` on top of `base` (typically the global layer or
@@ -254,6 +266,9 @@ impl Settings {
             compaction: CompactionSettings::merge(base.compaction, project.compaction),
             retry: RetrySettings::merge(base.retry, project.retry),
             quiet_startup: project.quiet_startup.or(base.quiet_startup),
+            enable_install_telemetry: project
+                .enable_install_telemetry
+                .or(base.enable_install_telemetry),
         }
     }
 
@@ -327,6 +342,7 @@ fn parse_yaml_with_warning(path: &Path, content: &str) -> Result<Settings, Setti
             "compaction",
             "retry",
             "quiet-startup",
+            "enable-install-telemetry",
         ];
         for (k, _) in map.iter() {
             if let Some(key) = k.as_str().filter(|k| !known.contains(k)) {
@@ -453,6 +469,26 @@ impl SettingsManager {
     /// Effective retry settings.
     pub fn retry_settings(&self) -> RetrySettings {
         self.settings.retry.clone()
+    }
+
+    /// Effective `enable-install-telemetry` flag — defaults to `true` if
+    /// unset, matching the TS reference.
+    pub fn enable_install_telemetry(&self) -> bool {
+        self.settings.enable_install_telemetry()
+    }
+
+    /// Test-only constructor: build a manager wrapping a pre-merged
+    /// [`Settings`] value with no on-disk paths and no watcher. Used by
+    /// unit tests that need to inject specific settings without touching
+    /// the filesystem.
+    #[doc(hidden)]
+    pub fn from_raw_for_test(settings: Settings) -> Self {
+        Self {
+            settings,
+            project_path: None,
+            global_path: None,
+            watch_handle: None,
+        }
     }
 
     /// Resolved `shell-path` setting if configured.
@@ -737,6 +773,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "compaction",
     "retry",
     "quiet-startup",
+    "enable-install-telemetry",
 ];
 
 /// Sub-struct keys we recognise (kebab-case) for `compaction` / `retry`.
@@ -1053,6 +1090,29 @@ mod tests {
         assert_eq!(s.retry.initial_delay_ms(), 1_000);
         assert_eq!(s.retry.max_delay_ms(), 30_000);
         assert!(!s.quiet_startup());
+        // Install telemetry defaults to ON, matching the TS reference.
+        assert!(s.enable_install_telemetry());
+    }
+
+    #[test]
+    fn enable_install_telemetry_round_trips_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        // Explicit `false` survives a load.
+        let p = write_yaml(&dir, "off.yaml", "enable-install-telemetry: false\n");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.enable_install_telemetry, Some(false));
+        assert!(!s.enable_install_telemetry());
+
+        // Explicit `true` survives a load.
+        let p = write_yaml(&dir, "on.yaml", "enable-install-telemetry: true\n");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.enable_install_telemetry, Some(true));
+        assert!(s.enable_install_telemetry());
+
+        // Field absent → default ON via the accessor (matches TS).
+        let p = write_yaml(&dir, "absent.yaml", "default-model: foo\n");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert!(s.enable_install_telemetry());
     }
 
     #[test]
