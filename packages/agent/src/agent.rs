@@ -197,6 +197,9 @@ pub struct Agent {
 
     // Misc
     max_retry_delay_ms: Option<u64>,
+
+    // Optional custom streaming transport.
+    stream_fn: Option<crate::types::StreamFn>,
 }
 
 /// Options for constructing an `Agent`.
@@ -217,6 +220,9 @@ pub struct AgentOptions {
     pub transform_context: Option<TransformContextFn>,
     pub get_api_key: Option<GetApiKeyFn>,
     pub max_retry_delay_ms: Option<u64>,
+    /// Optional custom streaming transport (e.g., `stream_fn_proxy(...)`).
+    /// When set, the agent uses this in place of `client.stream_simple`.
+    pub stream_fn: Option<crate::types::StreamFn>,
 }
 
 impl Agent {
@@ -250,6 +256,7 @@ impl Agent {
             listeners: Arc::new(Mutex::new(ListenerRegistry::default())),
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
             max_retry_delay_ms: opts.max_retry_delay_ms,
+            stream_fn: opts.stream_fn,
         }
     }
 
@@ -662,6 +669,7 @@ impl Agent {
             steering_mode: self.steering_queue.lock().unwrap().mode,
             follow_up_mode: self.follow_up_queue.lock().unwrap().mode,
             max_retry_delay_ms: self.max_retry_delay_ms,
+            stream_fn: self.stream_fn.clone(),
         }
     }
 

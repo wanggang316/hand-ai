@@ -388,6 +388,22 @@ pub type TransformContextFn =
 /// Dynamic API key resolver (e.g. for short-lived OAuth tokens).
 pub type GetApiKeyFn = Arc<dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync>;
 
+/// Custom streaming transport. When set on `AgentLoopConfig` (or
+/// `AgentOptions`), the loop calls this in place of
+/// `model::Client::stream_simple`. The closure must be `'static + Send + Sync`
+/// because the loop captures it across `.await` points and may share it
+/// across tasks.
+pub type StreamFn = Arc<
+    dyn Fn(
+            &model::Model,
+            model::Context,
+            model::SimpleStreamOptions,
+            tokio_util::sync::CancellationToken,
+        ) -> model::AssistantMessageEventStream<'static>
+        + Send
+        + Sync,
+>;
+
 // ---------------------------------------------------------------------------
 // Agent loop configuration
 // ---------------------------------------------------------------------------
@@ -412,6 +428,10 @@ pub struct AgentLoopConfig {
     pub steering_mode: QueueDeliveryMode,
     pub follow_up_mode: QueueDeliveryMode,
     pub max_retry_delay_ms: Option<u64>,
+    /// Optional custom streaming transport. When `None`, the loop calls
+    /// `client.stream_simple(...)`; when `Some`, it calls the closure with
+    /// the same arguments and uses the returned stream.
+    pub stream_fn: Option<StreamFn>,
 }
 
 impl AgentLoopConfig {
@@ -432,6 +452,7 @@ impl AgentLoopConfig {
             steering_mode: QueueDeliveryMode::default(),
             follow_up_mode: QueueDeliveryMode::default(),
             max_retry_delay_ms: None,
+            stream_fn: None,
         }
     }
 }

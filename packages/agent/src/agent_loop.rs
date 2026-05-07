@@ -401,10 +401,13 @@ async fn stream_assistant_response(
         return Ok(Message::Assistant(aborted));
     }
 
-    let stream_result = client.stream_simple(&config.model, llm_context, Some(stream_opts));
-    let mut stream = match stream_result {
-        Ok(s) => s,
-        Err(e) => return Err(AgentError::Client(e)),
+    let mut stream = if let Some(stream_fn) = &config.stream_fn {
+        stream_fn(&config.model, llm_context, stream_opts, cancel.clone())
+    } else {
+        match client.stream_simple(&config.model, llm_context, Some(stream_opts)) {
+            Ok(s) => s,
+            Err(e) => return Err(AgentError::Client(e)),
+        }
     };
 
     let mut final_message: Option<AssistantMessage> = None;

@@ -14,6 +14,7 @@
 //! `docs/exec-plans/agent-proxy-port.md`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -658,6 +659,39 @@ pub fn stream_proxy(
     };
 
     Box::pin(s)
+}
+
+/// Build a [`StreamFn`](crate::types::StreamFn) that bridges the proxy
+/// transport into [`AgentOptions`].
+///
+/// The `template` carries the auth token and proxy URL; the loop's
+/// `SimpleStreamOptions` for each turn is copied into
+/// `template.options` per call, and the loop's cancellation token
+/// replaces `template.cancel`. Other fields (auth, URL) come from
+/// the template.
+///
+/// # Example
+///
+/// ```ignore
+/// use hand_agent::{Agent, AgentOptions, ProxyStreamOptions, stream_fn_proxy};
+///
+/// let stream_fn = stream_fn_proxy(ProxyStreamOptions {
+///     auth_token: my_token,
+///     proxy_url: "https://genai.example.com".into(),
+///     ..Default::default()
+/// });
+/// let agent = Agent::with_options(client, model, AgentOptions {
+///     stream_fn: Some(stream_fn),
+///     ..Default::default()
+/// });
+/// ```
+pub fn stream_fn_proxy(template: ProxyStreamOptions) -> crate::types::StreamFn {
+    Arc::new(move |model, context, simple_opts, cancel| {
+        let mut opts = template.clone();
+        opts.options = simple_opts;
+        opts.cancel = Some(cancel);
+        stream_proxy(model, context, opts)
+    })
 }
 
 #[cfg(test)]
