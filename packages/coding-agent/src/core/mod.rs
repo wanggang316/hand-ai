@@ -13,6 +13,7 @@ pub mod git_utils;
 pub mod keybindings;
 pub mod model_registry;
 pub mod model_resolver;
+pub mod output_guard;
 pub mod package_manager;
 pub mod prompt_templates;
 pub mod resolve_config_value;
