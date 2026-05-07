@@ -6,6 +6,7 @@
 //! the specific helper they need.
 
 pub mod changelog;
+pub mod child_process;
 pub mod frontmatter;
 pub mod mime;
 pub mod paths;

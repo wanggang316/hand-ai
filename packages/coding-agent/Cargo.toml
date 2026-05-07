@@ -37,6 +37,9 @@ tempfile = "3"
 mime_guess = "2"
 reqwest = { version = "0.12", features = ["json"] }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["process", "signal"] }
+
 [dev-dependencies]
 async-trait = "0.1"
 ext-permission-gate = { path = "examples/extensions/permission-gate" }
