@@ -59,14 +59,62 @@ pub enum SessionEntry {
     },
 }
 
-/// Summary information about a session.
+/// Summary information about a session, suitable for listing UI and
+/// search. Mirrors the relevant fields from pi-mono's `SessionInfo`,
+/// adapted to the Rust port's flat-list session shape.
+///
+/// Construction is internal; consumers should treat new fields as
+/// additive — please go through [`SessionManager::list`] /
+/// [`SessionManager::list_all`] rather than building one by hand.
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub path: PathBuf,
     pub id: String,
     pub cwd: String,
+    /// Header timestamp (creation time), millis since epoch.
     pub timestamp: i64,
+    /// File mtime in millis since epoch — used as the listing sort key
+    /// (latest activity first), with the header timestamp as fallback.
+    /// Mirrors `SessionInfo.modified` in TS, which prefers the latest
+    /// message timestamp and falls back to file mtime.
+    pub modified: i64,
     pub message_count: usize,
+    /// Latest non-empty session label (if any). Mirrors
+    /// `SessionInfo.name`. The Rust port stores labels as `Label`
+    /// entries with `target_id == header.id` (session-level naming).
+    pub name: Option<String>,
+    /// Path to the parent session, for forks. Lifted from the header.
+    pub parent_session_path: Option<String>,
+    /// First user-message text found in the session, or
+    /// `"(no messages)"` for empty sessions. Used as a list-row
+    /// preview.
+    pub first_message: String,
+    /// All user/assistant text concatenated with single spaces. Used
+    /// as the haystack for free-text search ([`SessionInfo::matches`]).
+    pub all_messages_text: String,
+}
+
+impl SessionInfo {
+    /// Case-insensitive substring search across `name`, `first_message`,
+    /// and `all_messages_text`. Empty queries match everything.
+    pub fn matches(&self, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        if self
+            .name
+            .as_deref()
+            .map(|n| n.to_lowercase().contains(&q))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if self.first_message.to_lowercase().contains(&q) {
+            return true;
+        }
+        self.all_messages_text.to_lowercase().contains(&q)
+    }
 }
 
 /// Parse JSONL session content into entries. Malformed lines are
@@ -167,6 +215,152 @@ fn is_valid_session_file(path: &Path) -> bool {
         serde_json::from_str::<SessionEntry>(first_line),
         Ok(SessionEntry::Session(_))
     )
+}
+
+/// Build a [`SessionInfo`] from a session file by loading the
+/// entries, scanning for the latest label and the first user message,
+/// and concatenating user/assistant text for search.
+///
+/// Returns `Ok(None)` for files that have no valid header (so the
+/// caller can `flatten` over a directory listing). I/O errors
+/// propagate; malformed JSONL lines are tolerated by
+/// [`parse_session_entries`].
+pub fn build_session_info(path: &Path) -> Result<Option<SessionInfo>, CodingAgentError> {
+    let entries = load_entries_from_file(path)?;
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let header = match &entries[0] {
+        SessionEntry::Session(h) => h.clone(),
+        _ => return Ok(None),
+    };
+
+    let mtime = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(header.timestamp);
+
+    let mut message_count = 0usize;
+    let mut first_message = String::new();
+    let mut all_messages: Vec<String> = Vec::new();
+    let mut name: Option<String> = None;
+    let mut last_message_timestamp: Option<i64> = None;
+
+    for entry in &entries {
+        match entry {
+            SessionEntry::Label {
+                target_id, label, ..
+            } if target_id == &header.id => {
+                // Latest label wins, including explicit clears (None).
+                name = label
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            }
+            SessionEntry::Message {
+                message, timestamp, ..
+            } => {
+                message_count += 1;
+                last_message_timestamp = Some(
+                    last_message_timestamp
+                        .map(|prev| prev.max(*timestamp))
+                        .unwrap_or(*timestamp),
+                );
+
+                let text = extract_message_text(message);
+                if text.is_empty() {
+                    continue;
+                }
+                if first_message.is_empty()
+                    && let Message::User(_) = message.as_ref()
+                {
+                    first_message = text.clone();
+                }
+                all_messages.push(text);
+            }
+            _ => {}
+        }
+    }
+
+    // Prefer latest message timestamp when present (closer to "last
+    // activity"), falling back to file mtime, finally header
+    // timestamp. Mirrors `getSessionModifiedDate` in TS.
+    let modified = last_message_timestamp.unwrap_or(mtime);
+
+    Ok(Some(SessionInfo {
+        path: path.to_path_buf(),
+        id: header.id,
+        cwd: header.cwd,
+        timestamp: header.timestamp,
+        modified,
+        message_count,
+        name,
+        parent_session_path: header.parent_session,
+        first_message: if first_message.is_empty() {
+            "(no messages)".to_string()
+        } else {
+            first_message
+        },
+        all_messages_text: all_messages.join(" "),
+    }))
+}
+
+/// List session info for every valid `.jsonl` file directly under
+/// `dir`. Returns an empty vec if `dir` doesn't exist. Used by
+/// [`SessionManager::list`] / [`SessionManager::list_all`].
+fn list_sessions_from_dir(dir: &Path) -> Result<Vec<SessionInfo>, CodingAgentError> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(d) => d,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut out = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if let Ok(Some(info)) = build_session_info(&path) {
+            out.push(info);
+        }
+    }
+    Ok(out)
+}
+
+/// Best-effort plain-text extraction from a [`Message`] for search /
+/// preview purposes. ToolResult messages are skipped (they're noisy
+/// and not user-facing); user/assistant text and thinking blocks are
+/// concatenated with single spaces.
+fn extract_message_text(message: &Message) -> String {
+    match message {
+        Message::User(u) => match &u.content {
+            model::UserContent::Text(s) => s.clone(),
+            model::UserContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    model::UserContentBlock::Text(t) => Some(t.text.as_str()),
+                    model::UserContentBlock::Image(_) => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        },
+        Message::Assistant(a) => a
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                model::AssistantContentBlock::Text(t) => Some(t.text.as_str()),
+                model::AssistantContentBlock::Thinking(_) => None,
+                model::AssistantContentBlock::ToolCall(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        Message::ToolResult(_) => String::new(),
+    }
 }
 
 /// Manages session files (JSONL format).
@@ -552,31 +746,55 @@ impl SessionManager {
         &self.header
     }
 
-    /// List all sessions in a directory.
+    /// List all sessions for `cwd`'s default session directory. Sorted
+    /// by `modified` descending (most recently active first), matching
+    /// the TS `SessionManager.list` ordering.
+    ///
+    /// Malformed / header-less `.jsonl` files in the directory are
+    /// silently skipped.
     pub fn list(cwd: &Path) -> Result<Vec<SessionInfo>, CodingAgentError> {
         let session_dir = Self::default_session_dir(cwd);
-        if !session_dir.exists() {
-            return Ok(Vec::new());
-        }
+        let mut sessions = list_sessions_from_dir(&session_dir)?;
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
+        Ok(sessions)
+    }
 
+    /// List sessions across every project directory under `root`.
+    /// Mirrors `SessionManager.listAll` in TS, scoped to the directory
+    /// layout of the Rust port: each `cwd` keeps its sessions under
+    /// `<cwd>/.hand/sessions/`, so callers pass a parent directory
+    /// containing one or more such project trees, and `list_all`
+    /// recurses one level to find the per-project session dirs.
+    ///
+    /// Concretely, `list_all` looks for both:
+    ///   - `<root>/.hand/sessions/*.jsonl` (root itself is a project)
+    ///   - `<root>/<child>/.hand/sessions/*.jsonl` (one level down)
+    ///
+    /// Sorted by `modified` descending. Missing directories yield an
+    /// empty list (not an error).
+    pub fn list_all(root: &Path) -> Result<Vec<SessionInfo>, CodingAgentError> {
         let mut sessions = Vec::new();
-        for entry in std::fs::read_dir(&session_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "jsonl")
-                && let Ok(mgr) = Self::open(&path)
-            {
-                sessions.push(SessionInfo {
-                    path: path.clone(),
-                    id: mgr.header.id.clone(),
-                    cwd: mgr.header.cwd.clone(),
-                    timestamp: mgr.header.timestamp,
-                    message_count: mgr.message_count(),
-                });
+
+        // root itself, if it's a project dir
+        sessions.extend(list_sessions_from_dir(
+            &root.join(".hand").join("sessions"),
+        )?);
+
+        // one level of children
+        if let Ok(read_dir) = std::fs::read_dir(root) {
+            for entry in read_dir.flatten() {
+                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    continue;
+                }
+                let child_session_dir = entry.path().join(".hand").join("sessions");
+                if !child_session_dir.is_dir() {
+                    continue;
+                }
+                sessions.extend(list_sessions_from_dir(&child_session_dir)?);
             }
         }
 
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.timestamp));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         Ok(sessions)
     }
 
@@ -929,5 +1147,159 @@ mod tests {
         assert_eq!(CURRENT_SESSION_VERSION, 3);
         let mgr = SessionManager::in_memory();
         assert_eq!(mgr.header().version, CURRENT_SESSION_VERSION);
+    }
+
+    #[test]
+    fn test_build_session_info_extracts_first_message_and_name() {
+        let dir = TempDir::new().unwrap();
+        let mut mgr = SessionManager::create(dir.path()).unwrap();
+        mgr.append_message(Message::User(UserMessage::new_text("hello world")))
+            .unwrap();
+        mgr.append_message(Message::User(UserMessage::new_text("second")))
+            .unwrap();
+        mgr.append_label("My Project").unwrap();
+        let path = mgr.path().to_path_buf();
+
+        let info = build_session_info(&path).unwrap().expect("info present");
+        assert_eq!(info.id, mgr.id());
+        assert_eq!(info.message_count, 2);
+        assert_eq!(info.first_message, "hello world");
+        assert_eq!(info.name.as_deref(), Some("My Project"));
+        assert!(info.all_messages_text.contains("hello world"));
+        assert!(info.all_messages_text.contains("second"));
+    }
+
+    #[test]
+    fn test_build_session_info_no_messages_yields_placeholder() {
+        let dir = TempDir::new().unwrap();
+        let mgr = SessionManager::create(dir.path()).unwrap();
+        let info = build_session_info(mgr.path()).unwrap().unwrap();
+        assert_eq!(info.first_message, "(no messages)");
+        assert_eq!(info.message_count, 0);
+        assert!(info.name.is_none());
+        assert!(info.all_messages_text.is_empty());
+    }
+
+    #[test]
+    fn test_build_session_info_label_clear_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let mut mgr = SessionManager::create(dir.path()).unwrap();
+        mgr.append_label("first").unwrap();
+        // Clear via append_label with an empty string — empty trims
+        // away in build_session_info, so name should drop back to None.
+        mgr.append_label("   ").unwrap();
+        let info = build_session_info(mgr.path()).unwrap().unwrap();
+        assert!(
+            info.name.is_none(),
+            "expected cleared label, got {:?}",
+            info.name
+        );
+    }
+
+    #[test]
+    fn test_build_session_info_no_header_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("no-header.jsonl");
+        std::fs::write(&path, "{\"type\":\"foo\"}\n").unwrap();
+        assert!(build_session_info(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_session_info_matches_search() {
+        let info = SessionInfo {
+            path: PathBuf::from("/tmp/x.jsonl"),
+            id: "s_x".into(),
+            cwd: "/proj".into(),
+            timestamp: 0,
+            modified: 0,
+            message_count: 1,
+            name: Some("Refactor Pipeline".into()),
+            parent_session_path: None,
+            first_message: "investigate slow query".into(),
+            all_messages_text: "investigate slow query SELECT * FROM users".into(),
+        };
+
+        // Empty query — match all.
+        assert!(info.matches(""));
+        assert!(info.matches("   "));
+        // Hits in name.
+        assert!(info.matches("refactor"));
+        assert!(info.matches("REFACTOR"));
+        // Hits in first_message.
+        assert!(info.matches("slow"));
+        // Hits in all_messages_text only.
+        assert!(info.matches("users"));
+        // Misses.
+        assert!(!info.matches("postgres"));
+    }
+
+    #[test]
+    fn test_list_returns_modified_descending() {
+        let dir = TempDir::new().unwrap();
+        let older = SessionManager::create(dir.path()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newer = SessionManager::create(dir.path()).unwrap();
+
+        let listed = SessionManager::list(dir.path()).unwrap();
+        assert_eq!(listed.len(), 2);
+        // newer first
+        assert_eq!(listed[0].id, newer.id());
+        assert_eq!(listed[1].id, older.id());
+        // modified is set on every info (non-zero)
+        assert!(listed[0].modified > 0);
+    }
+
+    #[test]
+    fn test_list_skips_corrupted_jsonl() {
+        let dir = TempDir::new().unwrap();
+        SessionManager::create(dir.path()).unwrap();
+        let session_dir = dir.path().join(".hand").join("sessions");
+        std::fs::write(session_dir.join("garbage.jsonl"), "not json\n").unwrap();
+
+        let listed = SessionManager::list(dir.path()).unwrap();
+        assert_eq!(listed.len(), 1, "corrupted file should be skipped");
+    }
+
+    #[test]
+    fn test_list_all_finds_sessions_across_projects() {
+        let root = TempDir::new().unwrap();
+
+        let proj_a = root.path().join("a");
+        std::fs::create_dir_all(&proj_a).unwrap();
+        let _a = SessionManager::create(&proj_a).unwrap();
+
+        let proj_b = root.path().join("b");
+        std::fs::create_dir_all(&proj_b).unwrap();
+        let _b = SessionManager::create(&proj_b).unwrap();
+
+        // root itself has no .hand dir — should still work
+        let listed = SessionManager::list_all(root.path()).unwrap();
+        assert_eq!(listed.len(), 2);
+        // Each cwd should be the project, not the root
+        let cwds: std::collections::HashSet<_> = listed.iter().map(|i| i.cwd.as_str()).collect();
+        assert!(cwds.iter().any(|c| c.ends_with("/a")));
+        assert!(cwds.iter().any(|c| c.ends_with("/b")));
+    }
+
+    #[test]
+    fn test_list_all_includes_root_when_root_has_sessions() {
+        let root = TempDir::new().unwrap();
+        // root itself is a project with sessions
+        let _root_session = SessionManager::create(root.path()).unwrap();
+        // and a child too
+        let child = root.path().join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let _child_session = SessionManager::create(&child).unwrap();
+
+        let listed = SessionManager::list_all(root.path()).unwrap();
+        assert_eq!(listed.len(), 2);
+    }
+
+    #[test]
+    fn test_list_all_missing_root_yields_empty() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let listed = SessionManager::list_all(&missing).unwrap();
+        assert!(listed.is_empty());
     }
 }
