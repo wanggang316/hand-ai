@@ -506,6 +506,24 @@ pub struct CommandsData {
     pub commands: Vec<RpcSlashCommand>,
 }
 
+/// Data for the `bash` response.
+///
+/// Wire shape diverges intentionally from the TS `BashResult` interface
+/// (`{ output, exitCode, cancelled, truncated, fullOutputPath }`): we
+/// expose `stdout` / `stderr` separately so future ports can split the
+/// streams without another wire break. Phase 1 maps the existing
+/// `core::bash_executor::BashResult.output` (combined stdout+stderr)
+/// onto `stdout` and leaves `stderr` empty unless the call was aborted,
+/// in which case `stderr` carries `"[bash aborted]"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashRpcData {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub truncated: bool,
+}
+
 // =============================================================================
 // RPC response body
 // =============================================================================
@@ -548,8 +566,7 @@ pub enum RpcResponseBody {
     SetAutoRetry(RpcResultEmpty),
     AbortRetry(RpcResultEmpty),
 
-    /// TODO: typed `BashResult` once bash-executor port lands.
-    Bash(RpcResultWithData<serde_json::Value>),
+    Bash(RpcResultWithData<BashRpcData>),
     AbortBash(RpcResultEmpty),
 
     /// TODO: typed `SessionStats` once session-stats port lands.

@@ -142,6 +142,13 @@ pub struct AgentSession {
     /// `send_message` so a single token cancellation only affects the
     /// turn it was associated with — subsequent turns get a fresh token.
     cancel: Arc<Mutex<CancellationToken>>,
+    /// Cancellation token for in-flight one-off bash executions driven via
+    /// [`Self::run_bash`] (RPC `bash` handler). Held separately from
+    /// `cancel` so that aborting a turn does not kill an unrelated bash
+    /// command and vice versa. Like `cancel`, the token is *replaced* at
+    /// the start of every `run_bash` call so a stale `abort_bash` from
+    /// before the call can't poison it.
+    bash_cancel: Arc<Mutex<CancellationToken>>,
 }
 
 impl AgentSession {
@@ -233,6 +240,7 @@ impl AgentSession {
             is_streaming: false,
             is_compacting: false,
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            bash_cancel: Arc::new(Mutex::new(CancellationToken::new())),
         })
     }
 
@@ -284,6 +292,7 @@ impl AgentSession {
             is_streaming: false,
             is_compacting: false,
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            bash_cancel: Arc::new(Mutex::new(CancellationToken::new())),
         }
     }
 
@@ -637,6 +646,71 @@ impl AgentSession {
         } else {
             token.cancel();
             true
+        }
+    }
+
+    /// Cancel an in-flight [`Self::run_bash`] (if any). Idempotent — safe
+    /// to call when no bash command is running. Returns `true` if a token
+    /// was cancelled, `false` if there was nothing to cancel. Mirrors the
+    /// shape of [`Self::abort`] but for the bash-only cancellation
+    /// channel.
+    pub fn abort_bash(&self) -> bool {
+        let token = self.bash_cancel.lock().unwrap();
+        if token.is_cancelled() {
+            false
+        } else {
+            token.cancel();
+            true
+        }
+    }
+
+    /// Run a one-off bash command, racing it against [`Self::abort_bash`].
+    ///
+    /// Replaces the stored `bash_cancel` with a fresh token so a stale
+    /// abort can't poison this call, then races the executor future
+    /// against the new token's `cancelled()` future via `tokio::select!`.
+    /// On cancel, returns a synthesized [`BashResult`] with
+    /// `truncated: true` and the stderr-equivalent note `"[bash aborted]"`
+    /// (the underlying child process is left to exit on its own — the
+    /// executor doesn't expose a kill hook in v1).
+    ///
+    /// `timeout_secs` is forwarded to [`BashExecutorOptions::timeout_secs`]
+    /// (0 disables the timeout).
+    pub async fn run_bash(
+        &self,
+        command: &str,
+        timeout_secs: u64,
+    ) -> Result<crate::core::bash_executor::BashResult, CodingAgentError> {
+        // Replace the cancel token so callers from a previous run can't
+        // poison this call.
+        let cancel = {
+            let new_token = CancellationToken::new();
+            *self.bash_cancel.lock().unwrap() = new_token.clone();
+            new_token
+        };
+
+        let shell_path = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let options = crate::core::bash_executor::BashExecutorOptions {
+            on_chunk: None,
+            timeout_secs,
+            ..Default::default()
+        };
+
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                Ok(crate::core::bash_executor::BashResult {
+                    output: "[bash aborted]".to_string(),
+                    exit_code: None,
+                    truncated: true,
+                })
+            }
+            res = crate::core::bash_executor::execute_bash(
+                command,
+                &self.config.cwd,
+                &shell_path,
+                options,
+            ) => res,
         }
     }
 

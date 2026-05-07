@@ -32,9 +32,9 @@
 use crate::core::agent_session::{AgentSession, AgentSessionEvent};
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
 use crate::rpc::types::{
-    CommandsData, ExportHtmlData, ForkData, ForkMessagesData, LastAssistantTextData, MessagesData,
-    NewSessionData, RpcCommand, RpcResponse, RpcResponseBody, RpcResultEmpty, RpcResultWithData,
-    RpcSessionState, RpcSlashCommand, SlashCommandSource, SwitchSessionData,
+    BashRpcData, CommandsData, ExportHtmlData, ForkData, ForkMessagesData, LastAssistantTextData,
+    MessagesData, NewSessionData, RpcCommand, RpcResponse, RpcResponseBody, RpcResultEmpty,
+    RpcResultWithData, RpcSessionState, RpcSlashCommand, SlashCommandSource, SwitchSessionData,
 };
 use futures::StreamExt;
 use hand_agent::types::AgentEvent;
@@ -524,8 +524,41 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             let _ = session.abort();
             RpcResponse::new(id, RpcResponseBody::AbortRetry(RpcResultEmpty::ok()))
         }
-        RpcCommand::Bash { id, .. } => not_impl_data(id, RpcResponseBody::Bash),
-        RpcCommand::AbortBash { id } => not_impl_empty(id, RpcResponseBody::AbortBash),
+        RpcCommand::Bash { id, command } => {
+            // Phase 1 wire mapping: `core::bash_executor::BashResult` only
+            // carries a single combined `output` (stdout+stderr merged
+            // before truncation) so we surface it on `stdout` and leave
+            // `stderr` empty. The wire shape (`BashRpcData`) keeps the
+            // two fields separate so a future port that splits the
+            // streams in the executor can flip to populating both
+            // without another wire break. 120s default timeout matches
+            // the bash *tool* default; deliberately not surfaced on the
+            // wire since the TS reference doesn't expose it either.
+            match session.run_bash(&command, 120).await {
+                Ok(result) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::Bash(RpcResultWithData::ok(BashRpcData {
+                        stdout: result.output,
+                        stderr: String::new(),
+                        exit_code: result.exit_code,
+                        truncated: result.truncated,
+                    })),
+                ),
+                Err(e) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::Bash(RpcResultWithData::<BashRpcData>::err(format!(
+                        "bash failed: {e}"
+                    ))),
+                ),
+            }
+        }
+        RpcCommand::AbortBash { id } => {
+            // Idempotent — matches `abort` semantics. Returns success
+            // even when no bash is running, mirroring how the TS
+            // reference treats abort_bash as a fire-and-forget signal.
+            let _ = session.abort_bash();
+            RpcResponse::new(id, RpcResponseBody::AbortBash(RpcResultEmpty::ok()))
+        }
         RpcCommand::GetSessionStats { id } => {
             // `GetSessionStats` is typed as opaque JSON in the wire
             // protocol pending the typed `SessionStats` port. Compose
@@ -1178,6 +1211,84 @@ mod tests {
         assert_eq!(frames.len(), 2, "frames: {frames:#?}");
         for f in &frames {
             assert_eq!(f["command"], "abort");
+            assert_eq!(f["success"], true);
+        }
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `bash` runs a simple command and surfaces stdout + exit code on the
+    /// wire. The Phase 1 mapping puts the executor's combined output on
+    /// `stdout` and leaves `stderr` empty.
+    #[tokio::test]
+    async fn bash_executes_simple_command() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(b"{\"type\":\"bash\",\"id\":\"1\",\"command\":\"echo hello\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 1, "frames: {frames:#?}");
+        let resp = &frames[0];
+        assert_eq!(resp["command"], "bash");
+        assert_eq!(resp["success"], true);
+        assert_eq!(resp["id"], "1");
+        let data = &resp["data"];
+        let stdout = data["stdout"].as_str().expect("stdout is string");
+        assert!(stdout.contains("hello"), "expected hello in stdout: {stdout:?}");
+        assert_eq!(data["exitCode"], 0);
+        assert_eq!(data["truncated"], false);
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// A failing command surfaces its exit code on the wire.
+    #[tokio::test]
+    async fn bash_failure_surfaces_exit_code() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(b"{\"type\":\"bash\",\"id\":\"1\",\"command\":\"exit 7\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 1, "frames: {frames:#?}");
+        let resp = &frames[0];
+        assert_eq!(resp["command"], "bash");
+        assert_eq!(resp["success"], true);
+        assert_eq!(resp["data"]["exitCode"], 7);
+
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `abort_bash` is idempotent: returns success even when no bash is
+    /// running, matching how `abort` already behaves.
+    #[tokio::test]
+    async fn abort_bash_with_no_inflight_succeeds() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+
+        in_tx
+            .write_all(
+                br#"{"type":"abort_bash","id":"1"}
+{"type":"abort_bash","id":"2"}
+"#,
+            )
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        let frames = drain_frames(out_rx).await;
+        assert_eq!(frames.len(), 2, "frames: {frames:#?}");
+        for f in &frames {
+            assert_eq!(f["command"], "abort_bash");
             assert_eq!(f["success"], true);
         }
 
