@@ -473,7 +473,7 @@ fn process_proxy_event(
 /// bandwidth-trimmed projection of `options.options`. The server replies with
 /// an SSE-style stream of `data: <json>` lines, each carrying a
 /// [`ProxyAssistantMessageEvent`]. Lines are line-buffered, parsed, fed
-/// through [`process_proxy_event`], and the resulting events are yielded.
+/// through `process_proxy_event`, and the resulting events are yielded.
 ///
 /// This function is synchronous: it returns the boxed stream immediately, and
 /// the HTTP request is initiated on the first poll.
@@ -662,7 +662,7 @@ pub fn stream_proxy(
 }
 
 /// Build a [`StreamFn`](crate::types::StreamFn) that bridges the proxy
-/// transport into [`AgentOptions`].
+/// transport into [`AgentOptions`](crate::AgentOptions).
 ///
 /// The `template` carries the auth token and proxy URL; the loop's
 /// `SimpleStreamOptions` for each turn is copied into

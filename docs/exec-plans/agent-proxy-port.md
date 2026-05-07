@@ -1,6 +1,6 @@
 # ExecPlan: Port `proxy.ts` → `hand-agent::proxy`
 
-**Status:** Draft
+**Status:** Completed
 **Author:** Gump
 **Date:** 2026-05-07
 
@@ -18,14 +18,14 @@ The user-visible behavior:
 
 ## Progress
 
-- [ ] T1 — Scaffold the module and dependencies
-- [ ] T2 — Define `ProxyAssistantMessageEvent` (line-protocol enum)
-- [ ] T3 — Define `ProxyStreamOptions` and the proxy request body
-- [ ] T4 — Implement `process_proxy_event` (pure reducer) + unit tests
-- [ ] T5 — Implement `stream_proxy` (HTTP + SSE + cancellation)
-- [ ] T6 — Wire `stream_fn` injection into `AgentLoopConfig` so `Agent` can opt-in
-- [ ] T7 — Integration test against a mocked proxy server (`wiremock`)
-- [ ] T8 — Public API surface, README example, final verification
+- [x] T1 — Scaffold the module and dependencies
+- [x] T2 — Define `ProxyAssistantMessageEvent` (line-protocol enum)
+- [x] T3 — Define `ProxyStreamOptions` and the proxy request body
+- [x] T4 — Implement `process_proxy_event` (pure reducer) + unit tests
+- [x] T5 — Implement `stream_proxy` (HTTP + SSE + cancellation)
+- [x] T6 — Wire `stream_fn` injection into `AgentLoopConfig` so `Agent` can opt-in
+- [x] T7 — Integration test against a mocked proxy server (`wiremock`)
+- [x] T8 — Public API surface, README example, final verification
 
 ## Surprises & Discoveries
 
