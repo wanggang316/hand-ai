@@ -371,6 +371,11 @@ pub struct Tui {
     /// receiver is handed to [`crate::terminal::run_stdin_reader`]; flipping
     /// this to `true` cancels the reader's parked `read().await`.
     shutdown_tx: watch::Sender<bool>,
+    /// Bracketed-paste assembly buffer. `Some(buf)` when the most recent
+    /// stdin chunk crossed `\x1b[200~` without a closing `\x1b[201~`; the
+    /// next chunk's bytes accumulate here until the closing marker arrives,
+    /// at which point a single [`InputEvent::Paste`] is emitted.
+    paste_buffer: Option<String>,
 }
 
 impl Tui {
@@ -396,6 +401,7 @@ impl Tui {
             overlays: Vec::new(),
             next_overlay_id: 0,
             shutdown_tx,
+            paste_buffer: None,
         }
     }
 
@@ -602,17 +608,67 @@ impl Tui {
         Ok(())
     }
 
-    /// Convert a [`StdinBufferEvent`] into an [`InputEvent`], run listeners,
-    /// then dispatch.
+    /// Convert a [`StdinBufferEvent`] into one or more [`InputEvent`]s, run
+    /// listeners, then dispatch. A single stdin chunk may contain a regular
+    /// keystroke, a bracketed-paste payload, and a trailing keystroke — they
+    /// are split here and dispatched as separate events.
     fn process_stdin_event(&mut self, event: StdinBufferEvent) {
         let data = match event {
             StdinBufferEvent::Data(s) => s,
             StdinBufferEvent::Overflow => return, // signal-only; nothing to do
         };
 
-        let event = build_input_event(&data);
-        self.dispatch_event(event);
+        for ev in self.split_paste_markers(&data) {
+            self.dispatch_event(ev);
+        }
         self.render_requested.store(true, Ordering::Relaxed);
+    }
+
+    /// Split a stdin chunk on bracketed-paste markers (`\x1b[200~` /
+    /// `\x1b[201~`), accumulating cross-chunk paste payloads in
+    /// [`Self::paste_buffer`]. Yields a sequence of [`InputEvent`]s in the
+    /// order they should be dispatched.
+    fn split_paste_markers(&mut self, data: &str) -> Vec<InputEvent> {
+        const PASTE_START: &str = "\x1b[200~";
+        const PASTE_END: &str = "\x1b[201~";
+
+        let mut events = Vec::new();
+        let mut cursor = data;
+        loop {
+            if let Some(buf) = self.paste_buffer.as_mut() {
+                // Currently inside a paste: look for the end marker.
+                match cursor.find(PASTE_END) {
+                    Some(idx) => {
+                        buf.push_str(&cursor[..idx]);
+                        let payload = self.paste_buffer.take().unwrap();
+                        events.push(InputEvent::Paste(payload));
+                        cursor = &cursor[idx + PASTE_END.len()..];
+                    }
+                    None => {
+                        buf.push_str(cursor);
+                        return events;
+                    }
+                }
+            } else {
+                // Outside a paste: dispatch up to the next start marker as a
+                // regular event, then enter paste mode.
+                match cursor.find(PASTE_START) {
+                    Some(idx) => {
+                        if idx > 0 {
+                            events.push(build_input_event(&cursor[..idx]));
+                        }
+                        self.paste_buffer = Some(String::new());
+                        cursor = &cursor[idx + PASTE_START.len()..];
+                    }
+                    None => {
+                        if !cursor.is_empty() {
+                            events.push(build_input_event(cursor));
+                        }
+                        return events;
+                    }
+                }
+            }
+        }
     }
 
     /// Run listeners then dispatch to the focused component (with fallback).
@@ -1767,5 +1823,73 @@ mod tests {
             resize_seen,
             "root must receive a Resize event from the resize channel: {received:?}"
         );
+    }
+
+    // ---------- bracketed paste assembly ----------
+
+    /// A single chunk that wraps "hello" in paste markers must surface as
+    /// exactly one `InputEvent::Paste("hello")` and no `Raw` events.
+    #[test]
+    fn paste_in_one_chunk_emits_single_paste_event() {
+        let mut tui = make_tui();
+        let events = tui.split_paste_markers("\x1b[200~hello\x1b[201~");
+        assert_eq!(events.len(), 1, "got: {events:?}");
+        match &events[0] {
+            InputEvent::Paste(s) => assert_eq!(s, "hello"),
+            other => panic!("expected Paste, got {other:?}"),
+        }
+        assert!(
+            tui.paste_buffer.is_none(),
+            "paste buffer must be cleared after end marker"
+        );
+    }
+
+    /// A paste payload split across two chunks (start + body in chunk one,
+    /// rest of body + end in chunk two) must accumulate into one Paste event.
+    #[test]
+    fn paste_split_across_chunks_accumulates() {
+        let mut tui = make_tui();
+        let part1 = tui.split_paste_markers("\x1b[200~hello ");
+        assert!(
+            part1.is_empty(),
+            "no events should fire until the end marker arrives: {part1:?}"
+        );
+        assert!(tui.paste_buffer.is_some());
+        let part2 = tui.split_paste_markers("world\x1b[201~");
+        assert_eq!(part2.len(), 1);
+        match &part2[0] {
+            InputEvent::Paste(s) => assert_eq!(s, "hello world"),
+            other => panic!("expected Paste, got {other:?}"),
+        }
+    }
+
+    /// A chunk that brackets a paste between regular keystrokes must emit
+    /// three events: the prefix as a normal event, the Paste, and the suffix.
+    #[test]
+    fn paste_with_surrounding_keystrokes_splits_into_three_events() {
+        let mut tui = make_tui();
+        let events = tui.split_paste_markers("a\x1b[200~big\x1b[201~b");
+        assert_eq!(events.len(), 3, "got: {events:?}");
+        assert!(matches!(events[0], InputEvent::Raw(ref s) if s == "a"));
+        match &events[1] {
+            InputEvent::Paste(s) => assert_eq!(s, "big"),
+            other => panic!("expected Paste, got {other:?}"),
+        }
+        assert!(matches!(events[2], InputEvent::Raw(ref s) if s == "b"));
+    }
+
+    /// A multi-line paste payload must round-trip the newlines inside the
+    /// Paste variant rather than leaking them as separate Raw events.
+    #[test]
+    fn paste_preserves_multiline_payload() {
+        let mut tui = make_tui();
+        let payload = "line1\nline2\nline3";
+        let chunk = format!("\x1b[200~{payload}\x1b[201~");
+        let events = tui.split_paste_markers(&chunk);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            InputEvent::Paste(s) => assert_eq!(s, payload),
+            other => panic!("expected Paste, got {other:?}"),
+        }
     }
 }
