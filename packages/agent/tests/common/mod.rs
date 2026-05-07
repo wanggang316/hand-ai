@@ -1,6 +1,6 @@
 //! Shared test utilities for the agent crate.
 
-use hand_agent::{AgentEvent, AgentTool, BoxFuture, ToolResult};
+use hand_agent::{AgentEvent, AgentTool, BoxFuture, ToolExecutionContext, ToolResult};
 use model::types::Provider;
 use model::{
     Api, ApiProvider, AssistantContentBlock, AssistantMessage, AssistantMessageEvent,
@@ -222,7 +222,7 @@ pub fn echo_tool() -> AgentTool {
             "required": ["message"]
         }),
         "Echo",
-        Box::new(|_id, args| -> BoxFuture<'static, ToolResult> {
+        Box::new(|_id, args, _cx: ToolExecutionContext| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 let msg = args
                     .get("message")
@@ -247,7 +247,7 @@ pub fn calculator_tool() -> AgentTool {
             "required": ["expression"]
         }),
         "Calculator",
-        Box::new(|_id, args| -> BoxFuture<'static, ToolResult> {
+        Box::new(|_id, args, _cx: ToolExecutionContext| -> BoxFuture<'static, ToolResult> {
             Box::pin(async move {
                 let expr = args
                     .get("expression")

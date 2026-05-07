@@ -1,6 +1,6 @@
 //! Grep tool — search file contents using regex patterns.
 
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolExecuteFn, ToolExecutionContext, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,7 +10,7 @@ const DEFAULT_MAX_MATCHES: usize = 100;
 
 /// Create the grep tool.
 pub fn create_grep_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
+    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args, _cx: ToolExecutionContext| {
         let cwd = cwd.clone();
         Box::pin(async move { execute_grep(&cwd, args) })
     });

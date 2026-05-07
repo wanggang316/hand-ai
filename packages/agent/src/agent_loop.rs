@@ -6,8 +6,9 @@
 use crate::error::AgentError;
 use crate::types::{
     AfterToolCallContext, AgentContext, AgentEvent, AgentLoopConfig, AgentTool,
-    BeforeToolCallContext, ToolExecutionMode, ToolResult, extract_tool_calls,
+    BeforeToolCallContext, ToolExecutionContext, ToolExecutionMode, ToolResult, extract_tool_calls,
 };
+use std::path::PathBuf;
 use futures::StreamExt;
 use model::{
     AssistantMessage, AssistantMessageEvent, Context, Message, StopReason, ToolCall,
@@ -403,11 +404,12 @@ async fn execute_tool_calls_sequential(
         let preparation =
             prepare_tool_call(context, assistant_message, tool_call, tools, config).await;
         match preparation {
-            ToolCallPreparation::Immediate { result, is_error } => {
-                results.push(emit_tool_call_outcome(tool_call, result, is_error, emit));
+            ToolCallPreparation::Immediate { result } => {
+                results.push(emit_tool_call_outcome(tool_call, result, emit));
             }
             ToolCallPreparation::Prepared { tool, args, .. } => {
-                let executed = execute_prepared_tool_call(tool_call, tool, &args).await;
+                let executed =
+                    execute_prepared_tool_call(tool_call, tool, &args, config).await;
                 let finalized = finalize_executed_tool_call(
                     context,
                     assistant_message,
@@ -417,12 +419,7 @@ async fn execute_tool_calls_sequential(
                     config,
                 )
                 .await;
-                results.push(emit_tool_call_outcome(
-                    tool_call,
-                    finalized.0,
-                    finalized.1,
-                    emit,
-                ));
+                results.push(emit_tool_call_outcome(tool_call, finalized, emit));
             }
         }
     }
@@ -460,8 +457,8 @@ async fn execute_tool_calls_parallel(
         let preparation =
             prepare_tool_call(context, assistant_message, tool_call, tools, config).await;
         match preparation {
-            ToolCallPreparation::Immediate { result, is_error } => {
-                results.push(emit_tool_call_outcome(tool_call, result, is_error, emit));
+            ToolCallPreparation::Immediate { result } => {
+                results.push(emit_tool_call_outcome(tool_call, result, emit));
             }
             ToolCallPreparation::Prepared { tool, args, .. } => {
                 runnable_calls.push(PreparedCall {
@@ -476,7 +473,8 @@ async fn execute_tool_calls_parallel(
     // Await in source order (matching TS parallel behavior where results
     // are collected in source order after concurrent preparation)
     for call in &runnable_calls {
-        let executed = execute_prepared_tool_call(call.tool_call, call.tool, &call.args).await;
+        let executed =
+            execute_prepared_tool_call(call.tool_call, call.tool, &call.args, config).await;
         let finalized = finalize_executed_tool_call(
             context,
             assistant_message,
@@ -486,12 +484,7 @@ async fn execute_tool_calls_parallel(
             config,
         )
         .await;
-        results.push(emit_tool_call_outcome(
-            call.tool_call,
-            finalized.0,
-            finalized.1,
-            emit,
-        ));
+        results.push(emit_tool_call_outcome(call.tool_call, finalized, emit));
     }
 
     results
@@ -500,7 +493,6 @@ async fn execute_tool_calls_parallel(
 enum ToolCallPreparation<'a> {
     Immediate {
         result: ToolResult,
-        is_error: bool,
     },
     Prepared {
         tool: &'a AgentTool,
@@ -521,12 +513,11 @@ async fn prepare_tool_call<'a>(
         None => {
             return ToolCallPreparation::Immediate {
                 result: ToolResult::error(format!("Tool {} not found", tool_call.name)),
-                is_error: true,
             };
         }
     };
 
-    let args = tool_call.arguments.clone();
+    let mut args = tool_call.arguments.clone();
 
     // Run before_tool_call hook
     if let Some(hook) = &config.before_tool_call {
@@ -535,16 +526,21 @@ async fn prepare_tool_call<'a>(
             tool_call,
             args: &args,
         };
-        if let Some(before_result) = hook(ctx).await
-            && before_result.block
-        {
-            let reason = before_result
-                .reason
-                .unwrap_or_else(|| "Tool execution was blocked".to_string());
-            return ToolCallPreparation::Immediate {
-                result: ToolResult::error(reason),
-                is_error: true,
-            };
+        if let Some(before_result) = hook(ctx).await {
+            if before_result.block {
+                let reason = before_result
+                    .reason
+                    .unwrap_or_else(|| "Tool execution was blocked".to_string());
+                return ToolCallPreparation::Immediate {
+                    result: ToolResult::error(reason),
+                };
+            }
+            // Honor `replace_args`: swap the args fed to the tool while
+            // keeping the model-visible `tool_call.id` and original tool
+            // name so the conversation thread stays consistent.
+            if let Some(new_args) = before_result.replace_args {
+                args = new_args;
+            }
         }
     }
 
@@ -555,9 +551,19 @@ async fn execute_prepared_tool_call(
     tool_call: &ToolCall,
     tool: &AgentTool,
     args: &serde_json::Value,
-) -> (ToolResult, bool) {
-    let result = (tool.execute)(tool_call.id.clone(), args.clone()).await;
-    (result, false)
+    config: &AgentLoopConfig,
+) -> ToolResult {
+    let cwd = if config.cwd.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        config.cwd.clone()
+    };
+    let cx = ToolExecutionContext {
+        cwd,
+        session_id: config.session_id.clone(),
+        call_id: tool_call.id.clone(),
+    };
+    (tool.execute)(tool_call.id.clone(), args.clone(), cx).await
 }
 
 async fn finalize_executed_tool_call(
@@ -565,10 +571,10 @@ async fn finalize_executed_tool_call(
     assistant_message: &AssistantMessage,
     tool_call: &ToolCall,
     args: &serde_json::Value,
-    executed: (ToolResult, bool),
+    executed: ToolResult,
     config: &AgentLoopConfig,
-) -> (ToolResult, bool) {
-    let (mut result, mut is_error) = executed;
+) -> ToolResult {
+    let mut result = executed;
 
     if let Some(hook) = &config.after_tool_call {
         let ctx = AfterToolCallContext {
@@ -576,7 +582,7 @@ async fn finalize_executed_tool_call(
             tool_call,
             args,
             result: &result,
-            is_error,
+            is_error: result.is_error,
         };
         if let Some(after_result) = hook(ctx).await {
             if let Some(content) = after_result.content {
@@ -586,20 +592,20 @@ async fn finalize_executed_tool_call(
                 result.details = Some(details);
             }
             if let Some(err) = after_result.is_error {
-                is_error = err;
+                result.is_error = err;
             }
         }
     }
 
-    (result, is_error)
+    result
 }
 
 fn emit_tool_call_outcome(
     tool_call: &ToolCall,
     result: ToolResult,
-    is_error: bool,
     emit: &AgentEventSink,
 ) -> ToolResultMessage {
+    let is_error = result.is_error;
     emit(AgentEvent::ToolExecutionEnd {
         tool_call_id: tool_call.id.clone(),
         tool_name: tool_call.name.clone(),

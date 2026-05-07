@@ -6,6 +6,7 @@ use model::{
 };
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 // ---------------------------------------------------------------------------
@@ -42,22 +43,29 @@ pub struct ToolResult {
     pub content: Vec<ToolResultContent>,
     /// Opaque details for UI / logging.
     pub details: Option<serde_json::Value>,
+    /// True when the tool indicated a semantic failure (vs. successful
+    /// content that happens to describe a problem). The agent loop emits
+    /// this flag to the model so it can react.
+    #[serde(default)]
+    pub is_error: bool,
 }
 
 impl ToolResult {
-    /// Create a simple text result.
+    /// Create a simple text result. `is_error` is `false`.
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolResultContent::Text(TextContent::new(text))],
             details: None,
+            is_error: false,
         }
     }
 
-    /// Create an error result.
+    /// Create an error result. `is_error` is `true`.
     pub fn error(message: impl Into<String>) -> Self {
         Self {
             content: vec![ToolResultContent::Text(TextContent::new(message))],
             details: None,
+            is_error: true,
         }
     }
 }
@@ -65,13 +73,33 @@ impl ToolResult {
 /// A boxed, sendable future for async tool execution.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Per-call context handed to tool execute closures.
+///
+/// Carries session-level metadata that tools (especially extension-supplied
+/// ones) need to anchor file paths, look up per-session state, and tag log
+/// output. Callers of `run_agent_loop` populate `cwd` / `session_id` via
+/// [`AgentLoopConfig`]; the agent loop fills in `call_id` per tool call.
+#[derive(Debug, Clone)]
+pub struct ToolExecutionContext {
+    /// The session's working directory.
+    pub cwd: PathBuf,
+    /// The session's stable id (empty string when no session is associated).
+    pub session_id: String,
+    /// The unique id of the current tool call (matches the LLM's tool call id).
+    pub call_id: String,
+}
+
 /// The async function that executes a tool.
 ///
 /// Arguments:
 /// - `tool_call_id`: The unique ID for this specific call
 /// - `args`: Validated JSON arguments
-pub type ToolExecuteFn =
-    Box<dyn Fn(String, serde_json::Value) -> BoxFuture<'static, ToolResult> + Send + Sync>;
+/// - `cx`: Per-call session context (cwd, session id, call id)
+pub type ToolExecuteFn = Box<
+    dyn Fn(String, serde_json::Value, ToolExecutionContext) -> BoxFuture<'static, ToolResult>
+        + Send
+        + Sync,
+>;
 
 /// An executable tool registered with the agent.
 pub struct AgentTool {
@@ -199,6 +227,11 @@ pub struct BeforeToolCallResult {
     pub block: bool,
     /// Reason shown in the error result when blocked.
     pub reason: Option<String>,
+    /// If `Some`, the tool is invoked with these arguments instead of the
+    /// model's original ones. Ignored when `block` is true. The model still
+    /// sees the original tool call id, so the conversation thread stays
+    /// consistent — only the args fed to the tool change.
+    pub replace_args: Option<serde_json::Value>,
 }
 
 /// Result from `after_tool_call` hook — partial override of the tool result.
@@ -264,6 +297,13 @@ pub struct AgentLoopConfig {
     pub model: model::Model,
     /// Stream options (temperature, max_tokens, reasoning, etc.).
     pub stream_options: SimpleStreamOptions,
+    /// Working directory the loop reports to tools via
+    /// [`ToolExecutionContext::cwd`]. Defaults to `.` if empty.
+    pub cwd: PathBuf,
+    /// Session id the loop reports to tools via
+    /// [`ToolExecutionContext::session_id`]. Empty string is allowed and
+    /// signals "no associated session".
+    pub session_id: String,
     /// Tool execution mode.
     pub tool_execution: ToolExecutionMode,
     /// Hook: called before each tool execution.

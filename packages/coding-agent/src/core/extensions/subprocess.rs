@@ -31,7 +31,7 @@ use crate::core::extensions::manifest::load_manifest;
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
 use async_trait::async_trait;
 use futures::StreamExt;
-use hand_agent::types::{AgentTool, BoxFuture, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, BoxFuture, ToolExecuteFn, ToolExecutionContext, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -486,61 +486,52 @@ impl Extension for SubprocessExtension {
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
 
-            let execute: ToolExecuteFn = Box::new(move |call_id, args| {
-                let inner = inner.clone();
-                let tool_name = tool_name.clone();
-                let fut: BoxFuture<'static, ToolResult> = Box::pin(async move {
-                    // FIXME(F-extension-context): hand-agent's `ToolExecuteFn`
-                    // signature is `Fn(String, Value) -> BoxFuture<ToolResult>`
-                    // and does NOT carry session context. We synthesize a stub
-                    // `ExtensionContext` here so the subprocess receives
-                    // *something*, but `cwd` and `session_id` are NOT the live
-                    // session's values — they are deliberately fake sentinel
-                    // strings that show up in subprocess logs as `<ext:.../no-cwd>`
-                    // and `<ext:.../no-session>` so a misuse is loud rather
-                    // than silent. Subprocesses MUST treat these as untrusted
-                    // and not anchor file paths to `context.cwd`. Lifting this
-                    // requires extending hand-agent's `ToolExecuteFn` signature
-                    // to carry session metadata — see F20 / Phase 3.x.
-                    //
-                    // `data_dir` is the one field we can synthesize honestly:
-                    // it is deterministic per-extension (the extension's own
-                    // install dir + `data`).
-                    let cx = ExtensionContext {
-                        cwd: PathBuf::from(format!(
-                            "<ext:{}/no-cwd>",
-                            inner.manifest.name
-                        )),
-                        session_id: format!("<ext:{}/no-session>", inner.manifest.name),
-                        data_dir: inner.extension_dir.join("data"),
-                    };
-                    match inner
-                        .rpc(ExtensionEventOut::ExecuteCustomTool {
-                            context: (&cx).into(),
-                            tool_name: tool_name.clone(),
-                            arguments: args,
-                            call_id,
-                        })
-                        .await
-                    {
-                        Ok(ExtensionEventIn::ToolResult { content, is_error }) => {
-                            if is_error {
-                                ToolResult::error(content)
-                            } else {
-                                ToolResult::text(content)
+            let execute: ToolExecuteFn =
+                Box::new(move |_id, args, exec_cx: ToolExecutionContext| {
+                    let inner = inner.clone();
+                    let tool_name = tool_name.clone();
+                    let fut: BoxFuture<'static, ToolResult> = Box::pin(async move {
+                        // Build the `ExtensionContext` from the live session
+                        // metadata supplied by the agent loop. `data_dir` is
+                        // anchored at the extension's own install directory
+                        // so subprocesses can persist per-extension state
+                        // without trampling other extensions.
+                        let cx = ExtensionContext {
+                            cwd: exec_cx.cwd.clone(),
+                            session_id: exec_cx.session_id.clone(),
+                            data_dir: inner.extension_dir.join("data"),
+                        };
+                        match inner
+                            .rpc(ExtensionEventOut::ExecuteCustomTool {
+                                context: (&cx).into(),
+                                tool_name: tool_name.clone(),
+                                arguments: args,
+                                call_id: exec_cx.call_id.clone(),
+                            })
+                            .await
+                        {
+                            Ok(ExtensionEventIn::ToolResult { content, is_error }) => {
+                                // Preserve the subprocess's `is_error` flag
+                                // distinct from the textual content. Using
+                                // `ToolResult::text` + an explicit set keeps
+                                // the success path's content shape and only
+                                // flips the error bit when the subprocess
+                                // says so.
+                                let mut result = ToolResult::text(content);
+                                result.is_error = is_error;
+                                result
                             }
+                            Ok(ExtensionEventIn::Error { message }) => {
+                                ToolResult::error(format!("extension error: {message}"))
+                            }
+                            Ok(_) => ToolResult::error(
+                                "extension returned unexpected response for custom tool",
+                            ),
+                            Err(e) => ToolResult::error(format!("extension error: {e}")),
                         }
-                        Ok(ExtensionEventIn::Error { message }) => {
-                            ToolResult::error(format!("extension error: {message}"))
-                        }
-                        Ok(_) => ToolResult::error(
-                            "extension returned unexpected response for custom tool",
-                        ),
-                        Err(e) => ToolResult::error(format!("extension error: {e}")),
-                    }
+                    });
+                    fut
                 });
-                fut
-            });
 
             tools.push(AgentTool::new(
                 spec.name.clone(),
@@ -986,7 +977,12 @@ exec = ["/bin/true"]
         // Schema parsed at load time and round-trips through AgentTool.
         assert_eq!(tool.parameters["type"], "object");
 
-        let result = (tool.execute)("call-1".into(), serde_json::json!({})).await;
+        let cx = ToolExecutionContext {
+            cwd: PathBuf::from("/tmp"),
+            session_id: "test-session".into(),
+            call_id: "call-1".into(),
+        };
+        let result = (tool.execute)("call-1".into(), serde_json::json!({}), cx).await;
         // Successful result: text content "hello".
         let mut found = false;
         for block in &result.content {
@@ -1000,6 +996,148 @@ exec = ["/bin/true"]
             found,
             "expected `hello` text content; got {:?}",
             result.content
+        );
+
+        let _ = ext.on_shutdown(&ctx()).await;
+    }
+
+    /// F23 — Tier-2 subprocess that returns `is_error: true` propagates the
+    /// error flag into the resulting `ToolResult`. The content text is
+    /// preserved unchanged.
+    #[tokio::test]
+    async fn tier2_subprocess_is_error_propagates() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(
+            dir.path(),
+            r#"  printf '{"type":"tool_result","content":"compile failed","is_error":true}\n'"#,
+        );
+        let mut manifest =
+            make_manifest("erroring", vec![script.to_string_lossy().into_owned()]);
+        manifest.custom_tools = vec![CustomToolSpec {
+            name: "rust_check".into(),
+            description: "Run cargo check".into(),
+            schema: r#"{"type":"object","properties":{}}"#.into(),
+        }];
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let tools = ext.custom_tools();
+        let tool = &tools[0];
+        let cx = ToolExecutionContext {
+            cwd: PathBuf::from("/tmp"),
+            session_id: "test-session".into(),
+            call_id: "call-1".into(),
+        };
+        let result = (tool.execute)("call-1".into(), serde_json::json!({}), cx).await;
+
+        assert!(
+            result.is_error,
+            "is_error=true from subprocess must propagate into ToolResult.is_error"
+        );
+        // Content text is preserved.
+        let mut text = String::new();
+        for block in &result.content {
+            if let model::ToolResultContent::Text(t) = block {
+                text = t.text.clone();
+            }
+        }
+        assert_eq!(text, "compile failed");
+
+        let _ = ext.on_shutdown(&ctx()).await;
+    }
+
+    /// F23 — Tier-2 custom tool execute closure receives the live session's
+    /// `cwd` / `session_id` (forwarded via `ToolExecutionContext`), not the
+    /// `<ext:.../no-cwd>` sentinel that earlier versions of the host
+    /// synthesized. The fixture script echoes the inbound JSON line back so
+    /// the test can parse the embedded `context` and assert the values.
+    #[tokio::test]
+    async fn tier2_custom_tool_receives_real_session_context() {
+        let dir = TempDir::new().unwrap();
+        // Echo the inbound line as a tool_result whose `content` is the
+        // original event JSON. The host then parses that content and asserts
+        // the embedded context fields.
+        let script_path = dir.path().join("ext.sh");
+        let body = r#"#!/bin/bash
+set -u
+while IFS= read -r line; do
+  # Build a tool_result whose content is the inbound line (escaped).
+  python3 -c '
+import json, sys
+line = sys.argv[1]
+print(json.dumps({"type":"tool_result","content":line,"is_error":False}))
+' "$line"
+done
+"#;
+        std::fs::write(&script_path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        let mut manifest = make_manifest(
+            "context-echo",
+            vec![script_path.to_string_lossy().into_owned()],
+        );
+        manifest.custom_tools = vec![CustomToolSpec {
+            name: "echo_ctx".into(),
+            description: "Echo context".into(),
+            schema: r#"{"type":"object","properties":{}}"#.into(),
+        }];
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let tools = ext.custom_tools();
+        let tool = &tools[0];
+
+        let real_cwd = PathBuf::from("/the/real/cwd");
+        let real_session = "s_real_123".to_string();
+        let cx = ToolExecutionContext {
+            cwd: real_cwd.clone(),
+            session_id: real_session.clone(),
+            call_id: "call-xyz".into(),
+        };
+        let result = (tool.execute)("call-xyz".into(), serde_json::json!({}), cx).await;
+
+        assert!(
+            !result.is_error,
+            "context-echo is_error must remain false: {:?}",
+            result
+        );
+
+        let mut echoed = String::new();
+        for block in &result.content {
+            if let model::ToolResultContent::Text(t) = block {
+                echoed = t.text.clone();
+            }
+        }
+        // The echoed line is the inbound `ExtensionEventOut::ExecuteCustomTool`
+        // event with its embedded `context` DTO. Parse and verify the cwd
+        // and session_id match the live session — NOT the old
+        // `<ext:.../no-cwd>` / `<ext:.../no-session>` sentinels.
+        let event: serde_json::Value =
+            serde_json::from_str(&echoed).expect("echoed line is JSON");
+        let context = event
+            .get("context")
+            .expect("event carries context")
+            .clone();
+        assert_eq!(
+            context.get("cwd").and_then(|v| v.as_str()),
+            Some(real_cwd.to_str().unwrap()),
+            "subprocess must see the live cwd, not a sentinel"
+        );
+        assert_eq!(
+            context.get("sessionId").and_then(|v| v.as_str()),
+            Some(real_session.as_str()),
+            "subprocess must see the live session_id, not a sentinel"
+        );
+        let cwd_str = context.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            !cwd_str.contains("no-cwd"),
+            "cwd must not be a `<ext:.../no-cwd>` sentinel; got {cwd_str:?}"
         );
 
         let _ = ext.on_shutdown(&ctx()).await;

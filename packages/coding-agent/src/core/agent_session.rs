@@ -268,6 +268,8 @@ impl AgentSession {
         let loop_config = AgentLoopConfig {
             model: self.config.model.clone(),
             stream_options: self.config.stream_options.clone(),
+            cwd: self.config.cwd.clone(),
+            session_id: self.session_manager.id().to_string(),
             tool_execution: hand_agent::types::ToolExecutionMode::Parallel,
             before_tool_call: before_hook,
             after_tool_call: after_hook,
@@ -596,14 +598,10 @@ impl AgentSession {
 
 /// Build a `BeforeToolCallHook` that drives `dispatch_before_tool_call`.
 ///
-/// Note on `Replace`: `hand-agent`'s `BeforeToolCallResult` only exposes
-/// `block` / `reason` — there is no field for replaced arguments. So
-/// `HookDecision::Replace` from a Tier 1 extension is observable to
-/// **subsequent extensions in the same chain** (the dispatcher updates the
-/// working `ToolCallEvent::arguments`) but the host cannot push the replaced
-/// args back to the agent loop's tool execution. Treat `Replace` from the
-/// final aggregated decision the same as `Continue`. Lifting this limitation
-/// requires a `hand-agent` API change and is tracked separately.
+/// `HookDecision::Replace(args)` from the aggregated chain is forwarded to
+/// hand-agent via `BeforeToolCallResult::replace_args` so the agent loop
+/// invokes the tool with the rewritten arguments. The model still sees the
+/// original tool call id, so the conversation thread is unaffected.
 fn build_before_tool_call_hook(
     extensions: Arc<Vec<Arc<dyn Extension>>>,
     cx: Arc<ExtensionContext>,
@@ -619,15 +617,16 @@ fn build_before_tool_call_hook(
         Box::pin(async move {
             let decision = dispatch_before_tool_call(&extensions, &cx, &event).await;
             match decision {
-                HookDecision::Continue | HookDecision::Replace(_) => {
-                    // None == "no override"; agent loop runs the tool with
-                    // the original args. Replace is a no-op at the host
-                    // boundary; see function docs.
-                    None
-                }
+                HookDecision::Continue => None,
+                HookDecision::Replace(args) => Some(BeforeToolCallResult {
+                    block: false,
+                    reason: None,
+                    replace_args: Some(args),
+                }),
                 HookDecision::Cancel(reason) => Some(BeforeToolCallResult {
                     block: true,
                     reason: Some(reason),
+                    replace_args: None,
                 }),
             }
         })
@@ -966,11 +965,13 @@ mod tests {
                 &self.manifest
             }
             fn custom_tools(&self) -> Vec<AgentTool> {
-                let execute: hand_agent::types::ToolExecuteFn = Box::new(|_id, _args| {
-                    Box::pin(
-                        async move { hand_agent::types::ToolResult::text("custom tool ran") },
-                    )
-                });
+                let execute: hand_agent::types::ToolExecuteFn = Box::new(
+                    |_id, _args, _cx: hand_agent::types::ToolExecutionContext| {
+                        Box::pin(
+                            async move { hand_agent::types::ToolResult::text("custom tool ran") },
+                        )
+                    },
+                );
                 vec![AgentTool::new(
                     "echo",
                     "Echo a string",
@@ -990,7 +991,12 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
 
-        let result = (tools[0].execute)("c1".into(), serde_json::json!({})).await;
+        let cx = hand_agent::types::ToolExecutionContext {
+            cwd: PathBuf::from("."),
+            session_id: "test-session".into(),
+            call_id: "c1".into(),
+        };
+        let result = (tools[0].execute)("c1".into(), serde_json::json!({}), cx).await;
         let mut text = String::new();
         for block in &result.content {
             if let model::ToolResultContent::Text(t) = block {
@@ -1124,11 +1130,13 @@ mod tests {
     }
 
     fn noop_tool() -> AgentTool {
-        let execute: hand_agent::types::ToolExecuteFn = Box::new(move |_id, _args| {
-            Box::pin(async move {
-                hand_agent::types::ToolResult::text("noop ok")
-            })
-        });
+        let execute: hand_agent::types::ToolExecuteFn = Box::new(
+            move |_id, _args, _cx: hand_agent::types::ToolExecutionContext| {
+                Box::pin(async move {
+                    hand_agent::types::ToolResult::text("noop ok")
+                })
+            },
+        );
         AgentTool::new(
             "noop",
             "A no-op test tool.",
@@ -1270,13 +1278,15 @@ mod tests {
 
         let executions = Arc::new(AtomicUsize::new(0));
         let executions_for_tool = executions.clone();
-        let execute: hand_agent::types::ToolExecuteFn = Box::new(move |_id, _args| {
-            let counter = executions_for_tool.clone();
-            Box::pin(async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                hand_agent::types::ToolResult::text("ran")
-            })
-        });
+        let execute: hand_agent::types::ToolExecuteFn = Box::new(
+            move |_id, _args, _cx: hand_agent::types::ToolExecutionContext| {
+                let counter = executions_for_tool.clone();
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    hand_agent::types::ToolResult::text("ran")
+                })
+            },
+        );
         let counted_tool = AgentTool::new(
             "noop",
             "A no-op test tool.",
@@ -1308,6 +1318,67 @@ mod tests {
             ext.after_calls.lock().unwrap().len(),
             0,
             "after hook must not fire when the call was blocked",
+        );
+    }
+
+    /// F23: A `HookDecision::Replace(args)` returned by a Tier-1 extension
+    /// must be forwarded to the tool execute closure. The tool sees the
+    /// rewritten args, not the model's original ones.
+    #[tokio::test]
+    async fn replace_args_propagates_to_tool_execution() {
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(ToolThenTextProvider {
+                tool_name: "noop".into(),
+                args: serde_json::json!({"original": true}),
+                invocation: AtomicUsize::new(0),
+            }),
+            Some("test".into()),
+        );
+
+        // Build a recording tool that captures the args it actually received.
+        let observed: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+        let observed_for_tool = observed.clone();
+        let execute: hand_agent::types::ToolExecuteFn = Box::new(
+            move |_id, args, _cx: hand_agent::types::ToolExecutionContext| {
+                let observed = observed_for_tool.clone();
+                Box::pin(async move {
+                    *observed.lock().unwrap() = Some(args);
+                    hand_agent::types::ToolResult::text("recorded")
+                })
+            },
+        );
+        let recorder_tool = AgentTool::new(
+            "noop",
+            "Records args",
+            serde_json::json!({"type":"object","properties":{}}),
+            "Noop",
+            execute,
+        );
+
+        let mut session = AgentSession::in_memory_with_client(
+            openai_test_model(),
+            vec![recorder_tool],
+            client,
+        );
+
+        let ext = RecordingExt::new(
+            "rewriter",
+            HookDecision::Replace(serde_json::json!({"replaced": true})),
+        );
+        session.register_extension(ext.clone());
+
+        session
+            .send_message("call noop")
+            .await
+            .expect("send_message ok");
+
+        let captured = observed.lock().unwrap().clone();
+        assert_eq!(
+            captured,
+            Some(serde_json::json!({"replaced": true})),
+            "tool must observe the replaced args, not the model's original args"
         );
     }
 }

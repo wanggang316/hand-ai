@@ -359,6 +359,8 @@ impl Agent {
         AgentLoopConfig {
             model: self.model.clone(),
             stream_options: self.stream_options.clone(),
+            cwd: std::path::PathBuf::new(),
+            session_id: String::new(),
             tool_execution: self.tool_execution,
             before_tool_call: before_hook,
             after_tool_call: after_hook,

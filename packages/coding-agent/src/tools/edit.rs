@@ -1,13 +1,13 @@
 //! Edit tool — find-and-replace edits with diff output.
 
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolExecuteFn, ToolExecutionContext, ToolResult};
 use serde_json::json;
 use similar::TextDiff;
 use std::path::{Path, PathBuf};
 
 /// Create the edit tool.
 pub fn create_edit_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
+    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args, _cx: ToolExecutionContext| {
         let cwd = cwd.clone();
         Box::pin(async move { execute_edit(&cwd, args) })
     });

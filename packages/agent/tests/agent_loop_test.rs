@@ -52,6 +52,8 @@ fn default_config() -> AgentLoopConfig {
     AgentLoopConfig {
         model: test_model(),
         stream_options: SimpleStreamOptions::default(),
+        cwd: std::path::PathBuf::new(),
+        session_id: String::new(),
         tool_execution: ToolExecutionMode::Parallel,
         before_tool_call: None,
         after_tool_call: None,
@@ -305,6 +307,8 @@ async fn test_steering_messages_injected() {
     let config = AgentLoopConfig {
         model: test_model(),
         stream_options: SimpleStreamOptions::default(),
+        cwd: std::path::PathBuf::new(),
+        session_id: String::new(),
         tool_execution: ToolExecutionMode::Parallel,
         before_tool_call: None,
         after_tool_call: None,
@@ -352,6 +356,8 @@ async fn test_sequential_tool_execution() {
     let config = AgentLoopConfig {
         model: test_model(),
         stream_options: SimpleStreamOptions::default(),
+        cwd: std::path::PathBuf::new(),
+        session_id: String::new(),
         tool_execution: ToolExecutionMode::Sequential,
         before_tool_call: None,
         after_tool_call: None,
@@ -395,12 +401,15 @@ async fn test_before_tool_call_hook_blocks() {
     let config = AgentLoopConfig {
         model: test_model(),
         stream_options: SimpleStreamOptions::default(),
+        cwd: std::path::PathBuf::new(),
+        session_id: String::new(),
         tool_execution: ToolExecutionMode::Sequential,
         before_tool_call: Some(Box::new(|_ctx| {
             Box::pin(async {
                 Some(hand_agent::BeforeToolCallResult {
                     block: true,
                     reason: Some("Blocked by test".into()),
+                    replace_args: None,
                 })
             })
         })),
@@ -428,4 +437,158 @@ async fn test_before_tool_call_hook_blocks() {
         _ => false,
     });
     assert!(has_blocked);
+}
+
+// ========================================================================
+// F23 — replace_args from before-hook is forwarded to the tool execute fn.
+// ========================================================================
+#[tokio::test]
+async fn replace_args_used_when_set() {
+    use hand_agent::{BoxFuture, ToolExecutionContext};
+
+    let client = setup_client_with_tool(
+        "recorder",
+        serde_json::json!({"original": true}),
+        "Done",
+    );
+    let (emit, _events) = collecting_event_sink();
+
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: vec![],
+    };
+
+    // The recorder tool captures the args it actually receives so the test
+    // can assert that the rewritten args reached the closure.
+    let recorded: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let recorded_for_tool = recorded.clone();
+
+    let recorder_tool = hand_agent::AgentTool::new(
+        "recorder",
+        "Records args",
+        serde_json::json!({"type": "object"}),
+        "Recorder",
+        Box::new(move |_id, args, _cx: ToolExecutionContext| -> BoxFuture<'static, ToolResult> {
+            let recorded = recorded_for_tool.clone();
+            Box::pin(async move {
+                *recorded.lock().unwrap() = Some(args);
+                ToolResult::text("recorded")
+            })
+        }),
+    );
+
+    let config = AgentLoopConfig {
+        model: test_model(),
+        stream_options: SimpleStreamOptions::default(),
+        cwd: std::path::PathBuf::new(),
+        session_id: String::new(),
+        tool_execution: ToolExecutionMode::Sequential,
+        before_tool_call: Some(Box::new(|_ctx| {
+            Box::pin(async {
+                Some(hand_agent::BeforeToolCallResult {
+                    block: false,
+                    reason: None,
+                    replace_args: Some(serde_json::json!({"replaced": true})),
+                })
+            })
+        })),
+        after_tool_call: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_api_key: None,
+        steering_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        follow_up_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        max_retry_delay_ms: None,
+    };
+
+    let tools = vec![recorder_tool];
+    let prompt = vec![Message::User(UserMessage::new_text("rewrite me"))];
+    run_agent_loop(prompt, &mut context, &tools, &config, &client, &emit)
+        .await
+        .expect("agent loop ok");
+
+    let captured = recorded.lock().unwrap().clone();
+    assert_eq!(
+        captured,
+        Some(serde_json::json!({"replaced": true})),
+        "tool must observe the replace_args, not the model's original args"
+    );
+}
+
+// ========================================================================
+// F23 — ToolResult::is_error round-trips into the model-visible message.
+// ========================================================================
+#[tokio::test]
+async fn is_error_flag_round_trips() {
+    use hand_agent::{BoxFuture, ToolExecutionContext};
+
+    let client = setup_client_with_tool(
+        "fails",
+        serde_json::json!({}),
+        "Done",
+    );
+    let (emit, events) = collecting_event_sink();
+
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: vec![],
+    };
+
+    // Tool that returns `is_error: true` via `ToolResult::error`.
+    let failing_tool = hand_agent::AgentTool::new(
+        "fails",
+        "Always fails",
+        serde_json::json!({"type": "object"}),
+        "Fails",
+        Box::new(|_id, _args, _cx: ToolExecutionContext| -> BoxFuture<'static, ToolResult> {
+            Box::pin(async move { ToolResult::error("kaboom") })
+        }),
+    );
+
+    let config = AgentLoopConfig {
+        model: test_model(),
+        stream_options: SimpleStreamOptions::default(),
+        cwd: std::path::PathBuf::new(),
+        session_id: String::new(),
+        tool_execution: ToolExecutionMode::Sequential,
+        before_tool_call: None,
+        after_tool_call: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_api_key: None,
+        steering_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        follow_up_mode: hand_agent::QueueDeliveryMode::OneAtATime,
+        max_retry_delay_ms: None,
+    };
+
+    let tools = vec![failing_tool];
+    let prompt = vec![Message::User(UserMessage::new_text("call fails"))];
+    let result = run_agent_loop(prompt, &mut context, &tools, &config, &client, &emit)
+        .await
+        .expect("agent loop ok");
+
+    // The ToolExecutionEnd event must report is_error=true.
+    let events = events.lock().unwrap();
+    let saw_error_event = events.iter().any(|e| match e {
+        AgentEvent::ToolExecutionEnd { is_error, result, .. } => {
+            *is_error && result.is_error
+        }
+        _ => false,
+    });
+    assert!(saw_error_event, "ToolExecutionEnd must carry is_error=true");
+
+    // The tool_result message inserted into the conversation must also
+    // carry is_error=true so the model sees the failure.
+    let saw_error_message = result.messages.iter().any(|m| match m {
+        Message::ToolResult(trm) => trm.is_error && trm.tool_name == "fails",
+        _ => false,
+    });
+    assert!(
+        saw_error_message,
+        "tool_result message must carry is_error=true"
+    );
 }

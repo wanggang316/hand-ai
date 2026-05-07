@@ -16,6 +16,6 @@ pub use types::{
     AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentContext, AgentEvent,
     AgentLoopConfig, AgentState, AgentTool, BeforeToolCallContext, BeforeToolCallHook,
     BeforeToolCallResult, BoxFuture, ConvertToLlmFn, GetApiKeyFn, GetFollowUpMessagesFn,
-    GetSteeringMessagesFn, QueueDeliveryMode, ToolExecuteFn, ToolExecutionMode, ToolResult,
-    TransformContextFn,
+    GetSteeringMessagesFn, QueueDeliveryMode, ToolExecuteFn, ToolExecutionContext,
+    ToolExecutionMode, ToolResult, TransformContextFn,
 };
