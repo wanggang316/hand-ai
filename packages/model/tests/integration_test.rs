@@ -220,6 +220,7 @@ async fn test_provider_not_found_error() {
         },
         headers: None,
         compat: None,
+        thinking_level_map: None,
     };
 
     let context = Context {

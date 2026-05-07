@@ -83,6 +83,9 @@ impl ApiProvider for MockTextProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -99,6 +102,9 @@ impl ApiProvider for MockTextProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -115,6 +121,9 @@ impl ApiProvider for MockTextProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -137,6 +146,9 @@ impl ApiProvider for MockTextProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
         })
@@ -189,6 +201,9 @@ impl ApiProvider for MockToolProvider {
                     stop_reason: StopReason::ToolUse,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -210,6 +225,9 @@ impl ApiProvider for MockToolProvider {
                     stop_reason: StopReason::ToolUse,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -227,6 +245,9 @@ impl ApiProvider for MockToolProvider {
                     stop_reason: StopReason::ToolUse,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -250,6 +271,9 @@ impl ApiProvider for MockToolProvider {
                     stop_reason: StopReason::ToolUse,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
         })
@@ -290,6 +314,9 @@ impl ApiProvider for MockStreamingProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -309,6 +336,9 @@ impl ApiProvider for MockStreamingProvider {
                         stop_reason: StopReason::Stop,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
             }
@@ -326,6 +356,9 @@ impl ApiProvider for MockStreamingProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -348,6 +381,9 @@ impl ApiProvider for MockStreamingProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
         })
@@ -387,6 +423,9 @@ impl ApiProvider for MockThinkingProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -409,6 +448,9 @@ impl ApiProvider for MockThinkingProvider {
                         stop_reason: StopReason::Stop,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
             }
@@ -427,6 +469,9 @@ impl ApiProvider for MockThinkingProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -443,6 +488,9 @@ impl ApiProvider for MockThinkingProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -459,6 +507,9 @@ impl ApiProvider for MockThinkingProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -475,6 +526,9 @@ impl ApiProvider for MockThinkingProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
 
@@ -500,6 +554,9 @@ impl ApiProvider for MockThinkingProvider {
                     stop_reason: StopReason::Stop,
                     error_message: None,
                     timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                 },
             };
         })
@@ -571,6 +628,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::ToolUse,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
 
@@ -588,6 +648,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::ToolUse,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
 
@@ -604,6 +667,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::ToolUse,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
 
@@ -627,6 +693,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::ToolUse,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
 
@@ -647,6 +716,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::ToolUse,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
 
@@ -666,6 +738,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::ToolUse,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
 
@@ -691,6 +766,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::ToolUse,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
             } else {
@@ -707,6 +785,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::Stop,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
 
@@ -724,6 +805,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::Stop,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
 
@@ -740,6 +824,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::Stop,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
 
@@ -762,6 +849,9 @@ impl ApiProvider for MockMultiTurnProvider {
                         stop_reason: StopReason::Stop,
                         error_message: None,
                         timestamp: 0,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
                     },
                 };
             }
@@ -798,6 +888,7 @@ fn create_test_model(api: model::Api) -> Model {
         },
         headers: None,
         compat: None,
+        thinking_level_map: None,
     }
 }
 
@@ -1123,7 +1214,7 @@ async fn test_multi_turn() {
         let message = client
             .complete_simple(&test_model, context.clone(), None)
             .await
-            .unwrap_or_else(|_| panic!("Complete should succeed on turn {}", turn));
+            .unwrap_or_else(|_| panic!("Complete should succeed on turn {turn}"));
 
         // Add assistant response to context
         context.messages.push(Message::Assistant(message.clone()));

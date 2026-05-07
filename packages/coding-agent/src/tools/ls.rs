@@ -1,6 +1,6 @@
 //! Ls tool — list directory contents.
 
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -9,12 +9,7 @@ const DEFAULT_MAX_ENTRIES: usize = 500;
 
 /// Create the ls tool.
 pub fn create_ls_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
-        let cwd = cwd.clone();
-        Box::pin(async move { execute_ls(&cwd, args) })
-    });
-
-    AgentTool::new(
+    AgentTool::simple(
         "ls",
         "List the contents of a directory. Shows file names, types (file/dir), \
          and sizes. Use this instead of running ls via bash.",
@@ -32,7 +27,10 @@ pub fn create_ls_tool(cwd: PathBuf) -> AgentTool {
             }
         }),
         "Ls",
-        execute,
+        move |_tool_call_id, args| {
+            let cwd = cwd.clone();
+            async move { execute_ls(&cwd, args) }
+        },
     )
 }
 

@@ -1,192 +1,59 @@
 //! Message transformation for cross-provider compatibility.
 //!
-//! Normalizes tool call IDs, converts thinking blocks, and inserts synthetic
-//! tool results for orphaned tool calls across provider boundaries.
+//! The pipeline normalizes a slice of `Message`s so they can be safely replayed
+//! against an arbitrary target `Model`. The public entry point keeps the
+//! original signature and routes the input through a sequence of focused
+//! transforms; each step has a single responsibility and is unit-tested in
+//! isolation:
+//!
+//! 1. `downgrade_unsupported_tool_result_images` — drop image blocks from
+//!    tool-results when the target model lacks image input.
+//! 2. `drop_response_id_on_cross_api` — clear `responseId` when an assistant
+//!    message is being replayed against a different API.
+//! 3. `apply_eager_tool_input_streaming_compat` — wired through so future
+//!    Anthropic providers that opt out of eager-streaming can drop partial
+//!    tool-input markers; today this is a content-preserving pass.
+//! 4. `transform_assistant_content` — the legacy core: thinking-block
+//!    conversion, redacted-thinking drop, thought-signature stripping for
+//!    cross-model replay (including Google targets — see D-07 in the
+//!    model-package ExecPlan), and tool-call-id normalization.
+//! 5. `flush_orphans_and_skip_errored` — drop errored/aborted assistant
+//!    messages and synthesize "no result provided" tool results for orphaned
+//!    tool calls.
+//!
+//! Per-stage iteration is intentional: each pass is small, self-describing,
+//! and independently testable. A future single-pass fusion is possible if
+//! benchmarks call for it; deferred for now.
+//!
+//! Parity test ports for cross-provider-handoff and tool-call-id-normalization
+//! are deferred to M5 (the parity test harness milestone).
 
 use crate::types::{
-    AssistantContentBlock, AssistantMessage, Message, Model, StopReason, TextContent, ToolCall,
-    ToolResultMessage,
+    AnthropicMessagesCompat, Api, AssistantContentBlock, AssistantMessage, Compat, InputType,
+    Message, Model, StopReason, TextContent, ToolCall, ToolResultContent, ToolResultMessage,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Optional callback for normalizing tool call IDs across providers.
 pub type NormalizeToolCallIdFn = Box<dyn Fn(&str, &Model, &AssistantMessage) -> String>;
 
+const TOOL_RESULT_IMAGE_PLACEHOLDER: &str = "[image omitted]";
+
 /// Transform messages for cross-provider compatibility.
 ///
-/// This function:
-/// 1. Converts thinking blocks to plain text for different model/provider combinations
-/// 2. Drops redacted thinking from cross-model messages
-/// 3. Normalizes tool call IDs if a normalizer is provided
-/// 4. Strips thought signatures from cross-model tool calls
-/// 5. Skips errored/aborted assistant messages
-/// 6. Inserts synthetic tool results for orphaned tool calls
+/// See module docs for the list of stages this pipeline applies. The public
+/// signature is preserved for backwards compatibility with existing callers.
 pub fn transform_messages(
     messages: &[Message],
     model: &Model,
     normalize_tool_call_id: Option<&NormalizeToolCallIdFn>,
 ) -> Vec<Message> {
-    let mut tool_call_id_map: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-
-    // First pass: transform message content
-    let transformed: Vec<Message> = messages
-        .iter()
-        .map(|msg| match msg {
-            Message::User(u) => Message::User(u.clone()),
-
-            Message::ToolResult(tr) => {
-                if let Some(normalized) = tool_call_id_map.get(&tr.tool_call_id) {
-                    let mut new_tr = tr.clone();
-                    new_tr.tool_call_id = normalized.clone();
-                    Message::ToolResult(new_tr)
-                } else {
-                    Message::ToolResult(tr.clone())
-                }
-            }
-
-            Message::Assistant(assistant) => {
-                let is_same_model = assistant.provider == model.provider
-                    && assistant.api == model.api
-                    && assistant.model == model.id;
-
-                let transformed_content: Vec<AssistantContentBlock> = assistant
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        AssistantContentBlock::Thinking(t) => {
-                            // Keep thinking with signature for same model replay
-                            if is_same_model && t.thinking_signature.is_some() {
-                                return Some(block.clone());
-                            }
-                            // Skip empty thinking blocks
-                            if t.thinking.trim().is_empty() {
-                                return None;
-                            }
-                            if is_same_model {
-                                Some(block.clone())
-                            } else {
-                                // Convert to plain text for cross-provider
-                                Some(AssistantContentBlock::Text(TextContent::new(&t.thinking)))
-                            }
-                        }
-
-                        AssistantContentBlock::Text(t) => {
-                            if is_same_model {
-                                Some(block.clone())
-                            } else {
-                                // Strip text signature for cross-provider
-                                Some(AssistantContentBlock::Text(TextContent::new(&t.text)))
-                            }
-                        }
-
-                        AssistantContentBlock::ToolCall(tc) => {
-                            let mut new_tc = tc.clone();
-
-                            // Strip thought signature for cross-model
-                            if !is_same_model {
-                                new_tc.thought_signature = None;
-                            }
-
-                            // Normalize tool call ID for cross-model
-                            if !is_same_model && let Some(normalizer) = normalize_tool_call_id {
-                                let normalized = normalizer(&tc.id, model, assistant);
-                                if normalized != tc.id {
-                                    tool_call_id_map.insert(tc.id.clone(), normalized.clone());
-                                    new_tc.id = normalized;
-                                }
-                            }
-
-                            Some(AssistantContentBlock::ToolCall(new_tc))
-                        }
-                    })
-                    .collect();
-
-                let mut new_msg = assistant.clone();
-                new_msg.content = transformed_content;
-                Message::Assistant(new_msg)
-            }
-        })
-        .collect();
-
-    // Second pass: handle orphaned tool calls and skip errored messages
-    let mut result: Vec<Message> = Vec::new();
-    let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
-    let mut existing_tool_result_ids: HashSet<String> = HashSet::new();
-
-    for msg in &transformed {
-        match msg {
-            Message::Assistant(assistant) => {
-                // Insert synthetic results for previous orphaned tool calls
-                flush_orphaned_tool_calls(
-                    &mut result,
-                    &mut pending_tool_calls,
-                    &existing_tool_result_ids,
-                );
-                existing_tool_result_ids.clear();
-
-                // Skip errored/aborted assistant messages
-                if assistant.stop_reason == StopReason::Error
-                    || assistant.stop_reason == StopReason::Aborted
-                {
-                    continue;
-                }
-
-                // Track tool calls from this assistant message
-                let tool_calls: Vec<ToolCall> = assistant
-                    .content
-                    .iter()
-                    .filter_map(|b| {
-                        if let AssistantContentBlock::ToolCall(tc) = b {
-                            Some(tc.clone())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                if !tool_calls.is_empty() {
-                    pending_tool_calls = tool_calls;
-                }
-
-                result.push(msg.clone());
-            }
-
-            Message::ToolResult(tr) => {
-                existing_tool_result_ids.insert(tr.tool_call_id.clone());
-                result.push(msg.clone());
-            }
-
-            Message::User(_) => {
-                // User message interrupts tool flow
-                flush_orphaned_tool_calls(
-                    &mut result,
-                    &mut pending_tool_calls,
-                    &existing_tool_result_ids,
-                );
-                existing_tool_result_ids.clear();
-                result.push(msg.clone());
-            }
-        }
-    }
-
-    result
-}
-
-fn flush_orphaned_tool_calls(
-    result: &mut Vec<Message>,
-    pending_tool_calls: &mut Vec<ToolCall>,
-    existing_ids: &HashSet<String>,
-) {
-    for tc in pending_tool_calls.drain(..) {
-        if !existing_ids.contains(&tc.id) {
-            result.push(Message::ToolResult(ToolResultMessage::new_error(
-                &tc.id,
-                &tc.name,
-                "No result provided",
-            )));
-        }
-    }
+    let staged: Vec<Message> = messages.to_vec();
+    let staged = downgrade_unsupported_tool_result_images(staged, model);
+    let staged = drop_response_id_on_cross_api(staged, model);
+    let staged = apply_eager_tool_input_streaming_compat(staged, model);
+    let staged = transform_assistant_content(staged, model, normalize_tool_call_id);
+    flush_orphans_and_skip_errored(staged)
 }
 
 /// Normalize a tool call ID to be compatible with Anthropic's requirements.
@@ -209,6 +76,343 @@ pub fn normalize_tool_call_id_for_anthropic(id: &str) -> String {
         normalized[..64].to_string()
     } else {
         normalized
+    }
+}
+
+/// Whether the resolved compat for `model` opts in to eager tool-input
+/// streaming. Anthropic Messages defaults to `true` (the historical Anthropic
+/// behavior); other APIs default to `false`.
+///
+/// An explicit `Compat::AnthropicMessages` override always wins.
+pub fn supports_eager_tool_input_streaming(model: &Model) -> bool {
+    if let Some(Compat::AnthropicMessages(AnthropicMessagesCompat {
+        supports_eager_tool_input_streaming: Some(value),
+        ..
+    })) = &model.compat
+    {
+        return *value;
+    }
+    matches!(model.api, Api::AnthropicMessages)
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1 — image-bearing tool-result routing
+// ---------------------------------------------------------------------------
+
+/// Replace image blocks inside tool-results with a text placeholder when the
+/// target model does not advertise `InputType::Image` support.
+fn downgrade_unsupported_tool_result_images(messages: Vec<Message>, model: &Model) -> Vec<Message> {
+    if model.input.contains(&InputType::Image) {
+        return messages;
+    }
+
+    messages
+        .into_iter()
+        .map(|msg| match msg {
+            Message::ToolResult(tr) => {
+                let (downgraded_content, downgrade_info) = downgrade_tool_result_content(&tr);
+                if downgrade_info.is_none() {
+                    return Message::ToolResult(tr);
+                }
+                // TODO(M12): emit AssistantMessageDiagnostic {
+                //     kind: PayloadDowngraded,
+                //     message: "Tool result image stripped: target model does not support image input.",
+                //     details: Some({"toolName": tr.tool_name, "toolCallId": tr.tool_call_id}),
+                // } and attach it to the *next* AssistantMessage's diagnostics.
+                let mut new_tr = tr;
+                new_tr.content = downgraded_content;
+                Message::ToolResult(new_tr)
+            }
+            other => other,
+        })
+        .collect()
+}
+
+/// Replace each image block with a text placeholder, collapsing consecutive
+/// images into a single placeholder. Returns the new content along with `Some`
+/// payload describing the downgrade if any image was replaced.
+fn downgrade_tool_result_content(
+    tr: &ToolResultMessage,
+) -> (Vec<ToolResultContent>, Option<serde_json::Value>) {
+    let mut downgraded = false;
+    let mut previous_was_placeholder = false;
+    let mut out: Vec<ToolResultContent> = Vec::with_capacity(tr.content.len());
+
+    for block in &tr.content {
+        match block {
+            ToolResultContent::Image(_) => {
+                downgraded = true;
+                if !previous_was_placeholder {
+                    out.push(ToolResultContent::Text(TextContent::new(
+                        TOOL_RESULT_IMAGE_PLACEHOLDER,
+                    )));
+                }
+                previous_was_placeholder = true;
+            }
+            ToolResultContent::Text(t) => {
+                previous_was_placeholder = t.text == TOOL_RESULT_IMAGE_PLACEHOLDER;
+                out.push(ToolResultContent::Text(t.clone()));
+            }
+        }
+    }
+
+    let info = if downgraded {
+        Some(serde_json::json!({
+            "toolName": tr.tool_name,
+            "toolCallId": tr.tool_call_id,
+        }))
+    } else {
+        None
+    };
+    (out, info)
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2 — response-id normalization
+// ---------------------------------------------------------------------------
+
+/// Drop `response_id` on any assistant message whose source API differs from
+/// the target's. Foreign IDs get rejected (e.g. an OpenAI Responses `resp_…`
+/// id replayed against Anthropic Messages).
+fn drop_response_id_on_cross_api(messages: Vec<Message>, model: &Model) -> Vec<Message> {
+    messages
+        .into_iter()
+        .map(|msg| match msg {
+            Message::Assistant(mut assistant) => {
+                if assistant.api != model.api && assistant.response_id.is_some() {
+                    assistant.response_id = None;
+                }
+                Message::Assistant(assistant)
+            }
+            other => other,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3 — eager tool-input streaming compat
+// ---------------------------------------------------------------------------
+
+/// Wire eager-tool-input-streaming compat through the pipeline.
+///
+/// When the target is `Api::AnthropicMessages` and the resolved compat opts
+/// out of eager streaming, partial-form tool inputs would need to be
+/// collapsed to their final form. Today our types do not carry partial markers
+/// so this is a no-op data-wise; keeping the stage in place lets future
+/// providers that flip `supports_eager_tool_input_streaming = true` plug in
+/// without restructuring the pipeline.
+fn apply_eager_tool_input_streaming_compat(messages: Vec<Message>, model: &Model) -> Vec<Message> {
+    let _eager_supported = supports_eager_tool_input_streaming(model);
+    // No-op today; see doc comment.
+    messages
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4 — assistant-content normalization (legacy core)
+// ---------------------------------------------------------------------------
+
+/// Apply the historical assistant-content transformations:
+/// thinking-block conversion, redacted-thinking drop, cross-model
+/// thought-signature stripping, and tool-call-id normalization.
+fn transform_assistant_content(
+    messages: Vec<Message>,
+    model: &Model,
+    normalize_tool_call_id: Option<&NormalizeToolCallIdFn>,
+) -> Vec<Message> {
+    let mut tool_call_id_map: HashMap<String, String> = HashMap::new();
+
+    messages
+        .into_iter()
+        .map(|msg| match msg {
+            Message::User(u) => Message::User(u),
+
+            Message::ToolResult(mut tr) => {
+                if let Some(normalized) = tool_call_id_map.get(&tr.tool_call_id) {
+                    tr.tool_call_id = normalized.clone();
+                }
+                Message::ToolResult(tr)
+            }
+
+            Message::Assistant(assistant) => {
+                let is_same_model = assistant.provider == model.provider
+                    && assistant.api == model.api
+                    && assistant.model == model.id;
+
+                // Only clone the message when we'll actually need it as the
+                // callback context for the tool-id normalizer. Same-model
+                // assistants and cases without a normalizer skip the clone.
+                let assistant_for_callback = if !is_same_model && normalize_tool_call_id.is_some() {
+                    Some(assistant.clone())
+                } else {
+                    None
+                };
+                let transformed_content: Vec<AssistantContentBlock> = assistant
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        AssistantContentBlock::Thinking(t) => {
+                            if t.redacted == Some(true) {
+                                return if is_same_model {
+                                    Some(block.clone())
+                                } else {
+                                    None
+                                };
+                            }
+                            // Keep thinking with signature for same model replay
+                            if is_same_model && t.thinking_signature.is_some() {
+                                return Some(block.clone());
+                            }
+                            // Skip empty thinking blocks
+                            if t.thinking.trim().is_empty() {
+                                return None;
+                            }
+                            if is_same_model {
+                                Some(block.clone())
+                            } else {
+                                Some(AssistantContentBlock::Text(TextContent::new(&t.thinking)))
+                            }
+                        }
+
+                        AssistantContentBlock::Text(t) => {
+                            if is_same_model {
+                                Some(block.clone())
+                            } else {
+                                Some(AssistantContentBlock::Text(TextContent::new(&t.text)))
+                            }
+                        }
+
+                        AssistantContentBlock::ToolCall(tc) => {
+                            let mut new_tc = tc.clone();
+
+                            // Strip foreign thought signatures unconditionally for
+                            // cross-model replay. Provider-specific signatures encode
+                            // different opaque payloads and cannot be replayed
+                            // against another model. For Google targets this
+                            // matches the TS reference (`google-shared.ts`):
+                            // foreign signatures are dropped, not replaced with a
+                            // fabricated sentinel — see ExecPlan D-07.
+                            if !is_same_model {
+                                new_tc.thought_signature = None;
+                            }
+
+                            if !is_same_model
+                                && let Some(normalizer) = normalize_tool_call_id
+                                && let Some(source_msg) = assistant_for_callback.as_ref()
+                            {
+                                let normalized = normalizer(&tc.id, model, source_msg);
+                                if normalized != tc.id {
+                                    tool_call_id_map.insert(tc.id.clone(), normalized.clone());
+                                    new_tc.id = normalized;
+                                }
+                            }
+
+                            Some(AssistantContentBlock::ToolCall(new_tc))
+                        }
+                    })
+                    .collect();
+
+                let mut new_msg = assistant;
+                new_msg.content = transformed_content;
+                Message::Assistant(new_msg)
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Stage 5 — orphan flush + errored-message skip
+// ---------------------------------------------------------------------------
+
+/// Drop errored/aborted assistant messages and emit synthetic tool results for
+/// orphaned tool calls (those without a matching `ToolResult` in the same
+/// turn).
+///
+/// This stage also flushes any trailing orphan tool calls — i.e. tool calls
+/// in the final assistant message of the transcript that never received a
+/// result — so the returned conversation is well-formed even when the input
+/// ends mid-tool-turn. This isn't called out in the M3 bullet list, but
+/// matches `transform-messages.ts` parity behavior and is consistent with the
+/// overall transform intent (every tool call must be paired with a result).
+fn flush_orphans_and_skip_errored(messages: Vec<Message>) -> Vec<Message> {
+    let mut result: Vec<Message> = Vec::new();
+    let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
+    let mut existing_tool_result_ids: HashSet<String> = HashSet::new();
+
+    for msg in messages {
+        match msg {
+            Message::Assistant(assistant) => {
+                flush_orphaned_tool_calls(
+                    &mut result,
+                    &mut pending_tool_calls,
+                    &existing_tool_result_ids,
+                );
+                existing_tool_result_ids.clear();
+
+                if assistant.stop_reason == StopReason::Error
+                    || assistant.stop_reason == StopReason::Aborted
+                {
+                    continue;
+                }
+
+                let tool_calls: Vec<ToolCall> = assistant
+                    .content
+                    .iter()
+                    .filter_map(|b| {
+                        if let AssistantContentBlock::ToolCall(tc) = b {
+                            Some(tc.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !tool_calls.is_empty() {
+                    pending_tool_calls = tool_calls;
+                }
+
+                result.push(Message::Assistant(assistant));
+            }
+
+            Message::ToolResult(tr) => {
+                existing_tool_result_ids.insert(tr.tool_call_id.clone());
+                result.push(Message::ToolResult(tr));
+            }
+
+            Message::User(u) => {
+                flush_orphaned_tool_calls(
+                    &mut result,
+                    &mut pending_tool_calls,
+                    &existing_tool_result_ids,
+                );
+                existing_tool_result_ids.clear();
+                result.push(Message::User(u));
+            }
+        }
+    }
+
+    // If the conversation ends with unresolved tool calls, synthesize results.
+    flush_orphaned_tool_calls(
+        &mut result,
+        &mut pending_tool_calls,
+        &existing_tool_result_ids,
+    );
+
+    result
+}
+
+fn flush_orphaned_tool_calls(
+    result: &mut Vec<Message>,
+    pending_tool_calls: &mut Vec<ToolCall>,
+    existing_ids: &HashSet<String>,
+) {
+    for tc in pending_tool_calls.drain(..) {
+        if !existing_ids.contains(&tc.id) {
+            result.push(Message::ToolResult(ToolResultMessage::new_error(
+                &tc.id,
+                &tc.name,
+                "No result provided",
+            )));
+        }
     }
 }
 
@@ -239,6 +443,7 @@ mod tests {
             max_tokens: 16384,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 
@@ -258,6 +463,9 @@ mod tests {
             stop_reason: StopReason::Stop,
             error_message: None,
             timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         }
     }
 
@@ -298,7 +506,6 @@ mod tests {
         let result = transform_messages(&messages, &model, None);
         assert_eq!(result.len(), 1);
         if let Message::Assistant(a) = &result[0] {
-            // Thinking should be converted to text
             assert!(
                 matches!(&a.content[0], AssistantContentBlock::Text(t) if t.text == "reasoning")
             );
@@ -361,7 +568,6 @@ mod tests {
                 Api::AnthropicMessages,
                 "claude-sonnet-4-20250514",
             )),
-            // No tool result, then a user message
             Message::User(UserMessage::new_text("Continue")),
         ];
 

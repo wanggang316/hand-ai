@@ -1,6 +1,6 @@
 //! Find tool — search for files by name/pattern.
 
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -9,12 +9,7 @@ const DEFAULT_MAX_RESULTS: usize = 200;
 
 /// Create the find tool.
 pub fn create_find_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
-        let cwd = cwd.clone();
-        Box::pin(async move { execute_find(&cwd, args) })
-    });
-
-    AgentTool::new(
+    AgentTool::simple(
         "find",
         "Search for files by name pattern using glob matching. \
          Respects .gitignore. Returns relative file paths.",
@@ -37,7 +32,10 @@ pub fn create_find_tool(cwd: PathBuf) -> AgentTool {
             "required": ["pattern"]
         }),
         "Find",
-        execute,
+        move |_tool_call_id, args| {
+            let cwd = cwd.clone();
+            async move { execute_find(&cwd, args) }
+        },
     )
 }
 

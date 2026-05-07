@@ -8,19 +8,31 @@ pub mod cli;
 pub mod client;
 pub mod env_api_keys;
 pub mod models;
-pub mod overflow;
+pub mod oauth;
 pub mod providers;
+pub mod session_resources;
+pub mod stream;
 pub mod transform;
 pub mod types;
+pub mod utils;
 
 // Re-export commonly used items from types
 pub use types::{
-    Api, AssistantContentBlock, AssistantContentBlock as AssistantContent, AssistantMessage,
-    AssistantMessageEvent, Compat, Context, Cost, ImageContent, InputType, Message, Model,
-    OpenAICompletionsCompat, OpenAIResponsesCompat, OpenRouterRouting, ProviderStreamOptions,
+    AnthropicMessagesCompat, Api, AssistantContentBlock, AssistantContentBlock as AssistantContent,
+    AssistantMessage, AssistantMessageEvent, CacheRetention, Compat, Context, Cost, ImageContent,
+    InputType, Message, Model, OnPayloadCallback, OnResponseCallback, OpenAICompletionsCompat,
+    OpenAIResponsesCompat, OpenRouterRouting, ProviderResponse, ProviderStreamOptions,
     SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingBudgets, ThinkingContent,
-    ThinkingLevel, Tool, ToolCall, ToolResultContent, ToolResultMessage, Usage, UsageCost,
-    UserContent, UserContentBlock, UserMessage, VercelGatewayRouting,
+    ThinkingLevel, ThinkingLevelMap, Tool, ToolCall, ToolResultContent, ToolResultMessage,
+    Transport, Usage, UsageCost, UserContent, UserContentBlock, UserMessage, VercelGatewayRouting,
+};
+
+// Re-export from utils
+pub use utils::sanitize_unicode::{sanitize, sanitize_bytes};
+pub use utils::{
+    AssistantMessageDiagnostic, DiagnosticKind, EventStream, Provenance, ValidationIssue,
+    ValidationIssueKind, is_context_overflow, merge_headers, safe_parse_partial, sha256_hex,
+    try_parse_strict, validate_context,
 };
 
 // Re-export from models module
@@ -37,20 +49,37 @@ pub use api_registry::{
 // Re-export from client
 pub use client::{Client, ClientError};
 
+// Re-export from stream
+pub use stream::{complete_simple, stream_simple};
+
 // Re-export from env_api_keys
 pub use env_api_keys::{clear_vertex_adc_cache, get_env_api_key, get_env_api_key_by_str};
 
 // Re-export from providers
 pub use providers::{
-    AnthropicMessagesProvider, BedrockProvider, GoogleGenerativeAiProvider,
-    OpenAICompletionsOptions, OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat,
-    convert_messages, normalize_mistral_tool_id, stream_openai_completions,
+    AnthropicMessagesProvider, AzureOpenAIResponsesOptions, AzureOpenAIResponsesProvider,
+    BedrockProvider, GoogleGenerativeAiProvider, GoogleVertexOptions, GoogleVertexProvider,
+    GoogleVertexThinkingLevel, MistralOptions, MistralProvider, OpenAICodexResponsesOptions,
+    OpenAICodexResponsesProvider, OpenAICodexWebSocketDebugStats, OpenAICompletionsOptions,
+    OpenAICompletionsProvider, OpenAIResponsesProvider, ResolvedCompat, VertexTokenProvider,
+    cloudflare_ai_gateway_model, cloudflare_workers_ai_model, convert_messages,
+    normalize_mistral_tool_id, register_builtins, resolve_compat, stream_openai_completions,
+    websocket_debug_stats as openai_codex_websocket_debug_stats,
+};
+#[cfg(any(test, feature = "faux"))]
+pub use providers::{FauxProvider, FauxScriptStep, faux_model, register_builtins_with_faux};
+
+// Re-export from oauth
+pub use oauth::{
+    OAuthAuthInfo, OAuthCredentials, OAuthError, OAuthLoginCallbacks, OAuthProvider,
+    OAuthProviderId, OAuthRegistry,
 };
 
-// Re-export from overflow
-pub use overflow::is_context_overflow;
+// Re-export from session_resources
+pub use session_resources::{SessionResourceError, SessionResources, WebSocketHandle};
 
 // Re-export from transform
 pub use transform::{
-    NormalizeToolCallIdFn, normalize_tool_call_id_for_anthropic, transform_messages,
+    NormalizeToolCallIdFn, normalize_tool_call_id_for_anthropic,
+    supports_eager_tool_input_streaming, transform_messages,
 };
