@@ -9,27 +9,23 @@ pub enum AgentError {
     #[error("Client error: {0}")]
     Client(#[from] model::ClientError),
 
-    /// The agent was aborted.
+    /// The agent was aborted via its cancellation token.
     #[error("Agent aborted")]
     Aborted,
 
-    /// A tool was not found.
-    #[error("Tool not found: {name}")]
-    ToolNotFound { name: String },
+    /// Tool argument validation failed against the tool's JSON schema.
+    #[error("Tool '{tool_name}' argument validation failed: {message}")]
+    SchemaValidation { tool_name: String, message: String },
 
-    /// Tool argument validation failed.
-    #[error("Tool argument validation failed for {tool_name}: {message}")]
-    ToolValidationFailed { tool_name: String, message: String },
+    /// The stream ended without producing a final assistant message.
+    #[error("Agent stream ended without a final assistant message")]
+    StreamEndedWithoutResult,
 
-    /// The agent loop ended unexpectedly.
-    #[error("Agent loop ended without result")]
-    LoopEndedWithoutResult,
-
-    /// Cannot continue: invalid state.
-    #[error("Cannot continue: {0}")]
+    /// Misuse of the API: invalid state transition.
+    #[error("Invalid state: {0}")]
     InvalidState(String),
 
-    /// The stream ended with an error.
-    #[error("Stream error: {0}")]
-    StreamError(String),
+    /// Other unrecoverable error (used for lifecycle failures).
+    #[error("Agent error: {0}")]
+    Other(String),
 }

@@ -1,6 +1,6 @@
 //! Read tool — read file contents with line numbers.
 
-use hand_agent::types::{AgentTool, ToolExecuteFn, ToolResult};
+use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -9,12 +9,7 @@ const DEFAULT_MAX_LINES: usize = 2000;
 
 /// Create the read tool.
 pub fn create_read_tool(cwd: PathBuf) -> AgentTool {
-    let execute: ToolExecuteFn = Box::new(move |_tool_call_id, args| {
-        let cwd = cwd.clone();
-        Box::pin(async move { execute_read(&cwd, args) })
-    });
-
-    AgentTool::new(
+    AgentTool::simple(
         "read",
         "Read the contents of a file. Returns lines with line numbers. \
          Supports offset and limit parameters for reading portions of large files.",
@@ -37,7 +32,10 @@ pub fn create_read_tool(cwd: PathBuf) -> AgentTool {
             "required": ["path"]
         }),
         "Read",
-        execute,
+        move |_tool_call_id, args| {
+            let cwd = cwd.clone();
+            async move { execute_read(&cwd, args) }
+        },
     )
 }
 
