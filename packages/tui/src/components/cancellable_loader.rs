@@ -1,6 +1,12 @@
 //! Cancellable loader — animated spinner with progress and cancel support.
+//
+// audit: M3.T5 — surface superset of pi-tui/cancellable-loader.ts on 2026-05-07.
+// TS `CancellableLoader` extends `Loader` and exposes an `AbortController`/
+// `signal` for upstream tasks. The Rust port surfaces an `is_cancelled()` flag
+// instead — async cancellation is the host's concern (e.g. `tokio::select!`
+// against the application's own `CancellationToken`).
 
-use crate::tui::{Component, HandleResult};
+use crate::tui::{Component, HandleResult, InputEvent};
 
 /// A loader that supports cancellation and progress tracking.
 #[derive(Debug)]
@@ -80,6 +86,15 @@ impl CancellableLoaderComponent {
     pub fn reset(&mut self) {
         self.cancelled = false;
     }
+
+    fn handle_raw(&mut self, data: &str) -> HandleResult {
+        // Escape key cancels.
+        if data == "\x1b" {
+            self.cancelled = true;
+            return HandleResult::Handled;
+        }
+        HandleResult::Ignored
+    }
 }
 
 impl Component for CancellableLoaderComponent {
@@ -125,13 +140,11 @@ impl Component for CancellableLoaderComponent {
         lines
     }
 
-    fn handle_input(&mut self, data: &str) -> HandleResult {
-        // Escape key
-        if data == "\x1b" {
-            self.cancelled = true;
-            return HandleResult::Handled;
+    fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
+        match event {
+            InputEvent::Raw(data) | InputEvent::Paste(data) => self.handle_raw(data),
+            _ => HandleResult::Ignored,
         }
-        HandleResult::Ignored
     }
 
     fn invalidate(&mut self) {}
@@ -173,7 +186,7 @@ mod tests {
     fn escape_cancels() {
         let mut loader = CancellableLoaderComponent::new("test");
         assert!(!loader.is_cancelled());
-        loader.handle_input("\x1b");
+        loader.handle_input(&InputEvent::Raw("\x1b".into()));
         assert!(loader.is_cancelled());
     }
 

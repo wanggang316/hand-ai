@@ -17,17 +17,26 @@ pub mod text;
 pub mod toast;
 pub mod truncated_text;
 
-pub use autocomplete::{AutocompleteComponent, Suggestion};
+pub use autocomplete::{
+    AutocompleteComponent, AutocompleteContext, AutocompleteFuture, AutocompleteItem,
+    AutocompleteItemKind, AutocompleteProvider, AutocompleteTrigger, CombinedAutocompleteProvider,
+    SlashCommand, SlashCommandProvider, Suggestion,
+};
 pub use box_component::BoxComponent;
 pub use cancellable_loader::CancellableLoaderComponent;
-pub use editor::EditorComponent;
-pub use image::{ImageComponent, ImageProtocol};
+pub use editor::{AutocompleteState, EditorComponent, PasteContent, UndoEntry, UndoOp};
+pub use image::{ImageComponent, ImageOptions, ImageProtocol, ImageTheme};
 pub use input::InputComponent;
-pub use loader::LoaderComponent;
+pub use loader::{
+    DEFAULT_INDICATOR_INTERVAL_MS, DEFAULT_SPINNER_FRAMES, LoaderComponent, LoaderIndicatorOptions,
+};
 pub use markdown::MarkdownComponent;
 pub use progress_bar::ProgressBarComponent;
-pub use select_list::{SelectItem, SelectListComponent};
-pub use settings_list::{SettingEntry, SettingValue, SettingsListComponent};
+pub use select_list::{
+    DEFAULT_PRIMARY_COLUMN_WIDTH, SelectItem, SelectListComponent, SelectListLayoutOptions,
+    SelectListTheme,
+};
+pub use settings_list::{SettingEntry, SettingValue, SettingsListComponent, SettingsListTheme};
 pub use spacer::SpacerComponent;
 pub use status_bar::StatusBarComponent;
 pub use text::TextComponent;

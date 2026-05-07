@@ -1,6 +1,8 @@
 //! Status bar component — renders a fixed-width status line.
+//
+// audit: M3.T5 — Rust-original (no TS counterpart in pi-tui as of 2026-05-07).
 
-use crate::tui::{Component, HandleResult};
+use crate::tui::Component;
 
 /// A status bar with left, center, and right sections.
 pub struct StatusBarComponent {
@@ -77,10 +79,6 @@ impl Component for StatusBarComponent {
         );
 
         vec![line]
-    }
-
-    fn handle_input(&mut self, _data: &str) -> HandleResult {
-        HandleResult::Ignored
     }
 }
 

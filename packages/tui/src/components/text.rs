@@ -1,4 +1,6 @@
 //! Text component — multi-line text display with word wrapping.
+//
+// audit: M3.T5 — parity reviewed against pi-tui/text.ts on 2026-05-07.
 
 use crate::tui::Component;
 use crate::utils;
@@ -8,6 +10,10 @@ pub struct TextComponent {
     text: String,
     padding_x: u16,
     padding_y: u16,
+    /// Optional ANSI prefix (e.g. `"\x1b[44m"`) wrapped around every output
+    /// line, mirroring TS's `customBgFn`. We use a code rather than a closure
+    /// so the component remains `Send + 'static` without lifetime gymnastics.
+    bg_code: Option<String>,
     cache: Option<(String, u16, Vec<String>)>,
 }
 
@@ -17,6 +23,7 @@ impl TextComponent {
             text: text.into(),
             padding_x: 0,
             padding_y: 0,
+            bg_code: None,
             cache: None,
         }
     }
@@ -25,6 +32,19 @@ impl TextComponent {
         self.padding_x = x;
         self.padding_y = y;
         self
+    }
+
+    /// Set a background ANSI prefix applied to every rendered line. The line
+    /// is also padded to the full width and reset with `\x1b[0m`.
+    pub fn with_bg_code(mut self, ansi_code: impl Into<String>) -> Self {
+        self.bg_code = Some(ansi_code.into());
+        self
+    }
+
+    /// Replace the background ANSI prefix at runtime. Pass `None` to clear.
+    pub fn set_bg_code(&mut self, ansi_code: Option<String>) {
+        self.bg_code = ansi_code;
+        self.cache = None;
     }
 
     pub fn set_text(&mut self, text: impl Into<String>) {
@@ -52,20 +72,38 @@ impl Component for TextComponent {
 
         let available = width.saturating_sub(self.padding_x * 2) as usize;
         let padding = " ".repeat(self.padding_x as usize);
-        let blank_lines: Vec<String> = (0..self.padding_y).map(|_| String::new()).collect();
+
+        let blank_line = || -> String {
+            if let Some(bg) = &self.bg_code {
+                utils::apply_background("", width as usize, bg, "\x1b[0m")
+            } else {
+                String::new()
+            }
+        };
+        let blank_lines: Vec<String> = (0..self.padding_y).map(|_| blank_line()).collect();
 
         let mut lines = blank_lines.clone();
 
         for source_line in self.text.lines() {
             let wrapped = utils::wrap_text(source_line, available);
             for line in wrapped {
-                lines.push(format!("{}{}{}", padding, line, padding));
+                let raw = format!("{}{}{}", padding, line, padding);
+                if let Some(bg) = &self.bg_code {
+                    lines.push(utils::apply_background(&raw, width as usize, bg, "\x1b[0m"));
+                } else {
+                    lines.push(raw);
+                }
             }
         }
 
         // Handle empty text
         if self.text.is_empty() {
-            lines.push(format!("{}{}", padding, padding));
+            let raw = format!("{}{}", padding, padding);
+            if let Some(bg) = &self.bg_code {
+                lines.push(utils::apply_background(&raw, width as usize, bg, "\x1b[0m"));
+            } else {
+                lines.push(raw);
+            }
         }
 
         lines.extend(blank_lines);
@@ -125,5 +163,26 @@ mod tests {
         let comp = TextComponent::new("");
         let lines = comp.render(80);
         assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn test_text_bg_code() {
+        let comp = TextComponent::new("hi").with_bg_code("\x1b[44m");
+        let lines = comp.render(20);
+        assert!(lines[0].contains("\x1b[44m"));
+        assert!(lines[0].contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_text_set_bg_code_runtime() {
+        let mut comp = TextComponent::new("hi");
+        let lines = comp.render(20);
+        assert!(!lines[0].contains("\x1b[44m"));
+        comp.set_bg_code(Some("\x1b[44m".into()));
+        let lines = comp.render(20);
+        assert!(lines[0].contains("\x1b[44m"));
+        comp.set_bg_code(None);
+        let lines = comp.render(20);
+        assert!(!lines[0].contains("\x1b[44m"));
     }
 }

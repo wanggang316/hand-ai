@@ -1,6 +1,8 @@
 //! Progress bar component — renders a horizontal progress indicator.
+//
+// audit: M3.T5 — Rust-original (no TS counterpart in pi-tui as of 2026-05-07).
 
-use crate::tui::{Component, HandleResult};
+use crate::tui::Component;
 
 /// A horizontal progress bar.
 pub struct ProgressBarComponent {
@@ -100,10 +102,6 @@ impl Component for ProgressBarComponent {
         };
 
         vec![line]
-    }
-
-    fn handle_input(&mut self, _data: &str) -> HandleResult {
-        HandleResult::Ignored
     }
 }
 

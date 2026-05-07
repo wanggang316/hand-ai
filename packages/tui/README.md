@@ -8,8 +8,10 @@ Terminal UI component library with differential rendering, theming, and a set of
 - Differential rendering: `DiffRenderer` minimizes terminal redraws
 - Theme system: `Theme`, `Style`, `Color` with dark/light presets
 - Key parsing: Kitty keyboard protocol, standard CSI, SS3
-- 12 built-in components
+- 16 built-in components (see table below)
 - ANSI-aware text utilities (width, truncation, wrapping)
+- Terminal image rendering (Kitty / iTerm / Sixel) and resize handling
+- Pluggable keybindings, raw stdin buffering, structured errors
 
 ## Installation
 
@@ -38,37 +40,50 @@ fn main() {
 
 ### `Component`
 
-All components implement this trait:
+All components implement this trait. `hide` / `show` / `set_hidden` /
+`is_hidden` provide a unified visibility model that mirrors the upstream
+`pi-tui` TS surface; default impls treat the component as always visible
+and the visibility hooks as no-ops.
 
 ```rust
-trait Component {
-    fn render(&self, width: usize) -> Vec<String>;
-    fn handle_input(&mut self, data: &str) -> HandleResult;
-    fn invalidate(&mut self);
-    fn wants_key_release(&self) -> bool;
+trait Component: Send {
+    fn render(&self, width: u16) -> Vec<String>;
+    fn handle_input(&mut self, event: &InputEvent) -> HandleResult { /* default: Ignored */ }
+    fn invalidate(&mut self) {}
+    fn wants_key_release(&self) -> bool { false }
+
+    fn hide(&mut self) { self.set_hidden(true); }
+    fn show(&mut self) { self.set_hidden(false); }
+    fn set_hidden(&mut self, _hidden: bool) {}
+    fn is_hidden(&self) -> bool { false }
 }
 ```
 
 ### `Focusable`
 
-Components that accept keyboard input:
+Components that accept keyboard input. `focus` / `unfocus` / `is_focused`
+are convenience wrappers over the `set_focused` / `focused` pair.
 
 ```rust
 trait Focusable: Component {
     fn focused(&self) -> bool;
     fn set_focused(&mut self, focused: bool);
-    fn cursor_position(&self) -> Option<(usize, usize)>;
+    fn cursor_position(&self) -> Option<(u16, u16)>;
+
+    fn focus(&mut self) { self.set_focused(true); }
+    fn unfocus(&mut self) { self.set_focused(false); }
+    fn is_focused(&self) -> bool { self.focused() }
 }
 ```
 
 ### `Container`
 
-Manages child components:
+Manages child components by stable `ComponentId`:
 
 ```rust
 let mut root = Container::new();
-root.add_child(Box::new(text));
-root.remove_child(0);
+let id = root.add_child_with_id(Box::new(text));
+root.remove_child_by_id(id);
 root.clear();
 ```
 
@@ -79,7 +94,7 @@ root.clear();
 | `TextComponent` | Static/dynamic text with optional padding |
 | `TruncatedTextComponent` | Text that truncates to width with ellipsis |
 | `InputComponent` | Single-line input with history, placeholder, prefix |
-| `EditorComponent` | Multi-line editor with undo/redo, viewport scrolling |
+| `EditorComponent` | Multi-line editor with undo/redo, viewport scrolling, kill-ring |
 | `MarkdownComponent` | Markdown rendering (headings, code blocks, lists, bold, italic) |
 | `LoaderComponent` | Animated spinner with configurable frames and colors |
 | `SelectListComponent` | Navigable list with selection, home/end support |
@@ -87,8 +102,11 @@ root.clear();
 | `SpacerComponent` | Empty space of configurable height |
 | `StatusBarComponent` | Left/center/right sections with configurable style |
 | `ProgressBarComponent` | Horizontal progress bar with label and percentage |
-| `ToastManager` | Notification stack with Info/Success/Warning/Error levels |
+| `ToastComponent` | Notification stack with Info/Success/Warning/Error levels |
 | `AutocompleteComponent` | Suggestion dropdown with navigation and scrolling |
+| `CancellableLoaderComponent` | Loader with cancel keybinding and timeout hooks |
+| `ImageComponent` | Inline image rendering via Kitty / iTerm2 with ASCII fallback |
+| `SettingsListComponent` | Settings rows (toggles, choices, text fields) |
 
 ### InputComponent
 
@@ -131,6 +149,16 @@ let mut list = SelectListComponent::new(items);
 list.next();  // Navigate down
 let selected = list.selected_item();
 ```
+
+## Module Overview
+
+Top-level modules in addition to the component layer:
+
+- `terminal_image` — encode images for Kitty, iTerm2, and Sixel terminals; size detection and protocol negotiation.
+- `keybindings` — `KeybindingsManager` with named actions, default sets, and per-context overrides.
+- `stdin_buffer` — non-blocking buffered reader over raw stdin with chunk reassembly for paste and bracketed-paste sequences.
+- `resize` — SIGWINCH-driven terminal size watcher exposing a polled API for re-layout.
+- `error` — `TuiError` enum used by `Tui::run` and terminal I/O paths.
 
 ## Theme System
 
@@ -218,8 +246,48 @@ let caps = TerminalCapabilities::default();
 ```bash
 cd packages/tui
 cargo check
-cargo test   # 147 tests
+cargo test
 ```
+
+## Migration / Known Limitations
+
+This is the first release of `hand-tui`, ported from the TypeScript
+`pi-tui` library. The following behavioral divergences and limitations
+are known; downstream consumers should be aware of them.
+
+- **`EditorComponent::yank_pop` perturbs the redo stack.** Cycling the
+  kill-ring with `M-y` clears any in-flight redo history that the
+  TS port preserves. See `packages/tui/src/components/editor.rs`
+  (`yank_pop` impl).
+- **`SelectListComponent::set_filter` / `set_selected_index` do not
+  fire `on_selection_change`** for programmatic changes — only
+  user-driven navigation triggers the callback. See
+  `packages/tui/src/components/select_list.rs`.
+- **`KeybindingsManager::unset` permanently disables a binding** rather
+  than restoring the framework default, which is a divergence from
+  pi-tui. To restore a default, re-register it explicitly. See
+  `packages/tui/src/keybindings.rs`.
+- **`Tui::run` is single-shot.** Calling it twice on the same `Tui`
+  without a manual stdin-reader teardown leaks the background reader
+  task. Construct a new `Tui` per session for now. See
+  `packages/tui/src/tui.rs` (`Tui::run`).
+- **`ProcessTerminal::Drop` does not run on `panic = "abort"` profiles.**
+  Terminal restoration relies on stack unwinding; binaries built with
+  `panic = "abort"` may exit with the terminal in raw / alt-screen mode.
+  Install a panic hook if you need guaranteed restoration. See
+  `packages/tui/src/terminal.rs`.
+- **Rainbow flag emoji (🏳️‍🌈) measures display width 1 in this port**
+  versus 2 with pi-tui's `Intl.Segmenter`. Other ZWJ sequences may
+  differ similarly because `unicode-width` doesn't fully model
+  grapheme cluster widths. See `packages/tui/src/utils.rs`
+  (`visible_width`).
+- **`parse_key` returns `Key` (not `Option<Key>`)** for backward
+  compatibility with components that ship today. Unrecognized
+  sequences map to a synthetic `Key { name: KeyName::Unknown, .. }`.
+  This may tighten to `Option<Key>` in a future minor version.
+
+For a full list of porting findings, see
+`docs/exec-plans/hand-tui-port-from-pi-tui.md`.
 
 ## License
 

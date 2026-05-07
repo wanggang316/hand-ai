@@ -1,4 +1,6 @@
 //! Spacer component — empty vertical space.
+//
+// audit: M3.T5 — parity confirmed against pi-tui/spacer.ts on 2026-05-07.
 
 use crate::tui::Component;
 
@@ -10,6 +12,16 @@ pub struct SpacerComponent {
 impl SpacerComponent {
     pub fn new(lines: u16) -> Self {
         Self { lines }
+    }
+
+    /// Update the number of blank lines emitted by this spacer.
+    pub fn set_lines(&mut self, lines: u16) {
+        self.lines = lines;
+    }
+
+    /// Current number of lines.
+    pub fn lines(&self) -> u16 {
+        self.lines
     }
 }
 
@@ -36,5 +48,14 @@ mod tests {
         let spacer = SpacerComponent::new(0);
         let lines = spacer.render(80);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_spacer_set_lines() {
+        let mut spacer = SpacerComponent::new(1);
+        assert_eq!(spacer.lines(), 1);
+        spacer.set_lines(5);
+        assert_eq!(spacer.lines(), 5);
+        assert_eq!(spacer.render(80).len(), 5);
     }
 }

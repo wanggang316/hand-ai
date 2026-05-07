@@ -1,7 +1,15 @@
 //! Input component — single-line text input with cursor and history.
+//
+// audit: M3.T5 — parity reviewed against pi-tui/input.ts on 2026-05-07.
+// non-goal: TS's `Input` ships with kill-ring (yank/yank-pop), per-input undo
+// stack, bracketed-paste buffering, IME `CURSOR_MARKER`, Kitty CSI-u
+// printable decoding, and word-aware deletes. The Rust port keeps `Input` as
+// a lightweight single-line widget; the heavyweight surface lives on
+// `EditorComponent` (which already implements those features in Rust). Adding
+// them here would duplicate ~400 lines of editor logic for marginal gain.
 
-use crate::keys::{KeyName, parse_key};
-use crate::tui::{Component, Focusable, HandleResult};
+use crate::keys::{Key, KeyName, parse_key};
+use crate::tui::{Component, Focusable, HandleResult, InputEvent};
 use crate::utils;
 
 /// Callback type for input submission.
@@ -180,13 +188,20 @@ impl Component for InputComponent {
         vec![line]
     }
 
-    fn handle_input(&mut self, data: &str) -> HandleResult {
+    fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
         if !self.focused {
             return HandleResult::Ignored;
         }
+        match event {
+            InputEvent::Key(key) => self.handle_key(key),
+            InputEvent::Raw(data) | InputEvent::Paste(data) => self.handle_key(&parse_key(data)),
+            _ => HandleResult::Ignored,
+        }
+    }
+}
 
-        let key = parse_key(data);
-
+impl InputComponent {
+    fn handle_key(&mut self, key: &Key) -> HandleResult {
         if key.is_release {
             return HandleResult::Ignored;
         }
@@ -345,8 +360,8 @@ mod tests {
     #[test]
     fn test_input_type_characters() {
         let mut input = InputComponent::new();
-        input.handle_input("h");
-        input.handle_input("i");
+        input.handle_input(&InputEvent::Raw("h".into()));
+        input.handle_input(&InputEvent::Raw("i".into()));
         assert_eq!(input.text(), "hi");
     }
 
@@ -354,7 +369,7 @@ mod tests {
     fn test_input_backspace() {
         let mut input = InputComponent::new();
         input.set_text("hello");
-        input.handle_input("\x7f"); // Backspace
+        input.handle_input(&InputEvent::Raw("\x7f".into())); // Backspace
         assert_eq!(input.text(), "hell");
     }
 
@@ -363,7 +378,7 @@ mod tests {
         let mut input = InputComponent::new();
         input.set_text("hello");
         input.cursor = 0;
-        input.handle_input("\x1b[3~"); // Delete
+        input.handle_input(&InputEvent::Raw("\x1b[3~".into())); // Delete
         assert_eq!(input.text(), "ello");
     }
 
@@ -373,10 +388,10 @@ mod tests {
         input.set_text("hello");
         assert_eq!(input.cursor, 5);
 
-        input.handle_input("\x1b[D"); // Left
+        input.handle_input(&InputEvent::Raw("\x1b[D".into())); // Left
         assert_eq!(input.cursor, 4);
 
-        input.handle_input("\x1b[C"); // Right
+        input.handle_input(&InputEvent::Raw("\x1b[C".into())); // Right
         assert_eq!(input.cursor, 5);
     }
 
@@ -385,10 +400,10 @@ mod tests {
         let mut input = InputComponent::new();
         input.set_text("hello");
 
-        input.handle_input("\x1b[H"); // Home
+        input.handle_input(&InputEvent::Raw("\x1b[H".into())); // Home
         assert_eq!(input.cursor, 0);
 
-        input.handle_input("\x1b[F"); // End
+        input.handle_input(&InputEvent::Raw("\x1b[F".into())); // End
         assert_eq!(input.cursor, 5);
     }
 
@@ -407,13 +422,13 @@ mod tests {
         input.add_history("cmd1");
         input.add_history("cmd2");
 
-        input.handle_input("\x1b[A"); // Up
+        input.handle_input(&InputEvent::Raw("\x1b[A".into())); // Up
         assert_eq!(input.text(), "cmd2");
 
-        input.handle_input("\x1b[A"); // Up
+        input.handle_input(&InputEvent::Raw("\x1b[A".into())); // Up
         assert_eq!(input.text(), "cmd1");
 
-        input.handle_input("\x1b[B"); // Down
+        input.handle_input(&InputEvent::Raw("\x1b[B".into())); // Down
         assert_eq!(input.text(), "cmd2");
     }
 
@@ -438,7 +453,10 @@ mod tests {
         assert!(input.focused());
         input.set_focused(false);
         assert!(!input.focused());
-        assert_eq!(input.handle_input("a"), HandleResult::Ignored);
+        assert_eq!(
+            input.handle_input(&InputEvent::Raw("a".into())),
+            HandleResult::Ignored
+        );
     }
 
     #[test]
