@@ -42,11 +42,11 @@
 //! # Type stubs
 //!
 //! Several payloads reference structures that are not yet ported from
-//! TS (`AgentMessage`, `BashResult`, `CompactionResult`, `SessionStats`,
+//! TS (`AgentMessage`, `CompactionResult`, `SessionStats`,
 //! `Model<any>`, etc.). Those slots are typed as `serde_json::Value`
 //! placeholders and tagged with `// TODO:` markers. The protocol
-//! envelope still round-trips losslessly; the inner shape is the
-//! responsibility of later phases.
+//! envelope still round-trips losslessly; the inner shape is a
+//! follow-up to tighten on a per-payload basis.
 
 use model::types::{ImageContent, ThinkingLevel};
 use serde::{Deserialize, Serialize};
@@ -138,10 +138,6 @@ pub struct RpcSlashCommand {
 /// Commands sent from the client to the agent on stdin.
 ///
 /// Variants mirror the TS `RpcCommand` discriminated union one-for-one.
-/// The full surface is defined here even though Phase 1 only dispatches
-/// a subset (`prompt`, `abort`, `new_session`, `get_state`,
-/// `get_messages`); other handlers reply with a "not implemented"
-/// error until later phases fill them in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum RpcCommand {
@@ -510,11 +506,11 @@ pub struct CommandsData {
 ///
 /// Wire shape diverges intentionally from the TS `BashResult` interface
 /// (`{ output, exitCode, cancelled, truncated, fullOutputPath }`): we
-/// expose `stdout` / `stderr` separately so future ports can split the
-/// streams without another wire break. Phase 1 maps the existing
-/// `core::bash_executor::BashResult.output` (combined stdout+stderr)
-/// onto `stdout` and leaves `stderr` empty. When the call was aborted
-/// via `abort_bash`, `stdout` is empty and `stderr` carries the
+/// expose `stdout` / `stderr` separately so a future executor port can
+/// split the streams without another wire break. Today the executor
+/// returns a single combined `output` buffer, which is mapped onto
+/// `stdout` with `stderr` left empty. When the call was aborted via
+/// `abort_bash`, `stdout` is empty and `stderr` carries the
 /// `"[bash aborted]"` marker instead, with `truncated == true` and
 /// `exit_code == None`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -533,9 +529,7 @@ pub struct BashRpcData {
 /// Body of an [`RpcResponse`], discriminated by the `command` field.
 ///
 /// Each variant carries either a [`RpcResultEmpty`] (success has no
-/// `data`) or a [`RpcResultWithData<T>`] (typed `data` payload). Phase
-/// 1 in-scope handlers should produce these directly; out-of-scope
-/// commands return a Failure result with `error: "not implemented"`.
+/// `data`) or a [`RpcResultWithData<T>`] (typed `data` payload).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum RpcResponseBody {

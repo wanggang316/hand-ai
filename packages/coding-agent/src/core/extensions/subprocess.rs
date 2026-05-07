@@ -1,9 +1,9 @@
 //! Tier 2 subprocess extension implementation.
 //!
 //! Each subprocess extension is a child process that speaks the JSONL
-//! JSON-RPC protocol from Phase 1 (`rpc::jsonl`). Hooks are translated to
-//! "extension events" sent to the child; the child responds with the
-//! decision (HookDecision-shaped JSON).
+//! JSON-RPC protocol defined in [`crate::rpc::jsonl`]. Hooks are
+//! translated to "extension events" sent to the child; the child
+//! responds with the decision (HookDecision-shaped JSON).
 //!
 //! # Concurrency
 //!

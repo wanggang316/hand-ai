@@ -8,10 +8,6 @@
 //!
 //! The codec (line framing, stdin/stdout pumps) lives elsewhere; this
 //! module is types-only.
-//!
-//! Phase 1 dispatches a small subset of commands; the full protocol
-//! surface is defined here so handlers can be filled in incrementally
-//! without changing the public types.
 
 pub mod jsonl;
 pub mod server;

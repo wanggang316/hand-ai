@@ -531,9 +531,10 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             // longer reach the client. See C1 in T1.3 for the original
             // regression and the test below for the guard.
             //
-            // NOTE: this path does not currently honor `parent_session`;
-            // session forking lives in a later phase. The brief
-            // explicitly lists it as out-of-scope context.
+            // NOTE: this path does not currently honor `parent_session`
+            // (the `new_session` parent-fork variant). Forking from a
+            // specific message is exposed via the dedicated `fork` /
+            // `clone` commands instead.
             match session.reset_session() {
                 Ok(()) => RpcResponse::new(
                     id,
@@ -654,9 +655,9 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                                 thinking_level,
                                 // `is_scoped` is a TS concept tracking whether
                                 // the model came from a scoped (per-cwd /
-                                // per-project) override. Phase 1 has no such
-                                // override surface; report `false` until the
-                                // settings port lands.
+                                // per-project) override. We have no such
+                                // override surface yet; report `false` until
+                                // the settings port lands.
                                 is_scoped: false,
                             },
                         ))),
@@ -1453,7 +1454,7 @@ mod tests {
     }
 
     /// `bash` runs a simple command and surfaces stdout + exit code on the
-    /// wire. The Phase 1 mapping puts the executor's combined output on
+    /// wire. The current mapping puts the executor's combined output on
     /// `stdout` and leaves `stderr` empty.
     #[tokio::test]
     async fn bash_executes_simple_command() {
