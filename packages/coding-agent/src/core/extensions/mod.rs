@@ -1,20 +1,14 @@
-//! Extension system for lifecycle events and custom tools.
+//! Extensions runtime (Tier 1 trait + Tier 2 subprocess).
 //!
-//! Extensions can subscribe to agent events, register tools, commands,
-//! keyboard shortcuts, and CLI flags. The system supports auto-discovery
-//! from standard locations and explicit path configuration.
+//! See ADR-001 for the design.
 
-pub mod loader;
-pub mod runner;
-pub mod types;
-pub mod wrapper;
+pub mod api;
+pub mod manifest;
+pub mod registry;
 
-// Re-export primary types for convenience.
-pub use loader::{LoadExtensionsResult, discover_extensions, load_extension, load_extensions};
-pub use runner::{ExtensionRunner, ResolvedCommand};
-pub use types::{
-    DiscoveryReason, Extension, ExtensionConfig, ExtensionError, ExtensionFlag, ExtensionFlagType,
-    ExtensionHookContext, ExtensionHookResult, ExtensionHookType, ExtensionManifest,
-    ExtensionShortcut, RegisteredCommand, RegisteredTool, ResourcesDiscoverResult, WidgetPlacement,
+pub use api::{
+    Extension, ExtensionCapabilities, ExtensionContext, ExtensionError, ExtensionManifest,
+    HookDecision, ManifestError, SlashCommandSpec, ToolCallEvent, ToolResultEvent,
 };
-pub use wrapper::{WrappedTool, wrap_registered_tool, wrap_registered_tools};
+pub use manifest::load_manifest;
+pub use registry::builtin_tier1_extensions;

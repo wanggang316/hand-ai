@@ -3,7 +3,7 @@
 //! `use hand_coding_agent::prelude::*;` brings in the high-level types
 //! a typical SDK consumer needs. Items not included here are still
 //! accessible via their full module path
-//! (e.g., `hand_coding_agent::extensions::ExtensionConfig`).
+//! (e.g., `hand_coding_agent::Extension` for implementing a Tier 1 extension).
 //!
 //! # Stability
 //!

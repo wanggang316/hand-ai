@@ -35,7 +35,7 @@ pub use core::system_prompt::build_system_prompt;
 // Extension system — kept here at crate root for now; will move to
 // hand_coding_agent::extensions when Phase 3 lands the new runtime.
 pub use core::extensions::{
-    ExtensionConfig, ExtensionError, ExtensionHookType, ExtensionManifest, ExtensionRunner,
+    Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision,
 };
 
 // Slash commands and keybindings — same caveat as extensions; will be
