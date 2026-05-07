@@ -40,3 +40,10 @@ pub use branch_summarization::{
     FALLBACK_CONTEXT_WINDOW, GenerateBranchSummaryOptions, SummarizationClient,
     generate_branch_summary,
 };
+
+pub use compactor::{
+    CompactionDetails, CompactionInput, CompactionOutput, CompactionRuntimeSettings,
+    ContextUsageEstimate, calculate_context_tokens, compact, estimate_context_tokens_with_usage,
+    estimate_tokens_for_message, generate_summary, generate_turn_prefix_summary,
+    get_last_assistant_usage, should_compact_with_reserve,
+};
