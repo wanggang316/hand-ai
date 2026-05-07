@@ -116,7 +116,7 @@ counterparts. Each needs a diff-and-fill audit.
 | `core/session_manager.rs` | 593 | 1425 | 2.4× | Add fork/clone/migrate paths, search APIs |
 | `core/package_manager.rs` | 189 | — | n/a | NOT a port target — see correction below. |
 | `core/model_registry.rs` | 223 | 952 | 4.3× | Port custom-model registration, scoped overrides |
-| `core/resource_loader.rs` | 608 | 918 | 1.5× | Port skills + docs path resolution |
+| `core/resource_loader.rs` | 608 | — | n/a | NOT a port target — see correction below. |
 | `core/model_resolver.rs` | 338 | 636 | 1.9× | Port scope-priority resolution + alias map |
 
 Estimated: ~3000 LOC Rust, ~4 days.
@@ -136,6 +136,54 @@ The TS contract is still relevant if hand-ai needs to support pi-extension packa
 - [ ] **Port pi-extension source registry** — TS source: `pi-mono/packages/coding-agent/src/core/package-manager.ts`. Rust target: `coding-agent/src/core/extensions/source_registry.rs` (alongside the existing `extensions/{api,dispatch,manifest,registry,subprocess}.rs`).
   - Prerequisites: `Settings` must gain `packages`, `extensions`, `skills`, `prompts`, `themes` fields with project + global setters; `utils/git.rs` must expose `parse_git_url` / `GitSource`. Both prerequisites are covered by Tier 2 utils + a small Settings extension.
   - Estimated: ~1500 LOC Rust + tests, ~2 days.
+
+##### Correction: `resource_loader.rs` ↔ `resource-loader.ts` is also a name collision
+
+Same pattern as `package_manager`. The Rust file is a low-level generic
+discovery utility (`discover_resources<T>`, `discover_resources_lenient<T>`)
+consumed internally by `core::skills` and `core::prompt_templates`. The TS
+file is a high-level orchestrator (`DefaultResourceLoader` class) that ties
+together SettingsManager, EventBus, package-source registry, theme loader,
+extension factories, and resource diagnostics — most of which don't exist
+in the Rust crate yet.
+
+The TS file's contract isn't reachable until those prerequisite subsystems
+land:
+- EventBus (no Rust analogue)
+- Resource-side SettingsManager (Settings has no `extensions`/`skills`/
+  `prompts`/`themes` field — overlaps with the source-registry blockers
+  in §A4 above)
+- Theme loader (`Theme` type, JSON loader)
+- Extension factory loader (`loadExtensions(paths, cwd, eventBus)`,
+  `ExtensionRuntime`, `createExtensionRuntime` — partial coverage exists in
+  `core::extensions::*` but not the path-driven factory API)
+- `ResourceDiagnostic` / `ResourceCollision` discriminated unions
+
+Until the prerequisites are in place, treat the existing Rust
+`resource_loader.rs` as a finished low-level utility. Do **not** dispatch
+"completion" tasks against it.
+
+Track instead as a new module:
+
+- [ ] **Port the resource orchestrator** — TS source: `pi-mono/.../core/resource-loader.ts`. Rust target: `coding-agent/src/core/resource_orchestrator.rs` (NEW name to avoid the collision). Prerequisites: EventBus, theme loader, source-registry (§A4 correction), Settings extension fields. Estimated: ~1000 LOC Rust + tests, ~2 days, blocked behind prerequisites.
+
+##### Strategy note: ratio-based completion estimates were unreliable
+
+After two name-collision discoveries (`package_manager.rs` and
+`resource_loader.rs`), the bare line-count ratios in the §A4 table are not
+trustworthy. Future completion tasks must be preceded by an audit step
+that checks **public-API alignment**, not just file size, before the
+implementer is dispatched.
+
+Apply this lens to the remaining §A4 entries before dispatching:
+- `model_resolver.rs` (was 338 → 636) — ALREADY DONE in commit `ad22428`,
+  audit confirmed real port relationship.
+- `model_registry.rs` (was 223 → 952) — port-relationship status unknown;
+  audit pending.
+- `compaction/` (was 284 → 1371) — DONE in commits 8b5e1cf..0c5fad3, real
+  port relationship confirmed.
+- `session_manager.rs` (was 593 → 1425) — DONE in commits e4bdfe8..7297734,
+  real port relationship confirmed.
 
 #### A5. Missing core/* modules
 
