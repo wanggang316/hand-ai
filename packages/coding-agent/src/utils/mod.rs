@@ -8,4 +8,5 @@
 pub mod frontmatter;
 pub mod mime;
 pub mod paths;
+pub mod pi_user_agent;
 pub mod sleep;
