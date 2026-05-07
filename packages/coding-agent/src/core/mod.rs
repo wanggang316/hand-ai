@@ -10,6 +10,7 @@ pub mod diagnostics;
 pub mod error;
 pub mod export;
 pub mod extensions;
+pub mod footer_data_provider;
 pub mod git_utils;
 pub mod keybindings;
 pub mod messages;
