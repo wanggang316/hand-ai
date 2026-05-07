@@ -12,9 +12,7 @@
 //! fail to shut down because git happens to be unhappy.
 
 use async_trait::async_trait;
-use hand_coding_agent::{
-    Extension, ExtensionContext, ExtensionError, ExtensionManifest,
-};
+use hand_coding_agent::{Extension, ExtensionContext, ExtensionError, ExtensionManifest};
 use std::path::Path;
 use tokio::process::Command;
 
@@ -34,7 +32,8 @@ impl AutoCommitOnExit {
                 description: Some(
                     "Auto-commits uncommitted changes when the agent session ends.".to_string(),
                 ),
-                capabilities: hand_coding_agent::core::extensions::api::ExtensionCapabilities::default(),
+                capabilities:
+                    hand_coding_agent::core::extensions::api::ExtensionCapabilities::default(),
                 exec: None,
                 env: Default::default(),
                 slash_commands: Vec::new(),
@@ -194,9 +193,7 @@ mod tests {
             .output()
             .await;
         match out {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim().to_string()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => String::new(),
         }
     }
@@ -246,6 +243,9 @@ mod tests {
             .unwrap();
 
         let after = commit_count(dir.path()).await;
-        assert_eq!(after, before, "no commit should be created when tree is clean");
+        assert_eq!(
+            after, before,
+            "no commit should be created when tree is clean"
+        );
     }
 }

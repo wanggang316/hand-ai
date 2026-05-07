@@ -118,11 +118,7 @@ impl AuthRecord {
     }
 
     /// Convenience constructor for an OAuth record without extra fields.
-    pub fn oauth(
-        access: impl Into<String>,
-        refresh: impl Into<String>,
-        expires: i64,
-    ) -> Self {
+    pub fn oauth(access: impl Into<String>, refresh: impl Into<String>, expires: i64) -> Self {
         Self::Oauth {
             access: access.into(),
             refresh: refresh.into(),
@@ -215,10 +211,7 @@ impl AuthStorage {
     /// Persist `records` to disk atomically and force mode `0600` on Unix.
     ///
     /// Creates the parent directory if it doesn't exist.
-    pub fn save(
-        &self,
-        records: &HashMap<String, AuthRecord>,
-    ) -> Result<(), AuthStorageError> {
+    pub fn save(&self, records: &HashMap<String, AuthRecord>) -> Result<(), AuthStorageError> {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -228,21 +221,19 @@ impl AuthStorage {
             })?;
         }
 
-        let body = serde_json::to_string_pretty(records).map_err(|source| {
-            AuthStorageError::Json {
+        let body =
+            serde_json::to_string_pretty(records).map_err(|source| AuthStorageError::Json {
                 path: self.path.clone(),
                 source,
-            }
-        })?;
+            })?;
 
         // Atomic write: stage in the same directory, then rename. Same
         // pattern as the F30 settings migration path.
         let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
-        let mut tmp =
-            NamedTempFile::new_in(parent).map_err(|source| AuthStorageError::Io {
-                path: parent.to_path_buf(),
-                source,
-            })?;
+        let mut tmp = NamedTempFile::new_in(parent).map_err(|source| AuthStorageError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
         tmp.write_all(body.as_bytes())
             .map_err(|source| AuthStorageError::Io {
                 path: tmp.path().to_path_buf(),
@@ -254,11 +245,10 @@ impl AuthStorage {
                 path: tmp.path().to_path_buf(),
                 source,
             })?;
-        tmp.persist(&self.path)
-            .map_err(|e| AuthStorageError::Io {
-                path: self.path.clone(),
-                source: e.error,
-            })?;
+        tmp.persist(&self.path).map_err(|e| AuthStorageError::Io {
+            path: self.path.clone(),
+            source: e.error,
+        })?;
 
         // Force 0600 on Unix. The temp file may have been created with the
         // process umask (commonly 0644); we tighten it post-rename so the
@@ -368,14 +358,8 @@ mod tests {
         s.set("anthropic", AuthRecord::api_key("sk-2")).unwrap();
         let all = s.load().unwrap();
         assert_eq!(all.len(), 2);
-        assert_eq!(
-            all.get("openai"),
-            Some(&AuthRecord::api_key("sk-1")),
-        );
-        assert_eq!(
-            all.get("anthropic"),
-            Some(&AuthRecord::api_key("sk-2")),
-        );
+        assert_eq!(all.get("openai"), Some(&AuthRecord::api_key("sk-1")),);
+        assert_eq!(all.get("anthropic"), Some(&AuthRecord::api_key("sk-2")),);
     }
 
     #[test]
@@ -405,10 +389,7 @@ mod tests {
         fs::write(&path, "{not json").unwrap();
         let s = AuthStorage::at(&path);
         let err = s.load().unwrap_err();
-        assert!(
-            matches!(err, AuthStorageError::Json { .. }),
-            "got: {err:?}",
-        );
+        assert!(matches!(err, AuthStorageError::Json { .. }), "got: {err:?}",);
     }
 
     #[test]
@@ -454,11 +435,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let s = storage_in(&dir);
         s.set("openai", AuthRecord::api_key("sk-1")).unwrap();
-        s.set(
-            "anthropic",
-            AuthRecord::oauth("a", "r", 1_700_000_000_000),
-        )
-        .unwrap();
+        s.set("anthropic", AuthRecord::oauth("a", "r", 1_700_000_000_000))
+            .unwrap();
         let raw = fs::read_to_string(s.path()).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
@@ -482,12 +460,7 @@ mod tests {
         s.set("openai", AuthRecord::api_key("sk-1")).unwrap();
         let mode = fs::metadata(s.path()).unwrap().permissions().mode();
         // mode() returns the full st_mode; mask to permission bits.
-        assert_eq!(
-            mode & 0o777,
-            0o600,
-            "expected 0600, got {:o}",
-            mode & 0o777,
-        );
+        assert_eq!(mode & 0o777, 0o600, "expected 0600, got {:o}", mode & 0o777,);
     }
 
     #[cfg(unix)]

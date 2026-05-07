@@ -221,69 +221,69 @@ where
                     let bash_fut = session.run_bash(&command, 120);
                     tokio::pin!(bash_fut);
                     loop {
-                    tokio::select! {
-                        biased;
-                        res = &mut bash_fut => break res,
-                        next = stream.next() => match next {
-                            Some(Ok(RpcCommand::AbortBash { id: aid })) => {
-                                let _ = session.abort_bash();
-                                let resp = RpcResponse::new(
-                                    aid,
-                                    RpcResponseBody::AbortBash(RpcResultEmpty::ok()),
-                                );
-                                if tx.send(Outbound::Response(Box::new(resp))).is_err() {
-                                    // Writer dropped — finish the
-                                    // bash future so `kill_on_drop`
-                                    // reaps the child, then bail.
+                        tokio::select! {
+                            biased;
+                            res = &mut bash_fut => break res,
+                            next = stream.next() => match next {
+                                Some(Ok(RpcCommand::AbortBash { id: aid })) => {
+                                    let _ = session.abort_bash();
+                                    let resp = RpcResponse::new(
+                                        aid,
+                                        RpcResponseBody::AbortBash(RpcResultEmpty::ok()),
+                                    );
+                                    if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                        // Writer dropped — finish the
+                                        // bash future so `kill_on_drop`
+                                        // reaps the child, then bail.
+                                        break bash_fut.await;
+                                    }
+                                }
+                                Some(Ok(other)) => {
+                                    deferred.insert(0, other);
+                                }
+                                Some(Err(JsonlReadError::Parse { source, .. })) => {
+                                    let resp = RpcResponse::new(
+                                        None,
+                                        RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
+                                            "invalid JSON: {source}"
+                                        ))),
+                                    );
+                                    if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                        break bash_fut.await;
+                                    }
+                                }
+                                Some(Err(JsonlReadError::Utf8(e))) => {
+                                    let resp = RpcResponse::new(
+                                        None,
+                                        RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
+                                            "invalid UTF-8 in command frame: {e}"
+                                        ))),
+                                    );
+                                    if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                        break bash_fut.await;
+                                    }
+                                }
+                                Some(Err(JsonlReadError::Io(e))) => {
+                                    // Reader I/O is fatal — finish the
+                                    // bash future so its child is reaped
+                                    // via `kill_on_drop` (the bash
+                                    // response itself is dropped on the
+                                    // floor — the writer's about to go
+                                    // away anyway). Stash the io error
+                                    // and break the inner loop so the
+                                    // borrow on `session` ends before we
+                                    // drop it.
+                                    io_fatal = Some(e);
                                     break bash_fut.await;
                                 }
-                            }
-                            Some(Ok(other)) => {
-                                deferred.insert(0, other);
-                            }
-                            Some(Err(JsonlReadError::Parse { source, .. })) => {
-                                let resp = RpcResponse::new(
-                                    None,
-                                    RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
-                                        "invalid JSON: {source}"
-                                    ))),
-                                );
-                                if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                None => {
+                                    // Stream EOF: still need to deliver
+                                    // the bash response, so just await
+                                    // the future to completion.
                                     break bash_fut.await;
                                 }
-                            }
-                            Some(Err(JsonlReadError::Utf8(e))) => {
-                                let resp = RpcResponse::new(
-                                    None,
-                                    RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
-                                        "invalid UTF-8 in command frame: {e}"
-                                    ))),
-                                );
-                                if tx.send(Outbound::Response(Box::new(resp))).is_err() {
-                                    break bash_fut.await;
-                                }
-                            }
-                            Some(Err(JsonlReadError::Io(e))) => {
-                                // Reader I/O is fatal — finish the
-                                // bash future so its child is reaped
-                                // via `kill_on_drop` (the bash
-                                // response itself is dropped on the
-                                // floor — the writer's about to go
-                                // away anyway). Stash the io error
-                                // and break the inner loop so the
-                                // borrow on `session` ends before we
-                                // drop it.
-                                io_fatal = Some(e);
-                                break bash_fut.await;
-                            }
-                            None => {
-                                // Stream EOF: still need to deliver
-                                // the bash response, so just await
-                                // the future to completion.
-                                break bash_fut.await;
                             }
                         }
-                    }
                     }
                 };
                 // Inner-loop reader I/O propagates here so the
@@ -463,15 +463,10 @@ where
                     return Err(RpcServerError::Io(e));
                 }
                 let response = match result {
-                    Ok(_) => RpcResponse::new(
-                        id,
-                        RpcResponseBody::Prompt(RpcResultEmpty::ok()),
-                    ),
+                    Ok(_) => RpcResponse::new(id, RpcResponseBody::Prompt(RpcResultEmpty::ok())),
                     Err(e) => RpcResponse::new(
                         id,
-                        RpcResponseBody::Prompt(RpcResultEmpty::err(format!(
-                            "prompt failed: {e}"
-                        ))),
+                        RpcResponseBody::Prompt(RpcResultEmpty::err(format!("prompt failed: {e}"))),
                     ),
                 };
                 if tx.send(Outbound::Response(Box::new(response))).is_err() {
@@ -558,15 +553,10 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             // serializes all frames in send order, so consumers see the
             // event stream first and the success last.
             match session.send_message(&message).await {
-                Ok(_) => RpcResponse::new(
-                    id,
-                    RpcResponseBody::Prompt(RpcResultEmpty::ok()),
-                ),
+                Ok(_) => RpcResponse::new(id, RpcResponseBody::Prompt(RpcResultEmpty::ok())),
                 Err(e) => RpcResponse::new(
                     id,
-                    RpcResponseBody::Prompt(RpcResultEmpty::err(format!(
-                        "prompt failed: {e}"
-                    ))),
+                    RpcResponseBody::Prompt(RpcResultEmpty::err(format!("prompt failed: {e}"))),
                 ),
             }
         }
@@ -603,10 +593,7 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
 
         RpcCommand::GetState { id } => {
             let state = build_session_state(session);
-            RpcResponse::new(
-                id,
-                RpcResponseBody::GetState(RpcResultWithData::ok(state)),
-            )
+            RpcResponse::new(id, RpcResponseBody::GetState(RpcResultWithData::ok(state)))
         }
 
         RpcCommand::GetMessages { id } => {
@@ -634,7 +621,11 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             let _ = session.abort();
             RpcResponse::new(id, RpcResponseBody::Abort(RpcResultEmpty::ok()))
         }
-        RpcCommand::Steer { id, message, images } => {
+        RpcCommand::Steer {
+            id,
+            message,
+            images,
+        } => {
             // Enqueue + ack regardless of whether a prompt is in flight.
             // The agent loop drains the queue at the next turn boundary
             // via `get_steering_messages`; if no prompt is running the
@@ -642,7 +633,11 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             session.enqueue_steer(&message, images);
             RpcResponse::new(id, RpcResponseBody::Steer(RpcResultEmpty::ok()))
         }
-        RpcCommand::FollowUp { id, message, images } => {
+        RpcCommand::FollowUp {
+            id,
+            message,
+            images,
+        } => {
             // Same enqueue-and-ack semantics as Steer; the follow-up
             // queue is drained between turns by `get_follow_up_messages`.
             session.enqueue_follow_up(&message, images);
@@ -713,10 +708,9 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                         ))),
                     )
                 }
-                None => RpcResponse::new(
-                    id,
-                    RpcResponseBody::CycleModel(RpcResultWithData::ok(None)),
-                ),
+                None => {
+                    RpcResponse::new(id, RpcResponseBody::CycleModel(RpcResultWithData::ok(None)))
+                }
             }
         }
 
@@ -741,10 +735,7 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             let mut opts = session.stream_options().clone();
             opts.reasoning = Some(level);
             session.set_stream_options(opts);
-            RpcResponse::new(
-                id,
-                RpcResponseBody::SetThinkingLevel(RpcResultEmpty::ok()),
-            )
+            RpcResponse::new(id, RpcResponseBody::SetThinkingLevel(RpcResultEmpty::ok()))
         }
         RpcCommand::CycleThinkingLevel { id } => {
             // Cycle order matches the TS reference's full ladder:
@@ -774,17 +765,11 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
         }
         RpcCommand::SetSteeringMode { id, mode } => {
             session.set_steering_mode(mode);
-            RpcResponse::new(
-                id,
-                RpcResponseBody::SetSteeringMode(RpcResultEmpty::ok()),
-            )
+            RpcResponse::new(id, RpcResponseBody::SetSteeringMode(RpcResultEmpty::ok()))
         }
         RpcCommand::SetFollowUpMode { id, mode } => {
             session.set_follow_up_mode(mode);
-            RpcResponse::new(
-                id,
-                RpcResponseBody::SetFollowUpMode(RpcResultEmpty::ok()),
-            )
+            RpcResponse::new(id, RpcResponseBody::SetFollowUpMode(RpcResultEmpty::ok()))
         }
         RpcCommand::Compact {
             id,
@@ -812,10 +797,7 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
         }
         RpcCommand::SetAutoCompaction { id, enabled } => {
             session.set_auto_compaction(enabled);
-            RpcResponse::new(
-                id,
-                RpcResponseBody::SetAutoCompaction(RpcResultEmpty::ok()),
-            )
+            RpcResponse::new(id, RpcResponseBody::SetAutoCompaction(RpcResultEmpty::ok()))
         }
         RpcCommand::SetAutoRetry { id, enabled } => {
             session.set_auto_retry(enabled);
@@ -872,11 +854,9 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
         }
         RpcCommand::ExportHtml { id, output_path } => {
             // Default output: "<session_id>.html" under the session cwd.
-            let path = output_path.map(PathBuf::from).unwrap_or_else(|| {
-                session
-                    .cwd()
-                    .join(format!("{}.html", session.session_id()))
-            });
+            let path = output_path
+                .map(PathBuf::from)
+                .unwrap_or_else(|| session.cwd().join(format!("{}.html", session.session_id())));
             match crate::core::export::export_to_html(
                 session.messages(),
                 session.session_id(),
@@ -891,9 +871,9 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                 ),
                 Err(e) => RpcResponse::new(
                     id,
-                    RpcResponseBody::ExportHtml(RpcResultWithData::<ExportHtmlData>::err(
-                        format!("export failed: {e}"),
-                    )),
+                    RpcResponseBody::ExportHtml(RpcResultWithData::<ExportHtmlData>::err(format!(
+                        "export failed: {e}"
+                    ))),
                 ),
             }
         }
@@ -963,7 +943,9 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                             .content
                             .iter()
                             .filter_map(|c| match c {
-                                model::types::AssistantContentBlock::Text(t) => Some(t.text.as_str()),
+                                model::types::AssistantContentBlock::Text(t) => {
+                                    Some(t.text.as_str())
+                                }
                                 _ => None,
                             })
                             .collect::<Vec<_>>()
@@ -991,10 +973,7 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             )
         }
         RpcCommand::SetSessionName { id, name } => match session.set_label(&name) {
-            Ok(()) => RpcResponse::new(
-                id,
-                RpcResponseBody::SetSessionName(RpcResultEmpty::ok()),
-            ),
+            Ok(()) => RpcResponse::new(id, RpcResponseBody::SetSessionName(RpcResultEmpty::ok())),
             Err(e) => RpcResponse::new(
                 id,
                 RpcResponseBody::SetSessionName(RpcResultEmpty::err(format!(
@@ -1239,8 +1218,7 @@ mod tests {
 
     #[tokio::test]
     async fn smoke_get_state_returns_session_id() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(b"{\"type\":\"get_state\",\"id\":\"1\"}\n")
@@ -1265,8 +1243,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_messages_on_fresh_session_returns_empty_array() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(b"{\"type\":\"get_messages\",\"id\":\"2\"}\n")
@@ -1280,15 +1257,17 @@ mod tests {
         assert_eq!(resp["command"], "get_messages");
         assert_eq!(resp["success"], true);
         let messages = resp["data"]["messages"].as_array().unwrap();
-        assert!(messages.is_empty(), "messages must be empty on fresh session");
+        assert!(
+            messages.is_empty(),
+            "messages must be empty on fresh session"
+        );
 
         handle.await.unwrap().unwrap();
     }
 
     #[tokio::test]
     async fn prompt_emits_assistant_text_event_then_success_response() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("hello")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("hello")).await;
 
         in_tx
             .write_all(b"{\"type\":\"prompt\",\"message\":\"hi\",\"id\":\"42\"}\n")
@@ -1297,10 +1276,7 @@ mod tests {
         drop(in_tx);
 
         let frames = drain_frames(out_rx).await;
-        assert!(
-            !frames.is_empty(),
-            "expected at least one frame, got none"
-        );
+        assert!(!frames.is_empty(), "expected at least one frame, got none");
 
         // The success response must appear (last response with the right id).
         let response = frames
@@ -1312,9 +1288,9 @@ mod tests {
         assert_eq!(response["id"], "42");
 
         // At least one event frame must carry the assistant text "hello".
-        let saw_text = frames.iter().any(|f| {
-            f["type"] == "event" && f.to_string().contains("\"hello\"")
-        });
+        let saw_text = frames
+            .iter()
+            .any(|f| f["type"] == "event" && f.to_string().contains("\"hello\""));
         assert!(
             saw_text,
             "expected at least one event frame to carry the assistant text. frames: {frames:#?}"
@@ -1343,8 +1319,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_session_returns_cancelled_false() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(b"{\"type\":\"new_session\",\"id\":\"3\"}\n")
@@ -1441,8 +1416,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_line_yields_error_response_then_real_command_succeeds() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(b"not json\n{\"type\":\"get_state\",\"id\":\"7\"}\n")
@@ -1480,8 +1454,7 @@ mod tests {
     /// turns.
     #[tokio::test]
     async fn abort_with_no_inflight_turn_succeeds() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -1508,8 +1481,7 @@ mod tests {
     /// `stdout` and leaves `stderr` empty.
     #[tokio::test]
     async fn bash_executes_simple_command() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(b"{\"type\":\"bash\",\"id\":\"1\",\"command\":\"echo hello\"}\n")
@@ -1525,7 +1497,10 @@ mod tests {
         assert_eq!(resp["id"], "1");
         let data = &resp["data"];
         let stdout = data["stdout"].as_str().expect("stdout is string");
-        assert!(stdout.contains("hello"), "expected hello in stdout: {stdout:?}");
+        assert!(
+            stdout.contains("hello"),
+            "expected hello in stdout: {stdout:?}"
+        );
         assert_eq!(data["exitCode"], 0);
         assert_eq!(data["truncated"], false);
 
@@ -1535,8 +1510,7 @@ mod tests {
     /// A failing command surfaces its exit code on the wire.
     #[tokio::test]
     async fn bash_failure_surfaces_exit_code() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(b"{\"type\":\"bash\",\"id\":\"1\",\"command\":\"exit 7\"}\n")
@@ -1558,8 +1532,7 @@ mod tests {
     /// running, matching how `abort` already behaves.
     #[tokio::test]
     async fn abort_bash_with_no_inflight_succeeds() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -1587,8 +1560,7 @@ mod tests {
     /// as the 5s budget elapsing, not a 30s sleep completing.
     #[tokio::test]
     async fn bash_abort_interrupts_running_command() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
         in_tx
             .write_all(b"{\"type\":\"bash\",\"id\":\"1\",\"command\":\"sleep 30\"}\n")
             .await
@@ -1604,18 +1576,18 @@ mod tests {
         drop(in_tx);
 
         // Wall-clock budget: a regression manifests as timeout, not 30s hang.
-        let frames = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            drain_frames(out_rx),
-        )
-        .await
-        .expect("dispatcher must respond within 5s when bash is aborted");
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(5), drain_frames(out_rx))
+            .await
+            .expect("dispatcher must respond within 5s when bash is aborted");
         let bash = frames.iter().find(|f| f["id"] == "1").unwrap();
         assert_eq!(bash["data"]["truncated"], true);
         // Abort marker lands on stderr per `BashRpcData` doc; stdout is
         // empty on the cancel arm.
         assert!(
-            bash["data"]["stderr"].as_str().unwrap_or("").contains("aborted"),
+            bash["data"]["stderr"]
+                .as_str()
+                .unwrap_or("")
+                .contains("aborted"),
             "expected stderr to carry abort marker, got: {bash:#?}"
         );
         assert_eq!(bash["data"]["stdout"], "");
@@ -1626,8 +1598,7 @@ mod tests {
     /// surface the new value via the next `get_state`.
     #[tokio::test]
     async fn set_thinking_level_mutates_stream_options() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -1653,8 +1624,7 @@ mod tests {
     /// full ladder (default Medium → High).
     #[tokio::test]
     async fn cycle_thinking_level_rotates_from_default() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(b"{\"type\":\"cycle_thinking_level\",\"id\":\"1\"}\n")
@@ -1675,8 +1645,7 @@ mod tests {
     /// Mode setters reflect immediately in `get_state`.
     #[tokio::test]
     async fn steering_and_followup_modes_round_trip() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -1705,8 +1674,7 @@ mod tests {
     /// `SessionManager::append_label`.
     #[tokio::test]
     async fn set_session_name_persists() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -1730,8 +1698,7 @@ mod tests {
     /// `get_session_stats` returns the session id, model id, and cwd.
     #[tokio::test]
     async fn get_session_stats_returns_basic_fields() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(b"{\"type\":\"get_session_stats\",\"id\":\"1\"}\n")
@@ -1753,8 +1720,7 @@ mod tests {
     /// `source: "builtin"`.
     #[tokio::test]
     async fn get_commands_returns_builtins() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(b"{\"type\":\"get_commands\",\"id\":\"1\"}\n")
@@ -1773,10 +1739,7 @@ mod tests {
             );
         }
         // Sanity check: `/help` should be in there.
-        let names: Vec<&str> = cmds
-            .iter()
-            .filter_map(|c| c["name"].as_str())
-            .collect();
+        let names: Vec<&str> = cmds.iter().filter_map(|c| c["name"].as_str()).collect();
         assert!(
             names.contains(&"help"),
             "expected /help in builtin commands, got: {names:?}"
@@ -1789,8 +1752,7 @@ mod tests {
     /// and surfaces it via `get_state`.
     #[tokio::test]
     async fn set_model_unknown_returns_error() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -1821,8 +1783,7 @@ mod tests {
     /// and the queued message shows up in `get_state.pending_message_count`.
     #[tokio::test]
     async fn steer_enqueues_and_acks() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -1850,8 +1811,7 @@ mod tests {
     /// `steer`.
     #[tokio::test]
     async fn follow_up_enqueues_and_acks() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -1878,8 +1838,7 @@ mod tests {
     /// only `steering_queue` (or only `follow_up_queue`) is caught.
     #[tokio::test]
     async fn pending_message_count_sums_both_queues() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -1967,26 +1926,25 @@ mod tests {
         // The steer ack must arrive within the budget. The prompt
         // response will never arrive (pending forever), so we time
         // out the drain and abort the dispatcher.
-        let frames = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            async {
-                use tokio::io::AsyncReadExt;
-                let mut bytes = Vec::new();
-                let mut rx = out_rx;
-                // Read until we have at least one frame for "steer";
-                // the prompt frame will never come.
-                let mut buf = [0u8; 4096];
-                loop {
-                    let n = rx.read(&mut buf).await.unwrap_or(0);
-                    if n == 0 { break; }
-                    bytes.extend_from_slice(&buf[..n]);
-                    if String::from_utf8_lossy(&bytes).contains("\"command\":\"steer\"") {
-                        break;
-                    }
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            use tokio::io::AsyncReadExt;
+            let mut bytes = Vec::new();
+            let mut rx = out_rx;
+            // Read until we have at least one frame for "steer";
+            // the prompt frame will never come.
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = rx.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    break;
                 }
-                bytes
-            },
-        )
+                bytes.extend_from_slice(&buf[..n]);
+                if String::from_utf8_lossy(&bytes).contains("\"command\":\"steer\"") {
+                    break;
+                }
+            }
+            bytes
+        })
         .await
         .expect("steer ack must arrive within 5s during in-flight prompt");
 
@@ -2065,12 +2023,9 @@ mod tests {
 
         // Wall-clock budget: a regression (deferred abort) manifests as
         // timeout because the pending-forever provider never returns.
-        let frames = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            drain_frames(out_rx),
-        )
-        .await
-        .expect("dispatcher must respond within 5s when prompt is aborted");
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(5), drain_frames(out_rx))
+            .await
+            .expect("dispatcher must respond within 5s when prompt is aborted");
 
         // The abort ack must be present. Order vs the prompt response
         // doesn't matter — what's load-bearing is that the inline
@@ -2111,9 +2066,7 @@ mod tests {
 
         // Issue fork at the second user message — history should
         // truncate to just the first.
-        let cmd = format!(
-            "{{\"type\":\"fork\",\"id\":\"f-1\",\"entryId\":\"{fork_target}\"}}\n"
-        );
+        let cmd = format!("{{\"type\":\"fork\",\"id\":\"f-1\",\"entryId\":\"{fork_target}\"}}\n");
         in_tx.write_all(cmd.as_bytes()).await.unwrap();
         in_tx
             .write_all(b"{\"type\":\"get_state\",\"id\":\"gs-1\"}\n")
@@ -2151,9 +2104,7 @@ mod tests {
         let (mut in_tx, out_rx, handle) = spawn_dispatcher(session).await;
 
         in_tx
-            .write_all(
-                b"{\"type\":\"fork\",\"id\":\"f-2\",\"entryId\":\"bogus_entry_id\"}\n",
-            )
+            .write_all(b"{\"type\":\"fork\",\"id\":\"f-2\",\"entryId\":\"bogus_entry_id\"}\n")
             .await
             .unwrap();
         drop(in_tx);
@@ -2238,9 +2189,7 @@ mod tests {
 
         let (mut in_tx, out_rx, handle) = spawn_dispatcher(session).await;
 
-        let cmd = format!(
-            "{{\"type\":\"fork\",\"id\":\"f-3\",\"entryId\":\"{fork_target}\"}}\n"
-        );
+        let cmd = format!("{{\"type\":\"fork\",\"id\":\"f-3\",\"entryId\":\"{fork_target}\"}}\n");
         in_tx.write_all(cmd.as_bytes()).await.unwrap();
         in_tx
             .write_all(b"{\"type\":\"prompt\",\"message\":\"hi\",\"id\":\"p-1\"}\n")
@@ -2300,12 +2249,10 @@ mod tests {
         // switch to it. After the switch, `get_state` must reflect the
         // loaded file's id and message count.
         let tmp = tempfile::TempDir::new().unwrap();
-        let (path, src_id) =
-            write_session_with_users(tmp.path(), &["hello", "world", "third"]);
+        let (path, src_id) = write_session_with_users(tmp.path(), &["hello", "world", "third"]);
         let path_str = path.to_str().unwrap().to_string();
 
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         let cmd = format!(
             "{{\"type\":\"switch_session\",\"id\":\"sw-1\",\"sessionPath\":\"{}\"}}\n",
@@ -2347,8 +2294,7 @@ mod tests {
 
     #[tokio::test]
     async fn switch_session_unknown_path_returns_error() {
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         in_tx
             .write_all(
@@ -2436,8 +2382,7 @@ mod tests {
         let (path, src_id) = write_session_with_users(tmp.path(), &["alpha", "beta"]);
         let path_str = path.to_str().unwrap().to_string();
 
-        let (mut in_tx, out_rx, handle) =
-            spawn_dispatcher(session_with_mock("ignored")).await;
+        let (mut in_tx, out_rx, handle) = spawn_dispatcher(session_with_mock("ignored")).await;
 
         let cmd = format!(
             "{{\"type\":\"switch_session\",\"id\":\"sw-3\",\"sessionPath\":\"{}\"}}\n",

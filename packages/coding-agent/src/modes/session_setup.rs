@@ -157,5 +157,4 @@ mod tests {
         let setup = SessionSetup::resolve(&args).expect("resolve");
         assert!(setup.agent_tools.is_empty());
     }
-
 }

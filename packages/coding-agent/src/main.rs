@@ -326,10 +326,7 @@ async fn handle_slash_command(
             // forces compaction unconditionally (matching the user's
             // intent when they type `/compact` explicitly).
             match session.compact().await {
-                Ok(summary) => println!(
-                    "\x1b[32mCompaction complete.\x1b[0m\n{}",
-                    summary,
-                ),
+                Ok(summary) => println!("\x1b[32mCompaction complete.\x1b[0m\n{}", summary,),
                 Err(e) => eprintln!("\x1b[31mCompaction failed: {}\x1b[0m", e),
             }
         }
@@ -493,10 +490,7 @@ async fn handle_slash_command(
                 registry.register_extension_command(spec, ext);
             }
             let cx = session.extension_context();
-            match registry
-                .dispatch_extension_command(bare, args, &cx)
-                .await
-            {
+            match registry.dispatch_extension_command(bare, args, &cx).await {
                 Ok(Some(output)) => {
                     println!("{}", output);
                 }
@@ -507,10 +501,7 @@ async fn handle_slash_command(
                     );
                 }
                 Err(e) => {
-                    eprintln!(
-                        "\x1b[31mExtension command failed: {}\x1b[0m",
-                        e
-                    );
+                    eprintln!("\x1b[31mExtension command failed: {}\x1b[0m", e);
                 }
             }
         }
@@ -612,8 +603,10 @@ fn print_extension_commands(session: &AgentSession) {
         return;
     }
     // Group by extension name preserving registration order within a group.
-    let mut groups: std::collections::BTreeMap<String, Vec<&hand_coding_agent::core::extensions::api::SlashCommandSpec>> =
-        std::collections::BTreeMap::new();
+    let mut groups: std::collections::BTreeMap<
+        String,
+        Vec<&hand_coding_agent::core::extensions::api::SlashCommandSpec>,
+    > = std::collections::BTreeMap::new();
     for (spec, ext) in &collected {
         groups
             .entry(ext.manifest().name.clone())
@@ -629,10 +622,7 @@ fn print_extension_commands(session: &AgentSession) {
             if usage.is_empty() {
                 println!("    /{:<14}  {}", spec.name, spec.description);
             } else {
-                println!(
-                    "    /{:<14}  {} ({})",
-                    spec.name, spec.description, usage
-                );
+                println!("    /{:<14}  {} ({})", spec.name, spec.description, usage);
             }
         }
     }

@@ -139,7 +139,11 @@ pub struct RpcSlashCommand {
 ///
 /// Variants mirror the TS `RpcCommand` discriminated union one-for-one.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum RpcCommand {
     // ---- Prompting ----
     Prompt {
@@ -627,7 +631,11 @@ impl RpcResponse {
 /// serializing under that tag (see the manual `Serialize`/`Deserialize`
 /// pair via the wrapper struct).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "method", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "method",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum RpcExtensionUiRequestKind {
     Select {
         title: String,
@@ -743,7 +751,7 @@ pub struct RpcExtensionUiResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     /// Round-trip helper: parse JSON, re-serialize, re-parse, assert
     /// the two `Value` representations are equal. Avoids needing
@@ -914,7 +922,8 @@ mod tests {
 
     #[test]
     fn get_messages_empty_list_roundtrips() {
-        let json = r#"{"type":"response","command":"get_messages","success":true,"data":{"messages":[]}}"#;
+        let json =
+            r#"{"type":"response","command":"get_messages","success":true,"data":{"messages":[]}}"#;
         let resp: RpcResponse = roundtrip(json);
         match resp.body {
             RpcResponseBody::GetMessages(RpcResultWithData::Success { data, .. }) => {
@@ -928,7 +937,8 @@ mod tests {
     fn error_response_roundtrips() {
         // From rpc-mode.ts:397: output(error(id, "prompt", e.message));
         // error() returns: { id, type: "response", command, success: false, error: msg }
-        let json = r#"{"id":"42","type":"response","command":"prompt","success":false,"error":"boom"}"#;
+        let json =
+            r#"{"id":"42","type":"response","command":"prompt","success":false,"error":"boom"}"#;
         let resp: RpcResponse = roundtrip(json);
         match resp.body {
             RpcResponseBody::Prompt(RpcResultEmpty::Failure { error, .. }) => {
@@ -945,7 +955,10 @@ mod tests {
         let json = r#"{"type":"extension_ui_request","id":"u1","method":"confirm","title":"Proceed?","message":"Continue with edits?"}"#;
         let req: RpcExtensionUiRequest = roundtrip(json);
         assert_eq!(req.id, "u1");
-        assert!(matches!(req.kind, RpcExtensionUiRequestKind::Confirm { .. }));
+        assert!(matches!(
+            req.kind,
+            RpcExtensionUiRequestKind::Confirm { .. }
+        ));
     }
 
     #[test]
@@ -985,7 +998,11 @@ mod tests {
             RpcResponseBody::Prompt(RpcResultEmpty::Success { success: true }),
         );
         let s = serde_json::to_string(&resp_no_id).unwrap();
-        assert!(!s.contains(r#""id""#), "id must be skipped on response: {}", s);
+        assert!(
+            !s.contains(r#""id""#),
+            "id must be skipped on response: {}",
+            s
+        );
 
         let resp_with_id = RpcResponse::new(
             Some("z".into()),

@@ -589,9 +589,11 @@ impl SettingsManager {
                 if watched_parents.contains(&parent_buf) {
                     continue;
                 }
-                if let Err(e) =
-                    notify::Watcher::watch(&mut watcher, parent, notify::RecursiveMode::NonRecursive)
-                {
+                if let Err(e) = notify::Watcher::watch(
+                    &mut watcher,
+                    parent,
+                    notify::RecursiveMode::NonRecursive,
+                ) {
                     tracing::warn!(
                         path = %parent.display(),
                         ?e,
@@ -613,10 +615,8 @@ impl SettingsManager {
         // canonical paths (e.g. `/private/var/...`) while the configured
         // path may be the symlinked alias (e.g. `/var/...`). Including
         // parent dirs lets us catch coarse "directory changed" events too.
-        let target_files: Vec<PathBuf> = build_match_targets(
-            self.global_path.as_deref(),
-            self.project_path.as_deref(),
-        );
+        let target_files: Vec<PathBuf> =
+            build_match_targets(self.global_path.as_deref(), self.project_path.as_deref());
 
         let task = tokio::spawn(async move {
             loop {
@@ -644,16 +644,14 @@ impl SettingsManager {
                 }
 
                 // Re-load settings from disk.
-                let new_settings = match Settings::load(
-                    global_path.as_deref(),
-                    project_path.as_deref(),
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!(?e, "settings reload failed; keeping previous value");
-                        continue;
-                    }
-                };
+                let new_settings =
+                    match Settings::load(global_path.as_deref(), project_path.as_deref()) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::warn!(?e, "settings reload failed; keeping previous value");
+                            continue;
+                        }
+                    };
 
                 if new_settings != current_settings {
                     let event = SettingsChanged {
@@ -725,10 +723,7 @@ fn build_match_targets(global: Option<&Path>, project: Option<&Path>) -> Vec<Pat
 /// If no paths are populated (rare; some platforms emit a generic
 /// "something changed" event) or the event is an error, return `true` so
 /// the reload step can decide whether anything actually moved.
-fn event_matches_targets(
-    res: &notify::Result<notify::Event>,
-    targets: &[PathBuf],
-) -> bool {
+fn event_matches_targets(res: &notify::Result<notify::Event>, targets: &[PathBuf]) -> bool {
     let event = match res {
         Ok(e) => e,
         Err(_) => return true,
@@ -783,12 +778,7 @@ const KNOWN_COMPACTION: &[&str] = &[
     "keep-recent-tokens",
     "max-context-tokens",
 ];
-const KNOWN_RETRY: &[&str] = &[
-    "enabled",
-    "max-retries",
-    "initial-delay-ms",
-    "max-delay-ms",
-];
+const KNOWN_RETRY: &[&str] = &["enabled", "max-retries", "initial-delay-ms", "max-delay-ms"];
 
 /// Convert one snake_case identifier to kebab-case (`a_b_c` → `a-b-c`).
 fn snake_to_kebab(s: &str) -> String {
@@ -1156,16 +1146,8 @@ mod tests {
     #[test]
     fn sub_struct_field_merging() {
         let dir = TempDir::new().unwrap();
-        let g = write_yaml(
-            &dir,
-            "global.yaml",
-            "compaction:\n  threshold: 0.7\n",
-        );
-        let p = write_yaml(
-            &dir,
-            "project.yaml",
-            "compaction:\n  enabled: false\n",
-        );
+        let g = write_yaml(&dir, "global.yaml", "compaction:\n  threshold: 0.7\n");
+        let p = write_yaml(&dir, "project.yaml", "compaction:\n  enabled: false\n");
         let s = Settings::load(Some(&g), Some(&p)).unwrap();
         // Project supplied `enabled: false` — wins.
         assert!(!s.compaction.enabled());
@@ -1290,7 +1272,9 @@ mod tests {
         let parent = path.parent().expect("path has a parent");
         let tmp = parent.join(format!(
             ".{}.tmp",
-            path.file_name().and_then(|s| s.to_str()).unwrap_or("settings")
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("settings")
         ));
         let mut f = std::fs::File::create(&tmp).unwrap();
         f.write_all(content.as_bytes()).unwrap();
@@ -1551,10 +1535,9 @@ mod tests {
 
         let outcome = migrate_legacy_json_settings(dir.path());
         match outcome {
-            MigrationOutcome::Failed { reason } => assert!(
-                reason.contains("json parse"),
-                "unexpected reason: {reason}",
-            ),
+            MigrationOutcome::Failed { reason } => {
+                assert!(reason.contains("json parse"), "unexpected reason: {reason}",)
+            }
             other => panic!("expected Failed, got {other:?}"),
         }
         // JSON survives, YAML never created.

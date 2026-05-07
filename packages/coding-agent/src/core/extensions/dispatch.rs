@@ -223,7 +223,8 @@ mod tests {
     #[tokio::test]
     async fn no_extensions_returns_continue() {
         let exts: Vec<Arc<dyn Extension>> = Vec::new();
-        let decision = dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
+        let decision =
+            dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
         assert!(matches!(decision, HookDecision::Continue));
     }
 
@@ -231,7 +232,8 @@ mod tests {
     async fn single_continue_returns_continue() {
         let ext = Arc::new(RecordingExt::new("a", vec![BeforeAction::Continue]));
         let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
-        let decision = dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
+        let decision =
+            dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
         assert!(matches!(decision, HookDecision::Continue));
         assert_eq!(ext.before_calls.lock().unwrap().len(), 1);
     }
@@ -246,7 +248,8 @@ mod tests {
         let c = Arc::new(RecordingExt::new("c", vec![BeforeAction::Continue]));
 
         let exts: Vec<Arc<dyn Extension>> = vec![a.clone(), b.clone(), c.clone()];
-        let decision = dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
+        let decision =
+            dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
 
         match decision {
             HookDecision::Cancel(reason) => assert_eq!(reason, "nope"),
@@ -302,7 +305,8 @@ mod tests {
         ));
 
         let exts: Vec<Arc<dyn Extension>> = vec![a, b];
-        let decision = dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
+        let decision =
+            dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
         match decision {
             HookDecision::Cancel(reason) => assert_eq!(reason, "blocked"),
             other => panic!("expected Cancel, got {other:?}"),
@@ -318,7 +322,8 @@ mod tests {
         let b = Arc::new(RecordingExt::new("b", vec![BeforeAction::Continue]));
 
         let exts: Vec<Arc<dyn Extension>> = vec![a.clone(), b.clone()];
-        let decision = dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
+        let decision =
+            dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
         assert!(matches!(decision, HookDecision::Continue));
         assert_eq!(a.before_calls.lock().unwrap().len(), 1);
         assert_eq!(

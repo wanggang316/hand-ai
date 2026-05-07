@@ -208,10 +208,7 @@ pub fn run_diagnostics() -> DiagnosticsReport {
 /// `auth_path = None` records a "home directory not found" error in the
 /// auth-storage status. Tests pass `Some(tmp/auth.json)` to avoid touching
 /// the real `~/.hand/`.
-pub fn run_diagnostics_at(
-    cwd: &std::path::Path,
-    auth_path: Option<PathBuf>,
-) -> DiagnosticsReport {
+pub fn run_diagnostics_at(cwd: &std::path::Path, auth_path: Option<PathBuf>) -> DiagnosticsReport {
     let mut checks = vec![
         // OS info
         check_os(),
@@ -327,21 +324,19 @@ fn inspect_settings(cwd: &std::path::Path) -> SettingsLayerSummary {
     }
 }
 
-fn inspect_telemetry(
-    cwd: &std::path::Path,
-    settings: &SettingsLayerSummary,
-) -> TelemetryStatus {
+fn inspect_telemetry(cwd: &std::path::Path, settings: &SettingsLayerSummary) -> TelemetryStatus {
     let env_value = std::env::var("HAND_TELEMETRY").ok();
 
     // If settings failed to load, we can't faithfully resolve the gate.
     // Fall back to `default = true` (TS-faithful) and report that the
     // settings layer is unavailable.
     if settings.error.is_some() {
-        let enabled = env_value
-            .as_deref()
-            .map(is_truthy_env_flag)
-            .unwrap_or(true);
-        let source: &'static str = if env_value.is_some() { "env" } else { "default" };
+        let enabled = env_value.as_deref().map(is_truthy_env_flag).unwrap_or(true);
+        let source: &'static str = if env_value.is_some() {
+            "env"
+        } else {
+            "default"
+        };
         return TelemetryStatus {
             enabled,
             source,
@@ -358,19 +353,19 @@ fn inspect_telemetry(
         Ok(m) => m,
         Err(e) => {
             return TelemetryStatus {
-                enabled: env_value
-                    .as_deref()
-                    .map(is_truthy_env_flag)
-                    .unwrap_or(true),
-                source: if env_value.is_some() { "env" } else { "default" },
+                enabled: env_value.as_deref().map(is_truthy_env_flag).unwrap_or(true),
+                source: if env_value.is_some() {
+                    "env"
+                } else {
+                    "default"
+                },
                 env_value,
                 error: Some(e.to_string()),
             };
         }
     };
 
-    let enabled =
-        telemetry::is_install_telemetry_enabled(&mgr, env_value.as_deref());
+    let enabled = telemetry::is_install_telemetry_enabled(&mgr, env_value.as_deref());
     let source: &'static str = if env_value.is_some() {
         "env"
     } else if mgr.current().enable_install_telemetry.is_some() {
@@ -402,8 +397,7 @@ fn inspect_skill_errors(cwd: &std::path::Path) -> Vec<SkillErrorSummary> {
     let user_dir = dirs::home_dir()
         .map(|h| h.join(".hand").join("skills"))
         .filter(|p| p.exists());
-    let (_skills, errors) =
-        skills::discover_skills(cwd, user_dir.as_deref(), None);
+    let (_skills, errors) = skills::discover_skills(cwd, user_dir.as_deref(), None);
 
     errors
         .into_iter()
@@ -884,10 +878,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let report = run_diagnostics_at(dir.path(), None);
         // Same ambient-env caveat as above: just assert the field shape.
-        assert_eq!(
-            report.timings.enabled,
-            crate::core::timings::enabled(),
-        );
+        assert_eq!(report.timings.enabled, crate::core::timings::enabled(),);
     }
 
     #[test]

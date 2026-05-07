@@ -12,10 +12,10 @@ use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_befor
 use crate::core::extensions::registry::builtin_tier1_extensions;
 use crate::core::model_registry::ModelRegistry;
 use crate::core::session_manager::{SessionEntry, SessionManager};
-use crate::rpc::types::{ForkMessageEntry, QueueMode};
 use crate::core::settings::SettingsManager;
 use crate::core::skills::{self, Skill, SkillError};
 use crate::core::system_prompt::{self, BuildSystemPromptOptions};
+use crate::rpc::types::{ForkMessageEntry, QueueMode};
 use hand_agent::types::{
     AfterToolCallContext, AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig,
     AgentTool, BeforeToolCallContext, BeforeToolCallResult, BoxFuture,
@@ -396,19 +396,21 @@ impl AgentSession {
         // live mode for every drain in this turn.
         let steering_queue = self.steering_queue.clone();
         let steering_mode = self.steering_mode;
-        loop_config.get_steering_messages = Some(Arc::new(move || -> BoxFuture<'static, Vec<Message>> {
-            let queue = steering_queue.clone();
-            let mode = steering_mode;
-            Box::pin(async move { drain_queue(&queue, mode) })
-        }));
+        loop_config.get_steering_messages =
+            Some(Arc::new(move || -> BoxFuture<'static, Vec<Message>> {
+                let queue = steering_queue.clone();
+                let mode = steering_mode;
+                Box::pin(async move { drain_queue(&queue, mode) })
+            }));
 
         let follow_up_queue = self.follow_up_queue.clone();
         let follow_up_mode = self.follow_up_mode;
-        loop_config.get_follow_up_messages = Some(Arc::new(move || -> BoxFuture<'static, Vec<Message>> {
-            let queue = follow_up_queue.clone();
-            let mode = follow_up_mode;
-            Box::pin(async move { drain_queue(&queue, mode) })
-        }));
+        loop_config.get_follow_up_messages =
+            Some(Arc::new(move || -> BoxFuture<'static, Vec<Message>> {
+                let queue = follow_up_queue.clone();
+                let mode = follow_up_mode;
+                Box::pin(async move { drain_queue(&queue, mode) })
+            }));
 
         // Create event sink for the agent loop. Replace the session's
         // cancellation token with a fresh one so a previous turn's
@@ -445,10 +447,7 @@ impl AgentSession {
             tools: Some(owned_tools),
             keep: original_len,
         };
-        let tools_ref: &[AgentTool] = guard
-            .tools
-            .as_deref()
-            .expect("guard tools set above");
+        let tools_ref: &[AgentTool] = guard.tools.as_deref().expect("guard tools set above");
 
         let result_outcome = agent_loop::run_agent_loop(
             prompts,
@@ -596,9 +595,8 @@ impl AgentSession {
                 break;
             }
         }
-        let (cut_idx, text) = found.ok_or_else(|| {
-            CodingAgentError::Session(format!("entry_id not found: {entry_id}"))
-        })?;
+        let (cut_idx, text) = found
+            .ok_or_else(|| CodingAgentError::Session(format!("entry_id not found: {entry_id}")))?;
 
         // Truncated body: every entry strictly BEFORE the cut point,
         // skipping any session header (the new manager generates its
@@ -1187,7 +1185,10 @@ impl AgentSession {
 /// a valid `Blocks` payload (the leading text block is always present
 /// even when empty, matching the wire shape the model sees for
 /// multi-modal user turns).
-pub(crate) fn build_user_message(text: &str, images: Option<Vec<ImageContent>>) -> model::UserMessage {
+pub(crate) fn build_user_message(
+    text: &str,
+    images: Option<Vec<ImageContent>>,
+) -> model::UserMessage {
     match images {
         Some(images) if !images.is_empty() => {
             let mut blocks: Vec<UserContentBlock> = Vec::with_capacity(images.len() + 1);
@@ -1416,7 +1417,10 @@ mod tests {
         assert_eq!(session.skills()[0].name, "foo");
 
         let prompt = &session.context.system_prompt;
-        assert!(prompt.contains("<name>foo</name>"), "prompt missing skill name: {prompt}");
+        assert!(
+            prompt.contains("<name>foo</name>"),
+            "prompt missing skill name: {prompt}"
+        );
         assert!(prompt.contains("A foo skill for tests."));
     }
 
@@ -1429,7 +1433,11 @@ mod tests {
         let bad = tmp.path().join(".hand").join("skills").join("bad");
         fs::create_dir_all(&bad).unwrap();
         // Frontmatter open with no close → loader-level frontmatter error.
-        fs::write(bad.join("SKILL.md"), "---\ndescription: oops\nbody without close\n").unwrap();
+        fs::write(
+            bad.join("SKILL.md"),
+            "---\ndescription: oops\nbody without close\n",
+        )
+        .unwrap();
 
         let session = AgentSession::new_with_skill_dirs(
             test_config(tmp.path().to_path_buf()),
@@ -1908,9 +1916,11 @@ mod tests {
         // then cancel by dropping the future via `timeout`. The
         // `ToolsRestoreGuard`'s `Drop` must restore `self.tools`.
         let send_fut = session.send_message("hi");
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_millis(50), send_fut).await;
-        assert!(outcome.is_err(), "send_message should have been cancelled by timeout");
+        let outcome = tokio::time::timeout(std::time::Duration::from_millis(50), send_fut).await;
+        assert!(
+            outcome.is_err(),
+            "send_message should have been cancelled by timeout"
+        );
 
         assert_eq!(
             session.tools().len(),
@@ -2016,11 +2026,8 @@ mod tests {
             },
         );
 
-        let mut session = AgentSession::in_memory_with_client(
-            openai_test_model(),
-            vec![recorder_tool],
-            client,
-        );
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![recorder_tool], client);
 
         let ext = RecordingExt::new(
             "rewriter",

@@ -180,19 +180,19 @@ fn build_client(tool_name: &str, args: serde_json::Value) -> model::Client {
 /// Lay out a `subprocess_extensions/notify-sh/` directory by copying the
 /// in-tree fixture into a tempdir. Tests must NOT mutate the in-tree fixture.
 fn install_notify_sh(root: &Path) -> PathBuf {
-    let src =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/extensions/notify-sh");
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/extensions/notify-sh");
     let dst = root.join("notify-sh");
     std::fs::create_dir_all(&dst).unwrap();
     for f in ["extension.toml", "main.sh", "README.md"] {
-        std::fs::copy(src.join(f), dst.join(f))
-            .unwrap_or_else(|e| panic!("copy {f}: {e}"));
+        std::fs::copy(src.join(f), dst.join(f)).unwrap_or_else(|e| panic!("copy {f}: {e}"));
     }
     // Preserve the executable bit on main.sh under any umask.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(dst.join("main.sh")).unwrap().permissions();
+        let mut perms = std::fs::metadata(dst.join("main.sh"))
+            .unwrap()
+            .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(dst.join("main.sh"), perms).unwrap();
     }

@@ -24,8 +24,8 @@
 //! T3.5 will optionally add timeouts.
 
 use crate::core::extensions::api::{
-    Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision,
-    SlashCommandSpec, ToolCallEvent, ToolResultEvent,
+    Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision, SlashCommandSpec,
+    ToolCallEvent, ToolResultEvent,
 };
 use crate::core::extensions::manifest::load_manifest;
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
@@ -209,10 +209,7 @@ impl SubprocessExtension {
             let value: serde_json::Value =
                 serde_json::from_str(&tool.schema).map_err(|e| ExtensionError::Custom {
                     name: manifest.name.clone(),
-                    message: format!(
-                        "custom tool {:?}: schema is not valid JSON: {e}",
-                        tool.name
-                    ),
+                    message: format!("custom tool {:?}: schema is not valid JSON: {e}", tool.name),
                 })?;
             parsed_tool_schemas.insert(tool.name.clone(), value);
         }
@@ -255,12 +252,14 @@ impl SubprocessInner {
     /// state without scraping the event payload. The directory is created
     /// lazily here so the subprocess does not need to mkdir itself.
     fn spawn_locked(&self, data_dir: Option<&Path>) -> Result<SubprocessHandle, ExtensionError> {
-        let exec = self.manifest.exec.as_ref().ok_or_else(|| {
-            ExtensionError::Custom {
+        let exec = self
+            .manifest
+            .exec
+            .as_ref()
+            .ok_or_else(|| ExtensionError::Custom {
                 name: self.manifest.name.clone(),
                 message: "manifest missing `exec` for Tier 2 extension".to_string(),
-            }
-        })?;
+            })?;
         let (program, args) = exec.split_first().ok_or_else(|| ExtensionError::Custom {
             name: self.manifest.name.clone(),
             message: "manifest `exec` must have at least one element".to_string(),
@@ -320,10 +319,7 @@ impl SubprocessInner {
 
     /// Send one event and read one response. Spawns the subprocess if it
     /// is not already running.
-    async fn rpc(
-        &self,
-        event: ExtensionEventOut,
-    ) -> Result<ExtensionEventIn, ExtensionError> {
+    async fn rpc(&self, event: ExtensionEventOut) -> Result<ExtensionEventIn, ExtensionError> {
         let mut guard = self.child.lock().await;
         if guard.is_none() {
             // Extract `data_dir` from the event's embedded context (every
@@ -373,9 +369,7 @@ impl Extension for SubprocessExtension {
     async fn on_load(&self, cx: &ExtensionContext) -> Result<(), ExtensionError> {
         let response = self
             .inner
-            .rpc(ExtensionEventOut::OnLoad {
-                context: cx.into(),
-            })
+            .rpc(ExtensionEventOut::OnLoad { context: cx.into() })
             .await?;
         match response {
             ExtensionEventIn::Ok | ExtensionEventIn::Continue => Ok(()),
@@ -396,9 +390,7 @@ impl Extension for SubprocessExtension {
         // shutdown must not block session teardown.
         let _ = self
             .inner
-            .rpc(ExtensionEventOut::OnShutdown {
-                context: cx.into(),
-            })
+            .rpc(ExtensionEventOut::OnShutdown { context: cx.into() })
             .await;
         let mut guard = self.inner.child.lock().await;
         if let Some(mut handle) = guard.take() {
@@ -762,11 +754,7 @@ exec = ["/bin/true"]
         let dir = TempDir::new().unwrap();
         let bar_dir = dir.path().join("bar");
         fs::create_dir(&bar_dir).unwrap();
-        fs::write(
-            bar_dir.join("extension.toml"),
-            "this is = not [ valid toml",
-        )
-        .unwrap();
+        fs::write(bar_dir.join("extension.toml"), "this is = not [ valid toml").unwrap();
         let (exts, failures) = discover_subprocess_extensions(dir.path());
         assert!(exts.is_empty());
         assert_eq!(failures.len(), 1);
@@ -987,10 +975,8 @@ exec = ["/bin/true"]
             dir.path(),
             r#"  printf '{"type":"tool_result","content":"hello","is_error":false}\n'"#,
         );
-        let mut manifest = make_manifest(
-            "rust-checker",
-            vec![script.to_string_lossy().into_owned()],
-        );
+        let mut manifest =
+            make_manifest("rust-checker", vec![script.to_string_lossy().into_owned()]);
         manifest.custom_tools = vec![CustomToolSpec {
             name: "rust_check".into(),
             description: "Run cargo check".into(),
@@ -1037,8 +1023,7 @@ exec = ["/bin/true"]
             dir.path(),
             r#"  printf '{"type":"tool_result","content":"compile failed","is_error":true}\n'"#,
         );
-        let mut manifest =
-            make_manifest("erroring", vec![script.to_string_lossy().into_owned()]);
+        let mut manifest = make_manifest("erroring", vec![script.to_string_lossy().into_owned()]);
         manifest.custom_tools = vec![CustomToolSpec {
             name: "rust_check".into(),
             description: "Run cargo check".into(),
@@ -1140,12 +1125,8 @@ done
         // event with its embedded `context` DTO. Parse and verify the cwd
         // and session_id match the live session — NOT the old
         // `<ext:.../no-cwd>` / `<ext:.../no-session>` sentinels.
-        let event: serde_json::Value =
-            serde_json::from_str(&echoed).expect("echoed line is JSON");
-        let context = event
-            .get("context")
-            .expect("event carries context")
-            .clone();
+        let event: serde_json::Value = serde_json::from_str(&echoed).expect("echoed line is JSON");
+        let context = event.get("context").expect("event carries context").clone();
         assert_eq!(
             context.get("cwd").and_then(|v| v.as_str()),
             Some(real_cwd.to_str().unwrap()),
@@ -1174,10 +1155,7 @@ done
             dir.path(),
             r#"  printf '{"type":"slash_result","output":"done"}\n'"#,
         );
-        let mut manifest = make_manifest(
-            "slasher",
-            vec![script.to_string_lossy().into_owned()],
-        );
+        let mut manifest = make_manifest("slasher", vec![script.to_string_lossy().into_owned()]);
         manifest.slash_commands = vec![SlashCommandSpec {
             name: "review".into(),
             description: "Review code".into(),

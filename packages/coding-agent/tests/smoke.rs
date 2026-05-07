@@ -42,14 +42,18 @@ async fn mock_text_provider_emits_full_text_sequence() {
     let has_text_start = events
         .iter()
         .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. }));
-    let has_text_delta = events.iter().any(|e| matches!(
-        e,
-        AssistantMessageEvent::TextDelta { delta, .. } if delta == "hello world"
-    ));
-    let has_text_end = events.iter().any(|e| matches!(
-        e,
-        AssistantMessageEvent::TextEnd { content, .. } if content == "hello world"
-    ));
+    let has_text_delta = events.iter().any(|e| {
+        matches!(
+            e,
+            AssistantMessageEvent::TextDelta { delta, .. } if delta == "hello world"
+        )
+    });
+    let has_text_end = events.iter().any(|e| {
+        matches!(
+            e,
+            AssistantMessageEvent::TextEnd { content, .. } if content == "hello world"
+        )
+    });
     assert!(has_text_start, "expected TextStart event");
     assert!(has_text_delta, "expected TextDelta with full text");
     assert!(has_text_end, "expected TextEnd with full text");
@@ -135,7 +139,10 @@ fn session_manager_round_trip_appends_messages() {
         Message::User(m) => match &m.content {
             UserContent::Text(s) => assert_eq!(s, "hi"),
             UserContent::Blocks(blocks) => {
-                assert!(!blocks.is_empty(), "user message blocks should be non-empty")
+                assert!(
+                    !blocks.is_empty(),
+                    "user message blocks should be non-empty"
+                )
             }
         },
         other => panic!("expected user message, got {other:?}"),

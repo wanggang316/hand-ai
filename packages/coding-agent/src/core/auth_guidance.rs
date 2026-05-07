@@ -96,10 +96,7 @@ pub fn no_api_key_found_message(provider: &str, docs_path: &Path) -> String {
 /// implementation under that name. Returns `None` only for completeness
 /// with the brief's signature; in practice the TS reference always
 /// produces a string, so this always returns `Some`.
-pub fn guidance_for_missing_credentials(
-    provider: &str,
-    docs_path: &Path,
-) -> Option<String> {
+pub fn guidance_for_missing_credentials(provider: &str, docs_path: &Path) -> Option<String> {
     Some(no_api_key_found_message(provider, docs_path))
 }
 

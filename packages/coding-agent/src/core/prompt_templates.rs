@@ -337,8 +337,7 @@ mod tests {
         fs::write(user_dir.join("greet.md"), "from user").unwrap();
         fs::write(project_dir.join("greet.md"), "from project").unwrap();
 
-        let (found, errors) =
-            discover_templates(project, Some(&user_dir), Some(&builtin_dir));
+        let (found, errors) = discover_templates(project, Some(&user_dir), Some(&builtin_dir));
 
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert_eq!(found.len(), 1);

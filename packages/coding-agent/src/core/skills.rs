@@ -419,7 +419,10 @@ mod tests {
         .unwrap();
 
         let (skills, errors) = discover_in(tmp.path());
-        assert!(skills.is_empty(), "expected no top-level skill; got {skills:?}");
+        assert!(
+            skills.is_empty(),
+            "expected no top-level skill; got {skills:?}"
+        );
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
     }
 
@@ -480,11 +483,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dest = tmp.path().join(".hand").join("skills").join("Bad_Name");
         fs::create_dir_all(&dest).unwrap();
-        fs::write(
-            dest.join("SKILL.md"),
-            "---\ndescription: hi\n---\nbody",
-        )
-        .unwrap();
+        fs::write(dest.join("SKILL.md"), "---\ndescription: hi\n---\nbody").unwrap();
 
         let (skills, errors) = discover_in(tmp.path());
         assert!(skills.is_empty());
@@ -563,11 +562,8 @@ mod tests {
             .unwrap();
         }
 
-        let (skills, errors) = discover_skills(
-            project_root.path(),
-            Some(user.path()),
-            Some(builtin.path()),
-        );
+        let (skills, errors) =
+            discover_skills(project_root.path(), Some(user.path()), Some(builtin.path()));
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].source.scope, SourceScope::User);
@@ -597,11 +593,8 @@ mod tests {
         )
         .unwrap();
 
-        let (skills, errors) = discover_skills(
-            project_root.path(),
-            Some(user.path()),
-            Some(builtin.path()),
-        );
+        let (skills, errors) =
+            discover_skills(project_root.path(), Some(user.path()), Some(builtin.path()));
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].source.scope, SourceScope::Project);

@@ -81,9 +81,10 @@ impl ModelRegistry {
         if self.models.is_empty() {
             return None;
         }
-        let idx = self.models.iter().position(|m| {
-            m.provider.as_str() == current.provider.as_str() && m.id == current.id
-        })?;
+        let idx = self
+            .models
+            .iter()
+            .position(|m| m.provider.as_str() == current.provider.as_str() && m.id == current.id)?;
         let next_idx = (idx + 1) % self.models.len();
         Some(&self.models[next_idx])
     }
@@ -143,9 +144,20 @@ mod tests {
         let a = ModelRegistry::build(&client);
         let b = ModelRegistry::build(&client);
         assert_eq!(a.len(), b.len());
-        let a_keys: Vec<_> = a.all().iter().map(|m| (m.provider.as_str(), m.id.as_str())).collect();
-        let b_keys: Vec<_> = b.all().iter().map(|m| (m.provider.as_str(), m.id.as_str())).collect();
-        assert_eq!(a_keys, b_keys, "iteration order must be stable across rebuilds");
+        let a_keys: Vec<_> = a
+            .all()
+            .iter()
+            .map(|m| (m.provider.as_str(), m.id.as_str()))
+            .collect();
+        let b_keys: Vec<_> = b
+            .all()
+            .iter()
+            .map(|m| (m.provider.as_str(), m.id.as_str()))
+            .collect();
+        assert_eq!(
+            a_keys, b_keys,
+            "iteration order must be stable across rebuilds"
+        );
     }
 
     #[test]
@@ -158,7 +170,10 @@ mod tests {
         // against catalog churn.
         let probe = registry.all().first().expect("registry non-empty").clone();
         let found = registry.find(probe.provider.as_str(), &probe.id);
-        assert!(found.is_some(), "find must locate a model that exists in all()");
+        assert!(
+            found.is_some(),
+            "find must locate a model that exists in all()"
+        );
         let found = found.unwrap();
         assert_eq!(found.id, probe.id);
         assert_eq!(found.provider.as_str(), probe.provider.as_str());
@@ -176,7 +191,10 @@ mod tests {
     fn next_cycles_through_all_models_and_wraps() {
         let client = model::Client::new();
         let registry = ModelRegistry::build(&client);
-        assert!(registry.len() >= 2, "test requires at least 2 models in the static catalog");
+        assert!(
+            registry.len() >= 2,
+            "test requires at least 2 models in the static catalog"
+        );
 
         let first = &registry.all()[0];
         let second = &registry.all()[1];
@@ -196,7 +214,10 @@ mod tests {
         let client = model::Client::new();
         let registry = ModelRegistry::build(&client);
         // Use a synthetic model that cannot match anything in the catalog.
-        let phantom = fake_model(model::types::Provider::Anthropic, "definitely-not-a-real-model-id");
+        let phantom = fake_model(
+            model::types::Provider::Anthropic,
+            "definitely-not-a-real-model-id",
+        );
         assert!(registry.next(&phantom).is_none());
     }
 }

@@ -422,9 +422,7 @@ pub fn parse_chord(raw: &str) -> Result<KeyChord, ChordParseError> {
     let segments: Vec<&str> = trimmed.split('+').map(str::trim).collect();
     if segments.iter().any(|s| s.is_empty()) {
         // Catches "ctrl+", "+s", and "ctrl++s".
-        return Err(ChordParseError::UnknownKey {
-            key: String::new(),
-        });
+        return Err(ChordParseError::UnknownKey { key: String::new() });
     }
 
     let (key_seg, mod_segs) = segments
@@ -468,11 +466,13 @@ fn parse_key(raw: &str) -> Result<Key, ChordParseError> {
         "pagedown" | "page-down" | "pgdn" => Key::PageDown,
         s if s.starts_with('f') && s.len() >= 2 => {
             // f1..f24
-            let n: u8 = s[1..]
-                .parse()
-                .map_err(|_| ChordParseError::UnknownKey { key: raw.to_string() })?;
+            let n: u8 = s[1..].parse().map_err(|_| ChordParseError::UnknownKey {
+                key: raw.to_string(),
+            })?;
             if !(1..=24).contains(&n) {
-                return Err(ChordParseError::UnknownKey { key: raw.to_string() });
+                return Err(ChordParseError::UnknownKey {
+                    key: raw.to_string(),
+                });
             }
             Key::F(n)
         }
@@ -509,7 +509,10 @@ mod tests {
                 action
             );
         }
-        assert_eq!(kb.resolve(Action::Submit), Some(&KeyChord::plain(Key::Enter)));
+        assert_eq!(
+            kb.resolve(Action::Submit),
+            Some(&KeyChord::plain(Key::Enter))
+        );
         assert_eq!(
             kb.resolve(Action::Quit),
             Some(&KeyChord::with_mods(Key::Char('c'), KeyModifiers::CTRL))
@@ -533,7 +536,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("does-not-exist.yaml");
         let kb = KeyBindings::load(Some(&path), None).unwrap();
-        assert_eq!(kb.resolve(Action::Submit), Some(&KeyChord::plain(Key::Enter)));
+        assert_eq!(
+            kb.resolve(Action::Submit),
+            Some(&KeyChord::plain(Key::Enter))
+        );
     }
 
     #[test]
@@ -546,7 +552,10 @@ mod tests {
             Some(&KeyChord::with_mods(Key::Char('s'), KeyModifiers::CTRL))
         );
         // Default for an unrelated action is preserved.
-        assert_eq!(kb.resolve(Action::Cancel), Some(&KeyChord::plain(Key::Escape)));
+        assert_eq!(
+            kb.resolve(Action::Cancel),
+            Some(&KeyChord::plain(Key::Escape))
+        );
     }
 
     #[test]
@@ -579,20 +588,24 @@ mod tests {
         let path = write_yaml(&dir, "kb.yaml", "submit: \"ctrl+\"\n");
         let kb = KeyBindings::load(Some(&path), None).unwrap();
         // Default preserved because the override was malformed.
-        assert_eq!(kb.resolve(Action::Submit), Some(&KeyChord::plain(Key::Enter)));
+        assert_eq!(
+            kb.resolve(Action::Submit),
+            Some(&KeyChord::plain(Key::Enter))
+        );
     }
 
     #[test]
     fn conflict_detected_when_two_actions_share_chord() {
         let dir = TempDir::new().unwrap();
-        let path = write_yaml(
-            &dir,
-            "kb.yaml",
-            "submit: ctrl+x\ncancel: ctrl+x\n",
-        );
+        let path = write_yaml(&dir, "kb.yaml", "submit: ctrl+x\ncancel: ctrl+x\n");
         let kb = KeyBindings::load(Some(&path), None).unwrap();
         let conflicts = kb.conflicts();
-        assert_eq!(conflicts.len(), 1, "expected one conflict, got {:?}", conflicts);
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "expected one conflict, got {:?}",
+            conflicts
+        );
         let (chord, actions) = &conflicts[0];
         assert_eq!(
             chord,

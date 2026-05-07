@@ -43,7 +43,8 @@ impl PermissionGate {
                 name: "permission-gate".to_string(),
                 version: "0.1.0".to_string(),
                 description: Some(
-                    "Blocks bash commands matching a small dangerous-command blocklist.".to_string(),
+                    "Blocks bash commands matching a small dangerous-command blocklist."
+                        .to_string(),
                 ),
                 capabilities: hand_coding_agent::core::extensions::api::ExtensionCapabilities {
                     before_tool_call: true,

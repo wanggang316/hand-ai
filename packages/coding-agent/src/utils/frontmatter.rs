@@ -137,7 +137,10 @@ mod tests {
     fn parses_basic_frontmatter() {
         let input = "---\nname: foo\n---\nhello";
         let parsed = parse_frontmatter::<TestMeta>(input).unwrap();
-        assert_eq!(parsed.metadata.as_ref().unwrap().name.as_deref(), Some("foo"));
+        assert_eq!(
+            parsed.metadata.as_ref().unwrap().name.as_deref(),
+            Some("foo")
+        );
         assert_eq!(parsed.body, "hello");
     }
 
@@ -163,7 +166,10 @@ mod tests {
     fn frontmatter_only_with_trailing_newline() {
         let input = "---\nname: foo\n---\n";
         let parsed = parse_frontmatter::<TestMeta>(input).unwrap();
-        assert_eq!(parsed.metadata.as_ref().unwrap().name.as_deref(), Some("foo"));
+        assert_eq!(
+            parsed.metadata.as_ref().unwrap().name.as_deref(),
+            Some("foo")
+        );
         assert_eq!(parsed.body, "");
     }
 
@@ -172,7 +178,10 @@ mod tests {
     fn frontmatter_only_no_trailing_newline() {
         let input = "---\nname: foo\n---";
         let parsed = parse_frontmatter::<TestMeta>(input).unwrap();
-        assert_eq!(parsed.metadata.as_ref().unwrap().name.as_deref(), Some("foo"));
+        assert_eq!(
+            parsed.metadata.as_ref().unwrap().name.as_deref(),
+            Some("foo")
+        );
         assert_eq!(parsed.body, "");
     }
 
@@ -181,7 +190,10 @@ mod tests {
     fn crlf_line_endings() {
         let input = "---\r\nname: foo\r\n---\r\nhello";
         let parsed = parse_frontmatter::<TestMeta>(input).unwrap();
-        assert_eq!(parsed.metadata.as_ref().unwrap().name.as_deref(), Some("foo"));
+        assert_eq!(
+            parsed.metadata.as_ref().unwrap().name.as_deref(),
+            Some("foo")
+        );
         assert_eq!(parsed.body, "hello");
     }
 
@@ -195,10 +207,7 @@ mod tests {
         // to none for the deserialized string (differs from the JS `yaml` lib
         // which preserves a single trailing `\n`). The interior `\n` separator
         // is what we care about.
-        assert_eq!(
-            meta["description"].as_str(),
-            Some("line one\nline two"),
-        );
+        assert_eq!(meta["description"].as_str(), Some("line one\nline two"),);
         assert_eq!(parsed.body, "body");
     }
 
@@ -210,10 +219,7 @@ mod tests {
         let meta = parsed.metadata.as_ref().unwrap();
         // Folded scalar joins continuation lines with a single space; trailing
         // newline is clipped by serde_yaml.
-        assert_eq!(
-            meta["description"].as_str(),
-            Some("line one line two"),
-        );
+        assert_eq!(meta["description"].as_str(), Some("line one line two"),);
         assert_eq!(parsed.body, "body");
     }
 
@@ -263,7 +269,10 @@ mod tests {
     fn body_contains_triple_dash() {
         let input = "---\nname: foo\n---\nseparator: ---\nstill body";
         let parsed = parse_frontmatter::<TestMeta>(input).unwrap();
-        assert_eq!(parsed.metadata.as_ref().unwrap().name.as_deref(), Some("foo"));
+        assert_eq!(
+            parsed.metadata.as_ref().unwrap().name.as_deref(),
+            Some("foo")
+        );
         assert_eq!(parsed.body, "separator: ---\nstill body");
     }
 
@@ -272,7 +281,10 @@ mod tests {
     fn body_preserves_leading_newlines() {
         let input = "---\nname: foo\n---\n\n\nhello";
         let parsed = parse_frontmatter::<TestMeta>(input).unwrap();
-        assert_eq!(parsed.metadata.as_ref().unwrap().name.as_deref(), Some("foo"));
+        assert_eq!(
+            parsed.metadata.as_ref().unwrap().name.as_deref(),
+            Some("foo")
+        );
         assert_eq!(parsed.body, "\n\nhello");
     }
 
@@ -301,7 +313,10 @@ mod tests {
     fn yaml_comments_ignored() {
         let input = "---\n# comment\nname: foo\n---\nbody";
         let parsed = parse_frontmatter::<TestMeta>(input).unwrap();
-        assert_eq!(parsed.metadata.as_ref().unwrap().name.as_deref(), Some("foo"));
+        assert_eq!(
+            parsed.metadata.as_ref().unwrap().name.as_deref(),
+            Some("foo")
+        );
         assert_eq!(parsed.body, "body");
     }
 
@@ -332,7 +347,10 @@ mod tests {
     fn crlf_closer_at_eof() {
         let input = "---\r\nname: foo\r\n---\r\n";
         let parsed = parse_frontmatter::<TestMeta>(input).unwrap();
-        assert_eq!(parsed.metadata.as_ref().unwrap().name.as_deref(), Some("foo"));
+        assert_eq!(
+            parsed.metadata.as_ref().unwrap().name.as_deref(),
+            Some("foo")
+        );
         assert_eq!(parsed.body, "");
     }
 }

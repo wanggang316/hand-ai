@@ -513,12 +513,7 @@ mod tests {
             &skill_md("good", "ok", "good body"),
         );
         // Invalid YAML (double colon).
-        let bad_path = write_resource(
-            &builtin,
-            "bad",
-            "SKILL.md",
-            "---\nname: : :\n---\nbody",
-        );
+        let bad_path = write_resource(&builtin, "bad", "SKILL.md", "---\nname: : :\n---\nbody");
 
         let cfg = config(vec![(builtin, SourceScope::Builtin)]);
         let (successes, failures) = discover_resources_lenient::<TestMeta>(&cfg);

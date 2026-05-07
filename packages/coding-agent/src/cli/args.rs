@@ -141,8 +141,7 @@ mod tests {
 
     #[test]
     fn parses_short_prompt() {
-        let args =
-            Args::try_parse_from(["hand", "-p", "hello"]).expect("-p <prompt> should parse");
+        let args = Args::try_parse_from(["hand", "-p", "hello"]).expect("-p <prompt> should parse");
         assert_eq!(args.prompt, Some("hello".into()));
     }
 

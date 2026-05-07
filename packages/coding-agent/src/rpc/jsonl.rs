@@ -167,9 +167,8 @@ mod tests {
     async fn partial_reads_across_chunks() {
         let (mut tx, rx) = duplex(64);
         let reader = BufReader::new(rx);
-        let handle = tokio::spawn(async move {
-            read_jsonl::<_, A>(reader).collect::<Vec<_>>().await
-        });
+        let handle =
+            tokio::spawn(async move { read_jsonl::<_, A>(reader).collect::<Vec<_>>().await });
         tx.write_all(b"{\"a\":1}\n{\"a\":").await.unwrap();
         tokio::task::yield_now().await;
         tx.write_all(b"2}\n").await.unwrap();
@@ -207,7 +206,9 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_utf8_yields_utf8_error() {
-        let bytes: Vec<u8> = vec![0xff, 0xfe, b'\n', b'{', b'"', b'a', b'"', b':', b'4', b'}', b'\n'];
+        let bytes: Vec<u8> = vec![
+            0xff, 0xfe, b'\n', b'{', b'"', b'a', b'"', b':', b'4', b'}', b'\n',
+        ];
         let out: Vec<Result<A, _>> = collect_all(bytes).await;
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0], Err(JsonlReadError::Utf8(_))));
@@ -241,7 +242,9 @@ mod tests {
             s: String,
         }
         let mut sink: Vec<u8> = Vec::new();
-        let v = S { s: "\u{2028}".into() };
+        let v = S {
+            s: "\u{2028}".into(),
+        };
         write_jsonl(&mut sink, &v).await.unwrap();
         // Exactly one LF, at the end.
         assert_eq!(sink.iter().filter(|b| **b == b'\n').count(), 1);

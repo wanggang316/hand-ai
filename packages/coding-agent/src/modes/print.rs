@@ -5,11 +5,11 @@
 //! stderr exactly as in the interactive flow, so callers piping output into
 //! a file see the same bytes either way.
 
+use crate::SessionManager;
 use crate::cli::Args;
 use crate::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 use crate::core::export;
 use crate::modes::session_setup::SessionSetup;
-use crate::SessionManager;
 use std::io::{self, BufRead, Write};
 
 /// Run the agent in non-interactive print mode.
@@ -133,13 +133,12 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
         }
         AgentEvent::ToolExecutionEnd {
             tool_name,
-            is_error,
+            is_error: true,
             ..
         } => {
-            if *is_error {
-                eprintln!("\x1b[31m[{} failed]\x1b[0m", tool_name);
-            }
+            eprintln!("\x1b[31m[{} failed]\x1b[0m", tool_name);
         }
+        AgentEvent::ToolExecutionEnd { .. } => {}
         AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
             // Origin renamed `update: serde_json::Value` to a typed
             // `partial_result: ToolResult`. Render any text content

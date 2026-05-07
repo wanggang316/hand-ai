@@ -173,7 +173,11 @@ impl SlashCommandRegistry {
     /// rejected — these would never match the parser's tokenizer (which splits
     /// on whitespace and strips a leading `/`) so accepting them would create
     /// dead entries that pollute `/help` without ever being routable.
-    pub fn register_extension_command(&mut self, spec: SlashCommandSpec, extension: Arc<dyn Extension>) {
+    pub fn register_extension_command(
+        &mut self,
+        spec: SlashCommandSpec,
+        extension: Arc<dyn Extension>,
+    ) {
         if spec.name.is_empty()
             || spec.name.contains(char::is_whitespace)
             || spec.name.contains('/')
@@ -233,10 +237,7 @@ impl SlashCommandRegistry {
         let Some(entry) = self.find_extension_command(name) else {
             return Ok(None);
         };
-        let output = entry
-            .extension
-            .handle_slash_command(cx, name, args)
-            .await?;
+        let output = entry.extension.handle_slash_command(cx, name, args).await?;
         Ok(Some(output))
     }
 }

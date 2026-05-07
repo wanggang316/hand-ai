@@ -101,8 +101,14 @@ custom-provider = true
             manifest.exec.as_deref(),
             Some(&["python3".to_string(), "main.py".to_string()][..])
         );
-        assert_eq!(manifest.env.get("LOG_LEVEL").map(String::as_str), Some("debug"));
-        assert_eq!(manifest.env.get("API_KEY").map(String::as_str), Some("PI_API_KEY"));
+        assert_eq!(
+            manifest.env.get("LOG_LEVEL").map(String::as_str),
+            Some("debug")
+        );
+        assert_eq!(
+            manifest.env.get("API_KEY").map(String::as_str),
+            Some("PI_API_KEY")
+        );
         assert!(manifest.capabilities.before_tool_call);
         assert!(manifest.capabilities.after_tool_call);
         assert!(manifest.capabilities.on_user_message);

@@ -84,10 +84,7 @@ async fn three_turn_rpc_session() {
         .expect("dispatcher returned an error");
 
     // 8. Wire-shape assertions.
-    let responses: Vec<&Value> = frames
-        .iter()
-        .filter(|f| f["type"] == "response")
-        .collect();
+    let responses: Vec<&Value> = frames.iter().filter(|f| f["type"] == "response").collect();
     assert!(
         responses.len() >= 3,
         "expected at least 3 responses, got {}: {frames:#?}",

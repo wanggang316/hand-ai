@@ -16,6 +16,6 @@ pub mod types;
 pub use jsonl::{JsonlReadError, read_jsonl, write_jsonl};
 pub use server::{RpcServerError, run_rpc_server};
 pub use types::{
-    RpcCommand, RpcExtensionUiRequest, RpcExtensionUiResponse, RpcResponse, RpcResponseBody,
-    RpcResultEmpty, RpcResultWithData, RpcSessionState, RpcSlashCommand, ResponseTag,
+    ResponseTag, RpcCommand, RpcExtensionUiRequest, RpcExtensionUiResponse, RpcResponse,
+    RpcResponseBody, RpcResultEmpty, RpcResultWithData, RpcSessionState, RpcSlashCommand,
 };

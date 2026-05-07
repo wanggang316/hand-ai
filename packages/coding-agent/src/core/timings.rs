@@ -136,11 +136,7 @@ fn record_reset(log: &Mutex<Vec<Checkpoint>>, marker: &Mutex<Option<Instant>>) {
     *marker.lock().unwrap() = Some(Instant::now());
 }
 
-fn record_time(
-    label: &str,
-    log: &Mutex<Vec<Checkpoint>>,
-    marker: &Mutex<Option<Instant>>,
-) -> u64 {
+fn record_time(label: &str, log: &Mutex<Vec<Checkpoint>>, marker: &Mutex<Option<Instant>>) -> u64 {
     let now = Instant::now();
     let mut marker_guard = marker.lock().unwrap();
     let elapsed_ms = match *marker_guard {
