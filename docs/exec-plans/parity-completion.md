@@ -114,12 +114,28 @@ counterparts. Each needs a diff-and-fill audit.
 |---|---:|---:|---:|---|
 | `core/compaction.rs` | 284 | 1371 (dir) | 4.8× | Split into `core/compaction/{branch_summarization,compactor,utils}.rs`; port branch-summary logic |
 | `core/session_manager.rs` | 593 | 1425 | 2.4× | Add fork/clone/migrate paths, search APIs |
-| `core/package_manager.rs` | 189 | 2428 | 12× | Port full npm/yarn/pnpm/bun detection + lockfile parsing |
+| `core/package_manager.rs` | 189 | — | n/a | NOT a port target — see correction below. |
 | `core/model_registry.rs` | 223 | 952 | 4.3× | Port custom-model registration, scoped overrides |
 | `core/resource_loader.rs` | 608 | 918 | 1.5× | Port skills + docs path resolution |
 | `core/model_resolver.rs` | 338 | 636 | 1.9× | Port scope-priority resolution + alias map |
 
 Estimated: ~3000 LOC Rust, ~4 days.
+
+##### Correction: `package_manager.rs` ↔ `package-manager.ts` is a name collision
+
+These files share a name but have **disjoint purposes** — there is no port relationship between them.
+
+- **TS `core/package-manager.ts`** (2428 lines) is a *pi-extension package-source registry*: resolves npm packages / git URLs / local paths into directory trees of pi extensions / skills / prompts / themes. Public surface includes `resolve()`, `install()`, `update()`, `removeFromSettings()`, `listConfiguredPackages()`. It depends on `parseGitUrl`, `canonicalizePath`, `isLocalPath`, `shouldUseWindowsShell`, plus `Settings.{packages,extensions,skills,prompts,themes}` fields that don't exist in the Rust `Settings` struct.
+
+- **Rust `core/package_manager.rs`** (189 lines) is a *project-language detector*: returns `PackageManager::{Cargo,Npm,…}` / `Language::{Rust,TypeScript,…}` for project-introspection. No relationship to extension distribution.
+
+The "12× ratio" framing in the original §A4 table was an artifact of identical filenames; treat the Rust file as a finished, separate utility.
+
+The TS contract is still relevant if hand-ai needs to support pi-extension packages from remote sources. Track it as a **new** module:
+
+- [ ] **Port pi-extension source registry** — TS source: `pi-mono/packages/coding-agent/src/core/package-manager.ts`. Rust target: `coding-agent/src/core/extensions/source_registry.rs` (alongside the existing `extensions/{api,dispatch,manifest,registry,subprocess}.rs`).
+  - Prerequisites: `Settings` must gain `packages`, `extensions`, `skills`, `prompts`, `themes` fields with project + global setters; `utils/git.rs` must expose `parse_git_url` / `GitSource`. Both prerequisites are covered by Tier 2 utils + a small Settings extension.
+  - Estimated: ~1500 LOC Rust + tests, ~2 days.
 
 #### A5. Missing core/* modules
 
