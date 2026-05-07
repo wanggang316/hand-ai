@@ -1,6 +1,7 @@
 //! Core modules for the coding agent.
 
 pub mod agent_session;
+pub mod auth_storage;
 pub mod bash_executor;
 pub mod compaction;
 pub mod diagnostics;
