@@ -17,17 +17,28 @@
 //!
 //! # Concurrency model
 //!
-//! Single-task. Commands are processed sequentially on the dispatcher's
-//! task; while a `prompt` is driving a turn through the agent loop, the
-//! dispatcher does not pull the next command. Events stream out in real
-//! time because they are emitted by the session's subscribe callback,
-//! which forwards through an `mpsc` channel to a separate writer task.
+//! Mostly single-task. Commands are processed sequentially on the
+//! dispatcher's task; while a `prompt` is driving a turn through the
+//! agent loop, the dispatcher does not pull the next command. Events
+//! stream out in real time because they are emitted by the session's
+//! subscribe callback, which forwards through an `mpsc` channel to a
+//! separate writer task.
 //!
-//! The TS port (`pi-coding-agent/src/modes/rpc/rpc-mode.ts`) is
-//! multitasking: it parks the in-flight prompt as a Promise and continues
-//! reading commands so that `abort`/`get_state`/etc. can interrupt a
-//! turn. Porting that requires a thread-safe abort path on
-//! [`AgentSession`] which we do not have in Phase 1 — see brief.
+//! `bash` is the one exception: it races [`AgentSession::run_bash`]
+//! against further input frames so an `abort_bash` arriving mid-flight
+//! can cancel the executor (see [`AgentSession::abort_bash`]).
+//! `AbortBash` is dispatched inline during the race — it only borrows
+//! `&session`, same as `run_bash`, so the two coexist without the rest
+//! of the dispatcher needing to be made multitasking. Other commands
+//! arriving during a `bash` are deferred and processed through the
+//! normal path once `run_bash` returns.
+//!
+//! The TS port (`pi-coding-agent/src/modes/rpc/rpc-mode.ts`) is fully
+//! multitasking: it parks the in-flight prompt as a Promise and
+//! continues reading commands so that `abort`/`get_state`/etc. can
+//! interrupt a turn. Porting that for `prompt` requires a thread-safe
+//! abort path on [`AgentSession`] which we do not have in Phase 1 —
+//! see brief.
 
 use crate::core::agent_session::{AgentSession, AgentSessionEvent};
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
@@ -169,8 +180,144 @@ where
 
     // Drive the inbound stream. Each iteration handles one parse result.
     let mut stream = Box::pin(read_jsonl::<R, RpcCommand>(reader));
-    while let Some(item) = stream.next().await {
+    // Commands that arrived while a `bash` was in flight and weren't
+    // serviceable inline (i.e. anything other than `AbortBash`). Drained
+    // through the normal dispatch path once `run_bash` returns. Empty
+    // for the common case (no `bash` ever ran).
+    let mut deferred: Vec<RpcCommand> = Vec::new();
+    loop {
+        // Service any commands deferred while a previous `bash` was
+        // running before pulling the next frame off the wire.
+        let item_opt = if let Some(cmd) = deferred.pop() {
+            Some(Ok(cmd))
+        } else {
+            stream.next().await
+        };
+        let Some(item) = item_opt else {
+            break;
+        };
         match item {
+            // Special case: `bash` is the only long-running command on
+            // the dispatcher hot path that must remain interruptible by
+            // a follow-up `abort_bash` arriving while it's in flight.
+            // We race the executor future against further input frames
+            // — `abort_bash` is dispatched inline (it only borrows
+            // `&session`, same as `run_bash`), everything else is
+            // queued for after-bash dispatch. This keeps the rest of
+            // the dispatcher single-task while satisfying the
+            // `AbortBash` interrupt semantics that motivated
+            // `bash_cancel`.
+            Ok(RpcCommand::Bash { id, command }) => {
+                let mut io_fatal: Option<io::Error> = None;
+                // Inner block scopes the `&session` borrow held by
+                // `bash_fut` so we can `drop(session)` later if a
+                // fatal reader I/O error occurred.
+                let outcome = {
+                    let bash_fut = session.run_bash(&command, 120);
+                    tokio::pin!(bash_fut);
+                    loop {
+                    tokio::select! {
+                        biased;
+                        res = &mut bash_fut => break res,
+                        next = stream.next() => match next {
+                            Some(Ok(RpcCommand::AbortBash { id: aid })) => {
+                                let _ = session.abort_bash();
+                                let resp = RpcResponse::new(
+                                    aid,
+                                    RpcResponseBody::AbortBash(RpcResultEmpty::ok()),
+                                );
+                                if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                    // Writer dropped — finish the
+                                    // bash future so `kill_on_drop`
+                                    // reaps the child, then bail.
+                                    break bash_fut.await;
+                                }
+                            }
+                            Some(Ok(other)) => {
+                                deferred.insert(0, other);
+                            }
+                            Some(Err(JsonlReadError::Parse { source, .. })) => {
+                                let resp = RpcResponse::new(
+                                    None,
+                                    RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
+                                        "invalid JSON: {source}"
+                                    ))),
+                                );
+                                if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                    break bash_fut.await;
+                                }
+                            }
+                            Some(Err(JsonlReadError::Utf8(e))) => {
+                                let resp = RpcResponse::new(
+                                    None,
+                                    RpcResponseBody::Invalid(RpcResultEmpty::err(format!(
+                                        "invalid UTF-8 in command frame: {e}"
+                                    ))),
+                                );
+                                if tx.send(Outbound::Response(Box::new(resp))).is_err() {
+                                    break bash_fut.await;
+                                }
+                            }
+                            Some(Err(JsonlReadError::Io(e))) => {
+                                // Reader I/O is fatal — finish the
+                                // bash future so its child is reaped
+                                // via `kill_on_drop` (the bash
+                                // response itself is dropped on the
+                                // floor — the writer's about to go
+                                // away anyway). Stash the io error
+                                // and break the inner loop so the
+                                // borrow on `session` ends before we
+                                // drop it.
+                                io_fatal = Some(e);
+                                break bash_fut.await;
+                            }
+                            None => {
+                                // Stream EOF: still need to deliver
+                                // the bash response, so just await
+                                // the future to completion.
+                                break bash_fut.await;
+                            }
+                        }
+                    }
+                    }
+                };
+                // Inner-loop reader I/O propagates here so the
+                // borrow on `session` (held by `bash_fut`) has
+                // already ended.
+                if let Some(e) = io_fatal {
+                    drop(tx);
+                    drop(session);
+                    let _ = writer_task.await;
+                    return Err(RpcServerError::Io(e));
+                }
+                let response = match outcome {
+                    Ok(outcome) => {
+                        let (stdout, stderr) = if outcome.aborted {
+                            (String::new(), outcome.result.output)
+                        } else {
+                            (outcome.result.output, String::new())
+                        };
+                        RpcResponse::new(
+                            id,
+                            RpcResponseBody::Bash(RpcResultWithData::ok(BashRpcData {
+                                stdout,
+                                stderr,
+                                exit_code: outcome.result.exit_code,
+                                truncated: outcome.result.truncated,
+                            })),
+                        )
+                    }
+                    Err(e) => RpcResponse::new(
+                        id,
+                        RpcResponseBody::Bash(RpcResultWithData::<BashRpcData>::err(format!(
+                            "bash failed: {e}"
+                        ))),
+                    ),
+                };
+                if tx.send(Outbound::Response(Box::new(response))).is_err() {
+                    break;
+                }
+            }
             Ok(cmd) => {
                 let response = handle_command(&mut session, cmd).await;
                 if tx.send(Outbound::Response(Box::new(response))).is_err() {
@@ -524,33 +671,18 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             let _ = session.abort();
             RpcResponse::new(id, RpcResponseBody::AbortRetry(RpcResultEmpty::ok()))
         }
-        RpcCommand::Bash { id, command } => {
-            // Phase 1 wire mapping: `core::bash_executor::BashResult` only
-            // carries a single combined `output` (stdout+stderr merged
-            // before truncation) so we surface it on `stdout` and leave
-            // `stderr` empty. The wire shape (`BashRpcData`) keeps the
-            // two fields separate so a future port that splits the
-            // streams in the executor can flip to populating both
-            // without another wire break. 120s default timeout matches
-            // the bash *tool* default; deliberately not surfaced on the
-            // wire since the TS reference doesn't expose it either.
-            match session.run_bash(&command, 120).await {
-                Ok(result) => RpcResponse::new(
-                    id,
-                    RpcResponseBody::Bash(RpcResultWithData::ok(BashRpcData {
-                        stdout: result.output,
-                        stderr: String::new(),
-                        exit_code: result.exit_code,
-                        truncated: result.truncated,
-                    })),
-                ),
-                Err(e) => RpcResponse::new(
-                    id,
-                    RpcResponseBody::Bash(RpcResultWithData::<BashRpcData>::err(format!(
-                        "bash failed: {e}"
-                    ))),
-                ),
-            }
+        RpcCommand::Bash { id, .. } => {
+            // `Bash` is intercepted by the dispatcher loop (see
+            // `run_rpc_server`) so it can race the executor future
+            // against further input frames for in-flight `abort_bash`.
+            // Reaching this arm would mean a routing bug; emit a
+            // structured error rather than panicking.
+            RpcResponse::new(
+                id,
+                RpcResponseBody::Bash(RpcResultWithData::<BashRpcData>::err(
+                    "internal: bash command must be intercepted by dispatcher loop".to_string(),
+                )),
+            )
         }
         RpcCommand::AbortBash { id } => {
             // Idempotent — matches `abort` semantics. Returns success
@@ -1292,6 +1424,47 @@ mod tests {
             assert_eq!(f["success"], true);
         }
 
+        handle.await.unwrap().unwrap();
+    }
+
+    /// `abort_bash` on an in-flight `bash` interrupts the running command
+    /// rather than waiting for it to finish naturally. The wall-clock
+    /// timeout guards against regressions: a real hang would manifest
+    /// as the 5s budget elapsing, not a 30s sleep completing.
+    #[tokio::test]
+    async fn bash_abort_interrupts_running_command() {
+        let (mut in_tx, out_rx, handle) =
+            spawn_dispatcher(session_with_mock("ignored")).await;
+        in_tx
+            .write_all(b"{\"type\":\"bash\",\"id\":\"1\",\"command\":\"sleep 30\"}\n")
+            .await
+            .unwrap();
+        // Give the dispatcher a moment to enter run_bash before we
+        // signal cancel — otherwise the abort token gets reset by the
+        // bash handler after the abort fires.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        in_tx
+            .write_all(b"{\"type\":\"abort_bash\",\"id\":\"2\"}\n")
+            .await
+            .unwrap();
+        drop(in_tx);
+
+        // Wall-clock budget: a regression manifests as timeout, not 30s hang.
+        let frames = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            drain_frames(out_rx),
+        )
+        .await
+        .expect("dispatcher must respond within 5s when bash is aborted");
+        let bash = frames.iter().find(|f| f["id"] == "1").unwrap();
+        assert_eq!(bash["data"]["truncated"], true);
+        // Abort marker lands on stderr per `BashRpcData` doc; stdout is
+        // empty on the cancel arm.
+        assert!(
+            bash["data"]["stderr"].as_str().unwrap_or("").contains("aborted"),
+            "expected stderr to carry abort marker, got: {bash:#?}"
+        );
+        assert_eq!(bash["data"]["stdout"], "");
         handle.await.unwrap().unwrap();
     }
 

@@ -65,6 +65,20 @@ pub enum AgentSessionEvent {
     Error(String),
 }
 
+/// Result of [`AgentSession::run_bash`] — pairs the executor's
+/// [`BashResult`](crate::core::bash_executor::BashResult) with an
+/// explicit `aborted` flag so callers (e.g. the `bash` RPC handler) can
+/// route the abort marker to `stderr` without sniffing string prefixes.
+#[derive(Debug, Clone)]
+pub struct RunBashOutcome {
+    /// Underlying executor result. On abort, `output == "[bash aborted]"`,
+    /// `exit_code == None`, and `truncated == true`.
+    pub result: crate::core::bash_executor::BashResult,
+    /// True if the call was cancelled via [`AgentSession::abort_bash`]
+    /// before the executor returned.
+    pub aborted: bool,
+}
+
 /// Configuration for creating an agent session.
 #[derive(Clone)]
 pub struct AgentSessionConfig {
@@ -670,9 +684,11 @@ impl AgentSession {
     /// abort can't poison this call, then races the executor future
     /// against the new token's `cancelled()` future via `tokio::select!`.
     /// On cancel, returns a synthesized [`BashResult`] with
-    /// `truncated: true` and the stderr-equivalent note `"[bash aborted]"`
-    /// (the underlying child process is left to exit on its own — the
-    /// executor doesn't expose a kill hook in v1).
+    /// `truncated: true`, the abort marker `"[bash aborted]"` on
+    /// `output`, and `aborted: true` so the caller can route the marker
+    /// to `stderr` on the wire (see [`RunBashOutcome`]). The underlying
+    /// child process is killed via [`tokio::process::Command::kill_on_drop`]
+    /// — dropping the executor future on the cancel arm reaps the child.
     ///
     /// `timeout_secs` is forwarded to [`BashExecutorOptions::timeout_secs`]
     /// (0 disables the timeout).
@@ -680,7 +696,7 @@ impl AgentSession {
         &self,
         command: &str,
         timeout_secs: u64,
-    ) -> Result<crate::core::bash_executor::BashResult, CodingAgentError> {
+    ) -> Result<RunBashOutcome, CodingAgentError> {
         // Replace the cancel token so callers from a previous run can't
         // poison this call.
         let cancel = {
@@ -699,10 +715,13 @@ impl AgentSession {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                Ok(crate::core::bash_executor::BashResult {
-                    output: "[bash aborted]".to_string(),
-                    exit_code: None,
-                    truncated: true,
+                Ok(RunBashOutcome {
+                    result: crate::core::bash_executor::BashResult {
+                        output: "[bash aborted]".to_string(),
+                        exit_code: None,
+                        truncated: true,
+                    },
+                    aborted: true,
                 })
             }
             res = crate::core::bash_executor::execute_bash(
@@ -710,7 +729,7 @@ impl AgentSession {
                 &self.config.cwd,
                 &shell_path,
                 options,
-            ) => res,
+            ) => res.map(|result| RunBashOutcome { result, aborted: false }),
         }
     }
 

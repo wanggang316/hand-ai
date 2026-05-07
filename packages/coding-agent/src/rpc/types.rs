@@ -513,8 +513,10 @@ pub struct CommandsData {
 /// expose `stdout` / `stderr` separately so future ports can split the
 /// streams without another wire break. Phase 1 maps the existing
 /// `core::bash_executor::BashResult.output` (combined stdout+stderr)
-/// onto `stdout` and leaves `stderr` empty unless the call was aborted,
-/// in which case `stderr` carries `"[bash aborted]"`.
+/// onto `stdout` and leaves `stderr` empty. When the call was aborted
+/// via `abort_bash`, `stdout` is empty and `stderr` carries the
+/// `"[bash aborted]"` marker instead, with `truncated == true` and
+/// `exit_code == None`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashRpcData {
