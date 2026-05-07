@@ -15,13 +15,13 @@
 
 use crate::api_registry::{ApiProvider, AssistantMessageEventStream};
 use crate::env_api_keys;
-use crate::types::{
-    Api, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Context, Message, Model,
-    Provider, SimpleStreamOptions, StopReason, StreamOptions, TextContent, ThinkingContent,
-    ToolCall, Usage,
+use crate::providers::openai_responses_shared::{
+    build_request_body, current_timestamp_ms, drive_sse_stream,
 };
-use futures::StreamExt;
-use serde_json::Value;
+use crate::types::{
+    Api, AssistantMessage, AssistantMessageEvent, Context, Model, Provider, SimpleStreamOptions,
+    StopReason, StreamOptions, Usage,
+};
 
 /// Provider for OpenAI Responses API.
 #[derive(Debug, Clone, Copy, Default)]
@@ -90,125 +90,12 @@ fn make_error_stream(
                 error_message: Some(error_msg),
                 timestamp: current_timestamp_ms(),
                 content: vec![],
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
             },
         };
     })
-}
-
-/// Build the request body for the Responses API.
-fn build_request_body(model: &Model, context: &Context, options: &StreamOptions) -> Value {
-    let mut body = serde_json::json!({
-        "model": model.id,
-        "stream": true,
-    });
-
-    // Convert messages to "input" format
-    let input = convert_to_input(context);
-    body["input"] = input;
-
-    // System prompt goes as "instructions"
-    if let Some(ref prompt) = context.system_prompt
-        && !prompt.is_empty()
-    {
-        body["instructions"] = Value::String(prompt.clone());
-    }
-
-    // Tools
-    if let Some(ref tools_list) = context.tools
-        && !tools_list.is_empty()
-    {
-        let tools: Vec<Value> = tools_list
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                })
-            })
-            .collect();
-        body["tools"] = Value::Array(tools);
-    }
-
-    // Temperature
-    if let Some(temp) = options.temperature {
-        body["temperature"] = Value::from(temp);
-    }
-
-    // Max tokens
-    if let Some(max) = options.max_tokens.or(Some(model.max_tokens as u32)) {
-        body["max_output_tokens"] = Value::from(max);
-    }
-
-    body
-}
-
-/// Convert messages to the Responses API "input" format.
-fn convert_to_input(context: &Context) -> Value {
-    let mut input = Vec::new();
-
-    for msg in &context.messages {
-        match msg {
-            Message::User(u) => {
-                let text = match &u.content {
-                    crate::types::UserContent::Text(s) => s.clone(),
-                    crate::types::UserContent::Blocks(blocks) => blocks
-                        .iter()
-                        .filter_map(|b| match b {
-                            crate::types::UserContentBlock::Text(t) => Some(t.text.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                };
-                input.push(serde_json::json!({
-                    "type": "message",
-                    "role": "user",
-                    "content": text,
-                }));
-            }
-            Message::Assistant(a) => {
-                // Convert assistant content blocks to output items
-                let mut items = Vec::new();
-                for block in &a.content {
-                    match block {
-                        AssistantContentBlock::Text(t) => {
-                            items.push(serde_json::json!({
-                                "type": "message",
-                                "role": "assistant",
-                                "content": t.text,
-                            }));
-                        }
-                        AssistantContentBlock::ToolCall(tc) => {
-                            items.push(serde_json::json!({
-                                "type": "function_call",
-                                "name": tc.name,
-                                "call_id": tc.id,
-                                "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default(),
-                            }));
-                        }
-                        AssistantContentBlock::Thinking(_) => {
-                            // Thinking blocks are not sent back
-                        }
-                    }
-                }
-                input.extend(items);
-            }
-            Message::ToolResult(tr) => {
-                input.push(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": tr.tool_call_id,
-                    "output": tr.content.iter().filter_map(|c| match c {
-                        crate::types::ToolResultContent::Text(t) => Some(t.text.clone()),
-                        _ => None,
-                    }).collect::<Vec<_>>().join("\n"),
-                }));
-            }
-        }
-    }
-
-    Value::Array(input)
 }
 
 /// Stream from the OpenAI Responses API using SSE.
@@ -230,6 +117,9 @@ fn stream_openai_responses(
             usage: Usage::default(),
             error_message: None,
             timestamp: current_timestamp_ms(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         };
 
         yield AssistantMessageEvent::Start {
@@ -293,163 +183,20 @@ fn stream_openai_responses(
             return;
         }
 
-        // Parse SSE stream
-        let mut text_buffer = String::new();
-        let mut current_tool_name = String::new();
-        let mut current_tool_id = String::new();
-        let mut current_tool_args = String::new();
-        let mut thinking_buffer = String::new();
-
-        let mut byte_stream = response.bytes_stream();
-        let mut line_buffer = String::new();
-
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk = match chunk {
-                Ok(c) => c,
-                Err(e) => {
-                    output.error_message = Some(format!("Stream error: {}", e));
-                    break;
-                }
-            };
-
-            let text = String::from_utf8_lossy(&chunk);
-            line_buffer.push_str(&text);
-
-            while let Some(idx) = line_buffer.find("\n\n") {
-                let event_block = line_buffer[..idx].to_string();
-                line_buffer = line_buffer[idx + 2..].to_string();
-
-                // Parse SSE event
-                let mut event_type = String::new();
-                let mut event_data = String::new();
-
-                for line in event_block.lines() {
-                    if let Some(rest) = line.strip_prefix("event: ") {
-                        event_type = rest.to_string();
-                    } else if let Some(rest) = line.strip_prefix("data: ") {
-                        event_data = rest.to_string();
-                    }
-                }
-
-                if event_data.is_empty() || event_data == "[DONE]" {
-                    continue;
-                }
-
-                let data: Value = match serde_json::from_str(&event_data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                match event_type.as_str() {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                            text_buffer.push_str(delta);
-                            yield AssistantMessageEvent::TextDelta {
-                                content_index: 0,
-                                delta: delta.to_string(),
-                                partial: output.clone(),
-                            };
-                        }
-                    }
-
-                    "response.reasoning_summary_text.delta" => {
-                        if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                            thinking_buffer.push_str(delta);
-                            yield AssistantMessageEvent::ThinkingDelta {
-                                content_index: 0,
-                                delta: delta.to_string(),
-                                partial: output.clone(),
-                            };
-                        }
-                    }
-
-                    "response.function_call_arguments.delta" => {
-                        if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                            current_tool_args.push_str(delta);
-                        }
-                    }
-
-                    "response.output_item.added" => {
-                        if let Some(item) = data.get("item")
-                            && item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                                current_tool_name = item.get("name")
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                current_tool_id = item.get("call_id")
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                current_tool_args.clear();
-                            }
-                    }
-
-                    "response.output_item.done" => {
-                        if let Some(item) = data.get("item") {
-                            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            if item_type == "function_call" {
-                                let args: Value = serde_json::from_str(&current_tool_args)
-                                    .unwrap_or(Value::Object(Default::default()));
-                                output.content.push(AssistantContentBlock::ToolCall(ToolCall {
-                                    content_type: "tool_call".to_string(),
-                                    id: current_tool_id.clone(),
-                                    name: current_tool_name.clone(),
-                                    arguments: args,
-                                    thought_signature: None,
-                                }));
-                                output.stop_reason = StopReason::ToolUse;
-                                current_tool_name.clear();
-                                current_tool_id.clear();
-                                current_tool_args.clear();
-                            }
-                        }
-                    }
-
-                    "response.content_part.done" => {
-                        // Finalize text part
-                        if !text_buffer.is_empty() {
-                            output.content.push(AssistantContentBlock::Text(TextContent {
-                                content_type: "text".to_string(),
-                                text: text_buffer.clone(),
-                                text_signature: None,
-                            }));
-                        }
-                    }
-
-                    "response.completed" => {
-                        // Extract usage
-                        if let Some(response) = data.get("response")
-                            && let Some(usage) = response.get("usage") {
-                                output.usage.input = usage.get("input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                                output.usage.output = usage.get("output_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0);
-                            }
-                    }
-
-                    _ => {}
-                }
+        // Stream SSE events from the shared decoder. The decoder yields a
+        // terminal `Error` event itself if it hits a transport failure
+        // mid-stream and stamps `output.stop_reason = Error` so we know to
+        // skip the `Done` event below.
+        {
+            use futures::StreamExt;
+            let mut inner = Box::pin(drive_sse_stream(response, &mut output));
+            while let Some(ev) = inner.next().await {
+                yield ev;
             }
         }
 
-        // Finalize thinking
-        if !thinking_buffer.is_empty() {
-            output.content.insert(0, AssistantContentBlock::Thinking(ThinkingContent {
-                content_type: "thinking".to_string(),
-                thinking: thinking_buffer,
-                thinking_signature: None,
-            }));
-        }
-
-        // Finalize text if not already done
-        if !text_buffer.is_empty() && !output.content.iter().any(|c| matches!(c, AssistantContentBlock::Text(_))) {
-            output.content.push(AssistantContentBlock::Text(TextContent {
-                content_type: "text".to_string(),
-                text: text_buffer,
-                text_signature: None,
-            }));
+        if matches!(output.stop_reason, StopReason::Error) {
+            return;
         }
 
         yield AssistantMessageEvent::Done {
@@ -459,17 +206,11 @@ fn stream_openai_responses(
     })
 }
 
-fn current_timestamp_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Cost, InputType, UserMessage};
+    use crate::providers::openai_responses_shared::{build_request_body, convert_to_input};
+    use crate::types::{Cost, InputType, Message, TextContent, UserMessage};
 
     fn test_model() -> Model {
         Model {
@@ -490,6 +231,7 @@ mod tests {
             max_tokens: 100_000,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 

@@ -212,6 +212,9 @@ fn stream_bedrock(
             usage: Usage::default(),
             error_message: None,
             timestamp: current_timestamp_ms(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
         };
 
         yield AssistantMessageEvent::Start {
@@ -543,6 +546,7 @@ mod tests {
             max_tokens: 4096,
             headers: None,
             compat: None,
+            thinking_level_map: None,
         }
     }
 

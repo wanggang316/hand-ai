@@ -1,12 +1,32 @@
 # Model CLI
 
-命令行工具，用于管理和查询 AI 模型配置。
+命令行工具，用于管理和查询 AI 模型配置、运行流式聊天，以及管理 OAuth 凭证。
 
 ## 构建
 
 ```bash
 cargo build --bin model-cli
 ```
+
+## Provider Matrix
+
+CLI 可访问 11 个内建 API 协议（由 `register_builtins` 注册）。下表概括各 provider 在 CLI 流程中的角色与凭证来源：
+
+| Api 标识                   | Provider 用途                                                          | 凭证来源 |
+|---------------------------|-----------------------------------------------------------------------|---------|
+| `openai-completions`      | OpenAI 及一切 OpenAI 兼容主机（Groq、Cerebras、xAI、OpenRouter、Vercel AI Gateway、Cloudflare Workers AI、Cloudflare AI Gateway、Z.ai、Qwen / Moonshot / Xiaomi / Deepseek、OpenCode、MiniMax、HuggingFace 等） | API Key |
+| `openai-responses`        | OpenAI Responses 原生 API                                              | API Key |
+| `openai-codex-responses`  | OpenAI Codex（支持 SSE / WebSocket / WebsocketCached）                | OAuth (PKCE) |
+| `azure-openai-responses`  | Azure OpenAI Responses（`api-key` header）                             | API Key |
+| `anthropic-messages`      | Anthropic Claude；GitHub Copilot 也通过该 API 反代                     | API Key 或 OAuth |
+| `bedrock-converse-stream` | AWS Bedrock                                                           | AWS SigV4 / Bearer |
+| `google-generative-ai`    | Google AI Studio (Gemini)、Antigravity、Gemini CLI                    | API Key 或 OAuth |
+| `google-gemini-cli`       | Google Gemini CLI                                                     | OAuth |
+| `google-vertex`           | Google Vertex AI（ADC 优先）                                           | ADC 或 API Key |
+| `mistral-conversations`   | Mistral La Plateforme（推理模式与 9 字符 tool-id 规范化）              | API Key |
+| `faux`                    | 测试 / 冒烟用的 in-process provider，需开启 `--features faux`         | 无 |
+
+> Compat（OpenRouter routing、Z.ai tool streaming、Qwen thinking format 等）由 `model.base_url` 自动检测，可通过 `Model.compat` 覆盖。
 
 ## 命令
 
@@ -16,7 +36,7 @@ cargo build --bin model-cli
 cargo run --bin model-cli list-providers
 ```
 
-显示所有已注册的 providers 及其 API key 配置状态。
+显示所有已注册的 providers、其 API key 配置状态，以及（适用时）OAuth 登录状态。
 
 ### 列出模型
 
@@ -53,6 +73,48 @@ cargo run --bin model-cli model-info openai gpt-4o
 - 成本（每百万 token）
 - 兼容性配置
 
+### Chat 流式补全
+
+```bash
+cargo run --bin model-cli chat <provider> <model_id> "<prompt>" [flags]
+```
+
+可选 flags：
+
+| Flag | Values | Description |
+|---|---|---|
+| `--transport` | `sse`, `websocket`, `auto` | 选择流式传输方式（映射到 `StreamOptions::transport`）|
+| `--cache-retention` | `none`, `short`, `long` | 提示缓存策略（映射到 `StreamOptions::cache_retention`）|
+
+示例：
+
+```bash
+cargo run --bin model-cli chat openai gpt-4o "Hello, how are you?"
+cargo run --bin model-cli chat openai-codex gpt-5-codex "Hi" --transport websocket
+cargo run --bin model-cli chat anthropic claude-sonnet-4-5 "Summarize" --cache-retention long
+```
+
+### OAuth 凭证管理
+
+支持的 OAuth providers（slug 形式）：`anthropic`、`openai-codex`、`github-copilot`。
+
+```bash
+# 交互式登录（启动浏览器或显示 device code）
+cargo run --bin model-cli oauth login <provider>
+
+# 查看已认证的 providers
+cargo run --bin model-cli oauth status
+
+# 移除存储的凭证
+cargo run --bin model-cli oauth logout <provider>
+```
+
+凭证存储路径：`~/.hand-ai/oauth.json`（目录权限 `0700`，文件权限 `0600`）。
+
+`oauth login` 会调用 provider 的 `login()` 方法：
+- Anthropic / OpenAI Codex 走 PKCE + 本地回环服务器，URL 会输出到 stderr，请在浏览器中打开。
+- GitHub Copilot 走 device flow，user code + verification URL 会输出到 stderr。
+
 ### 帮助
 
 ```bash
@@ -72,6 +134,35 @@ CLI 会检查以下环境变量来确定 API key 配置状态：
 - 以及更多...
 
 完整列表请参考 `src/env_api_keys.rs`。
+
+## 手动冒烟测试
+
+下列命令在本地环境冒烟新增 / 已有的 CLI 表面：
+
+```bash
+# 1. Help shows all subcommands including oauth + chat flags
+cargo run -p model --bin model-cli -- --help
+
+# 2. list-providers includes [oauth: ...] markers for the three OAuth providers
+cargo run -p model --bin model-cli -- list-providers
+
+# 3. oauth status runs without error before any login
+cargo run -p model --bin model-cli -- oauth status
+
+# 4. oauth login dispatches to the provider's login() (will print a URL or device code)
+#    Cancel with Ctrl-C if you don't want to actually authenticate.
+cargo run -p model --bin model-cli -- oauth login anthropic
+
+# 5. oauth logout removes the credentials file entry
+cargo run -p model --bin model-cli -- oauth logout anthropic
+
+# 6. chat accepts the new transport / cache-retention flags
+#    (Requires OPENAI_API_KEY; will hit the live API)
+cargo run -p model --bin model-cli -- chat openai gpt-4o "Hi" --transport sse --cache-retention short
+
+# 7. Invalid flag values exit non-zero with a usage message
+cargo run -p model --bin model-cli -- chat openai gpt-4o "Hi" --transport carrier-pigeon
+```
 
 ## 示例输出
 
@@ -95,4 +186,16 @@ Cost (per million tokens):
   Output: $10.0000
   Cache read: $1.2500
   Cache write: $0.0000
+```
+
+```bash
+$ cargo run --bin model-cli oauth status
+
+OAuth status:
+
+  anthropic: authenticated, expires in 2h
+  openai-codex: not authenticated
+  github-copilot: authenticated
+
+Storage: /Users/you/.hand-ai/oauth.json
 ```
