@@ -300,11 +300,14 @@ async fn handle_slash_command(
 
         "/compact" => {
             println!("\x1b[36mRunning compaction...\x1b[0m");
+            // `session.compact()` now returns the summary string and
+            // forces compaction unconditionally (matching the user's
+            // intent when they type `/compact` explicitly).
             match session.compact().await {
-                Ok(true) => println!("\x1b[32mCompaction complete.\x1b[0m"),
-                Ok(false) => {
-                    println!("\x1b[33mNo compaction needed (context within limits).\x1b[0m")
-                }
+                Ok(summary) => println!(
+                    "\x1b[32mCompaction complete.\x1b[0m\n{}",
+                    summary,
+                ),
                 Err(e) => eprintln!("\x1b[31mCompaction failed: {}\x1b[0m", e),
             }
         }

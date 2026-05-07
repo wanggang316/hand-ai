@@ -479,7 +479,30 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                 RpcResponseBody::SetFollowUpMode(RpcResultEmpty::ok()),
             )
         }
-        RpcCommand::Compact { id, .. } => not_impl_data(id, RpcResponseBody::Compact),
+        RpcCommand::Compact {
+            id,
+            custom_instructions: _,
+        } => {
+            // `custom_instructions` from the wire is currently dropped:
+            // `compaction::build_compaction_prompt` does not yet accept
+            // a per-call instruction string. The TS reference threads it
+            // through; restoring that requires a small helper change in
+            // core/compaction.rs (TODO).
+            match session.compact().await {
+                Ok(summary) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::Compact(RpcResultWithData::ok(serde_json::json!({
+                        "summary": summary,
+                    }))),
+                ),
+                Err(e) => RpcResponse::new(
+                    id,
+                    RpcResponseBody::Compact(RpcResultWithData::<serde_json::Value>::err(format!(
+                        "compaction failed: {e}"
+                    ))),
+                ),
+            }
+        }
         RpcCommand::SetAutoCompaction { id, enabled } => {
             session.set_auto_compaction(enabled);
             RpcResponse::new(

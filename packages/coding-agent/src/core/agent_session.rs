@@ -408,63 +408,9 @@ impl AgentSession {
         }
 
         // Check for compaction
-        self.maybe_compact().await?;
+        self.maybe_compact_if_needed().await?;
 
         Ok(result.messages)
-    }
-
-    /// Check if compaction is needed and run it.
-    async fn maybe_compact(&mut self) -> Result<(), CodingAgentError> {
-        // Honor the runtime auto-compaction toggle (`set_auto_compaction`)
-        // before doing any token math — the toggle is the cheap fast path.
-        if !self.auto_compaction_enabled {
-            return Ok(());
-        }
-
-        let settings = self.settings_manager.compaction_settings();
-        let context_tokens = compaction::estimate_context_tokens(&self.context.messages);
-        let max_context_tokens = settings.max_context_tokens() as usize;
-
-        if !compaction::should_compact(context_tokens, max_context_tokens, &settings) {
-            return Ok(());
-        }
-
-        self.is_compacting = true;
-        self.emit(AgentSessionEvent::CompactionStart);
-
-        let (to_compact, _to_keep, _split_idx) = compaction::split_for_compaction(
-            &self.context.messages,
-            settings.keep_recent_tokens() as usize,
-        );
-
-        let file_ops = compaction::extract_file_operations(&to_compact);
-        let summary_prompt = compaction::build_compaction_prompt(&to_compact, &file_ops);
-
-        // Call LLM to generate a compaction summary
-        let summary = match self.generate_compaction_summary(&summary_prompt).await {
-            Ok(s) => s,
-            Err(_) => {
-                // Fallback to a structured summary if LLM call fails
-                format!(
-                    "[Compacted {} messages. Files read: {}. Files edited: {}.]",
-                    to_compact.len(),
-                    file_ops.read.join(", "),
-                    file_ops.edited.join(", "),
-                )
-            }
-        };
-
-        // Record compaction in session
-        let first_kept_id = format!("compaction_{}", chrono::Utc::now().timestamp_millis());
-        self.session_manager
-            .append_compaction(&summary, &first_kept_id)?;
-
-        self.emit(AgentSessionEvent::CompactionEnd {
-            summary: summary.clone(),
-        });
-        self.is_compacting = false;
-
-        Ok(())
     }
 
     /// Get the session ID.
@@ -536,18 +482,71 @@ impl AgentSession {
         &self.settings_manager
     }
 
-    /// Manually trigger compaction. Returns true if compaction was performed.
-    pub async fn compact(&mut self) -> Result<bool, CodingAgentError> {
+    /// Manually trigger compaction unconditionally — bypasses both the
+    /// `auto_compaction_enabled` toggle and the
+    /// `compaction::should_compact` token-threshold gate. Returns the
+    /// summary string the agent generated (or a structured fallback if
+    /// the LLM call failed). Used by the RPC `compact` handler and the
+    /// `/compact` slash command, where the user is explicitly asking
+    /// for compaction regardless of session state.
+    pub async fn compact(&mut self) -> Result<String, CodingAgentError> {
+        self.do_compact().await
+    }
+
+    /// Compact-if-needed: no-op unless auto-compaction is enabled AND
+    /// the should_compact threshold is met. Called automatically at
+    /// the end of `send_message`.
+    async fn maybe_compact_if_needed(&mut self) -> Result<(), CodingAgentError> {
+        if !self.auto_compaction_enabled {
+            return Ok(());
+        }
         let settings = self.settings_manager.compaction_settings();
         let context_tokens = compaction::estimate_context_tokens(&self.context.messages);
         let max_context_tokens = settings.max_context_tokens() as usize;
-
         if !compaction::should_compact(context_tokens, max_context_tokens, &settings) {
-            return Ok(false);
+            return Ok(());
         }
+        let _ = self.do_compact().await?;
+        Ok(())
+    }
 
-        self.maybe_compact().await?;
-        Ok(true)
+    /// Run the compaction summarizer + record the result on the session
+    /// manager. Returns the summary text. Caller is responsible for any
+    /// gating (auto-toggle, token threshold).
+    async fn do_compact(&mut self) -> Result<String, CodingAgentError> {
+        let settings = self.settings_manager.compaction_settings();
+
+        self.is_compacting = true;
+        self.emit(AgentSessionEvent::CompactionStart);
+
+        let (to_compact, _to_keep, _split_idx) = compaction::split_for_compaction(
+            &self.context.messages,
+            settings.keep_recent_tokens() as usize,
+        );
+
+        let file_ops = compaction::extract_file_operations(&to_compact);
+        let summary_prompt = compaction::build_compaction_prompt(&to_compact, &file_ops);
+
+        let summary = match self.generate_compaction_summary(&summary_prompt).await {
+            Ok(s) => s,
+            Err(_) => format!(
+                "[Compacted {} messages. Files read: {}. Files edited: {}.]",
+                to_compact.len(),
+                file_ops.read.join(", "),
+                file_ops.edited.join(", "),
+            ),
+        };
+
+        let first_kept_id = format!("compaction_{}", chrono::Utc::now().timestamp_millis());
+        self.session_manager
+            .append_compaction(&summary, &first_kept_id)?;
+
+        self.emit(AgentSessionEvent::CompactionEnd {
+            summary: summary.clone(),
+        });
+        self.is_compacting = false;
+
+        Ok(summary)
     }
 
     /// Get the stream options.
