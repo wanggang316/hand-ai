@@ -3,6 +3,7 @@
 use clap::Parser;
 use hand_coding_agent::cli::Args;
 use hand_coding_agent::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
+use hand_coding_agent::core::diagnostics;
 use hand_coding_agent::core::export;
 use hand_coding_agent::core::model_resolver;
 use hand_coding_agent::core::timings;
@@ -19,6 +20,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     timings::reset();
     let cli = Args::parse();
     timings::time("parse_args");
+
+    // Handle --diagnostics: print system report and exit. Runs before
+    // logging setup so the report is the only thing on stdout.
+    if cli.diagnostics {
+        timings::print();
+        let report = diagnostics::run_diagnostics();
+        diagnostics::print_report(&report);
+        if report.has_errors() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     // Handle --list-models
     if let Some(ref search) = cli.list_models {

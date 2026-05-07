@@ -75,7 +75,10 @@ fn is_truthy_env_flag(value: &str) -> bool {
 /// Whether the global gate is on. Reads `HAND_TIMING` from the
 /// environment each call (matches TS `process.env.PI_TIMING === "1"`
 /// being read at module load; reading per-call lets tests toggle it).
-fn enabled() -> bool {
+///
+/// Public so diagnostics (and similar inspectors) can report the gate
+/// state without re-implementing the truthy-parse rules.
+pub fn enabled() -> bool {
     std::env::var("HAND_TIMING")
         .ok()
         .as_deref()

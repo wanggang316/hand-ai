@@ -91,6 +91,10 @@ pub struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Print system diagnostics and exit
+    #[arg(long)]
+    pub diagnostics: bool,
 }
 
 #[cfg(test)]
@@ -119,6 +123,14 @@ mod tests {
         assert!(args.export.is_none());
         assert!(args.list_models.is_none());
         assert!(!args.verbose);
+        assert!(!args.diagnostics);
+    }
+
+    #[test]
+    fn parses_diagnostics_flag() {
+        let args =
+            Args::try_parse_from(["hand", "--diagnostics"]).expect("--diagnostics should parse");
+        assert!(args.diagnostics);
     }
 
     #[test]

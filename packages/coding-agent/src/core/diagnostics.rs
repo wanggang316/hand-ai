@@ -1,7 +1,20 @@
 //! System diagnostics — check environment, API keys, and dependencies.
+//!
+//! In addition to the legacy `DiagCheck` rows, the report surfaces the new
+//! Phase-6 subsystems: on-disk auth storage, install-telemetry gate, the
+//! startup-timings gate, skill-discovery errors, and the layered-settings
+//! summary. Every subsystem records its own error in the relevant status
+//! struct rather than panicking — `--diagnostics` must always finish.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::process::Command;
+
+use crate::core::auth_storage::AuthStorage;
+use crate::core::settings::SettingsManager;
+use crate::core::skills;
+use crate::core::telemetry;
+use crate::core::timings;
 
 /// Status of a diagnostic check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,10 +45,75 @@ pub struct DiagCheck {
     pub value: Option<String>,
 }
 
+/// On-disk auth storage status (`~/.hand/agent/auth.json`).
+///
+/// `error` carries the human-readable failure message if the file existed
+/// but couldn't be parsed; `provider_count` and `mode_octal` are populated
+/// only when the load succeeded.
+#[derive(Debug, Clone)]
+pub struct AuthStorageStatus {
+    pub path: PathBuf,
+    pub exists: bool,
+    /// Unix file mode (permission bits, e.g. `0o600`). `None` on non-Unix
+    /// or when the file doesn't exist.
+    pub mode_octal: Option<u32>,
+    /// Number of provider entries in the file. `None` when the file is
+    /// missing or failed to parse.
+    pub provider_count: Option<usize>,
+    pub error: Option<String>,
+}
+
+/// Resolution outcome of [`telemetry::is_install_telemetry_enabled`].
+#[derive(Debug, Clone)]
+pub struct TelemetryStatus {
+    pub enabled: bool,
+    /// `"env"` when `HAND_TELEMETRY` decided the result, `"settings"`
+    /// when the YAML layer set the flag, `"default"` when neither did.
+    pub source: &'static str,
+    /// Raw `HAND_TELEMETRY` env value if set, for reporting only.
+    pub env_value: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Resolution outcome of [`timings::enabled`].
+#[derive(Debug, Clone)]
+pub struct TimingsStatus {
+    pub enabled: bool,
+    /// Raw `HAND_TIMING` env value if set.
+    pub env_value: Option<String>,
+}
+
+/// One skill-discovery failure surfaced by [`skills::discover_skills`].
+#[derive(Debug, Clone)]
+pub struct SkillErrorSummary {
+    /// Path of the offending SKILL.md, when known.
+    pub path: Option<PathBuf>,
+    /// `Display` of the `SkillError` — already includes the path.
+    pub message: String,
+}
+
+/// Layered-settings summary: which YAML files were loaded and the merged
+/// result rendered as YAML.
+#[derive(Debug, Clone)]
+pub struct SettingsLayerSummary {
+    pub global_path: Option<PathBuf>,
+    pub global_exists: bool,
+    pub project_path: Option<PathBuf>,
+    pub project_exists: bool,
+    /// Resolved settings serialized as YAML. Empty on serializer failure.
+    pub settings_yaml: String,
+    pub error: Option<String>,
+}
+
 /// Complete diagnostics report.
 #[derive(Debug, Clone)]
 pub struct DiagnosticsReport {
     pub checks: Vec<DiagCheck>,
+    pub auth_storage: AuthStorageStatus,
+    pub telemetry: TelemetryStatus,
+    pub timings: TimingsStatus,
+    pub skill_errors: Vec<SkillErrorSummary>,
+    pub settings: SettingsLayerSummary,
 }
 
 impl DiagnosticsReport {
@@ -61,6 +139,20 @@ impl DiagnosticsReport {
             .iter()
             .filter(|c| matches!(c.status, DiagStatus::Error(_)))
             .count()
+    }
+
+    /// True when any subsystem reports a hard error. Used by `main.rs` to
+    /// pick the process exit code.
+    ///
+    /// Skill-discovery errors are NOT counted: a malformed SKILL.md is a
+    /// per-file warning condition, not a system-level failure (the rest of
+    /// the agent keeps working). Auth-load and settings-load errors *are*
+    /// counted because they signal a config layer that's unreadable.
+    pub fn has_errors(&self) -> bool {
+        self.error_count() > 0
+            || self.auth_storage.error.is_some()
+            || self.telemetry.error.is_some()
+            || self.settings.error.is_some()
     }
 }
 
@@ -104,8 +196,22 @@ impl fmt::Display for DiagnosticsReport {
     }
 }
 
-/// Run all diagnostic checks.
+/// Run all diagnostic checks against the process cwd. Convenience wrapper
+/// around [`run_diagnostics_at`].
 pub fn run_diagnostics() -> DiagnosticsReport {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    run_diagnostics_at(&cwd, AuthStorage::default_path().ok())
+}
+
+/// Run all diagnostic checks against an explicit cwd and auth-storage path.
+///
+/// `auth_path = None` records a "home directory not found" error in the
+/// auth-storage status. Tests pass `Some(tmp/auth.json)` to avoid touching
+/// the real `~/.hand/`.
+pub fn run_diagnostics_at(
+    cwd: &std::path::Path,
+    auth_path: Option<PathBuf>,
+) -> DiagnosticsReport {
     let mut checks = vec![
         // OS info
         check_os(),
@@ -131,10 +237,313 @@ pub fn run_diagnostics() -> DiagnosticsReport {
         checks.push(check_api_key(env_var, provider));
     }
 
-    // .hand directory
+    // .hand directory (legacy DiagCheck row).
     checks.push(check_hand_directory());
 
-    DiagnosticsReport { checks }
+    let auth_storage = inspect_auth_storage(auth_path);
+    let settings = inspect_settings(cwd);
+    let telemetry = inspect_telemetry(cwd, &settings);
+    let timings = inspect_timings();
+    let skill_errors = inspect_skill_errors(cwd);
+
+    DiagnosticsReport {
+        checks,
+        auth_storage,
+        telemetry,
+        timings,
+        skill_errors,
+        settings,
+    }
+}
+
+fn inspect_auth_storage(path: Option<PathBuf>) -> AuthStorageStatus {
+    let Some(path) = path else {
+        return AuthStorageStatus {
+            path: PathBuf::new(),
+            exists: false,
+            mode_octal: None,
+            provider_count: None,
+            error: Some("home directory not found".to_string()),
+        };
+    };
+
+    let exists = path.exists();
+    let mode_octal = file_mode_octal(&path);
+
+    if !exists {
+        return AuthStorageStatus {
+            path,
+            exists: false,
+            mode_octal: None,
+            provider_count: None,
+            error: None,
+        };
+    }
+
+    let storage = AuthStorage::at(&path);
+    match storage.load() {
+        Ok(records) => AuthStorageStatus {
+            path,
+            exists: true,
+            mode_octal,
+            provider_count: Some(records.len()),
+            error: None,
+        },
+        Err(e) => AuthStorageStatus {
+            path,
+            exists: true,
+            mode_octal,
+            provider_count: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn inspect_settings(cwd: &std::path::Path) -> SettingsLayerSummary {
+    match SettingsManager::from_cwd(cwd) {
+        Ok(mgr) => {
+            let global_path = mgr.global_path().map(|p| p.to_path_buf());
+            let project_path = mgr.project_path().map(|p| p.to_path_buf());
+            let global_exists = global_path.as_deref().map(|p| p.exists()).unwrap_or(false);
+            let project_exists = project_path.as_deref().map(|p| p.exists()).unwrap_or(false);
+            let settings_yaml = serde_yaml::to_string(mgr.current()).unwrap_or_default();
+            SettingsLayerSummary {
+                global_path,
+                global_exists,
+                project_path,
+                project_exists,
+                settings_yaml,
+                error: None,
+            }
+        }
+        Err(e) => SettingsLayerSummary {
+            global_path: None,
+            global_exists: false,
+            project_path: None,
+            project_exists: false,
+            settings_yaml: String::new(),
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn inspect_telemetry(
+    cwd: &std::path::Path,
+    settings: &SettingsLayerSummary,
+) -> TelemetryStatus {
+    let env_value = std::env::var("HAND_TELEMETRY").ok();
+
+    // If settings failed to load, we can't faithfully resolve the gate.
+    // Fall back to `default = true` (TS-faithful) and report that the
+    // settings layer is unavailable.
+    if settings.error.is_some() {
+        let enabled = env_value
+            .as_deref()
+            .map(is_truthy_env_flag)
+            .unwrap_or(true);
+        let source: &'static str = if env_value.is_some() { "env" } else { "default" };
+        return TelemetryStatus {
+            enabled,
+            source,
+            env_value,
+            error: Some("settings unavailable; telemetry resolved with defaults".to_string()),
+        };
+    }
+
+    // Re-load a SettingsManager rather than threading one through:
+    // settings.error.is_none() means the load succeeded once already, so
+    // this second load is expected to also succeed; if it doesn't, fall
+    // through to the same default path as above.
+    let mgr = match SettingsManager::from_cwd(cwd) {
+        Ok(m) => m,
+        Err(e) => {
+            return TelemetryStatus {
+                enabled: env_value
+                    .as_deref()
+                    .map(is_truthy_env_flag)
+                    .unwrap_or(true),
+                source: if env_value.is_some() { "env" } else { "default" },
+                env_value,
+                error: Some(e.to_string()),
+            };
+        }
+    };
+
+    let enabled =
+        telemetry::is_install_telemetry_enabled(&mgr, env_value.as_deref());
+    let source: &'static str = if env_value.is_some() {
+        "env"
+    } else if mgr.current().enable_install_telemetry.is_some() {
+        "settings"
+    } else {
+        "default"
+    };
+
+    TelemetryStatus {
+        enabled,
+        source,
+        env_value,
+        error: None,
+    }
+}
+
+fn inspect_timings() -> TimingsStatus {
+    TimingsStatus {
+        enabled: timings::enabled(),
+        env_value: std::env::var("HAND_TIMING").ok(),
+    }
+}
+
+fn inspect_skill_errors(cwd: &std::path::Path) -> Vec<SkillErrorSummary> {
+    // User skills live under `~/.hand/skills/`. Builtin skills are not
+    // bundled yet (Phase 2.x). Mirror `AgentSession::new`'s wiring: skip
+    // user_dir when it doesn't exist so a missing global dir isn't
+    // surfaced as an error.
+    let user_dir = dirs::home_dir()
+        .map(|h| h.join(".hand").join("skills"))
+        .filter(|p| p.exists());
+    let (_skills, errors) =
+        skills::discover_skills(cwd, user_dir.as_deref(), None);
+
+    errors
+        .into_iter()
+        .map(|e| SkillErrorSummary {
+            path: skill_error_path(&e),
+            message: e.to_string(),
+        })
+        .collect()
+}
+
+fn skill_error_path(err: &skills::SkillError) -> Option<PathBuf> {
+    match err {
+        skills::SkillError::Loader { path, .. }
+        | skills::SkillError::MissingDescription { path }
+        | skills::SkillError::DescriptionTooLong { path, .. }
+        | skills::SkillError::NameMismatch { path, .. }
+        | skills::SkillError::InvalidName { path, .. } => Some(path.clone()),
+    }
+}
+
+fn file_mode_octal(path: &std::path::Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o777)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Truthy parsing matching `core::telemetry::is_truthy_env_flag` /
+/// `core::timings::is_truthy_env_flag`. Duplicated here (rather than
+/// re-exported) because the upstream helpers are private; the rule is
+/// trivial and unlikely to drift.
+fn is_truthy_env_flag(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    if value == "1" {
+        return true;
+    }
+    let lower = value.to_lowercase();
+    lower == "true" || lower == "yes"
+}
+
+/// Render a [`DiagnosticsReport`] to stdout in section-by-section plain
+/// text. Format is ad-hoc human-readable, matching the legacy
+/// `Display for DiagnosticsReport` style for the existing checks and
+/// adding labelled sections for the Phase-6 subsystems.
+pub fn print_report(report: &DiagnosticsReport) {
+    // Legacy checks block (re-uses `Display`).
+    print!("{}", report);
+
+    println!();
+    println!("Auth Storage");
+    println!("------------");
+    println!("  path: {}", report.auth_storage.path.display());
+    println!("  exists: {}", report.auth_storage.exists);
+    match report.auth_storage.mode_octal {
+        Some(m) => println!("  mode: {:o}", m),
+        None => println!("  mode: <n/a>"),
+    }
+    match report.auth_storage.provider_count {
+        Some(n) => println!("  providers: {}", n),
+        None => println!("  providers: <unknown>"),
+    }
+    if let Some(err) = &report.auth_storage.error {
+        println!("  error: {}", err);
+    }
+
+    println!();
+    println!("Telemetry");
+    println!("---------");
+    println!("  enabled: {}", report.telemetry.enabled);
+    println!("  source: {}", report.telemetry.source);
+    match &report.telemetry.env_value {
+        Some(v) => println!("  HAND_TELEMETRY: {}", v),
+        None => println!("  HAND_TELEMETRY: <unset>"),
+    }
+    if let Some(err) = &report.telemetry.error {
+        println!("  error: {}", err);
+    }
+
+    println!();
+    println!("Timings");
+    println!("-------");
+    println!("  enabled: {}", report.timings.enabled);
+    match &report.timings.env_value {
+        Some(v) => println!("  HAND_TIMING: {}", v),
+        None => println!("  HAND_TIMING: <unset>"),
+    }
+
+    println!();
+    println!("Skill Discovery");
+    println!("---------------");
+    println!("  errors: {}", report.skill_errors.len());
+    for e in &report.skill_errors {
+        println!("    - {}", e.message);
+    }
+
+    println!();
+    println!("Settings");
+    println!("--------");
+    match &report.settings.global_path {
+        Some(p) => println!(
+            "  global: {} ({})",
+            p.display(),
+            if report.settings.global_exists {
+                "exists"
+            } else {
+                "absent"
+            }
+        ),
+        None => println!("  global: <none>"),
+    }
+    match &report.settings.project_path {
+        Some(p) => println!(
+            "  project: {} ({})",
+            p.display(),
+            if report.settings.project_exists {
+                "exists"
+            } else {
+                "absent"
+            }
+        ),
+        None => println!("  project: <none>"),
+    }
+    if let Some(err) = &report.settings.error {
+        println!("  error: {}", err);
+    } else {
+        println!("  resolved YAML:");
+        for line in report.settings.settings_yaml.lines() {
+            println!("    {}", line);
+        }
+    }
 }
 
 fn check_os() -> DiagCheck {
@@ -322,29 +731,186 @@ mod tests {
         assert!(check.value.is_some());
     }
 
+    /// Build an otherwise-empty `DiagnosticsReport` so unit tests can
+    /// exercise the count/`has_errors` helpers without booting all the
+    /// real subsystems.
+    fn empty_report(checks: Vec<DiagCheck>) -> DiagnosticsReport {
+        DiagnosticsReport {
+            checks,
+            auth_storage: AuthStorageStatus {
+                path: PathBuf::new(),
+                exists: false,
+                mode_octal: None,
+                provider_count: None,
+                error: None,
+            },
+            telemetry: TelemetryStatus {
+                enabled: true,
+                source: "default",
+                env_value: None,
+                error: None,
+            },
+            timings: TimingsStatus {
+                enabled: false,
+                env_value: None,
+            },
+            skill_errors: Vec::new(),
+            settings: SettingsLayerSummary {
+                global_path: None,
+                global_exists: false,
+                project_path: None,
+                project_exists: false,
+                settings_yaml: String::new(),
+                error: None,
+            },
+        }
+    }
+
     #[test]
     fn report_counts() {
-        let report = DiagnosticsReport {
-            checks: vec![
-                DiagCheck {
-                    name: "a".into(),
-                    status: DiagStatus::Ok,
-                    value: None,
-                },
-                DiagCheck {
-                    name: "b".into(),
-                    status: DiagStatus::Warn("w".into()),
-                    value: None,
-                },
-                DiagCheck {
-                    name: "c".into(),
-                    status: DiagStatus::Error("e".into()),
-                    value: None,
-                },
-            ],
-        };
+        let report = empty_report(vec![
+            DiagCheck {
+                name: "a".into(),
+                status: DiagStatus::Ok,
+                value: None,
+            },
+            DiagCheck {
+                name: "b".into(),
+                status: DiagStatus::Warn("w".into()),
+                value: None,
+            },
+            DiagCheck {
+                name: "c".into(),
+                status: DiagStatus::Error("e".into()),
+                value: None,
+            },
+        ]);
         assert_eq!(report.ok_count(), 1);
         assert_eq!(report.warn_count(), 1);
         assert_eq!(report.error_count(), 1);
+    }
+
+    #[test]
+    fn has_errors_flags_check_errors() {
+        let r = empty_report(vec![DiagCheck {
+            name: "git".into(),
+            status: DiagStatus::Error("missing".into()),
+            value: None,
+        }]);
+        assert!(r.has_errors());
+    }
+
+    #[test]
+    fn has_errors_flags_subsystem_errors() {
+        let mut r = empty_report(vec![]);
+        r.auth_storage.error = Some("malformed".into());
+        assert!(r.has_errors());
+
+        let mut r = empty_report(vec![]);
+        r.settings.error = Some("malformed yaml".into());
+        assert!(r.has_errors());
+
+        let mut r = empty_report(vec![]);
+        r.telemetry.error = Some("settings unavailable".into());
+        assert!(r.has_errors());
+    }
+
+    #[test]
+    fn has_errors_skill_errors_alone_do_not_count() {
+        let mut r = empty_report(vec![]);
+        r.skill_errors.push(SkillErrorSummary {
+            path: None,
+            message: "bad SKILL.md".into(),
+        });
+        assert!(!r.has_errors());
+    }
+
+    #[test]
+    fn report_includes_auth_storage_status_when_file_missing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let report = run_diagnostics_at(dir.path(), Some(auth_path.clone()));
+        assert_eq!(report.auth_storage.path, auth_path);
+        assert!(!report.auth_storage.exists);
+        assert!(report.auth_storage.provider_count.is_none());
+        assert!(report.auth_storage.error.is_none());
+    }
+
+    #[test]
+    fn report_includes_auth_storage_status_when_file_exists() {
+        use crate::core::auth_storage::{AuthRecord, AuthStorage};
+        let dir = tempfile::TempDir::new().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        let storage = AuthStorage::at(&auth_path);
+        storage
+            .set("openai", AuthRecord::api_key("sk-test"))
+            .unwrap();
+
+        let report = run_diagnostics_at(dir.path(), Some(auth_path.clone()));
+        assert_eq!(report.auth_storage.path, auth_path);
+        assert!(report.auth_storage.exists);
+        assert_eq!(report.auth_storage.provider_count, Some(1));
+        assert!(report.auth_storage.error.is_none());
+        #[cfg(unix)]
+        {
+            assert_eq!(report.auth_storage.mode_octal, Some(0o600));
+        }
+    }
+
+    #[test]
+    fn report_includes_auth_storage_error_when_file_malformed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let auth_path = dir.path().join("auth.json");
+        std::fs::write(&auth_path, "{ not json").unwrap();
+        let report = run_diagnostics_at(dir.path(), Some(auth_path));
+        assert!(report.auth_storage.exists);
+        assert!(report.auth_storage.provider_count.is_none());
+        assert!(report.auth_storage.error.is_some());
+        assert!(report.has_errors());
+    }
+
+    #[test]
+    fn report_includes_telemetry_gate_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let report = run_diagnostics_at(dir.path(), None);
+        // `enabled` and `source` are always populated; the exact value
+        // depends on the ambient HAND_TELEMETRY env which we do not mutate
+        // here (env-var mutation is process-wide and racy across tests).
+        assert!(["env", "settings", "default"].contains(&report.telemetry.source));
+    }
+
+    #[test]
+    fn report_includes_timings_gate_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let report = run_diagnostics_at(dir.path(), None);
+        // Same ambient-env caveat as above: just assert the field shape.
+        assert_eq!(
+            report.timings.enabled,
+            crate::core::timings::enabled(),
+        );
+    }
+
+    #[test]
+    fn print_report_renders_known_sections() {
+        // Build a fully synthetic report so the test is deterministic and
+        // doesn't depend on the host's `~/.hand/` or env vars.
+        let mut r = empty_report(vec![DiagCheck {
+            name: "OS".into(),
+            status: DiagStatus::Ok,
+            value: Some("test/test".into()),
+        }]);
+        r.auth_storage.path = PathBuf::from("/tmp/auth.json");
+        r.settings.settings_yaml = "compaction:\n  enabled: true\n".into();
+
+        // `print_report` writes to stdout; capturing stdout in tests
+        // requires extra plumbing. We assert via the report's `Display`
+        // for the legacy block and trust the `print_report` body is
+        // a thin formatting layer over the same fields. As a smoke
+        // check, just ensure the call doesn't panic.
+        print_report(&r);
+
+        let display = r.to_string();
+        assert!(display.contains("System Diagnostics"));
+        assert!(display.contains("Summary:"));
     }
 }
