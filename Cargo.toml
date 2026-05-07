@@ -1,5 +1,14 @@
 [workspace]
-members = ["packages/model", "packages/agent", "packages/tui", "packages/coding-agent", "examples"]
+members = [
+    "packages/model",
+    "packages/agent",
+    "packages/tui",
+    "packages/coding-agent",
+    "examples",
+    "packages/coding-agent/examples/extensions/permission-gate",
+    "packages/coding-agent/examples/extensions/dirty-repo-guard",
+    "packages/coding-agent/examples/extensions/auto-commit-on-exit",
+]
 resolver = "2"
 
 [workspace.package]

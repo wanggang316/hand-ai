@@ -1,6 +1,8 @@
 //! Slash command system — parse and execute `/command` inputs.
 
+use crate::core::extensions::api::{Extension, ExtensionContext, ExtensionError, SlashCommandSpec};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// A registered slash command.
 #[derive(Clone)]
@@ -25,12 +27,44 @@ impl std::fmt::Debug for SlashCommand {
     }
 }
 
+/// An extension-contributed slash command and the extension that owns it.
+#[derive(Clone)]
+pub struct ExtensionSlashCommand {
+    pub spec: SlashCommandSpec,
+    pub extension: Arc<dyn Extension>,
+}
+
+impl std::fmt::Debug for ExtensionSlashCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionSlashCommand")
+            .field("name", &self.spec.name)
+            .field("extension", &self.extension.manifest().name)
+            .finish()
+    }
+}
+
 /// Registry that holds all available slash commands.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SlashCommandRegistry {
     commands: Vec<SlashCommand>,
     /// Map from name/alias to command index.
     lookup: HashMap<String, usize>,
+    /// Extension-contributed commands, indexed by primary name. Built-in
+    /// commands take precedence: a lookup checks `lookup` first and only
+    /// falls back to `extension_commands` on miss.
+    extension_commands: HashMap<String, ExtensionSlashCommand>,
+}
+
+impl std::fmt::Debug for SlashCommandRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlashCommandRegistry")
+            .field("commands", &self.commands)
+            .field(
+                "extension_commands",
+                &self.extension_commands.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl SlashCommandRegistry {
@@ -127,6 +161,84 @@ impl SlashCommandRegistry {
                 accepts_args,
             });
         }
+    }
+
+    /// Register a slash command contributed by a Tier 1 or Tier 2 extension.
+    ///
+    /// Built-in commands always take precedence: if `spec.name` shadows a
+    /// built-in, the built-in is what `find` and `dispatch` resolve to. The
+    /// extension command is still recorded so `/help` can list it.
+    ///
+    /// Names that are empty, contain whitespace, or contain `/` are silently
+    /// rejected — these would never match the parser's tokenizer (which splits
+    /// on whitespace and strips a leading `/`) so accepting them would create
+    /// dead entries that pollute `/help` without ever being routable.
+    pub fn register_extension_command(
+        &mut self,
+        spec: SlashCommandSpec,
+        extension: Arc<dyn Extension>,
+    ) {
+        if spec.name.is_empty()
+            || spec.name.contains(char::is_whitespace)
+            || spec.name.contains('/')
+        {
+            tracing::warn!(
+                extension = %extension.manifest().name,
+                name = %spec.name,
+                "rejecting extension slash command with invalid name"
+            );
+            return;
+        }
+        let key = spec.name.clone();
+        self.extension_commands
+            .insert(key, ExtensionSlashCommand { spec, extension });
+    }
+
+    /// Look up an extension-contributed command by name.
+    ///
+    /// Returns `None` if the name shadows a built-in command (built-ins win)
+    /// or if no extension registered that name.
+    pub fn find_extension_command(&self, name: &str) -> Option<&ExtensionSlashCommand> {
+        if self.lookup.contains_key(name) {
+            // Built-in shadowing: the dispatcher must not route to the
+            // extension version of a built-in command.
+            return None;
+        }
+        self.extension_commands.get(name)
+    }
+
+    /// All extension-contributed slash commands, sorted by extension name
+    /// then command name. Used by `/help` to list them grouped per extension.
+    pub fn extension_commands(&self) -> Vec<&ExtensionSlashCommand> {
+        let mut items: Vec<&ExtensionSlashCommand> = self.extension_commands.values().collect();
+        items.sort_by(|a, b| {
+            a.extension
+                .manifest()
+                .name
+                .cmp(&b.extension.manifest().name)
+                .then_with(|| a.spec.name.cmp(&b.spec.name))
+        });
+        items
+    }
+
+    /// Dispatch a slash command to an extension. Looks up the command via
+    /// [`Self::find_extension_command`] (so built-ins shadow extensions),
+    /// then calls `Extension::handle_slash_command`.
+    ///
+    /// Returns `Ok(Some(output))` on success, `Ok(None)` if the name doesn't
+    /// match any extension command (caller should treat as "unknown"), or
+    /// the extension's `Err` on failure.
+    pub async fn dispatch_extension_command(
+        &self,
+        name: &str,
+        args: &str,
+        cx: &ExtensionContext,
+    ) -> Result<Option<String>, ExtensionError> {
+        let Some(entry) = self.find_extension_command(name) else {
+            return Ok(None);
+        };
+        let output = entry.extension.handle_slash_command(cx, name, args).await?;
+        Ok(Some(output))
     }
 }
 
@@ -273,5 +385,196 @@ mod tests {
         };
         let debug = format!("{:?}", cmd);
         assert!(debug.contains("test"));
+    }
+
+    // ----------------------------------------------------------------------
+    // T3.5 — extension-contributed slash command dispatch
+    // ----------------------------------------------------------------------
+
+    use crate::core::extensions::api::{
+        Extension, ExtensionContext, ExtensionError, ExtensionManifest, SlashCommandSpec,
+    };
+    use async_trait::async_trait;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    fn ext_manifest(name: &str) -> ExtensionManifest {
+        ExtensionManifest {
+            name: name.into(),
+            version: "0.1.0".into(),
+            description: None,
+            capabilities: Default::default(),
+            exec: None,
+            env: Default::default(),
+            slash_commands: Vec::new(),
+            custom_tools: Vec::new(),
+        }
+    }
+
+    fn test_ctx() -> ExtensionContext {
+        ExtensionContext {
+            cwd: PathBuf::from("/tmp"),
+            session_id: "s".into(),
+            data_dir: PathBuf::from("/tmp"),
+        }
+    }
+
+    /// A fake extension whose `handle_slash_command` records the call and
+    /// returns a caller-configured output string.
+    struct FakeSlashExt {
+        manifest: ExtensionManifest,
+        output: String,
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait]
+    impl Extension for FakeSlashExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn handle_slash_command(
+            &self,
+            _cx: &ExtensionContext,
+            name: &str,
+            args: &str,
+        ) -> Result<String, ExtensionError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.to_string(), args.to_string()));
+            Ok(self.output.clone())
+        }
+    }
+
+    /// A built-in command must take precedence over an extension-registered
+    /// command of the same name. The extension is recorded but not routed to.
+    #[tokio::test]
+    async fn builtin_shadows_extension_command_of_same_name() {
+        let mut registry = SlashCommandRegistry::new();
+        let ext = Arc::new(FakeSlashExt {
+            manifest: ext_manifest("collider"),
+            output: "extension-ran".into(),
+            calls: Mutex::new(Vec::new()),
+        });
+        // `help` is a built-in.
+        registry.register_extension_command(
+            SlashCommandSpec {
+                name: "help".into(),
+                description: "shadow".into(),
+                usage: None,
+            },
+            ext.clone(),
+        );
+
+        // Built-in still wins on lookup.
+        assert!(registry.find("help").is_some());
+        assert!(
+            registry.find_extension_command("help").is_none(),
+            "built-in must shadow"
+        );
+
+        let routed = registry
+            .dispatch_extension_command("help", "", &test_ctx())
+            .await
+            .expect("no error");
+        assert!(routed.is_none(), "built-in shadowing must skip extension");
+        assert!(
+            ext.calls.lock().unwrap().is_empty(),
+            "extension must not be invoked when built-in shadows"
+        );
+    }
+
+    /// An unknown command (no built-in match) routes to the extension
+    /// dispatcher. The extension receives the command name and raw args.
+    #[tokio::test]
+    async fn unknown_command_routes_to_extension() {
+        let mut registry = SlashCommandRegistry::new();
+        let ext = Arc::new(FakeSlashExt {
+            manifest: ext_manifest("auto-commit"),
+            output: "committed".into(),
+            calls: Mutex::new(Vec::new()),
+        });
+        registry.register_extension_command(
+            SlashCommandSpec {
+                name: "foo".into(),
+                description: "Run foo".into(),
+                usage: None,
+            },
+            ext.clone(),
+        );
+
+        let routed = registry
+            .dispatch_extension_command("foo", "bar", &test_ctx())
+            .await
+            .expect("dispatch ok");
+        assert_eq!(routed.as_deref(), Some("committed"));
+
+        let calls = ext.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "foo");
+        assert_eq!(calls[0].1, "bar");
+    }
+
+    /// Names that the parser could never match (empty, whitespace, slash)
+    /// must be rejected at registration time so `/help` never lists a
+    /// dead-on-arrival command.
+    #[test]
+    fn register_extension_command_rejects_invalid_names() {
+        let mut registry = SlashCommandRegistry::new();
+        let ext = Arc::new(FakeSlashExt {
+            manifest: ext_manifest("ext"),
+            output: String::new(),
+            calls: Mutex::new(Vec::new()),
+        });
+
+        for bad in ["", "has space", "with/slash", "tab\there"] {
+            registry.register_extension_command(
+                SlashCommandSpec {
+                    name: bad.into(),
+                    description: "should be rejected".into(),
+                    usage: None,
+                },
+                ext.clone(),
+            );
+        }
+        assert!(
+            registry.extension_commands().is_empty(),
+            "invalid names must be rejected: {:?}",
+            registry.extension_commands()
+        );
+
+        // Sanity: a valid name still registers.
+        registry.register_extension_command(
+            SlashCommandSpec {
+                name: "valid-name".into(),
+                description: "ok".into(),
+                usage: None,
+            },
+            ext.clone(),
+        );
+        assert_eq!(registry.extension_commands().len(), 1);
+    }
+
+    #[test]
+    fn extension_commands_listed_for_help() {
+        let mut registry = SlashCommandRegistry::new();
+        let ext = Arc::new(FakeSlashExt {
+            manifest: ext_manifest("ext-a"),
+            output: String::new(),
+            calls: Mutex::new(Vec::new()),
+        });
+        registry.register_extension_command(
+            SlashCommandSpec {
+                name: "alpha".into(),
+                description: "Alpha".into(),
+                usage: None,
+            },
+            ext.clone(),
+        );
+        let listed = registry.extension_commands();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].spec.name, "alpha");
+        assert_eq!(listed[0].extension.manifest().name, "ext-a");
     }
 }

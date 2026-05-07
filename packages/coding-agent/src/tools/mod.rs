@@ -14,6 +14,13 @@ use hand_agent::types::AgentTool;
 use std::path::Path;
 
 /// Create all default tools for the given working directory.
+///
+/// NOTE: prior to the merge with origin/main this module also exposed a
+/// `create_default_tools_with_config(cwd, BashToolConfig)` variant that
+/// threaded `Settings.shell_path` into the bash tool. The bash tool was
+/// rewritten on origin/main to use the `AgentTool::simple` factory and
+/// hard-codes `/bin/bash`; the config thread-through can be reintroduced
+/// later by adding a `BashToolConfig` builder to the new `create_bash_tool`.
 pub fn create_default_tools(cwd: &Path) -> Vec<AgentTool> {
     let cwd = cwd.to_path_buf();
     vec![

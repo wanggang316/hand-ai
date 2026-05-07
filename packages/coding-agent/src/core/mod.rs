@@ -1,6 +1,8 @@
 //! Core modules for the coding agent.
 
 pub mod agent_session;
+pub mod auth_guidance;
+pub mod auth_storage;
 pub mod bash_executor;
 pub mod compaction;
 pub mod diagnostics;
@@ -9,9 +11,16 @@ pub mod export;
 pub mod extensions;
 pub mod git_utils;
 pub mod keybindings;
+pub mod model_registry;
 pub mod model_resolver;
 pub mod package_manager;
+pub mod prompt_templates;
+pub mod resource_loader;
 pub mod session_manager;
 pub mod settings;
+pub mod skills;
 pub mod slash_commands;
+pub mod source_info;
 pub mod system_prompt;
+pub mod telemetry;
+pub mod timings;

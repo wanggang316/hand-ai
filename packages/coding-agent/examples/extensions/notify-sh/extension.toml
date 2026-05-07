@@ -1,0 +1,7 @@
+name = "notify-sh"
+version = "0.1.0"
+description = "Logs every tool call to notifications.log"
+exec = ["bash", "main.sh"]
+
+[capabilities]
+after-tool-call = true
