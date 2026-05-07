@@ -408,7 +408,8 @@ impl Agent {
     /// Build the event sink that forwards to listeners.
     fn build_event_sink(&self) -> AgentEventSink {
         // Collect listeners into an Arc<Vec<...>> so the closure can own them.
-        let listeners: Arc<Vec<Box<dyn Fn(AgentEvent) + Send + Sync>>> = Arc::new(
+        type Listener = Box<dyn Fn(AgentEvent) + Send + Sync>;
+        let listeners: Arc<Vec<Listener>> = Arc::new(
             // We can't move self.listeners, so we need to wrap them.
             // Since we can't clone Box<dyn Fn>, we use a no-op if no listeners.
             Vec::new(),

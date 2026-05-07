@@ -587,9 +587,9 @@ impl Extension for SubprocessExtension {
 /// discovery of the others.
 ///
 /// A missing `root` is not an error — returns `(vec![], vec![])`.
-pub fn discover_subprocess_extensions(
-    root: &Path,
-) -> (Vec<Arc<dyn Extension>>, Vec<(PathBuf, ExtensionError)>) {
+pub type DiscoveredExtensions = (Vec<Arc<dyn Extension>>, Vec<(PathBuf, ExtensionError)>);
+
+pub fn discover_subprocess_extensions(root: &Path) -> DiscoveredExtensions {
     let mut extensions: Vec<Arc<dyn Extension>> = Vec::new();
     let mut failures: Vec<(PathBuf, ExtensionError)> = Vec::new();
 
