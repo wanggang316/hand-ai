@@ -114,6 +114,8 @@ mod tests {
             capabilities: ExtensionCapabilities::default(),
             exec: None,
             env: Default::default(),
+            slash_commands: Vec::new(),
+            custom_tools: Vec::new(),
         }
     }
 

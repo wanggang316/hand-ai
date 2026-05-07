@@ -31,6 +31,7 @@ use crate::core::extensions::manifest::load_manifest;
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
 use async_trait::async_trait;
 use futures::StreamExt;
+use hand_agent::types::{AgentTool, BoxFuture, ToolExecuteFn, ToolResult};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -57,6 +58,21 @@ pub enum ExtensionEventOut {
         context: ContextDto,
         event: ToolResultDto,
     },
+    /// Invoke a manifest-declared custom tool. The subprocess responds with
+    /// [`ExtensionEventIn::ToolResult`].
+    ExecuteCustomTool {
+        context: ContextDto,
+        tool_name: String,
+        arguments: serde_json::Value,
+        call_id: String,
+    },
+    /// Invoke a manifest-declared slash command. The subprocess responds
+    /// with [`ExtensionEventIn::SlashResult`].
+    ExecuteSlashCommand {
+        context: ContextDto,
+        command_name: String,
+        args: String,
+    },
 }
 
 /// Wire format for responses the subprocess sends back.
@@ -73,6 +89,21 @@ pub enum ExtensionEventIn {
     Replace { arguments: serde_json::Value },
     /// Subprocess-reported error; surfaces as `ExtensionError::Custom`.
     Error { message: String },
+    /// Custom tool result. `content` is the text the model sees;
+    /// `is_error` flags an error condition.
+    ToolResult {
+        content: String,
+        #[serde(default)]
+        is_error: bool,
+    },
+    /// Slash command result. `output` is what the host prints; `error` is
+    /// shown when the command failed (and surfaces as ExtensionError).
+    SlashResult {
+        #[serde(default)]
+        output: String,
+        #[serde(default)]
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,13 +164,27 @@ impl From<&ToolResultEvent> for ToolResultDto {
 
 /// A Tier 2 (subprocess) extension. Implements [`Extension`] so the host
 /// cannot tell it apart from a Tier 1 in-process extension.
+///
+/// The shared state lives in [`SubprocessInner`] behind an `Arc` so that
+/// tool execute closures (which need `'static + Send + Sync`) and slash
+/// command handlers can clone a handle to drive RPC back into the
+/// subprocess from the agent loop's tool list.
 pub struct SubprocessExtension {
+    inner: Arc<SubprocessInner>,
+}
+
+pub(crate) struct SubprocessInner {
     manifest: ExtensionManifest,
     /// Path to the directory containing `extension.toml`. Used as the cwd
     /// for the subprocess so relative `exec` paths resolve correctly.
     extension_dir: PathBuf,
     /// Lazy-spawned child process. Mutex-guarded for hook serialization.
     child: Mutex<Option<SubprocessHandle>>,
+    /// Custom tool schemas pre-parsed from `manifest.custom_tools`. Indexed
+    /// by tool name. Populated at construction; if any schema string fails
+    /// JSON parsing, [`SubprocessExtension::new`] returns an error and the
+    /// extension does not load.
+    parsed_tool_schemas: std::collections::HashMap<String, serde_json::Value>,
 }
 
 struct SubprocessHandle {
@@ -152,14 +197,42 @@ struct SubprocessHandle {
 }
 
 impl SubprocessExtension {
-    pub fn new(manifest: ExtensionManifest, extension_dir: PathBuf) -> Self {
-        SubprocessExtension {
-            manifest,
-            extension_dir,
-            child: Mutex::new(None),
+    /// Construct a new subprocess extension. Eagerly parses the JSON Schema
+    /// of every declared custom tool; if any schema string is not valid
+    /// JSON, returns an error and the extension fails to load.
+    pub fn new(
+        manifest: ExtensionManifest,
+        extension_dir: PathBuf,
+    ) -> Result<Self, ExtensionError> {
+        let mut parsed_tool_schemas = std::collections::HashMap::new();
+        for tool in &manifest.custom_tools {
+            let value: serde_json::Value =
+                serde_json::from_str(&tool.schema).map_err(|e| ExtensionError::Custom {
+                    name: manifest.name.clone(),
+                    message: format!(
+                        "custom tool {:?}: schema is not valid JSON: {e}",
+                        tool.name
+                    ),
+                })?;
+            parsed_tool_schemas.insert(tool.name.clone(), value);
         }
+        Ok(SubprocessExtension {
+            inner: Arc::new(SubprocessInner {
+                manifest,
+                extension_dir,
+                child: Mutex::new(None),
+                parsed_tool_schemas,
+            }),
+        })
     }
 
+    #[cfg(test)]
+    pub(crate) fn inner_for_test(&self) -> Arc<SubprocessInner> {
+        self.inner.clone()
+    }
+}
+
+impl SubprocessInner {
     /// Spawn the subprocess. Caller must hold the child mutex and have
     /// observed `None`.
     fn spawn_locked(&self) -> Result<SubprocessHandle, ExtensionError> {
@@ -265,11 +338,12 @@ impl SubprocessExtension {
 #[async_trait]
 impl Extension for SubprocessExtension {
     fn manifest(&self) -> &ExtensionManifest {
-        &self.manifest
+        &self.inner.manifest
     }
 
     async fn on_load(&self, cx: &ExtensionContext) -> Result<(), ExtensionError> {
         let response = self
+            .inner
             .rpc(ExtensionEventOut::OnLoad {
                 context: cx.into(),
             })
@@ -277,11 +351,11 @@ impl Extension for SubprocessExtension {
         match response {
             ExtensionEventIn::Ok | ExtensionEventIn::Continue => Ok(()),
             ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
-                name: self.manifest.name.clone(),
+                name: self.inner.manifest.name.clone(),
                 message,
             }),
             _ => Err(ExtensionError::Custom {
-                name: self.manifest.name.clone(),
+                name: self.inner.manifest.name.clone(),
                 message: "unexpected response shape for on_load".to_string(),
             }),
         }
@@ -292,11 +366,12 @@ impl Extension for SubprocessExtension {
         // the process. A subprocess that has already exited or hangs on
         // shutdown must not block session teardown.
         let _ = self
+            .inner
             .rpc(ExtensionEventOut::OnShutdown {
                 context: cx.into(),
             })
             .await;
-        let mut guard = self.child.lock().await;
+        let mut guard = self.inner.child.lock().await;
         if let Some(mut handle) = guard.take() {
             // `kill_on_drop` would also handle this, but be explicit so the
             // process is reaped before we return.
@@ -311,6 +386,7 @@ impl Extension for SubprocessExtension {
         event: &ToolCallEvent,
     ) -> Result<HookDecision, ExtensionError> {
         let response = self
+            .inner
             .rpc(ExtensionEventOut::OnBeforeToolCall {
                 context: cx.into(),
                 event: event.into(),
@@ -321,12 +397,16 @@ impl Extension for SubprocessExtension {
             ExtensionEventIn::Cancel { reason } => Ok(HookDecision::Cancel(reason)),
             ExtensionEventIn::Replace { arguments } => Ok(HookDecision::Replace(arguments)),
             ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
-                name: self.manifest.name.clone(),
+                name: self.inner.manifest.name.clone(),
                 message,
             }),
             ExtensionEventIn::Ok => Err(ExtensionError::Custom {
-                name: self.manifest.name.clone(),
+                name: self.inner.manifest.name.clone(),
                 message: "unexpected `ok` response for on_before_tool_call".to_string(),
+            }),
+            _ => Err(ExtensionError::Custom {
+                name: self.inner.manifest.name.clone(),
+                message: "unexpected response shape for on_before_tool_call".to_string(),
             }),
         }
     }
@@ -337,6 +417,7 @@ impl Extension for SubprocessExtension {
         event: &ToolResultEvent,
     ) -> Result<(), ExtensionError> {
         let response = self
+            .inner
             .rpc(ExtensionEventOut::OnAfterToolCall {
                 context: cx.into(),
                 event: event.into(),
@@ -345,19 +426,138 @@ impl Extension for SubprocessExtension {
         match response {
             ExtensionEventIn::Ok | ExtensionEventIn::Continue => Ok(()),
             ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
-                name: self.manifest.name.clone(),
+                name: self.inner.manifest.name.clone(),
                 message,
             }),
             _ => Err(ExtensionError::Custom {
-                name: self.manifest.name.clone(),
+                name: self.inner.manifest.name.clone(),
                 message: "unexpected response shape for on_after_tool_call".to_string(),
             }),
         }
     }
 
     fn slash_commands(&self) -> Vec<SlashCommandSpec> {
-        // T3.4 will wire `manifest.slash_commands` once that field exists.
-        Vec::new()
+        self.inner.manifest.slash_commands.clone()
+    }
+
+    /// Build [`AgentTool`] entries for every manifest-declared custom tool.
+    ///
+    /// Each tool's execute closure clones an `Arc<SubprocessInner>` and the
+    /// extension context so it can drive an RPC round-trip into the
+    /// subprocess from inside the agent loop's tool list.
+    fn custom_tools(&self) -> Vec<AgentTool> {
+        let mut tools = Vec::with_capacity(self.inner.manifest.custom_tools.len());
+        for spec in &self.inner.manifest.custom_tools {
+            let inner = self.inner.clone();
+            let tool_name = spec.name.clone();
+            let parameters = self
+                .inner
+                .parsed_tool_schemas
+                .get(&spec.name)
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
+
+            let execute: ToolExecuteFn = Box::new(move |call_id, args| {
+                let inner = inner.clone();
+                let tool_name = tool_name.clone();
+                let fut: BoxFuture<'static, ToolResult> = Box::pin(async move {
+                    // FIXME(F-extension-context): hand-agent's `ToolExecuteFn`
+                    // signature is `Fn(String, Value) -> BoxFuture<ToolResult>`
+                    // and does NOT carry session context. We synthesize a stub
+                    // `ExtensionContext` here so the subprocess receives
+                    // *something*, but `cwd` and `session_id` are NOT the live
+                    // session's values — they are deliberately fake sentinel
+                    // strings that show up in subprocess logs as `<ext:.../no-cwd>`
+                    // and `<ext:.../no-session>` so a misuse is loud rather
+                    // than silent. Subprocesses MUST treat these as untrusted
+                    // and not anchor file paths to `context.cwd`. Lifting this
+                    // requires extending hand-agent's `ToolExecuteFn` signature
+                    // to carry session metadata — see F20 / Phase 3.x.
+                    //
+                    // `data_dir` is the one field we can synthesize honestly:
+                    // it is deterministic per-extension (the extension's own
+                    // install dir + `data`).
+                    let cx = ExtensionContext {
+                        cwd: PathBuf::from(format!(
+                            "<ext:{}/no-cwd>",
+                            inner.manifest.name
+                        )),
+                        session_id: format!("<ext:{}/no-session>", inner.manifest.name),
+                        data_dir: inner.extension_dir.join("data"),
+                    };
+                    match inner
+                        .rpc(ExtensionEventOut::ExecuteCustomTool {
+                            context: (&cx).into(),
+                            tool_name: tool_name.clone(),
+                            arguments: args,
+                            call_id,
+                        })
+                        .await
+                    {
+                        Ok(ExtensionEventIn::ToolResult { content, is_error }) => {
+                            if is_error {
+                                ToolResult::error(content)
+                            } else {
+                                ToolResult::text(content)
+                            }
+                        }
+                        Ok(ExtensionEventIn::Error { message }) => {
+                            ToolResult::error(format!("extension error: {message}"))
+                        }
+                        Ok(_) => ToolResult::error(
+                            "extension returned unexpected response for custom tool",
+                        ),
+                        Err(e) => ToolResult::error(format!("extension error: {e}")),
+                    }
+                });
+                fut
+            });
+
+            tools.push(AgentTool::new(
+                spec.name.clone(),
+                spec.description.clone(),
+                parameters,
+                spec.name.clone(),
+                execute,
+            ));
+        }
+        tools
+    }
+
+    async fn handle_slash_command(
+        &self,
+        cx: &ExtensionContext,
+        name: &str,
+        args: &str,
+    ) -> Result<String, ExtensionError> {
+        let response = self
+            .inner
+            .rpc(ExtensionEventOut::ExecuteSlashCommand {
+                context: cx.into(),
+                command_name: name.to_string(),
+                args: args.to_string(),
+            })
+            .await?;
+        match response {
+            ExtensionEventIn::SlashResult { output, error } => {
+                if let Some(message) = error {
+                    Err(ExtensionError::Custom {
+                        name: self.inner.manifest.name.clone(),
+                        message,
+                    })
+                } else {
+                    Ok(output)
+                }
+            }
+            ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
+                name: self.inner.manifest.name.clone(),
+                message,
+            }),
+            _ => Err(ExtensionError::Custom {
+                name: self.inner.manifest.name.clone(),
+                message: "unexpected response shape for slash command".to_string(),
+            }),
+        }
     }
 }
 
@@ -392,11 +592,15 @@ pub fn discover_subprocess_extensions(
             continue;
         }
         match load_manifest(&manifest_path) {
-            Ok(manifest) => {
-                let ext: Arc<dyn Extension> =
-                    Arc::new(SubprocessExtension::new(manifest, path.clone()));
-                extensions.push(ext);
-            }
+            Ok(manifest) => match SubprocessExtension::new(manifest, path.clone()) {
+                Ok(sub) => {
+                    let ext: Arc<dyn Extension> = Arc::new(sub);
+                    extensions.push(ext);
+                }
+                Err(err) => {
+                    failures.push((manifest_path, err));
+                }
+            },
             Err(source) => {
                 failures.push((
                     manifest_path.clone(),
@@ -469,6 +673,8 @@ mod tests {
             capabilities: Default::default(),
             exec: Some(exec),
             env: Default::default(),
+            slash_commands: Vec::new(),
+            custom_tools: Vec::new(),
         }
     }
 
@@ -536,7 +742,8 @@ exec = ["/bin/true"]
 "#,
         );
         let manifest = make_manifest("hooky", vec![script.to_string_lossy().into_owned()]);
-        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf());
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
 
         let cx = ctx();
         ext.on_load(&cx).await.expect("on_load ok");
@@ -553,7 +760,8 @@ exec = ["/bin/true"]
 
         ext.on_shutdown(&cx).await.expect("on_shutdown ok");
         // After shutdown the child handle should be cleared.
-        let guard = ext.child.lock().await;
+        let inner = ext.inner_for_test();
+        let guard = inner.child.lock().await;
         assert!(guard.is_none(), "child handle cleared on shutdown");
     }
 
@@ -565,7 +773,8 @@ exec = ["/bin/true"]
             r#"  printf '{"type":"cancel","reason":"blocked"}\n'"#,
         );
         let manifest = make_manifest("blocker", vec![script.to_string_lossy().into_owned()]);
-        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf());
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
 
         let decision = ext
             .on_before_tool_call(&ctx(), &tool_call_event())
@@ -586,7 +795,8 @@ exec = ["/bin/true"]
             r#"  printf '{"type":"replace","arguments":{"foo":"bar"}}\n'"#,
         );
         let manifest = make_manifest("rewriter", vec![script.to_string_lossy().into_owned()]);
-        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf());
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
 
         let decision = ext
             .on_before_tool_call(&ctx(), &tool_call_event())
@@ -621,7 +831,8 @@ exec = ["/bin/true"]
             fs::set_permissions(&script_path, perms).unwrap();
         }
         let manifest = make_manifest("broken", vec![script_path.to_string_lossy().into_owned()]);
-        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf());
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
 
         let err = ext
             .on_before_tool_call(&ctx(), &tool_call_event())
@@ -644,7 +855,8 @@ exec = ["/bin/true"]
             r#"  printf '{"type":"error","message":"boom"}\n'"#,
         );
         let manifest = make_manifest("erroring", vec![script.to_string_lossy().into_owned()]);
-        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf());
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
 
         let err = ext
             .on_before_tool_call(&ctx(), &tool_call_event())
@@ -657,6 +869,140 @@ exec = ["/bin/true"]
             }
             other => panic!("expected Custom, got {other:?}"),
         }
+        let _ = ext.on_shutdown(&ctx()).await;
+    }
+
+    // ----------------------------------------------------------------------
+    // T3.5 — manifest-driven slash commands and custom tools
+    // ----------------------------------------------------------------------
+
+    use crate::core::extensions::api::{CustomToolSpec, SlashCommandSpec};
+
+    /// Tier-2 manifest-declared slash commands surface via `slash_commands()`.
+    #[test]
+    fn tier2_slash_commands_returned_from_manifest() {
+        let dir = TempDir::new().unwrap();
+        let mut manifest = make_manifest("greeter", vec!["/bin/true".into()]);
+        manifest.slash_commands = vec![
+            SlashCommandSpec {
+                name: "greet".into(),
+                description: "Greet the user".into(),
+                usage: Some("/greet [name]".into()),
+            },
+            SlashCommandSpec {
+                name: "wave".into(),
+                description: "Wave hello".into(),
+                usage: None,
+            },
+        ];
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let cmds = ext.slash_commands();
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0].name, "greet");
+        assert_eq!(cmds[1].name, "wave");
+    }
+
+    /// Construction fails when a custom tool's schema string isn't valid JSON.
+    #[test]
+    fn tier2_custom_tool_invalid_schema_fails_to_load() {
+        let dir = TempDir::new().unwrap();
+        let mut manifest = make_manifest("bad-schema", vec!["/bin/true".into()]);
+        manifest.custom_tools = vec![CustomToolSpec {
+            name: "broken".into(),
+            description: "Broken tool".into(),
+            schema: "this is not json".into(),
+        }];
+        let result = SubprocessExtension::new(manifest, dir.path().to_path_buf());
+        match result {
+            Err(ExtensionError::Custom { name, message }) => {
+                assert_eq!(name, "bad-schema");
+                assert!(
+                    message.contains("schema is not valid JSON"),
+                    "unexpected message: {message}"
+                );
+            }
+            Err(other) => panic!("expected Custom error, got {other:?}"),
+            Ok(_) => panic!("invalid schema should reject load"),
+        }
+    }
+
+    /// Tier-2 custom tool round-trip: the AgentTool returned by
+    /// `custom_tools()` drives an RPC into the subprocess and converts the
+    /// response into a `ToolResult`.
+    #[tokio::test]
+    async fn tier2_custom_tool_round_trip_via_subprocess() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(
+            dir.path(),
+            r#"  printf '{"type":"tool_result","content":"hello","is_error":false}\n'"#,
+        );
+        let mut manifest = make_manifest(
+            "rust-checker",
+            vec![script.to_string_lossy().into_owned()],
+        );
+        manifest.custom_tools = vec![CustomToolSpec {
+            name: "rust_check".into(),
+            description: "Run cargo check".into(),
+            schema: r#"{"type":"object","properties":{"package":{"type":"string"}}}"#.into(),
+        }];
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let tools = ext.custom_tools();
+        assert_eq!(tools.len(), 1);
+        let tool = &tools[0];
+        assert_eq!(tool.name, "rust_check");
+        // Schema parsed at load time and round-trips through AgentTool.
+        assert_eq!(tool.parameters["type"], "object");
+
+        let result = (tool.execute)("call-1".into(), serde_json::json!({})).await;
+        // Successful result: text content "hello".
+        let mut found = false;
+        for block in &result.content {
+            if let model::ToolResultContent::Text(t) = block
+                && t.text == "hello"
+            {
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "expected `hello` text content; got {:?}",
+            result.content
+        );
+
+        let _ = ext.on_shutdown(&ctx()).await;
+    }
+
+    /// Tier-2 slash command round-trip: `handle_slash_command` issues an
+    /// RPC and surfaces the subprocess's `slash_result.output`.
+    #[tokio::test]
+    async fn tier2_slash_command_round_trip_via_subprocess() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(
+            dir.path(),
+            r#"  printf '{"type":"slash_result","output":"done"}\n'"#,
+        );
+        let mut manifest = make_manifest(
+            "slasher",
+            vec![script.to_string_lossy().into_owned()],
+        );
+        manifest.slash_commands = vec![SlashCommandSpec {
+            name: "review".into(),
+            description: "Review code".into(),
+            usage: None,
+        }];
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let output = ext
+            .handle_slash_command(&ctx(), "review", "src/")
+            .await
+            .expect("slash command ok");
+        assert_eq!(output, "done");
+
         let _ = ext.on_shutdown(&ctx()).await;
     }
 }

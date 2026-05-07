@@ -6,7 +6,7 @@
 use crate::core::compaction;
 use crate::core::error::CodingAgentError;
 use crate::core::extensions::api::{
-    Extension, ExtensionContext, HookDecision, ToolCallEvent, ToolResultEvent,
+    Extension, ExtensionContext, HookDecision, SlashCommandSpec, ToolCallEvent, ToolResultEvent,
 };
 use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_before_tool_call};
 use crate::core::extensions::registry::builtin_tier1_extensions;
@@ -25,6 +25,30 @@ use std::sync::{Arc, Mutex};
 
 type EventListener = Arc<dyn Fn(AgentSessionEvent) + Send + Sync>;
 type EventListeners = Arc<Mutex<Vec<EventListener>>>;
+
+/// RAII guard that restores [`AgentSession::tools`] when dropped.
+///
+/// Used by [`AgentSession::send_message`] to make tool restoration robust
+/// against future cancellation and panics: when the host's RPC layer aborts
+/// `send_message` mid-await (e.g. via `tokio::select!` with `ctrl_c()`), the
+/// future is dropped and this guard's `Drop` runs, putting the built-in
+/// tools back exactly as they were before the call. The guard `truncate`s
+/// the appended extension-contributed tools off the tail before restoring
+/// so the session never accumulates duplicates across turns.
+struct ToolsRestoreGuard<'a> {
+    slot: &'a mut Option<Vec<AgentTool>>,
+    tools: Option<Vec<AgentTool>>,
+    keep: usize,
+}
+
+impl Drop for ToolsRestoreGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(mut tools) = self.tools.take() {
+            tools.truncate(self.keep);
+            *self.slot = Some(tools);
+        }
+    }
+}
 
 /// Events emitted by the agent session.
 #[derive(Debug, Clone)]
@@ -62,7 +86,14 @@ pub struct AgentSession {
     session_manager: SessionManager,
     settings_manager: SettingsManager,
     context: AgentContext,
-    tools: Vec<AgentTool>,
+    /// Built-in tools owned by this session.
+    ///
+    /// Wrapped in `Option` so [`Self::send_message`] can `take()` ownership for
+    /// the duration of an agent loop turn and restore via an RAII guard whose
+    /// `Drop` runs even if the future is cancelled or panics. Outside of
+    /// `send_message` the invariant is `Some(_)`; helpers that read it use
+    /// [`Self::tools`] which expects the invariant to hold.
+    tools: Option<Vec<AgentTool>>,
     client: model::Client,
     event_listeners: EventListeners,
     /// Skills discovered at construction time and advertised in the system
@@ -150,7 +181,7 @@ impl AgentSession {
             session_manager,
             settings_manager,
             context,
-            tools,
+            tools: Some(tools),
             client,
             event_listeners: Arc::new(Mutex::new(Vec::new())),
             skills: skills_discovered,
@@ -192,7 +223,7 @@ impl AgentSession {
             session_manager: SessionManager::in_memory(),
             settings_manager: SettingsManager::in_memory(),
             context,
-            tools,
+            tools: Some(tools),
             client,
             event_listeners: Arc::new(Mutex::new(Vec::new())),
             skills: Vec::new(),
@@ -252,16 +283,50 @@ impl AgentSession {
         // Create event sink for the agent loop
         let emit = self.build_event_sink();
 
-        let result = agent_loop::run_agent_loop(
+        // Merge built-in tools with extension-contributed custom tools so
+        // the model can call them through the same agent loop tool list.
+        // `AgentTool` is not `Clone` (its `execute` is a boxed closure), so
+        // we *move* the session's tools out and rely on an RAII guard
+        // (`ToolsRestoreGuard`) to restore them on scope exit. The guard's
+        // `Drop` fires on the happy path AND on cancellation/panic — without
+        // it, a cancelled `send_message` future would leak the built-in
+        // tools and the next turn would see an empty tool list.
+        let extension_tools = self.collected_custom_tools();
+        let mut owned_tools = self
+            .tools
+            .take()
+            .expect("AgentSession::tools invariant: Some outside send_message");
+        let original_len = owned_tools.len();
+        owned_tools.extend(extension_tools);
+
+        // The guard borrows `&mut self.tools` (the `Option`) but NOT `&mut self.context`.
+        // Rust's split borrows on disjoint fields permit this even across the
+        // await below.
+        let guard = ToolsRestoreGuard {
+            slot: &mut self.tools,
+            tools: Some(owned_tools),
+            keep: original_len,
+        };
+        let tools_ref: &[AgentTool] = guard
+            .tools
+            .as_deref()
+            .expect("guard tools set above");
+
+        let result_outcome = agent_loop::run_agent_loop(
             prompts,
             &mut self.context,
-            &self.tools,
+            tools_ref,
             &loop_config,
             &self.client,
             &emit,
         )
-        .await
-        .map_err(CodingAgentError::Agent)?;
+        .await;
+
+        // Explicit drop ends the borrow and restores `self.tools` here on the
+        // happy path. On cancel/panic the same Drop runs implicitly.
+        drop(guard);
+
+        let result = result_outcome.map_err(CodingAgentError::Agent)?;
 
         // Persist new messages to session
         for msg in &result.messages {
@@ -417,11 +482,48 @@ impl AgentSession {
         &self.extensions
     }
 
+    /// Built-in tools registered on this session.
+    ///
+    /// Returns an empty slice if invoked while the session is mid-`send_message`
+    /// (the tools are temporarily moved into a guard for the duration of the
+    /// agent loop). Outside of `send_message` the slice always reflects the
+    /// tools the caller passed into the constructor.
+    pub fn tools(&self) -> &[AgentTool] {
+        self.tools.as_deref().unwrap_or(&[])
+    }
+
     /// Append an extension to the dispatch chain. Useful for tests and
     /// dynamic registration scenarios that don't go through
     /// [`builtin_tier1_extensions`].
     pub fn register_extension(&mut self, ext: Arc<dyn Extension>) {
         self.extensions.push(ext);
+    }
+
+    /// Slash commands contributed by every registered extension, paired with
+    /// the contributing extension. Used by the slash-command dispatcher to
+    /// resolve a `/foo` invocation to the right extension. The list is built
+    /// fresh on each call; for v1 it's recomputed lazily because the cost is
+    /// negligible (extensions are not added mid-session in practice).
+    pub fn collected_slash_commands(&self) -> Vec<(SlashCommandSpec, Arc<dyn Extension>)> {
+        let mut out = Vec::new();
+        for ext in &self.extensions {
+            for spec in ext.slash_commands() {
+                out.push((spec, ext.clone()));
+            }
+        }
+        out
+    }
+
+    /// Custom AgentTools contributed by every registered extension, flattened
+    /// into one list ready to merge with the session's built-in tools. Tier 1
+    /// extensions return tools backed by Rust closures; Tier 2 extensions
+    /// return tools whose execute fn drives an RPC into the subprocess.
+    pub fn collected_custom_tools(&self) -> Vec<AgentTool> {
+        let mut out = Vec::new();
+        for ext in &self.extensions {
+            out.extend(ext.custom_tools());
+        }
+        out
     }
 
     /// Build the [`ExtensionContext`] passed to hooks for this session.
@@ -738,6 +840,8 @@ mod tests {
             capabilities: ExtensionCapabilities::default(),
             exec: None,
             env: Default::default(),
+            slash_commands: Vec::new(),
+            custom_tools: Vec::new(),
         }
     }
 
@@ -797,6 +901,104 @@ mod tests {
 
         assert_eq!(session.extensions().len(), 1);
         assert_eq!(session.extensions()[0].manifest().name, "recorder");
+    }
+
+    /// With no extensions registered, `collected_slash_commands()` returns
+    /// an empty list.
+    #[test]
+    fn collected_slash_commands_empty_when_no_extensions() {
+        let session = AgentSession::in_memory(test_model(), vec![]);
+        assert!(session.collected_slash_commands().is_empty());
+    }
+
+    /// With no extensions registered, `collected_custom_tools()` returns an
+    /// empty list.
+    #[test]
+    fn collected_custom_tools_empty_when_no_extensions() {
+        let session = AgentSession::in_memory(test_model(), vec![]);
+        assert!(session.collected_custom_tools().is_empty());
+    }
+
+    /// A Tier-1 extension that contributes a single slash command surfaces
+    /// it via `collected_slash_commands()`, paired with the contributing
+    /// extension Arc.
+    #[test]
+    fn tier1_extension_contributes_slash_command() {
+        struct CmdExt {
+            manifest: ExtensionManifest,
+        }
+        #[async_trait]
+        impl Extension for CmdExt {
+            fn manifest(&self) -> &ExtensionManifest {
+                &self.manifest
+            }
+            fn slash_commands(&self) -> Vec<crate::core::extensions::api::SlashCommandSpec> {
+                vec![crate::core::extensions::api::SlashCommandSpec {
+                    name: "commit-now".into(),
+                    description: "Commit pending changes".into(),
+                    usage: None,
+                }]
+            }
+        }
+
+        let mut session = AgentSession::in_memory(test_model(), vec![]);
+        session.register_extension(Arc::new(CmdExt {
+            manifest: ext_manifest("auto-commit"),
+        }));
+
+        let collected = session.collected_slash_commands();
+        assert_eq!(collected.len(), 1);
+        let (spec, ext) = &collected[0];
+        assert_eq!(spec.name, "commit-now");
+        assert_eq!(ext.manifest().name, "auto-commit");
+    }
+
+    /// A Tier-1 extension that contributes a single custom tool surfaces it
+    /// via `collected_custom_tools()`. The tool's execute fn is invokable
+    /// and returns the expected result.
+    #[tokio::test]
+    async fn tier1_extension_contributes_custom_tool() {
+        struct ToolExt {
+            manifest: ExtensionManifest,
+        }
+        #[async_trait]
+        impl Extension for ToolExt {
+            fn manifest(&self) -> &ExtensionManifest {
+                &self.manifest
+            }
+            fn custom_tools(&self) -> Vec<AgentTool> {
+                let execute: hand_agent::types::ToolExecuteFn = Box::new(|_id, _args| {
+                    Box::pin(
+                        async move { hand_agent::types::ToolResult::text("custom tool ran") },
+                    )
+                });
+                vec![AgentTool::new(
+                    "echo",
+                    "Echo a string",
+                    serde_json::json!({"type":"object","properties":{}}),
+                    "Echo",
+                    execute,
+                )]
+            }
+        }
+
+        let mut session = AgentSession::in_memory(test_model(), vec![]);
+        session.register_extension(Arc::new(ToolExt {
+            manifest: ext_manifest("echoer"),
+        }));
+
+        let tools = session.collected_custom_tools();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+
+        let result = (tools[0].execute)("c1".into(), serde_json::json!({})).await;
+        let mut text = String::new();
+        for block in &result.content {
+            if let model::ToolResultContent::Text(t) = block {
+                text = t.text.clone();
+            }
+        }
+        assert_eq!(text, "custom tool ran");
     }
 
     #[test]
@@ -987,6 +1189,68 @@ mod tests {
         );
         assert_eq!(after_calls[0].tool_name, "noop");
         assert!(after_calls[0].success, "noop tool should report success");
+    }
+
+    /// Cancel-safety regression: when the future returned by `send_message`
+    /// is dropped mid-flight (the typical cancellation path the host RPC
+    /// layer uses via `tokio::select!`), the session's built-in tools must
+    /// be restored. Without the [`ToolsRestoreGuard`] this test fails:
+    /// `tools()` returns `&[]` because the manual restore never ran.
+    #[tokio::test]
+    async fn send_message_cancel_restores_tools() {
+        /// Provider whose stream pends forever — guarantees the agent loop
+        /// is awaiting when we cancel `send_message`.
+        struct PendingForeverProvider;
+        impl ApiProvider for PendingForeverProvider {
+            fn stream(
+                &self,
+                _model: model::Model,
+                _context: Context,
+                _options: Option<StreamOptions>,
+            ) -> AssistantMessageEventStream<'static> {
+                Box::pin(async_stream::stream! {
+                    let () = std::future::pending().await;
+                    yield AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        message: assistant_text_message("unreachable"),
+                    };
+                })
+            }
+            fn stream_simple(
+                &self,
+                model: model::Model,
+                context: Context,
+                options: Option<SimpleStreamOptions>,
+            ) -> AssistantMessageEventStream<'static> {
+                self.stream(model, context, options.map(|o| o.base))
+            }
+        }
+
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PendingForeverProvider),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![noop_tool()], client);
+        assert_eq!(session.tools().len(), 1, "precondition: one built-in tool");
+
+        // Drive `send_message` to its first await on the provider stream,
+        // then cancel by dropping the future via `timeout`. The
+        // `ToolsRestoreGuard`'s `Drop` must restore `self.tools`.
+        let send_fut = session.send_message("hi");
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_millis(50), send_fut).await;
+        assert!(outcome.is_err(), "send_message should have been cancelled by timeout");
+
+        assert_eq!(
+            session.tools().len(),
+            1,
+            "tools must be restored to their original state after cancel"
+        );
+        assert_eq!(session.tools()[0].name, "noop");
     }
 
     #[tokio::test]

@@ -41,6 +41,15 @@ pub struct ExtensionManifest {
     /// Tier 2 only: extra environment variables for the subprocess.
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Slash commands declared by this extension. Tier 1 extensions usually
+    /// override `Extension::slash_commands()` directly; Tier 2 extensions
+    /// declare them here in `extension.toml`.
+    #[serde(default)]
+    pub slash_commands: Vec<SlashCommandSpec>,
+    /// Custom AgentTools declared by this extension (Tier 2 only — Tier 1
+    /// builds tools in code via `Extension::custom_tools()`).
+    #[serde(default)]
+    pub custom_tools: Vec<CustomToolSpec>,
 }
 
 /// Which extension hooks/contributions the extension provides.
@@ -99,11 +108,27 @@ pub enum HookDecision {
 
 /// What a slash command extension declares.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SlashCommandSpec {
     pub name: String,
     pub description: String,
     /// Optional usage hint shown in /help.
+    #[serde(default)]
     pub usage: Option<String>,
+}
+
+/// Manifest declaration for a custom AgentTool contributed by a Tier 2
+/// extension. Tier 1 extensions construct `AgentTool` values directly and
+/// don't go through this shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomToolSpec {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema for the tool parameters, encoded as a string. Parsed into
+    /// `serde_json::Value` at extension load time; if the string is not valid
+    /// JSON, the extension fails to load.
+    pub schema: String,
 }
 
 /// Per-extension load-time and per-event context. Provided by the host.
@@ -172,6 +197,24 @@ pub trait Extension: Send + Sync {
     /// Custom AgentTools this extension contributes. Default: none.
     fn custom_tools(&self) -> Vec<AgentTool> {
         Vec::new()
+    }
+
+    /// Invoke an extension-contributed slash command. The default
+    /// implementation returns an error so extensions only have to override
+    /// it when they actually contribute commands.
+    ///
+    /// `name` is the command name without the leading `/`. `args` is the raw
+    /// argument string after the command name.
+    async fn handle_slash_command(
+        &self,
+        _cx: &ExtensionContext,
+        name: &str,
+        _args: &str,
+    ) -> Result<String, ExtensionError> {
+        Err(ExtensionError::Custom {
+            name: self.manifest().name.clone(),
+            message: format!("slash command {name} not implemented"),
+        })
     }
 }
 
@@ -256,6 +299,8 @@ mod tests {
                 capabilities: ExtensionCapabilities::default(),
                 exec: None,
                 env: Default::default(),
+                slash_commands: Vec::new(),
+                custom_tools: Vec::new(),
             },
         };
         let cx = ctx();

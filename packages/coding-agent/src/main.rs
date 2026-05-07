@@ -261,6 +261,7 @@ async fn handle_slash_command(
 
         "/help" | "/h" => {
             print_help();
+            print_extension_commands(session);
         }
 
         "/model" => {
@@ -438,10 +439,35 @@ async fn handle_slash_command(
         }
 
         _ => {
-            println!(
-                "\x1b[33mUnknown command: {}. Type /help for available commands.\x1b[0m",
-                input
-            );
+            // Try routing to an extension-contributed slash command before
+            // declaring the input unknown. Strip the leading slash from the
+            // command name; `args` is already the raw remainder.
+            let bare = command.strip_prefix('/').unwrap_or(command);
+            let mut registry = hand_coding_agent::SlashCommandRegistry::new();
+            for (spec, ext) in session.collected_slash_commands() {
+                registry.register_extension_command(spec, ext);
+            }
+            let cx = session.extension_context();
+            match registry
+                .dispatch_extension_command(bare, args, &cx)
+                .await
+            {
+                Ok(Some(output)) => {
+                    println!("{}", output);
+                }
+                Ok(None) => {
+                    println!(
+                        "\x1b[33mUnknown command: {}. Type /help for available commands.\x1b[0m",
+                        input
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "\x1b[31mExtension command failed: {}\x1b[0m",
+                        e
+                    );
+                }
+            }
         }
     }
 
@@ -530,6 +556,41 @@ fn print_welcome(session: &AgentSession) {
     );
     println!("Session: {}", session.session_id());
     println!("Type \x1b[1m/help\x1b[0m for commands, \x1b[1m/quit\x1b[0m to exit.\n");
+}
+
+/// Print extension-contributed slash commands grouped by their owning
+/// extension. No-ops if no extensions are registered or none contribute
+/// any slash commands.
+fn print_extension_commands(session: &AgentSession) {
+    let collected = session.collected_slash_commands();
+    if collected.is_empty() {
+        return;
+    }
+    // Group by extension name preserving registration order within a group.
+    let mut groups: std::collections::BTreeMap<String, Vec<&hand_coding_agent::core::extensions::api::SlashCommandSpec>> =
+        std::collections::BTreeMap::new();
+    for (spec, ext) in &collected {
+        groups
+            .entry(ext.manifest().name.clone())
+            .or_default()
+            .push(spec);
+    }
+    println!();
+    println!("\x1b[1mExtensions:\x1b[0m");
+    for (ext_name, specs) in &groups {
+        println!("  [{}]", ext_name);
+        for spec in specs {
+            let usage = spec.usage.as_deref().unwrap_or("");
+            if usage.is_empty() {
+                println!("    /{:<14}  {}", spec.name, spec.description);
+            } else {
+                println!(
+                    "    /{:<14}  {} ({})",
+                    spec.name, spec.description, usage
+                );
+            }
+        }
+    }
 }
 
 fn print_help() {

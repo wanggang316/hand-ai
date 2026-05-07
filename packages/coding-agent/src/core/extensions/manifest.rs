@@ -182,6 +182,46 @@ version = "0.1"
         }
     }
 
+    /// T3.5: a manifest carrying `[[slash_commands]]` and `[[custom_tools]]`
+    /// round-trips through the TOML deserializer and surfaces both as
+    /// populated `Vec` fields. Schemas are kept as raw strings; semantic
+    /// JSON validation happens at `SubprocessExtension::new` time.
+    #[test]
+    fn parses_manifest_with_slash_commands_and_custom_tools() {
+        let raw = r#"
+name = "fixture"
+version = "0.1.0"
+
+[[slash-commands]]
+name = "review"
+description = "Run code review"
+usage = "/review [file]"
+
+[[slash-commands]]
+name = "ping"
+description = "Ping the extension"
+
+[[custom-tools]]
+name = "rust_check"
+description = "Run cargo check on the project"
+schema = """
+{ "type": "object", "properties": { "package": { "type": "string" } } }
+"""
+"#;
+        let manifest = parse_manifest_str(raw).expect("manifest parses");
+        assert_eq!(manifest.slash_commands.len(), 2);
+        assert_eq!(manifest.slash_commands[0].name, "review");
+        assert_eq!(
+            manifest.slash_commands[0].usage.as_deref(),
+            Some("/review [file]")
+        );
+        assert_eq!(manifest.slash_commands[1].name, "ping");
+        assert!(manifest.slash_commands[1].usage.is_none());
+        assert_eq!(manifest.custom_tools.len(), 1);
+        assert_eq!(manifest.custom_tools[0].name, "rust_check");
+        assert!(manifest.custom_tools[0].schema.contains("\"package\""));
+    }
+
     #[test]
     fn loads_manifest_from_disk() {
         use tempfile::TempDir;
