@@ -5,8 +5,11 @@
 //!
 //! - **Unix**: listens for `SIGWINCH` via `tokio::signal::unix`. On each
 //!   signal, queries `crossterm::terminal::size()` and forwards.
-//! - **Windows**: polls `crossterm::event::poll` and forwards
-//!   `Event::Resize(cols, rows)`.
+//! - **Windows**: polls `crossterm::terminal::size()` periodically and emits
+//!   when the (cols, rows) tuple changes. We deliberately avoid
+//!   `crossterm::event::read()` here because it drains every console event
+//!   (keys, mouse, focus) from the same handle the stdin reader is using —
+//!   on Windows that would silently steal user keystrokes.
 //! - **Other**: returns an empty receiver — no events ever arrive.
 //!
 //! The watcher exits when `shutdown` flips to `true` or the receiver is
@@ -63,34 +66,38 @@ fn spawn_watcher(tx: mpsc::UnboundedSender<(u16, u16)>, mut shutdown: watch::Rec
 fn spawn_watcher(tx: mpsc::UnboundedSender<(u16, u16)>, mut shutdown: watch::Receiver<bool>) {
     use std::time::Duration;
 
-    use crossterm::event::{Event, poll, read};
+    // Windows has no SIGWINCH equivalent that's accessible without claiming
+    // the console event handle. The previous implementation called
+    // `crossterm::event::read()`, which consumes ALL console events — keys,
+    // mouse, focus — from the same handle the stdin reader uses. Two
+    // consumers on one handle silently lose keystrokes.
+    //
+    // Poll `terminal::size()` instead: it's cheap, doesn't consume events,
+    // and a 200ms cadence is well below human perception for resize.
+    const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
     tokio::spawn(async move {
+        let (mut last_cols, mut last_rows) =
+            crossterm::terminal::size().unwrap_or((0, 0));
         loop {
-            if *shutdown.borrow() {
-                return;
-            }
-
-            // crossterm's poll/read are blocking — defer to a thread so the
-            // tokio runtime stays responsive.
-            let polled = tokio::task::spawn_blocking(|| match poll(Duration::from_millis(50)) {
-                Ok(true) => read().ok(),
-                _ => None,
-            })
-            .await;
-
-            match polled {
-                Ok(Some(Event::Resize(cols, rows))) => {
-                    if tx.send((cols, rows)).is_err() {
+            tokio::select! {
+                biased;
+                res = shutdown.changed() => {
+                    if res.is_err() || *shutdown.borrow() {
                         return;
                     }
                 }
-                Ok(_) => {}
-                Err(_) => return,
-            }
-
-            if shutdown.has_changed().unwrap_or(true) && *shutdown.borrow() {
-                return;
+                _ = tokio::time::sleep(POLL_INTERVAL) => {
+                    if let Ok((cols, rows)) = crossterm::terminal::size()
+                        && (cols, rows) != (last_cols, last_rows)
+                    {
+                        last_cols = cols;
+                        last_rows = rows;
+                        if tx.send((cols, rows)).is_err() {
+                            return;
+                        }
+                    }
+                }
             }
         }
     });
