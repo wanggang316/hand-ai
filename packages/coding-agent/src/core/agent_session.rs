@@ -21,7 +21,7 @@ type EventListeners = Arc<Mutex<Vec<EventListener>>>;
 #[derive(Debug, Clone)]
 pub enum AgentSessionEvent {
     /// Forwarded agent event.
-    Agent(AgentEvent),
+    Agent(Box<AgentEvent>),
     /// Compaction started.
     CompactionStart,
     /// Compaction completed.
@@ -343,7 +343,7 @@ impl AgentSession {
     fn build_event_sink(&self) -> AgentEventSink {
         let listeners = Arc::clone(&self.event_listeners);
         Arc::new(move |event: AgentEvent| {
-            Self::emit_to_listeners(&listeners, AgentSessionEvent::Agent(event));
+            Self::emit_to_listeners(&listeners, AgentSessionEvent::Agent(Box::new(event)));
         })
     }
 
@@ -421,7 +421,7 @@ mod tests {
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            AgentSessionEvent::Agent(AgentEvent::AgentStart) => {}
+            AgentSessionEvent::Agent(e) if matches!(**e, AgentEvent::AgentStart) => {}
             other => panic!("unexpected event: {other:?}"),
         }
     }

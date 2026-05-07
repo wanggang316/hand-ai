@@ -143,7 +143,7 @@ mod tests {
         std::fs::write(&file, "hello world").unwrap();
 
         let result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "world",
@@ -163,7 +163,7 @@ mod tests {
         std::fs::write(&file, "hello").unwrap();
 
         let result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "nonexistent",
@@ -181,7 +181,7 @@ mod tests {
         std::fs::write(&file, "aaa bbb aaa").unwrap();
 
         let result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "aaa",
@@ -199,7 +199,7 @@ mod tests {
         std::fs::write(&file, "aaa bbb aaa").unwrap();
 
         let _result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "aaa",
@@ -228,7 +228,7 @@ mod tests {
         std::fs::write(&file, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
 
         let _result = execute_edit(
-            &dir.path().to_path_buf(),
+            dir.path(),
             json!({
                 "file_path": file.to_str().unwrap(),
                 "old_string": "    println!(\"hello\");",

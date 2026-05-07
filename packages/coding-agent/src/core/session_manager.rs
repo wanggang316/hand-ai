@@ -24,7 +24,7 @@ pub enum SessionEntry {
     Session(SessionHeader),
     Message {
         id: String,
-        message: Message,
+        message: Box<Message>,
         timestamp: i64,
     },
     ModelChange {
@@ -168,7 +168,7 @@ impl SessionManager {
         let id = generate_entry_id();
         let entry = SessionEntry::Message {
             id: id.clone(),
-            message,
+            message: Box::new(message),
             timestamp: Utc::now().timestamp_millis(),
         };
         self.entries.push(entry);
@@ -269,7 +269,7 @@ impl SessionManager {
                         continue;
                     }
                 }
-                messages.push(message.clone());
+                messages.push((**message).clone());
             }
         }
 

@@ -33,6 +33,7 @@ pub fn test_model() -> Model {
         max_tokens: 4096,
         headers: None,
         compat: None,
+        thinking_level_map: None,
     }
 }
 
@@ -43,6 +44,9 @@ pub fn test_assistant_message(text: &str) -> AssistantMessage {
         api: Api::OpenAICompletions,
         provider: Provider::OpenAI,
         model: "test-model".into(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
         error_message: None,
@@ -63,6 +67,9 @@ pub fn test_assistant_message_with_tool_call(
         api: Api::OpenAICompletions,
         provider: Provider::OpenAI,
         model: "test-model".into(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
         usage: Usage::default(),
         stop_reason: StopReason::ToolUse,
         error_message: None,
@@ -70,7 +77,9 @@ pub fn test_assistant_message_with_tool_call(
     }
 }
 
-pub fn test_assistant_message_with_tool_calls(calls: Vec<(&str, &str, serde_json::Value)>) -> AssistantMessage {
+pub fn test_assistant_message_with_tool_calls(
+    calls: Vec<(&str, &str, serde_json::Value)>,
+) -> AssistantMessage {
     let content = calls
         .into_iter()
         .map(|(name, id, args)| AssistantContentBlock::ToolCall(ToolCall::new(id, name, args)))
@@ -81,6 +90,9 @@ pub fn test_assistant_message_with_tool_calls(calls: Vec<(&str, &str, serde_json
         api: Api::OpenAICompletions,
         provider: Provider::OpenAI,
         model: "test-model".into(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
         usage: Usage::default(),
         stop_reason: StopReason::ToolUse,
         error_message: None,

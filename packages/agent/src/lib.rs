@@ -15,9 +15,7 @@ pub mod agent_loop;
 pub mod error;
 pub mod types;
 
-pub use agent::{
-    AbortHandle, Agent, AgentOptions, IntoPromptInput, Listener, SubscriptionHandle,
-};
+pub use agent::{AbortHandle, Agent, AgentOptions, IntoPromptInput, Listener, SubscriptionHandle};
 pub use agent_loop::{
     AgentEventSink, AgentLoopResult, run_agent_loop, run_agent_loop_continue,
     run_agent_loop_with_messages,

@@ -213,7 +213,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = execute_grep(&dir.path().to_path_buf(), json!({"pattern": "hello"}));
+        let result = execute_grep(dir.path(), json!({"pattern": "hello"}));
         let text = get_text(&result);
         assert!(text.contains("hello"));
     }
@@ -223,10 +223,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("test.txt"), "hello world").unwrap();
 
-        let result = execute_grep(
-            &dir.path().to_path_buf(),
-            json!({"pattern": "nonexistent_xyz_12345"}),
-        );
+        let result = execute_grep(dir.path(), json!({"pattern": "nonexistent_xyz_12345"}));
         let text = get_text(&result);
         assert!(text.contains("No matches") || text.is_empty());
     }
@@ -234,7 +231,7 @@ mod tests {
     #[test]
     fn test_grep_missing_pattern() {
         let dir = TempDir::new().unwrap();
-        let result = execute_grep(&dir.path().to_path_buf(), json!({}));
+        let result = execute_grep(dir.path(), json!({}));
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
     }

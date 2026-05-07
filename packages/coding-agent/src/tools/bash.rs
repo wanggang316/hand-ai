@@ -79,8 +79,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_echo() {
         let dir = TempDir::new().unwrap();
-        let result =
-            execute_bash(&dir.path().to_path_buf(), json!({"command": "echo hello"})).await;
+        let result = execute_bash(dir.path(), json!({"command": "echo hello"})).await;
         let text = get_text(&result);
         assert!(text.contains("hello"));
     }
@@ -88,7 +87,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_exit_code() {
         let dir = TempDir::new().unwrap();
-        let result = execute_bash(&dir.path().to_path_buf(), json!({"command": "exit 1"})).await;
+        let result = execute_bash(dir.path(), json!({"command": "exit 1"})).await;
         let text = get_text(&result);
         assert!(text.contains("Exit code: 1"));
     }
@@ -96,7 +95,7 @@ mod tests {
     #[tokio::test]
     async fn test_bash_missing_command() {
         let dir = TempDir::new().unwrap();
-        let result = execute_bash(&dir.path().to_path_buf(), json!({})).await;
+        let result = execute_bash(dir.path(), json!({})).await;
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
     }

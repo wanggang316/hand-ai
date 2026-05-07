@@ -100,8 +100,7 @@ async fn single_turn_text() {
 
 #[tokio::test]
 async fn single_turn_tool_call() {
-    let client =
-        setup_client_with_tool("echo", serde_json::json!({"message": "test"}), "Done");
+    let client = setup_client_with_tool("echo", serde_json::json!({"message": "test"}), "Done");
     let (emit, events) = collecting_event_sink();
     let cancel = CancellationToken::new();
     let mut context = AgentContext::default();
@@ -128,14 +127,16 @@ async fn single_turn_tool_call() {
     );
     assert!(evs.iter().any(|e| matches!(
         e,
-        AgentEvent::ToolExecutionEnd { is_error: false, .. }
+        AgentEvent::ToolExecutionEnd {
+            is_error: false,
+            ..
+        }
     )));
 }
 
 #[tokio::test]
 async fn loop_continues_until_assistant_stops() {
-    let client =
-        setup_client_with_tool("echo", serde_json::json!({"message": "hi"}), "All done");
+    let client = setup_client_with_tool("echo", serde_json::json!({"message": "hi"}), "All done");
     let (emit, _events) = collecting_event_sink();
     let cancel = CancellationToken::new();
     let mut context = AgentContext::default();
@@ -179,16 +180,12 @@ async fn error_response_emits_terminal_events() {
     .unwrap();
 
     let evs = events.lock().unwrap();
-    assert!(
-        evs.iter()
-            .any(|e| matches!(e, AgentEvent::AgentEnd { .. }))
-    );
+    assert!(evs.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
     // error message lands as a final assistant message in the transcript
-    let final_assistant_has_error =
-        context.messages.iter().rev().find_map(|m| match m {
-            Message::Assistant(a) => Some(a.error_message.is_some()),
-            _ => None,
-        });
+    let final_assistant_has_error = context.messages.iter().rev().find_map(|m| match m {
+        Message::Assistant(a) => Some(a.error_message.is_some()),
+        _ => None,
+    });
     assert_eq!(final_assistant_has_error, Some(true));
 }
 
@@ -262,16 +259,15 @@ async fn tool_not_found_emits_error_result() {
     .unwrap();
 
     let evs = events.lock().unwrap();
-    let has_error = evs.iter().any(|e| {
-        matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })
-    });
+    let has_error = evs
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. }));
     assert!(has_error);
 }
 
 #[tokio::test]
 async fn before_tool_call_blocks() {
-    let client =
-        setup_client_with_tool("echo", serde_json::json!({"message": "test"}), "Done");
+    let client = setup_client_with_tool("echo", serde_json::json!({"message": "test"}), "Done");
     let (emit, events) = collecting_event_sink();
     let cancel = CancellationToken::new();
     let mut context = AgentContext::default();
@@ -289,9 +285,17 @@ async fn before_tool_call_blocks() {
     let tools = vec![echo_tool()];
     let prompt = vec![Message::User(UserMessage::new_text("Use echo"))];
 
-    run_agent_loop(prompt, &mut context, &tools, &config, &client, &emit, &cancel)
-        .await
-        .unwrap();
+    run_agent_loop(
+        prompt,
+        &mut context,
+        &tools,
+        &config,
+        &client,
+        &emit,
+        &cancel,
+    )
+    .await
+    .unwrap();
 
     let evs = events.lock().unwrap();
     let has_blocked = evs
@@ -392,9 +396,17 @@ async fn parallel_tools_overlap_in_wall_clock() {
     let prompt = vec![Message::User(UserMessage::new_text("go"))];
 
     let start = Instant::now();
-    run_agent_loop(prompt, &mut context, &tools, &config, &client, &emit, &cancel)
-        .await
-        .unwrap();
+    run_agent_loop(
+        prompt,
+        &mut context,
+        &tools,
+        &config,
+        &client,
+        &emit,
+        &cancel,
+    )
+    .await
+    .unwrap();
     let elapsed = start.elapsed();
 
     // Two 60ms sleeps overlapping should finish in ~60ms; allow generous margin.
@@ -428,9 +440,17 @@ async fn parallel_tool_end_arrives_in_completion_order() {
     config.tool_execution = ToolExecutionMode::Parallel;
 
     let prompt = vec![Message::User(UserMessage::new_text("go"))];
-    run_agent_loop(prompt, &mut context, &tools, &config, &client, &emit, &cancel)
-        .await
-        .unwrap();
+    run_agent_loop(
+        prompt,
+        &mut context,
+        &tools,
+        &config,
+        &client,
+        &emit,
+        &cancel,
+    )
+    .await
+    .unwrap();
 
     let evs = events.lock().unwrap();
     let end_order: Vec<&str> = evs
@@ -441,7 +461,8 @@ async fn parallel_tool_end_arrives_in_completion_order() {
         })
         .collect();
     assert_eq!(
-        end_order, vec!["slow_b", "slow_a"],
+        end_order,
+        vec!["slow_b", "slow_a"],
         "tool_execution_end must arrive in completion order"
     );
 
@@ -480,9 +501,17 @@ async fn sequential_tools_run_in_series() {
     let prompt = vec![Message::User(UserMessage::new_text("go"))];
 
     let start = Instant::now();
-    run_agent_loop(prompt, &mut context, &tools, &config, &client, &emit, &cancel)
-        .await
-        .unwrap();
+    run_agent_loop(
+        prompt,
+        &mut context,
+        &tools,
+        &config,
+        &client,
+        &emit,
+        &cancel,
+    )
+    .await
+    .unwrap();
     let elapsed = start.elapsed();
 
     // Sequential 2x50ms ≥ 100ms. Allow up to 250ms for CI slack.
@@ -515,9 +544,17 @@ async fn per_tool_sequential_downgrades_batch() {
     let prompt = vec![Message::User(UserMessage::new_text("go"))];
 
     let start = Instant::now();
-    run_agent_loop(prompt, &mut context, &tools, &config, &client, &emit, &cancel)
-        .await
-        .unwrap();
+    run_agent_loop(
+        prompt,
+        &mut context,
+        &tools,
+        &config,
+        &client,
+        &emit,
+        &cancel,
+    )
+    .await
+    .unwrap();
     let elapsed = start.elapsed();
     assert!(
         elapsed >= Duration::from_millis(75),
@@ -562,7 +599,14 @@ async fn all_tools_terminate_breaks_loop() {
     let evs = events.lock().unwrap();
     let assistant_message_ends = evs
         .iter()
-        .filter(|e| matches!(e, AgentEvent::MessageEnd { message: Message::Assistant(_) }))
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageEnd {
+                    message: Message::Assistant(_)
+                }
+            )
+        })
         .count();
     assert_eq!(
         assistant_message_ends, 1,
@@ -609,21 +653,31 @@ async fn partial_terminate_does_not_break_loop() {
     let tool_ends: Vec<_> = evs
         .iter()
         .filter_map(|e| match e {
-            AgentEvent::ToolExecutionEnd { tool_name, result, .. } => {
-                Some((tool_name.clone(), result.terminate))
-            }
+            AgentEvent::ToolExecutionEnd {
+                tool_name, result, ..
+            } => Some((tool_name.clone(), result.terminate)),
             _ => None,
         })
         .collect();
     assert_eq!(tool_ends.len(), 2, "expected two tool_execution_end events");
     let terminate_count = tool_ends.iter().filter(|(_, t)| *t == Some(true)).count();
-    assert_eq!(terminate_count, 1, "exactly one tool result should have terminate=true");
+    assert_eq!(
+        terminate_count, 1,
+        "exactly one tool result should have terminate=true"
+    );
 
     // The loop must have produced two assistant messages: the tool-call turn
     // and the post-tool follow-up turn.
     let assistant_ends = evs
         .iter()
-        .filter(|e| matches!(e, AgentEvent::MessageEnd { message: Message::Assistant(_) }))
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageEnd {
+                    message: Message::Assistant(_)
+                }
+            )
+        })
         .count();
     assert_eq!(
         assistant_ends, 2,
@@ -701,10 +755,7 @@ async fn cancellation_during_stream_emits_aborted() {
     );
 
     let evs = events.lock().unwrap();
-    assert!(
-        evs.iter()
-            .any(|e| matches!(e, AgentEvent::AgentEnd { .. }))
-    );
+    assert!(evs.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
     let last_assistant_aborted = context.messages.iter().rev().find_map(|m| match m {
         Message::Assistant(a) => Some(a.stop_reason == model::StopReason::Aborted),
         _ => None,
@@ -740,11 +791,25 @@ async fn pre_stream_cancel_emits_message_start_and_end() {
     let evs = events.lock().unwrap();
     let assistant_starts = evs
         .iter()
-        .filter(|e| matches!(e, AgentEvent::MessageStart { message: Message::Assistant(_) }))
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageStart {
+                    message: Message::Assistant(_)
+                }
+            )
+        })
         .count();
     let assistant_ends = evs
         .iter()
-        .filter(|e| matches!(e, AgentEvent::MessageEnd { message: Message::Assistant(_) }))
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::MessageEnd {
+                    message: Message::Assistant(_)
+                }
+            )
+        })
         .count();
     assert_eq!(
         assistant_starts, 1,
@@ -793,7 +858,9 @@ async fn schema_validation_rejects_bad_args() {
 
     let evs = events.lock().unwrap();
     let invalid = evs.iter().any(|e| match e {
-        AgentEvent::ToolExecutionEnd { is_error, result, .. } => {
+        AgentEvent::ToolExecutionEnd {
+            is_error, result, ..
+        } => {
             *is_error
                 && matches!(&result.content[..], [model::ToolResultContent::Text(t)]
                     if t.text.contains("Invalid arguments"))
@@ -876,9 +943,17 @@ async fn after_tool_call_overrides_result() {
     }));
 
     let prompt = vec![Message::User(UserMessage::new_text("go"))];
-    run_agent_loop(prompt, &mut context, &tools, &config, &client, &emit, &cancel)
-        .await
-        .unwrap();
+    run_agent_loop(
+        prompt,
+        &mut context,
+        &tools,
+        &config,
+        &client,
+        &emit,
+        &cancel,
+    )
+    .await
+    .unwrap();
 
     let evs = events.lock().unwrap();
     let saw_override = evs.iter().any(|e| match e {

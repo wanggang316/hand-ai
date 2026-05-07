@@ -39,6 +39,9 @@ impl ApiProvider for SlowProvider {
                 api: Api::OpenAICompletions,
                 provider: Provider::OpenAI,
                 model: "demo".into(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
                 usage: Usage::default(),
                 stop_reason: StopReason::Stop,
                 error_message: None,
@@ -78,6 +81,7 @@ fn demo_model() -> Model {
         max_tokens: 1024,
         headers: None,
         compat: None,
+        thinking_level_map: None,
     }
 }
 
@@ -123,10 +127,13 @@ async fn main() {
 
     let last_msg = agent.messages().last().cloned();
     println!("prompt outcome: {:?}", outcome.map(|r| r.messages.len()));
-    println!("last message: {:?}", last_msg.map(|m| match m {
-        model::Message::Assistant(a) => format!("Assistant(stop_reason={:?})", a.stop_reason),
-        other => format!("{other:?}"),
-    }));
+    println!(
+        "last message: {:?}",
+        last_msg.map(|m| match m {
+            model::Message::Assistant(a) => format!("Assistant(stop_reason={:?})", a.stop_reason),
+            other => format!("{other:?}"),
+        })
+    );
     println!("event sequence:");
     for label in log.lock().unwrap().iter() {
         println!("  {label}");

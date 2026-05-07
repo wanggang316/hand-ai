@@ -508,10 +508,8 @@ async fn stream_assistant_response(
             // emitted on `Start`, so subscribers see a balanced
             // `MessageStart`/`MessageEnd` pair and the transcript holds a
             // single closed assistant message.
-            let mut failure = synthesize_aborted_message(
-                &config.model,
-                "Stream ended without a final message",
-            );
+            let mut failure =
+                synthesize_aborted_message(&config.model, "Stream ended without a final message");
             failure.stop_reason = StopReason::Error;
             let msg = Message::Assistant(failure.clone());
             if emitted_start {
@@ -537,6 +535,9 @@ fn synthesize_aborted_message(model: &model::Model, reason: &str) -> AssistantMe
         api: model.api,
         provider: model.provider,
         model: model.id.clone(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
         usage: model::Usage::default(),
         stop_reason: StopReason::Aborted,
         error_message: Some(reason.into()),
@@ -593,12 +594,28 @@ async fn execute_tool_calls(
 
     match mode {
         ToolExecutionMode::Sequential => {
-            execute_sequential(context, assistant_message, tool_calls, tools, config, emit, cancel)
-                .await
+            execute_sequential(
+                context,
+                assistant_message,
+                tool_calls,
+                tools,
+                config,
+                emit,
+                cancel,
+            )
+            .await
         }
         ToolExecutionMode::Parallel => {
-            execute_parallel(context, assistant_message, tool_calls, tools, config, emit, cancel)
-                .await
+            execute_parallel(
+                context,
+                assistant_message,
+                tool_calls,
+                tools,
+                config,
+                emit,
+                cancel,
+            )
+            .await
         }
     }
 }
@@ -669,8 +686,14 @@ async fn execute_parallel<'a>(
     cancel: &'a CancellationToken,
 ) -> ExecutedToolBatch {
     enum Slot<'b> {
-        Immediate { result: ToolResult, is_error: bool },
-        Pending { tool: &'b AgentTool, args: serde_json::Value },
+        Immediate {
+            result: ToolResult,
+            is_error: bool,
+        },
+        Pending {
+            tool: &'b AgentTool,
+            args: serde_json::Value,
+        },
     }
 
     // Phase 1: prepare each call sequentially.
@@ -784,10 +807,7 @@ async fn prepare_tool_call<'a>(
     // JSON-Schema validation, using a per-tool compiled cache.
     if let Err(msg) = validate_tool_args(tool, &prepared_args) {
         return ToolCallPreparation::Immediate {
-            result: ToolResult::error(format!(
-                "Invalid arguments for tool '{}': {msg}",
-                tool.name
-            )),
+            result: ToolResult::error(format!("Invalid arguments for tool '{}': {msg}", tool.name)),
             is_error: true,
         };
     }

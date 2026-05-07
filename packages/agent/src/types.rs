@@ -4,12 +4,12 @@
 //! tagged enums for unions, traits/Fn-objects for callbacks, `Result` for errors,
 //! and a `CancellationToken` threaded through every async boundary.
 
+use jsonschema::JSONSchema;
 use model::{
     AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Message, SimpleStreamOptions,
     TextContent, ToolCall, ToolResultContent, ToolResultMessage,
 };
 use serde::{Deserialize, Serialize};
-use jsonschema::JSONSchema;
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
@@ -21,8 +21,7 @@ use tokio_util::sync::CancellationToken;
 /// Stored on `AgentTool` so the compile cost is paid once per tool, not once
 /// per tool call. `Ok(None)` means the tool's schema is empty/non-object and
 /// validation is a no-op; `Err` carries the compile error message.
-pub(crate) type CompiledSchemaCell =
-    Arc<OnceLock<Result<Option<Arc<JSONSchema>>, String>>>;
+pub(crate) type CompiledSchemaCell = Arc<OnceLock<Result<Option<Arc<JSONSchema>>, String>>>;
 
 /// A boxed, sendable future used by async hooks and tool executors.
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -112,13 +111,11 @@ pub struct ToolExecuteCtx {
 /// Async function that executes a tool call.
 ///
 /// Returning `Err` is wrapped by the loop into an error `ToolResult` (mirrors TS try/catch).
-pub type ToolExecuteFn = Box<
-    dyn Fn(ToolExecuteCtx) -> BoxFuture<'static, Result<ToolResult, ToolError>> + Send + Sync,
->;
+pub type ToolExecuteFn =
+    Box<dyn Fn(ToolExecuteCtx) -> BoxFuture<'static, Result<ToolResult, ToolError>> + Send + Sync>;
 
 /// Optional shim that pre-processes raw arguments before schema validation.
-pub type PrepareArgumentsFn =
-    Box<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>;
+pub type PrepareArgumentsFn = Box<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>;
 
 /// An executable tool registered with the agent.
 pub struct AgentTool {
@@ -349,16 +346,20 @@ pub struct ShouldStopAfterTurnContext<'a> {
 
 /// Async hook called before each tool execution.
 pub type BeforeToolCallHook = Arc<
-    dyn for<'a> Fn(BeforeToolCallContext<'a>, CancellationToken)
-            -> BoxFuture<'a, Option<BeforeToolCallResult>>
+    dyn for<'a> Fn(
+            BeforeToolCallContext<'a>,
+            CancellationToken,
+        ) -> BoxFuture<'a, Option<BeforeToolCallResult>>
         + Send
         + Sync,
 >;
 
 /// Async hook called after each tool execution.
 pub type AfterToolCallHook = Arc<
-    dyn for<'a> Fn(AfterToolCallContext<'a>, CancellationToken)
-            -> BoxFuture<'a, Option<AfterToolCallResult>>
+    dyn for<'a> Fn(
+            AfterToolCallContext<'a>,
+            CancellationToken,
+        ) -> BoxFuture<'a, Option<AfterToolCallResult>>
         + Send
         + Sync,
 >;
@@ -371,25 +372,21 @@ pub type ShouldStopAfterTurnFn = Arc<
 >;
 
 /// Async hook returning steering messages to inject mid-run.
-pub type GetSteeringMessagesFn =
-    Arc<dyn Fn() -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
+pub type GetSteeringMessagesFn = Arc<dyn Fn() -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
 
 /// Async hook returning follow-up messages to process after the agent would stop.
-pub type GetFollowUpMessagesFn =
-    Arc<dyn Fn() -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
+pub type GetFollowUpMessagesFn = Arc<dyn Fn() -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
 
 /// Convert agent messages to LLM-compatible messages.
 pub type ConvertToLlmFn =
     Arc<dyn Fn(Vec<Message>) -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
 
 /// Transform context before LLM call (applied before `convert_to_llm`).
-pub type TransformContextFn = Arc<
-    dyn Fn(Vec<Message>, CancellationToken) -> BoxFuture<'static, Vec<Message>> + Send + Sync,
->;
+pub type TransformContextFn =
+    Arc<dyn Fn(Vec<Message>, CancellationToken) -> BoxFuture<'static, Vec<Message>> + Send + Sync>;
 
 /// Dynamic API key resolver (e.g. for short-lived OAuth tokens).
-pub type GetApiKeyFn =
-    Arc<dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync>;
+pub type GetApiKeyFn = Arc<dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Agent loop configuration

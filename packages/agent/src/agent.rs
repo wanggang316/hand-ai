@@ -226,11 +226,7 @@ impl Agent {
     }
 
     /// Create a new agent with full options.
-    pub fn with_options(
-        client: model::Client,
-        model: model::Model,
-        opts: AgentOptions,
-    ) -> Self {
+    pub fn with_options(client: model::Client, model: model::Model, opts: AgentOptions) -> Self {
         let steering_mode = opts.steering_mode.unwrap_or_default();
         let follow_up_mode = opts.follow_up_mode.unwrap_or_default();
         Self {
@@ -503,9 +499,7 @@ impl Agent {
                     "cannot continue from message role: assistant".into(),
                 ))
             }
-            Some(Message::User(_)) | Some(Message::ToolResult(_)) => {
-                self.run_continuation().await
-            }
+            Some(Message::User(_)) | Some(Message::ToolResult(_)) => self.run_continuation().await,
         }
     }
 
@@ -604,6 +598,9 @@ impl Agent {
                     api: self.model.api,
                     provider: self.model.provider,
                     model: self.model.id.clone(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
                     usage: Usage::default(),
                     stop_reason,
                     error_message: Some(e.to_string()),
