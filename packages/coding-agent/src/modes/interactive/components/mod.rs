@@ -13,6 +13,7 @@ pub mod custom_message;
 pub mod diff;
 pub mod dynamic_border;
 pub mod keybinding_hints;
+pub mod skill_invocation_message;
 pub mod user_message;
 pub mod visual_truncate;
 
@@ -25,5 +26,6 @@ pub use custom_message::{CustomMessageComponent, CustomMessageData};
 pub use diff::render_diff;
 pub use dynamic_border::DynamicBorderComponent;
 pub use keybinding_hints::{format_keys, key_hint_for, key_text, raw_key_hint};
+pub use skill_invocation_message::{ParsedSkillBlockData, SkillInvocationMessageComponent};
 pub use user_message::UserMessageComponent;
 pub use visual_truncate::{VisualTruncateResult, truncate_to_visual_lines};
