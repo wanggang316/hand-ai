@@ -17,6 +17,7 @@ pub mod daxnuts;
 pub mod diff;
 pub mod dynamic_border;
 pub mod earendil_announcement;
+pub mod extension_editor;
 pub mod extension_input;
 pub mod extension_selector;
 pub mod footer;
@@ -51,6 +52,7 @@ pub use earendil_announcement::{
     BLOG_URL as EARENDIL_BLOG_URL, EarendilAnnouncementComponent,
     IMAGE_FILENAME as EARENDIL_IMAGE_FILENAME, IMAGE_MAX_WIDTH_CELLS as EARENDIL_IMAGE_MAX_WIDTH,
 };
+pub use extension_editor::{ExtensionEditorComponent, ExtensionEditorEvent};
 pub use extension_input::{ExtensionInputComponent, ExtensionInputEvent};
 pub use extension_selector::{ExtensionSelectorComponent, ExtensionSelectorEvent};
 pub use footer::{FooterComponent, FooterViewModel, TokenUsageSummary};
