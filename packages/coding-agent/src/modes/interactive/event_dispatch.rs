@@ -65,6 +65,12 @@ pub enum ChatUpdate {
     /// Append a transient status line (used for compaction notices, errors,
     /// `/help` output, ...).
     AppendStatus { text: String },
+    /// The active theme changed. Carries the theme's short name so renderers
+    /// that cache palette state can refresh. Emitted by `/theme <name>` and
+    /// the theme-selector overlay; the driver currently logs the change as
+    /// a status line — the live palette swap lands with the theme bridge
+    /// (see `docs/exec-plans/parity-completion.md` §A1).
+    ThemeChanged { theme: String },
 }
 
 /// Translate a single [`AgentSessionEvent`] into zero or more
