@@ -28,19 +28,54 @@ use tokio::sync::broadcast;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct Settings {
+    /// Most recent changelog version the agent has shown to the user.
+    /// Global-only in pi-mono; we keep it on the same struct because every
+    /// field is `Option<T>` and the project layer simply leaves it `None`.
+    #[serde(alias = "lastChangelogVersion")]
+    pub last_changelog_version: Option<String>,
+    #[serde(alias = "defaultProvider")]
     pub default_provider: Option<String>,
+    #[serde(alias = "defaultModel")]
     pub default_model: Option<String>,
+    #[serde(alias = "defaultThinkingLevel")]
     pub default_thinking_level: Option<ThinkingLevelSetting>,
+    /// Streaming transport mode. Mirrors pi-mono's `transport`. Default
+    /// when unset is [`TransportSetting::Auto`] — read via the accessor on
+    /// [`Settings`] rather than the raw field.
+    pub transport: Option<TransportSetting>,
+    /// Surface mode for the steering queue (`all` vs `one-at-a-time`).
+    #[serde(alias = "steeringMode")]
+    pub steering_mode: Option<SteeringMode>,
+    /// Surface mode for follow-up queue. Same shape as
+    /// [`Self::steering_mode`].
+    #[serde(alias = "followUpMode")]
+    pub follow_up_mode: Option<FollowUpMode>,
+    #[serde(alias = "shellPath")]
     pub shell_path: Option<PathBuf>,
+    #[serde(alias = "shellCommandPrefix")]
     pub shell_command_prefix: Option<String>,
     pub theme: Option<ThemeSetting>,
     pub compaction: CompactionSettings,
+    /// Branch summarisation knobs.
+    #[serde(default, alias = "branchSummary")]
+    pub branch_summary: BranchSummarySettings,
     pub retry: RetrySettings,
+    /// Suppress thinking blocks in the rendered transcript.
+    #[serde(alias = "hideThinkingBlock")]
+    pub hide_thinking_block: Option<bool>,
+    #[serde(alias = "quietStartup")]
     pub quiet_startup: Option<bool>,
+    /// argv-style command used for npm package lookup/install.
+    #[serde(alias = "npmCommand", skip_serializing_if = "Option::is_none")]
+    pub npm_command: Option<Vec<String>>,
+    /// Show condensed changelog after an update (full via `/changelog`).
+    #[serde(alias = "collapseChangelog")]
+    pub collapse_changelog: Option<bool>,
     /// Anonymous install-telemetry attribution headers on outbound provider
     /// calls. Default: `true` (matches the TS reference). Read effective
     /// value via [`Settings::enable_install_telemetry`] — direct field
     /// access is `Option<bool>` so layered merging is mechanical.
+    #[serde(alias = "enableInstallTelemetry")]
     pub enable_install_telemetry: Option<bool>,
     /// Pi-extension package sources (npm specs, git URLs, or local paths)
     /// to load extensions/skills/prompts/themes from. Each entry is either
@@ -69,6 +104,45 @@ pub struct Settings {
     /// JSON files from. Whole-list override on merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub themes: Option<Vec<String>>,
+    /// Whether to register skills as `/skill:name` slash commands.
+    #[serde(alias = "enableSkillCommands")]
+    pub enable_skill_commands: Option<bool>,
+    /// Terminal rendering preferences.
+    #[serde(default)]
+    pub terminal: TerminalSettings,
+    /// Image handling preferences.
+    #[serde(default)]
+    pub images: ImageSettings,
+    /// Patterns for the `--models` cycling flag. Whole-list override on merge.
+    #[serde(alias = "enabledModels", skip_serializing_if = "Option::is_none")]
+    pub enabled_models: Option<Vec<String>>,
+    /// Action taken when the user double-presses Escape on an empty editor.
+    #[serde(alias = "doubleEscapeAction")]
+    pub double_escape_action: Option<DoubleEscapeAction>,
+    /// Default filter applied when opening the tree view.
+    #[serde(alias = "treeFilterMode")]
+    pub tree_filter_mode: Option<TreeFilterMode>,
+    /// Custom token budgets per thinking level.
+    #[serde(default, alias = "thinkingBudgets")]
+    pub thinking_budgets: ThinkingBudgetsSettings,
+    /// Horizontal padding for the input editor.
+    #[serde(alias = "editorPaddingX")]
+    pub editor_padding_x: Option<u32>,
+    /// Maximum visible items in the autocomplete dropdown.
+    #[serde(alias = "autocompleteMaxVisible")]
+    pub autocomplete_max_visible: Option<u32>,
+    /// Show the terminal hardware cursor while still positioning it for IME.
+    #[serde(alias = "showHardwareCursor")]
+    pub show_hardware_cursor: Option<bool>,
+    /// Markdown rendering preferences.
+    #[serde(default)]
+    pub markdown: MarkdownSettings,
+    /// Soft warnings the UI surfaces.
+    #[serde(default)]
+    pub warnings: WarningSettings,
+    /// Custom session-storage directory (same format as `--session-dir`).
+    #[serde(alias = "sessionDir")]
+    pub session_dir: Option<PathBuf>,
 }
 
 /// One entry in [`Settings::packages`].
@@ -582,15 +656,23 @@ impl Settings {
     /// specified" from "explicitly the default value".
     pub fn defaults() -> Self {
         Self {
+            last_changelog_version: None,
             default_provider: Some("anthropic".into()),
             default_model: Some("claude-sonnet-4-20250514".into()),
             default_thinking_level: None,
+            transport: None,
+            steering_mode: None,
+            follow_up_mode: None,
             shell_path: None,
             shell_command_prefix: None,
             theme: Some(ThemeSetting::Dark),
             compaction: CompactionSettings::with_defaults(),
+            branch_summary: BranchSummarySettings::default(),
             retry: RetrySettings::with_defaults(),
+            hide_thinking_block: None,
             quiet_startup: Some(false),
+            npm_command: None,
+            collapse_changelog: None,
             enable_install_telemetry: Some(true),
             // Resource-side fields default to "not configured" (None) — the
             // accessors below return empty slices in that case. Distinct
@@ -600,6 +682,19 @@ impl Settings {
             skills: None,
             prompts: None,
             themes: None,
+            enable_skill_commands: None,
+            terminal: TerminalSettings::default(),
+            images: ImageSettings::default(),
+            enabled_models: None,
+            double_escape_action: None,
+            tree_filter_mode: None,
+            thinking_budgets: ThinkingBudgetsSettings::default(),
+            editor_padding_x: None,
+            autocomplete_max_visible: None,
+            show_hardware_cursor: None,
+            markdown: MarkdownSettings::default(),
+            warnings: WarningSettings::default(),
+            session_dir: None,
         }
     }
 
@@ -651,17 +746,31 @@ impl Settings {
     /// `project` wins; sub-structs merge recursively per the same rule.
     pub fn merge(base: Self, project: Self) -> Self {
         Self {
+            last_changelog_version: project
+                .last_changelog_version
+                .or(base.last_changelog_version),
             default_provider: project.default_provider.or(base.default_provider),
             default_model: project.default_model.or(base.default_model),
             default_thinking_level: project
                 .default_thinking_level
                 .or(base.default_thinking_level),
+            transport: project.transport.or(base.transport),
+            steering_mode: project.steering_mode.or(base.steering_mode),
+            follow_up_mode: project.follow_up_mode.or(base.follow_up_mode),
             shell_path: project.shell_path.or(base.shell_path),
             shell_command_prefix: project.shell_command_prefix.or(base.shell_command_prefix),
             theme: project.theme.or(base.theme),
             compaction: CompactionSettings::merge(base.compaction, project.compaction),
+            branch_summary: BranchSummarySettings::merge(
+                base.branch_summary,
+                project.branch_summary,
+            ),
             retry: RetrySettings::merge(base.retry, project.retry),
+            hide_thinking_block: project.hide_thinking_block.or(base.hide_thinking_block),
             quiet_startup: project.quiet_startup.or(base.quiet_startup),
+            // Whole-list override (matches arrays-not-deep-merged TS rule).
+            npm_command: project.npm_command.or(base.npm_command),
+            collapse_changelog: project.collapse_changelog.or(base.collapse_changelog),
             enable_install_telemetry: project
                 .enable_install_telemetry
                 .or(base.enable_install_telemetry),
@@ -673,6 +782,30 @@ impl Settings {
             skills: project.skills.or(base.skills),
             prompts: project.prompts.or(base.prompts),
             themes: project.themes.or(base.themes),
+            enable_skill_commands: project
+                .enable_skill_commands
+                .or(base.enable_skill_commands),
+            terminal: TerminalSettings::merge(base.terminal, project.terminal),
+            images: ImageSettings::merge(base.images, project.images),
+            enabled_models: project.enabled_models.or(base.enabled_models),
+            double_escape_action: project
+                .double_escape_action
+                .or(base.double_escape_action),
+            tree_filter_mode: project.tree_filter_mode.or(base.tree_filter_mode),
+            thinking_budgets: ThinkingBudgetsSettings::merge(
+                base.thinking_budgets,
+                project.thinking_budgets,
+            ),
+            editor_padding_x: project.editor_padding_x.or(base.editor_padding_x),
+            autocomplete_max_visible: project
+                .autocomplete_max_visible
+                .or(base.autocomplete_max_visible),
+            show_hardware_cursor: project
+                .show_hardware_cursor
+                .or(base.show_hardware_cursor),
+            markdown: MarkdownSettings::merge(base.markdown, project.markdown),
+            warnings: WarningSettings::merge(base.warnings, project.warnings),
+            session_dir: project.session_dir.or(base.session_dir),
         }
     }
 
@@ -819,21 +952,42 @@ fn parse_yaml_with_warning(path: &Path, content: &str) -> Result<Settings, Setti
     if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(content)
     {
         let known: &[&str] = &[
+            "last-changelog-version",
             "default-provider",
             "default-model",
             "default-thinking-level",
+            "transport",
+            "steering-mode",
+            "follow-up-mode",
             "shell-path",
             "shell-command-prefix",
             "theme",
             "compaction",
+            "branch-summary",
             "retry",
+            "hide-thinking-block",
             "quiet-startup",
+            "npm-command",
+            "collapse-changelog",
             "enable-install-telemetry",
             "packages",
             "extensions",
             "skills",
             "prompts",
             "themes",
+            "enable-skill-commands",
+            "terminal",
+            "images",
+            "enabled-models",
+            "double-escape-action",
+            "tree-filter-mode",
+            "thinking-budgets",
+            "editor-padding-x",
+            "autocomplete-max-visible",
+            "show-hardware-cursor",
+            "markdown",
+            "warnings",
+            "session-dir",
         ];
         for (k, _) in map.iter() {
             if let Some(key) = k.as_str().filter(|k| !known.contains(k)) {
@@ -1384,21 +1538,42 @@ pub enum MigrationOutcome {
 
 /// Top-level keys recognised by the new [`Settings`] struct, in kebab-case.
 const KNOWN_TOP_LEVEL: &[&str] = &[
+    "last-changelog-version",
     "default-provider",
     "default-model",
     "default-thinking-level",
+    "transport",
+    "steering-mode",
+    "follow-up-mode",
     "shell-path",
     "shell-command-prefix",
     "theme",
     "compaction",
+    "branch-summary",
     "retry",
+    "hide-thinking-block",
     "quiet-startup",
+    "npm-command",
+    "collapse-changelog",
     "enable-install-telemetry",
     "packages",
     "extensions",
     "skills",
     "prompts",
     "themes",
+    "enable-skill-commands",
+    "terminal",
+    "images",
+    "enabled-models",
+    "double-escape-action",
+    "tree-filter-mode",
+    "thinking-budgets",
+    "editor-padding-x",
+    "autocomplete-max-visible",
+    "show-hardware-cursor",
+    "markdown",
+    "warnings",
+    "session-dir",
 ];
 
 /// Sub-struct keys we recognise (kebab-case) for `compaction` / `retry`.
@@ -1408,7 +1583,13 @@ const KNOWN_COMPACTION: &[&str] = &[
     "keep-recent-tokens",
     "max-context-tokens",
 ];
-const KNOWN_RETRY: &[&str] = &["enabled", "max-retries", "initial-delay-ms", "max-delay-ms"];
+const KNOWN_RETRY: &[&str] = &[
+    "enabled",
+    "max-retries",
+    "initial-delay-ms",
+    "max-delay-ms",
+    "provider",
+];
 
 /// Convert one snake_case identifier to kebab-case (`a_b_c` → `a-b-c`).
 fn snake_to_kebab(s: &str) -> String {
