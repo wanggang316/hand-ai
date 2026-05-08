@@ -6,5 +6,6 @@
 //! `main.rs` but share [`session_setup::SessionSetup`] for argument
 //! resolution.
 
+pub mod interactive;
 pub mod print;
 pub mod session_setup;
