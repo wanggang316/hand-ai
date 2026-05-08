@@ -20,6 +20,7 @@ pub mod extension_input;
 pub mod extension_selector;
 pub mod footer;
 pub mod keybinding_hints;
+pub mod login_dialog;
 pub mod model_selector;
 pub mod oauth_selector;
 pub mod scoped_models_selector;
@@ -52,6 +53,7 @@ pub use extension_input::{ExtensionInputComponent, ExtensionInputEvent};
 pub use extension_selector::{ExtensionSelectorComponent, ExtensionSelectorEvent};
 pub use footer::{FooterComponent, FooterViewModel, TokenUsageSummary};
 pub use keybinding_hints::{format_keys, key_hint_for, key_text, raw_key_hint};
+pub use login_dialog::{LoginDialogComponent, LoginDialogEvent, LoginProvider};
 pub use model_selector::{ModelOutcome, ModelScope, ModelSelectorComponent};
 pub use oauth_selector::{
     AuthSelectorMode, AuthSelectorProvider, OAuthOutcome, OAuthSelectorComponent,
