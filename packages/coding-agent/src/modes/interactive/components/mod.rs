@@ -27,6 +27,7 @@ pub mod model_selector;
 pub mod oauth_selector;
 pub mod scoped_models_selector;
 pub mod session_selector_search;
+pub mod settings_selector;
 pub mod show_images_selector;
 pub mod skill_invocation_message;
 pub mod theme_selector;
@@ -69,6 +70,7 @@ pub use session_selector_search::{
     MatchResult, NameFilter, ParsedSearchQuery, SearchToken, SortMode, TokenKind,
     filter_and_sort_sessions, has_session_name, match_session, parse_search_query,
 };
+pub use settings_selector::{SettingsSelectorComponent, SettingsSelectorEvent};
 pub use show_images_selector::{ShowImagesOutcome, ShowImagesSelectorComponent};
 pub use skill_invocation_message::{ParsedSkillBlockData, SkillInvocationMessageComponent};
 pub use theme_selector::{ThemeOutcome, ThemeSelectorComponent};
