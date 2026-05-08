@@ -27,6 +27,7 @@ pub mod theme_selector;
 pub mod thinking_selector;
 pub mod tool_execution;
 pub mod user_message;
+pub mod user_message_selector;
 pub mod visual_truncate;
 
 pub use assistant_message::{AssistantMessageComponent, DEFAULT_HIDDEN_THINKING_LABEL};
@@ -59,4 +60,7 @@ pub use theme_selector::{ThemeOutcome, ThemeSelectorComponent};
 pub use thinking_selector::{ThinkingOutcome, ThinkingSelectorComponent};
 pub use tool_execution::{ToolExecutionComponent, ToolExecutionStatus};
 pub use user_message::UserMessageComponent;
+pub use user_message_selector::{
+    UserMessageItem, UserMessageSelectorComponent, UserMessageSelectorEvent,
+};
 pub use visual_truncate::{VisualTruncateResult, truncate_to_visual_lines};
