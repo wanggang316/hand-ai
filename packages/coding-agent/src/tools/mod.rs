@@ -7,6 +7,7 @@ pub mod edit;
 pub mod find;
 pub mod grep;
 pub mod ls;
+pub mod path_utils;
 pub mod read;
 pub mod write;
 

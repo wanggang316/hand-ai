@@ -29,10 +29,8 @@
 //!    how to surface the failure (the binary still exits non-zero).
 //! 3. **Path resolution.** TS calls into `core/tools/path-utils.ts`'s
 //!    `resolveReadPath`, which probes a handful of macOS Unicode-space and
-//!    NFD/curly-quote variants. That helper has not been ported either, so
-//!    we use a minimal resolver: tilde expansion plus cwd-join. macOS
-//!    screenshot edge cases will raise [`FileProcessorError::NotFound`]
-//!    until `resolveReadPath` is ported.
+//!    NFD/curly-quote variants. The Rust port lives in
+//!    [`crate::tools::path_utils`] and we delegate to it directly.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,6 +40,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use model::types::ImageContent;
 use thiserror::Error;
 
+use crate::tools::path_utils;
 use crate::utils::mime::{MimeError, detect_supported_image_mime_type_from_file};
 
 /// Result of resolving one or more `@file` arguments.
@@ -82,37 +81,14 @@ pub enum FileProcessorError {
     NotUtf8 { path: PathBuf },
 }
 
-/// Expand a leading `~` / `~/` to the user's home directory, returning
-/// the input untouched on any other prefix.
-///
-/// The TS reference's `expandPath` also strips a leading `@` because the
-/// CLI sometimes passes the literal sigil through; we do the same so
-/// callers can hand us either `path` or `@path`.
-fn expand_path(input: &str) -> PathBuf {
-    let trimmed = input.strip_prefix('@').unwrap_or(input);
-    if trimmed == "~" {
-        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
-    }
-    if let Some(rest) = trimmed.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest);
-    }
-    PathBuf::from(trimmed)
-}
-
 /// Resolve a CLI `@file` argument to an absolute filesystem path.
 ///
-/// Steps: strip leading `@`, expand `~`, join against `cwd` if relative.
-/// Does *not* probe macOS Unicode variants (that lives in the unported
-/// `path-utils::resolveReadPath`).
+/// Delegates to [`path_utils::resolve_read_path`], which expands `~`,
+/// strips the `@` sigil, joins relative paths against `cwd`, and probes
+/// the macOS Unicode-variant set (AM/PM narrow space, NFD, curly quote,
+/// NFD+curly).
 fn resolve_read_path(file_arg: &str, cwd: &Path) -> PathBuf {
-    let expanded = expand_path(file_arg);
-    if expanded.is_absolute() {
-        expanded
-    } else {
-        cwd.join(expanded)
-    }
+    path_utils::resolve_read_path(file_arg, cwd)
 }
 
 /// Process `@file` arguments into prompt text and image attachments.
@@ -297,6 +273,7 @@ mod tests {
 
     #[test]
     fn expand_path_handles_tilde() {
+        use crate::tools::path_utils::expand_path;
         let home = dirs::home_dir().expect("home dir");
         assert_eq!(expand_path("~"), home);
         assert_eq!(expand_path("~/foo"), home.join("foo"));
