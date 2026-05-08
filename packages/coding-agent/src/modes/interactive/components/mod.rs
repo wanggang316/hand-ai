@@ -5,6 +5,7 @@
 //! parent module's docs for the theming caveat.
 
 pub mod assistant_message;
+pub mod bash_execution;
 pub mod bordered_loader;
 pub mod branch_summary_message;
 pub mod compaction_summary_message;
@@ -18,6 +19,7 @@ pub mod user_message;
 pub mod visual_truncate;
 
 pub use assistant_message::{AssistantMessageComponent, DEFAULT_HIDDEN_THINKING_LABEL};
+pub use bash_execution::{BashExecutionComponent, BashStatus, PREVIEW_LINES};
 pub use bordered_loader::BorderedLoaderComponent;
 pub use branch_summary_message::{BranchSummaryData, BranchSummaryMessageComponent};
 pub use compaction_summary_message::{CompactionSummaryData, CompactionSummaryMessageComponent};
