@@ -47,8 +47,7 @@ use crate::core::error::CodingAgentError;
 
 use super::components::{
     AssistantMessageComponent, BashExecutionComponent, BashStatus, FooterComponent,
-    FooterViewModel, ModelOutcome, TokenUsageSummary, ToolExecutionComponent, ToolExecutionStatus,
-    UserMessageComponent,
+    FooterViewModel, ModelOutcome, TokenUsageSummary, ToolExecutionComponent, UserMessageComponent,
 };
 use super::event_dispatch::{ChatUpdate, dispatch as dispatch_event};
 use super::slash_commands::{
@@ -595,26 +594,8 @@ fn apply_updates_to_chat(
                     }
                     Some(ToolHandle::Generic(cell)) => {
                         if let Ok(mut comp) = cell.lock() {
-                            // Best-effort partial display: surface the latest
-                            // streaming text via a minimal ToolResult so the
-                            // generic component's output area updates.
                             let partial = hand_agent::types::ToolResult::text(partial_text);
-                            // Treat as still-pending: keep status, only swap
-                            // the recorded output. We do this by passing the
-                            // result with `is_error = false` and immediately
-                            // resetting the status back to Pending so the
-                            // background colour stays in the in-flight state.
-                            comp.set_result(partial, false);
-                            // Restore the pending state (set_result advanced
-                            // the status to Complete).
-                            if comp.status() == ToolExecutionStatus::Complete {
-                                // No public setter, but ToolUpdate semantics
-                                // require remaining "in flight". The chat
-                                // visually still shows the streamed text;
-                                // the colour briefly flips to success and
-                                // back on the final ToolEnd. Acceptable for
-                                // the parity skeleton.
-                            }
+                            comp.set_partial_result(partial);
                         }
                     }
                     None => {

@@ -89,6 +89,14 @@ impl ToolExecutionComponent {
         self.args = args;
     }
 
+    /// Stash a streaming partial result without flipping the lifecycle
+    /// status. The generic renderer overwrites the recorded output but
+    /// keeps the pending background until [`Self::set_result`] is called.
+    pub fn set_partial_result(&mut self, partial: ToolResult) {
+        self.result = Some(partial);
+        self.status = ToolExecutionStatus::Pending;
+    }
+
     /// Apply a final result. `is_error` mirrors the flag the agent loop
     /// records on the corresponding [`model::ToolResultMessage`] — it lives
     /// on the message, not on [`ToolResult`] itself.
@@ -249,6 +257,16 @@ mod tests {
         let post = comp.render(60).join("\n");
         assert!(!pre.contains("echo hi"));
         assert!(post.contains("echo hi"));
+    }
+
+    #[test]
+    fn set_partial_result_keeps_pending_status_and_renders_text() {
+        let mut comp = ToolExecutionComponent::new("read", json!({}));
+        comp.set_partial_result(ToolResult::text("streaming chunk"));
+        assert_eq!(comp.status(), ToolExecutionStatus::Pending);
+        let joined = comp.render(60).join("\n");
+        assert!(joined.contains("streaming chunk"));
+        assert!(joined.contains(PENDING_BG), "should keep pending bg");
     }
 
     #[test]
