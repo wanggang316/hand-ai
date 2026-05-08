@@ -6,6 +6,7 @@ pub mod api;
 pub mod dispatch;
 pub mod manifest;
 pub mod registry;
+pub mod source_registry;
 pub mod subprocess;
 
 pub use api::{
