@@ -13,8 +13,8 @@
 //! is per-effect (30 fps for most, 60 fps for `glitch`) and reported via
 //! [`ArminComponent::tick_interval`] so drivers can schedule appropriately.
 //!
-//! Parity scope: the data table and two effects (`Fade` + `Scanline`) are
-//! ported. The remaining five (`Typewriter`, `Rain`, `Crt`, `Glitch`,
+//! Parity scope: the data table and three effects (`Fade`, `Scanline`,
+//! `Typewriter`) are ported. The remaining four (`Rain`, `Crt`, `Glitch`,
 //! `Dissolve`) are tracked as `// TODO(parity): port additional reveal
 //! effects` and currently fall back to instant-reveal so callers never get a
 //! frozen splash.
@@ -144,7 +144,10 @@ enum EffectState {
         positions: Vec<(usize, usize)>,
         idx: usize,
     },
-    /// Placeholder for the five effects not yet ported. Always reveals on the
+    Typewriter {
+        pos: usize,
+    },
+    /// Placeholder for the effects not yet ported. Always reveals on the
     /// first tick — see TS source for the actual animation.
     InstantReveal {
         revealed: bool,
@@ -205,6 +208,9 @@ impl ArminComponent {
             EffectState::Fade { positions, idx } => {
                 tick_fade(positions, idx, &self.final_grid, &mut self.current_grid)
             }
+            EffectState::Typewriter { pos } => {
+                tick_typewriter(pos, &self.final_grid, &mut self.current_grid)
+            }
             EffectState::InstantReveal { revealed } => {
                 if !*revealed {
                     self.current_grid = self.final_grid.clone();
@@ -240,6 +246,7 @@ impl Default for ArminComponent {
 fn init_state(effect: Effect) -> EffectState {
     match effect {
         Effect::Scanline => EffectState::Scanline { row: 0 },
+        Effect::Typewriter => EffectState::Typewriter { pos: 0 },
         Effect::Fade => {
             let mut positions = Vec::with_capacity(DISPLAY_HEIGHT * WIDTH);
             for row in 0..DISPLAY_HEIGHT {
@@ -263,10 +270,10 @@ fn init_state(effect: Effect) -> EffectState {
             }
             EffectState::Fade { positions, idx: 0 }
         }
-        // TODO(parity): port additional reveal effects (typewriter, rain,
-        // crt, glitch, dissolve). For now they instantly reveal on the first
-        // tick so the component never freezes mid-animation.
-        Effect::Typewriter | Effect::Rain | Effect::Crt | Effect::Glitch | Effect::Dissolve => {
+        // TODO(parity): port additional reveal effects (rain, crt, glitch,
+        // dissolve). For now they instantly reveal on the first tick so the
+        // component never freezes mid-animation.
+        Effect::Rain | Effect::Crt | Effect::Glitch | Effect::Dissolve => {
             EffectState::InstantReveal { revealed: false }
         }
     }
@@ -281,6 +288,20 @@ fn tick_scanline(row: &mut usize, final_grid: &[Vec<char>], current: &mut [Vec<c
     }
     *row += 1;
     *row >= DISPLAY_HEIGHT
+}
+
+fn tick_typewriter(pos: &mut usize, final_grid: &[Vec<char>], current: &mut [Vec<char>]) -> bool {
+    let pixels_per_frame = 3;
+    for _ in 0..pixels_per_frame {
+        let row = *pos / WIDTH;
+        let x = *pos % WIDTH;
+        if row >= DISPLAY_HEIGHT {
+            return true;
+        }
+        current[row][x] = final_grid[row][x];
+        *pos += 1;
+    }
+    *pos / WIDTH >= DISPLAY_HEIGHT
 }
 
 fn tick_fade(
@@ -382,14 +403,43 @@ mod tests {
     }
 
     #[test]
+    fn typewriter_reveals_three_pixels_per_tick_in_row_major_order() {
+        let mut c = ArminComponent::with_effect(Effect::Typewriter);
+        // Initially blank.
+        assert!(
+            c.current_grid()
+                .iter()
+                .all(|row| row.iter().all(|&ch| ch == ' '))
+        );
+
+        // First tick: positions 0..3 in row 0 should match the final grid.
+        c.tick();
+        let final_grid = build_final_grid();
+        for x in 0..3 {
+            assert_eq!(c.current_grid()[0][x], final_grid[0][x]);
+        }
+        // Position 3 still blank.
+        assert_eq!(c.current_grid()[0][3], ' ');
+
+        // Tick to completion. Total pixels = DISPLAY_HEIGHT * WIDTH; 3/tick.
+        let total_pixels = DISPLAY_HEIGHT * WIDTH;
+        let max_ticks = total_pixels.div_ceil(3) + 2;
+        for _ in 0..max_ticks {
+            c.tick();
+            if c.is_done() {
+                break;
+            }
+        }
+        assert!(
+            c.is_done(),
+            "typewriter should complete in <= {max_ticks} ticks"
+        );
+        assert_eq!(c.current_grid(), final_grid.as_slice());
+    }
+
+    #[test]
     fn instant_reveal_effects_complete_in_one_tick() {
-        for &effect in &[
-            Effect::Typewriter,
-            Effect::Rain,
-            Effect::Crt,
-            Effect::Glitch,
-            Effect::Dissolve,
-        ] {
+        for &effect in &[Effect::Rain, Effect::Crt, Effect::Glitch, Effect::Dissolve] {
             let mut c = ArminComponent::with_effect(effect);
             // First tick reveals everything but the component is still in
             // the "running" state until the *next* tick (mirrors the TS
