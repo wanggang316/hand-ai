@@ -26,6 +26,7 @@ pub mod login_dialog;
 pub mod model_selector;
 pub mod oauth_selector;
 pub mod scoped_models_selector;
+pub mod session_selector;
 pub mod session_selector_search;
 pub mod settings_selector;
 pub mod show_images_selector;
@@ -66,6 +67,7 @@ pub use oauth_selector::{
 pub use scoped_models_selector::{
     ScopedModelsConfig, ScopedModelsOutcome, ScopedModelsSelectorComponent,
 };
+pub use session_selector::{SessionSelectorComponent, SessionSelectorEvent};
 pub use session_selector_search::{
     MatchResult, NameFilter, ParsedSearchQuery, SearchToken, SortMode, TokenKind,
     filter_and_sort_sessions, has_session_name, match_session, parse_search_query,
