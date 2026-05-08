@@ -11,6 +11,7 @@ pub mod branch_summary_message;
 pub mod compaction_summary_message;
 pub mod countdown_timer;
 pub mod custom_message;
+pub mod daxnuts;
 pub mod diff;
 pub mod dynamic_border;
 pub mod earendil_announcement;
@@ -38,6 +39,7 @@ pub use branch_summary_message::{BranchSummaryData, BranchSummaryMessageComponen
 pub use compaction_summary_message::{CompactionSummaryData, CompactionSummaryMessageComponent};
 pub use countdown_timer::{CountdownTimer, DEFAULT_TICK_INTERVAL};
 pub use custom_message::{CustomMessageComponent, CustomMessageData};
+pub use daxnuts::DaxnutsComponent;
 pub use diff::render_diff;
 pub use dynamic_border::DynamicBorderComponent;
 pub use earendil_announcement::{
