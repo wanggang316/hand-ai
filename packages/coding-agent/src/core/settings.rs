@@ -269,6 +269,20 @@ pub enum ThinkingLevelSetting {
     Xhigh,
 }
 
+/// Which on-disk settings layer a write targets.
+///
+/// Read-side resolution still prefers project over global; this enum only
+/// matters for [`SettingsManager::set_packages`] et al. and the matching
+/// [`SettingsManager::save`] call that persists the in-memory state for
+/// one layer back to YAML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SettingsScope {
+    /// User-global layer at `~/.hand/agent/settings.yaml`.
+    Global,
+    /// Project-local layer at `<cwd>/.hand/settings.yaml`.
+    Project,
+}
+
 /// Errors raised by [`Settings::load`].
 #[derive(Debug, Error)]
 pub enum SettingsError {
@@ -284,6 +298,16 @@ pub enum SettingsError {
         #[source]
         source: serde_yaml::Error,
     },
+    /// YAML serialisation failure when writing a layer.
+    #[error("YAML emit error for {path}: {source}", path = .path.display())]
+    YamlEmit {
+        path: PathBuf,
+        #[source]
+        source: serde_yaml::Error,
+    },
+    /// `save` was called for a scope that has no configured on-disk path.
+    #[error("no path configured for {scope:?} settings layer")]
+    NoPath { scope: SettingsScope },
 }
 
 impl Settings {
@@ -402,6 +426,21 @@ impl Settings {
         global_path: Option<&Path>,
         project_path: Option<&Path>,
     ) -> Result<Self, SettingsError> {
+        let (_, _, merged) = Self::load_layers(global_path, project_path)?;
+        Ok(merged)
+    }
+
+    /// Load each YAML layer separately and return `(global, project, merged)`.
+    ///
+    /// `global` and `project` are the raw layer values (every field that
+    /// was not specified in the YAML is `None`); `merged` is the fully
+    /// resolved view including defaults. Useful when callers need to
+    /// mutate one layer in isolation — see
+    /// [`SettingsManager::global_layer`] / [`SettingsManager::project_layer`].
+    pub fn load_layers(
+        global_path: Option<&Path>,
+        project_path: Option<&Path>,
+    ) -> Result<(Self, Self, Self), SettingsError> {
         let global = match global_path {
             Some(p) => load_yaml_layer(p)?.unwrap_or_default(),
             None => Settings::default(),
@@ -413,9 +452,76 @@ impl Settings {
         // Order: defaults < global < project. Each layer above only
         // contributes the fields it explicitly set (everything else is
         // `None` and falls through).
-        let with_global = Settings::merge(Settings::defaults(), global);
-        Ok(Settings::merge(with_global, project))
+        let with_global = Settings::merge(Settings::defaults(), global.clone());
+        let merged = Settings::merge(with_global, project.clone());
+        Ok((global, project, merged))
     }
+}
+
+/// Persist `layer` to `path` as YAML using a tmp-file + rename so a torn
+/// write leaves the original untouched. Creates the parent directory if
+/// needed. On Unix the post-rename mode is forced to `0o600`.
+///
+/// On Windows mode-handling is a no-op — the file is created with the
+/// process-default ACL.
+fn write_yaml_layer_atomic(path: &Path, layer: &Settings) -> Result<(), SettingsError> {
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|source| SettingsError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+
+    let body = serde_yaml::to_string(layer).map_err(|source| SettingsError::YamlEmit {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|source| SettingsError::Io {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    tmp.write_all(body.as_bytes())
+        .map_err(|source| SettingsError::Io {
+            path: tmp.path().to_path_buf(),
+            source,
+        })?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|source| SettingsError::Io {
+            path: tmp.path().to_path_buf(),
+            source,
+        })?;
+    tmp.persist(path).map_err(|e| SettingsError::Io {
+        path: path.to_path_buf(),
+        source: e.error,
+    })?;
+
+    // Reassert 0o600 on Unix. The tempfile is created with the process
+    // umask which is commonly 0644; tighten post-rename so the visible
+    // file is never world-readable. No-op on Windows.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)
+            .map_err(|source| SettingsError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?
+            .permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms).map_err(|source| SettingsError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+
+    Ok(())
 }
 
 /// Read one layer from disk. Returns `Ok(None)` if the file does not exist;
@@ -512,8 +618,10 @@ impl Drop for WatchHandle {
 /// Manages loading settings from the standard hand layout.
 ///
 /// Holds the merged [`Settings`] together with the resolved layer paths.
-/// Persistence (writing back to disk) is intentionally out of scope here —
-/// the TUI does not edit YAML.
+/// The two source layers (`global_layer`, `project_layer`) are kept
+/// separately so that scope-targeted writes (see
+/// [`SettingsManager::set_packages`]) can update one without affecting the
+/// other; the merged view is recomputed on every mutation.
 ///
 /// Hot-reload: call [`SettingsManager::watch`] to receive a
 /// [`broadcast::Receiver<SettingsChanged>`] that fires whenever the YAML
@@ -521,7 +629,14 @@ impl Drop for WatchHandle {
 /// watcher is started lazily on first call and shared across subsequent
 /// callers.
 pub struct SettingsManager {
+    /// Merged view: `defaults < global < project`. Recomputed by
+    /// [`SettingsManager::recompute_merged`] after any layer-targeted
+    /// write so existing read accessors keep working unchanged.
     settings: Settings,
+    /// Raw global-layer values (everything not specified is `None`).
+    global_layer: Settings,
+    /// Raw project-layer values (everything not specified is `None`).
+    project_layer: Settings,
     project_path: Option<PathBuf>,
     global_path: Option<PathBuf>,
     watch_handle: Option<WatchHandle>,
@@ -551,9 +666,12 @@ impl SettingsManager {
             let _ = migrate_legacy_json_settings(p);
         }
 
-        let settings = Settings::load(global_path.as_deref(), project_path.as_deref())?;
+        let (global_layer, project_layer, settings) =
+            Settings::load_layers(global_path.as_deref(), project_path.as_deref())?;
         Ok(Self {
             settings,
+            global_layer,
+            project_layer,
             project_path,
             global_path,
             watch_handle: None,
@@ -564,6 +682,8 @@ impl SettingsManager {
     pub fn in_memory() -> Self {
         Self {
             settings: Settings::defaults(),
+            global_layer: Settings::default(),
+            project_layer: Settings::default(),
             project_path: None,
             global_path: None,
             watch_handle: None,
@@ -579,6 +699,94 @@ impl SettingsManager {
     /// `mgr.settings()` from the previous JSON-backed API.
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Borrow the raw global-layer values. Every field that was not
+    /// explicitly set in the global YAML is `None`. Distinct from
+    /// [`Self::current`], which folds in the project layer and defaults.
+    pub fn global_layer(&self) -> &Settings {
+        &self.global_layer
+    }
+
+    /// Borrow the raw project-layer values. Every field that was not
+    /// explicitly set in the project YAML is `None`. Distinct from
+    /// [`Self::current`], which folds in the global layer and defaults.
+    pub fn project_layer(&self) -> &Settings {
+        &self.project_layer
+    }
+
+    /// Borrow the layer matching `scope`.
+    pub fn layer(&self, scope: SettingsScope) -> &Settings {
+        match scope {
+            SettingsScope::Global => &self.global_layer,
+            SettingsScope::Project => &self.project_layer,
+        }
+    }
+
+    fn layer_mut(&mut self, scope: SettingsScope) -> &mut Settings {
+        match scope {
+            SettingsScope::Global => &mut self.global_layer,
+            SettingsScope::Project => &mut self.project_layer,
+        }
+    }
+
+    /// Replace the `packages` list of one layer in memory. Persist with
+    /// [`Self::save`] for the same `scope`. Passing `None` clears the
+    /// field (the layer will not contribute a `packages` value to the
+    /// merge); passing `Some(vec![])` is "explicitly empty" and shadows
+    /// the lower layer's list.
+    pub fn set_packages(&mut self, scope: SettingsScope, value: Option<Vec<PackageSource>>) {
+        self.layer_mut(scope).packages = value;
+        self.recompute_merged();
+    }
+
+    /// Replace the `extensions` list of one layer in memory. Same
+    /// semantics as [`Self::set_packages`].
+    pub fn set_extensions(&mut self, scope: SettingsScope, value: Option<Vec<String>>) {
+        self.layer_mut(scope).extensions = value;
+        self.recompute_merged();
+    }
+
+    /// Replace the `skills` list of one layer in memory. Same semantics
+    /// as [`Self::set_packages`].
+    pub fn set_skills(&mut self, scope: SettingsScope, value: Option<Vec<String>>) {
+        self.layer_mut(scope).skills = value;
+        self.recompute_merged();
+    }
+
+    /// Replace the `prompts` list of one layer in memory. Same semantics
+    /// as [`Self::set_packages`].
+    pub fn set_prompts(&mut self, scope: SettingsScope, value: Option<Vec<String>>) {
+        self.layer_mut(scope).prompts = value;
+        self.recompute_merged();
+    }
+
+    /// Replace the `themes` list of one layer in memory. Same semantics
+    /// as [`Self::set_packages`].
+    pub fn set_themes(&mut self, scope: SettingsScope, value: Option<Vec<String>>) {
+        self.layer_mut(scope).themes = value;
+        self.recompute_merged();
+    }
+
+    /// Persist the in-memory state of `scope` to its YAML path.
+    ///
+    /// Atomic write semantics: the new content is staged to a sibling
+    /// `tempfile::NamedTempFile`, fsynced, then renamed into place. A
+    /// torn write therefore either leaves the existing file untouched or
+    /// produces the new file in full — never a partial overwrite. On
+    /// Unix the post-rename file mode is forced to `0o600`. On Windows
+    /// mode handling is a no-op.
+    ///
+    /// Returns [`SettingsError::NoPath`] when the scope has no
+    /// configured path (the in-memory-only constructors).
+    pub fn save(&self, scope: SettingsScope) -> Result<(), SettingsError> {
+        let path = match scope {
+            SettingsScope::Global => self.global_path.as_deref(),
+            SettingsScope::Project => self.project_path.as_deref(),
+        }
+        .ok_or(SettingsError::NoPath { scope })?;
+        let layer = self.layer(scope);
+        write_yaml_layer_atomic(path, layer)
     }
 
     /// Effective compaction settings. The returned value is a clone — call
@@ -602,13 +810,39 @@ impl SettingsManager {
     /// Test-only constructor: build a manager wrapping a pre-merged
     /// [`Settings`] value with no on-disk paths and no watcher. Used by
     /// unit tests that need to inject specific settings without touching
-    /// the filesystem.
+    /// the filesystem. Both layer views mirror the supplied settings —
+    /// callers exercising layer-targeted writes should construct via
+    /// [`SettingsManager::from_layers_for_test`] instead.
     #[doc(hidden)]
     pub fn from_raw_for_test(settings: Settings) -> Self {
         Self {
+            global_layer: settings.clone(),
+            project_layer: Settings::default(),
             settings,
             project_path: None,
             global_path: None,
+            watch_handle: None,
+        }
+    }
+
+    /// Test-only constructor: build a manager from explicit per-layer
+    /// values plus on-disk paths. Used by tests that need to exercise
+    /// scope-targeted writes round-tripping through YAML.
+    #[doc(hidden)]
+    pub fn from_layers_for_test(
+        global_layer: Settings,
+        project_layer: Settings,
+        global_path: Option<PathBuf>,
+        project_path: Option<PathBuf>,
+    ) -> Self {
+        let with_global = Settings::merge(Settings::defaults(), global_layer.clone());
+        let settings = Settings::merge(with_global, project_layer.clone());
+        Self {
+            settings,
+            global_layer,
+            project_layer,
+            project_path,
+            global_path,
             watch_handle: None,
         }
     }
@@ -794,6 +1028,12 @@ impl SettingsManager {
             task,
         });
         receiver
+    }
+
+    /// Recompute the merged view after a layer-targeted mutation.
+    fn recompute_merged(&mut self) {
+        let with_global = Settings::merge(Settings::defaults(), self.global_layer.clone());
+        self.settings = Settings::merge(with_global, self.project_layer.clone());
     }
 
     /// Stop the watcher (used in tests and on shutdown). Idempotent.
@@ -1381,11 +1621,19 @@ mod tests {
     /// (without requiring the file to exist yet) and no global layer.
     fn manager_for_project(project: PathBuf) -> SettingsManager {
         // Bypass `from_cwd` (which forces the standard layout) and use
-        // `Settings::load` directly so we control which files exist.
-        let settings =
-            Settings::load(None, Some(project.as_path())).unwrap_or_else(|_| Settings::defaults());
+        // `Settings::load_layers` directly so we control which files exist.
+        let (global_layer, project_layer, settings) =
+            Settings::load_layers(None, Some(project.as_path())).unwrap_or_else(|_| {
+                (
+                    Settings::default(),
+                    Settings::default(),
+                    Settings::defaults(),
+                )
+            });
         SettingsManager {
             settings,
+            global_layer,
+            project_layer,
             project_path: Some(project),
             global_path: None,
             watch_handle: None,
@@ -1566,9 +1814,12 @@ mod tests {
         std::fs::write(&global, "default-model: A\n").unwrap();
         // Project file does not yet exist.
 
-        let settings = Settings::load(Some(global.as_path()), Some(project.as_path())).unwrap();
+        let (global_layer, project_layer, settings) =
+            Settings::load_layers(Some(global.as_path()), Some(project.as_path())).unwrap();
         let mut mgr = SettingsManager {
             settings,
+            global_layer,
+            project_layer,
             project_path: Some(project.clone()),
             global_path: Some(global.clone()),
             watch_handle: None,
@@ -2023,5 +2274,246 @@ themes:
         let p = write_yaml(&dir, "project.yaml", "extensions:\n  - /project/x\n");
         let s = Settings::load(Some(&g), Some(&p)).unwrap();
         assert_eq!(s.extensions(), &["/project/x".to_string()]);
+    }
+
+    // ---------------------------------------------------------------------
+    // Layer-targeted writes (Track 1: SettingsManager YAML persistence)
+    // ---------------------------------------------------------------------
+
+    fn manager_with_layers(global_path: PathBuf, project_path: PathBuf) -> SettingsManager {
+        let (global_layer, project_layer, settings) =
+            Settings::load_layers(Some(global_path.as_path()), Some(project_path.as_path()))
+                .unwrap();
+        SettingsManager {
+            settings,
+            global_layer,
+            project_layer,
+            project_path: Some(project_path),
+            global_path: Some(global_path),
+            watch_handle: None,
+        }
+    }
+
+    #[test]
+    fn layer_accessors_expose_raw_layers() {
+        let dir = TempDir::new().unwrap();
+        let g = write_yaml(&dir, "global.yaml", "default-model: from-global\n");
+        let p = write_yaml(&dir, "project.yaml", "packages:\n  - npm:proj-only\n");
+        let mgr = manager_with_layers(g, p);
+        // Project layer carries only what was specified — no defaults.
+        assert!(mgr.project_layer().default_model.is_none());
+        assert_eq!(mgr.project_layer().packages().len(), 1);
+        // Global layer also raw — no defaults injected.
+        assert_eq!(
+            mgr.global_layer().default_model.as_deref(),
+            Some("from-global"),
+        );
+        assert!(mgr.global_layer().packages.is_none());
+        // Merged view still has defaults applied.
+        assert_eq!(mgr.current().default_model.as_deref(), Some("from-global"));
+        assert!(mgr.current().enable_install_telemetry());
+    }
+
+    #[test]
+    fn set_packages_then_save_reload_roundtrips_for_global_scope() {
+        let dir = TempDir::new().unwrap();
+        let g = dir.path().join("global.yaml");
+        let p = dir.path().join("project.yaml");
+        std::fs::write(&g, "").unwrap();
+        std::fs::write(&p, "").unwrap();
+
+        let mut mgr = manager_with_layers(g.clone(), p.clone());
+        mgr.set_packages(
+            SettingsScope::Global,
+            Some(vec![PackageSource::Bare("npm:hello".into())]),
+        );
+        mgr.save(SettingsScope::Global).unwrap();
+
+        let reloaded = Settings::load(Some(&g), Some(&p)).unwrap();
+        let pkgs = reloaded.packages();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].source(), "npm:hello");
+    }
+
+    #[test]
+    fn set_packages_then_save_reload_roundtrips_for_project_scope() {
+        let dir = TempDir::new().unwrap();
+        let g = dir.path().join("global.yaml");
+        let p = dir.path().join("project.yaml");
+        std::fs::write(&g, "packages:\n  - npm:keep-me\n").unwrap();
+        std::fs::write(&p, "").unwrap();
+
+        let mut mgr = manager_with_layers(g.clone(), p.clone());
+        mgr.set_packages(
+            SettingsScope::Project,
+            Some(vec![PackageSource::Bare("npm:proj".into())]),
+        );
+        mgr.save(SettingsScope::Project).unwrap();
+
+        // Project YAML now has the new entry; global YAML untouched.
+        let project_yaml = std::fs::read_to_string(&p).unwrap();
+        assert!(project_yaml.contains("npm:proj"));
+        let global_yaml = std::fs::read_to_string(&g).unwrap();
+        assert!(global_yaml.contains("npm:keep-me"));
+
+        // After reload, project shadows global (whole-list override).
+        let reloaded = Settings::load(Some(&g), Some(&p)).unwrap();
+        let pkgs = reloaded.packages();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].source(), "npm:proj");
+    }
+
+    #[test]
+    fn set_extensions_skills_prompts_themes_persist_per_scope() {
+        let dir = TempDir::new().unwrap();
+        let g = dir.path().join("global.yaml");
+        let p = dir.path().join("project.yaml");
+        std::fs::write(&g, "").unwrap();
+        std::fs::write(&p, "").unwrap();
+
+        let mut mgr = manager_with_layers(g.clone(), p.clone());
+        mgr.set_extensions(SettingsScope::Project, Some(vec!["/p/ext".into()]));
+        mgr.set_skills(SettingsScope::Project, Some(vec!["/p/skill".into()]));
+        mgr.set_prompts(SettingsScope::Global, Some(vec!["/g/pr".into()]));
+        mgr.set_themes(SettingsScope::Global, Some(vec!["/g/th".into()]));
+        mgr.save(SettingsScope::Project).unwrap();
+        mgr.save(SettingsScope::Global).unwrap();
+
+        let reloaded = Settings::load(Some(&g), Some(&p)).unwrap();
+        assert_eq!(reloaded.extensions(), &["/p/ext".to_string()]);
+        assert_eq!(reloaded.skills(), &["/p/skill".to_string()]);
+        assert_eq!(reloaded.prompts(), &["/g/pr".to_string()]);
+        assert_eq!(reloaded.themes(), &["/g/th".to_string()]);
+    }
+
+    #[test]
+    fn set_packages_does_not_touch_other_layer() {
+        let dir = TempDir::new().unwrap();
+        let g = dir.path().join("global.yaml");
+        let p = dir.path().join("project.yaml");
+        std::fs::write(&g, "default-model: g-model\n").unwrap();
+        std::fs::write(&p, "default-model: p-model\n").unwrap();
+
+        let mut mgr = manager_with_layers(g.clone(), p.clone());
+        mgr.set_packages(
+            SettingsScope::Project,
+            Some(vec![PackageSource::Bare("npm:p".into())]),
+        );
+        mgr.save(SettingsScope::Project).unwrap();
+
+        // The project YAML should round-trip both default-model and the
+        // packages list — a layer write must not lose unrelated fields.
+        let reloaded = Settings::load(None, Some(&p)).unwrap();
+        assert_eq!(reloaded.default_model.as_deref(), Some("p-model"));
+        assert_eq!(reloaded.packages().len(), 1);
+        // Global YAML on disk is untouched (we never called save(Global)).
+        let global_yaml = std::fs::read_to_string(&g).unwrap();
+        assert_eq!(global_yaml, "default-model: g-model\n");
+    }
+
+    #[test]
+    fn save_with_no_path_returns_error() {
+        let mut mgr = SettingsManager::in_memory();
+        mgr.set_packages(
+            SettingsScope::Global,
+            Some(vec![PackageSource::Bare("npm:foo".into())]),
+        );
+        let err = mgr.save(SettingsScope::Global).unwrap_err();
+        assert!(matches!(err, SettingsError::NoPath { .. }));
+    }
+
+    #[test]
+    fn save_creates_parent_directory() {
+        let dir = TempDir::new().unwrap();
+        // Path under a nested directory that does not exist yet.
+        let p = dir.path().join("nested/.hand/settings.yaml");
+        let g = dir.path().join("global.yaml");
+        std::fs::write(&g, "").unwrap();
+        let (global_layer, project_layer, settings) =
+            Settings::load_layers(Some(g.as_path()), None).unwrap();
+        let mut mgr = SettingsManager {
+            settings,
+            global_layer,
+            project_layer,
+            project_path: Some(p.clone()),
+            global_path: Some(g),
+            watch_handle: None,
+        };
+        mgr.set_packages(
+            SettingsScope::Project,
+            Some(vec![PackageSource::Bare("npm:foo".into())]),
+        );
+        mgr.save(SettingsScope::Project).unwrap();
+        assert!(p.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_unix_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let g = dir.path().join("global.yaml");
+        let p = dir.path().join("project.yaml");
+        std::fs::write(&g, "").unwrap();
+        std::fs::write(&p, "").unwrap();
+        // Loosen the existing mode so we can detect the reassert.
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&p, perms).unwrap();
+
+        let mut mgr = manager_with_layers(g, p.clone());
+        mgr.set_packages(
+            SettingsScope::Project,
+            Some(vec![PackageSource::Bare("npm:foo".into())]),
+        );
+        mgr.save(SettingsScope::Project).unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "expected 0600, got {:o}", mode & 0o777);
+    }
+
+    #[test]
+    fn save_is_atomic_when_target_does_not_exist() {
+        // A successful save must produce a complete file; we can't easily
+        // inject a partial-write failure mid-save, but we can confirm
+        // that NamedTempFile::persist hands us a syntactically valid YAML
+        // for the layer (i.e. no partial content leaks through).
+        let dir = TempDir::new().unwrap();
+        let g = dir.path().join("global.yaml");
+        let p = dir.path().join("project.yaml");
+        std::fs::write(&g, "").unwrap();
+        std::fs::write(&p, "default-model: original\n").unwrap();
+
+        let mut mgr = manager_with_layers(g, p.clone());
+        mgr.set_packages(
+            SettingsScope::Project,
+            Some(vec![PackageSource::Bare("npm:atomic".into())]),
+        );
+        mgr.save(SettingsScope::Project).unwrap();
+        // Reload through Settings::load — if the rename had been torn we'd
+        // see a YAML parse error; instead we get the merged view.
+        let reloaded = Settings::load(None, Some(&p)).unwrap();
+        assert_eq!(reloaded.default_model.as_deref(), Some("original"));
+        assert_eq!(reloaded.packages().len(), 1);
+    }
+
+    #[test]
+    fn current_reflects_in_memory_set_before_save() {
+        // The merged view is recomputed on every set; tests that observe
+        // current() between set and save should see the new value.
+        let dir = TempDir::new().unwrap();
+        let g = dir.path().join("global.yaml");
+        let p = dir.path().join("project.yaml");
+        std::fs::write(&g, "").unwrap();
+        std::fs::write(&p, "").unwrap();
+
+        let mut mgr = manager_with_layers(g, p);
+        assert!(mgr.current().packages().is_empty());
+        mgr.set_packages(
+            SettingsScope::Project,
+            Some(vec![PackageSource::Bare("npm:in-memory".into())]),
+        );
+        let pkgs = mgr.current().packages();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].source(), "npm:in-memory");
     }
 }
