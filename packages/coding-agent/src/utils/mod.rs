@@ -11,6 +11,7 @@ pub mod clipboard;
 pub mod clipboard_image;
 pub mod exif_orientation;
 pub mod frontmatter;
+pub mod fs_watch;
 pub mod image_convert;
 pub mod image_resize;
 pub mod mime;
