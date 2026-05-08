@@ -42,6 +42,81 @@ pub struct Settings {
     /// value via [`Settings::enable_install_telemetry`] — direct field
     /// access is `Option<bool>` so layered merging is mechanical.
     pub enable_install_telemetry: Option<bool>,
+    /// Pi-extension package sources (npm specs, git URLs, or local paths)
+    /// to load extensions/skills/prompts/themes from. Each entry is either
+    /// a bare string source or a [`PackageSource::Filtered`] object that
+    /// scopes which resource kinds to enable from the package.
+    ///
+    /// Merge semantics: project layer **replaces** the global list when
+    /// supplied (whole-list override, matching the TS reference's
+    /// `deepMergeSettings` array behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packages: Option<Vec<PackageSource>>,
+    /// Local filesystem paths (files or directories) to load extension
+    /// modules from, in addition to those discovered via [`Self::packages`].
+    /// Whole-list override on merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Vec<String>>,
+    /// Local filesystem paths (files or directories) to load skill markdown
+    /// files from. Whole-list override on merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+    /// Local filesystem paths (files or directories) to load prompt
+    /// templates from. Whole-list override on merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<Vec<String>>,
+    /// Local filesystem paths (files or directories) to load theme
+    /// JSON files from. Whole-list override on merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub themes: Option<Vec<String>>,
+}
+
+/// One entry in [`Settings::packages`].
+///
+/// Mirrors the TS `PackageSource` union: either a bare source string
+/// (`"npm:..."`, `"git:..."`, `"github:..."`, `"./local/path"`) that loads
+/// every resource kind the package exposes, or a filtered object that
+/// scopes the loaded resource kinds.
+///
+/// Serde shape: untagged. A YAML scalar deserializes as
+/// [`PackageSource::Bare`]; a mapping with at least a `source:` key
+/// deserializes as [`PackageSource::Filtered`].
+///
+/// ```yaml
+/// packages:
+///   - npm:@scope/pkg                # Bare
+///   - source: github:owner/repo     # Filtered
+///     extensions: ["ext-a"]
+///     skills: ["skill-x"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum PackageSource {
+    /// Bare source spec — load everything the package exposes.
+    Bare(String),
+    /// Source spec plus per-kind allow-lists. An absent list means "load
+    /// every resource of that kind"; an empty list means "load none".
+    Filtered {
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extensions: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skills: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompts: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        themes: Option<Vec<String>>,
+    },
+}
+
+impl PackageSource {
+    /// Source spec as a string slice, regardless of variant.
+    pub fn source(&self) -> &str {
+        match self {
+            PackageSource::Bare(s) => s,
+            PackageSource::Filtered { source, .. } => source,
+        }
+    }
 }
 
 /// Compaction tuning, in YAML-parse shape.
@@ -230,7 +305,41 @@ impl Settings {
             retry: RetrySettings::with_defaults(),
             quiet_startup: Some(false),
             enable_install_telemetry: Some(true),
+            // Resource-side fields default to "not configured" (None) — the
+            // accessors below return empty slices in that case. Distinct
+            // from `Some(vec![])` which is "explicitly an empty list".
+            packages: None,
+            extensions: None,
+            skills: None,
+            prompts: None,
+            themes: None,
         }
+    }
+
+    /// Effective list of pi-extension package sources. Empty when the
+    /// field is unset in both layers.
+    pub fn packages(&self) -> &[PackageSource] {
+        self.packages.as_deref().unwrap_or(&[])
+    }
+
+    /// Effective list of extension paths.
+    pub fn extensions(&self) -> &[String] {
+        self.extensions.as_deref().unwrap_or(&[])
+    }
+
+    /// Effective list of skill paths.
+    pub fn skills(&self) -> &[String] {
+        self.skills.as_deref().unwrap_or(&[])
+    }
+
+    /// Effective list of prompt template paths.
+    pub fn prompts(&self) -> &[String] {
+        self.prompts.as_deref().unwrap_or(&[])
+    }
+
+    /// Effective list of theme paths.
+    pub fn themes(&self) -> &[String] {
+        self.themes.as_deref().unwrap_or(&[])
     }
 
     /// Effective theme — the merged value or [`ThemeSetting::Dark`] if unset.
@@ -269,6 +378,14 @@ impl Settings {
             enable_install_telemetry: project
                 .enable_install_telemetry
                 .or(base.enable_install_telemetry),
+            // Whole-list override: project's `Some(...)` (even an empty
+            // vec) replaces base. This matches the TS reference's
+            // `deepMergeSettings`, where arrays are not deep-merged.
+            packages: project.packages.or(base.packages),
+            extensions: project.extensions.or(base.extensions),
+            skills: project.skills.or(base.skills),
+            prompts: project.prompts.or(base.prompts),
+            themes: project.themes.or(base.themes),
         }
     }
 
@@ -343,6 +460,11 @@ fn parse_yaml_with_warning(path: &Path, content: &str) -> Result<Settings, Setti
             "retry",
             "quiet-startup",
             "enable-install-telemetry",
+            "packages",
+            "extensions",
+            "skills",
+            "prompts",
+            "themes",
         ];
         for (k, _) in map.iter() {
             if let Some(key) = k.as_str().filter(|k| !known.contains(k)) {
@@ -769,6 +891,11 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "retry",
     "quiet-startup",
     "enable-install-telemetry",
+    "packages",
+    "extensions",
+    "skills",
+    "prompts",
+    "themes",
 ];
 
 /// Sub-struct keys we recognise (kebab-case) for `compaction` / `retry`.
@@ -1738,5 +1865,163 @@ mod tests {
         assert_eq!(s.retry.max_retries(), 5);
         assert_eq!(s.retry.initial_delay_ms(), 2_500);
         assert_eq!(s.retry.max_delay_ms(), 60_000);
+    }
+
+    // ---------------------------------------------------------------------
+    // Resource-side fields: packages / extensions / skills / prompts / themes
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn resource_side_accessors_default_empty() {
+        let s = Settings::defaults();
+        assert!(s.packages().is_empty());
+        assert!(s.extensions().is_empty());
+        assert!(s.skills().is_empty());
+        assert!(s.prompts().is_empty());
+        assert!(s.themes().is_empty());
+    }
+
+    #[test]
+    fn package_source_bare_round_trips_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(
+            &dir,
+            "settings.yaml",
+            "packages:\n  - npm:@scope/pkg\n  - git:owner/repo\n",
+        );
+        let s = Settings::load(Some(&p), None).unwrap();
+        let pkgs = s.packages();
+        assert_eq!(pkgs.len(), 2);
+        assert!(matches!(&pkgs[0], PackageSource::Bare(spec) if spec == "npm:@scope/pkg"));
+        assert!(matches!(&pkgs[1], PackageSource::Bare(spec) if spec == "git:owner/repo"));
+        assert_eq!(pkgs[0].source(), "npm:@scope/pkg");
+    }
+
+    #[test]
+    fn package_source_filtered_round_trips_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let body = "\
+packages:
+  - source: github:owner/repo
+    extensions:
+      - ext-a
+      - ext-b
+    skills:
+      - skill-x
+    themes: []
+";
+        let p = write_yaml(&dir, "settings.yaml", body);
+        let s = Settings::load(Some(&p), None).unwrap();
+        let pkgs = s.packages();
+        assert_eq!(pkgs.len(), 1);
+        match &pkgs[0] {
+            PackageSource::Filtered {
+                source,
+                extensions,
+                skills,
+                prompts,
+                themes,
+            } => {
+                assert_eq!(source, "github:owner/repo");
+                assert_eq!(
+                    extensions.as_deref(),
+                    Some(&["ext-a".to_string(), "ext-b".to_string()][..]),
+                );
+                assert_eq!(skills.as_deref(), Some(&["skill-x".to_string()][..]));
+                assert!(prompts.is_none(), "absent list stays None");
+                assert_eq!(themes.as_deref(), Some(&[][..]), "empty list survives");
+            }
+            other => panic!("expected Filtered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn package_source_serializes_round_trip() {
+        // Round-trip a Vec through serde_yaml to pin the on-disk shape.
+        let pkgs = vec![
+            PackageSource::Bare("npm:foo".into()),
+            PackageSource::Filtered {
+                source: "git:bar".into(),
+                extensions: Some(vec!["a".into()]),
+                skills: None,
+                prompts: None,
+                themes: None,
+            },
+        ];
+        let yaml = serde_yaml::to_string(&pkgs).unwrap();
+        let parsed: Vec<PackageSource> = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed, pkgs);
+    }
+
+    #[test]
+    fn project_packages_replace_global_whole_list() {
+        // Whole-list override semantics: if project sets `packages`, the
+        // global list is dropped entirely (it doesn't union or interleave).
+        let dir = TempDir::new().unwrap();
+        let g = write_yaml(
+            &dir,
+            "global.yaml",
+            "packages:\n  - npm:global-pkg\n  - git:global-repo\n",
+        );
+        let p = write_yaml(&dir, "project.yaml", "packages:\n  - npm:project-only\n");
+        let s = Settings::load(Some(&g), Some(&p)).unwrap();
+        let pkgs = s.packages();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].source(), "npm:project-only");
+    }
+
+    #[test]
+    fn project_absent_packages_leaves_global_list_intact() {
+        let dir = TempDir::new().unwrap();
+        let g = write_yaml(&dir, "global.yaml", "packages:\n  - npm:global-pkg\n");
+        let p = write_yaml(&dir, "project.yaml", "default-model: gpt-4o\n");
+        let s = Settings::load(Some(&g), Some(&p)).unwrap();
+        assert_eq!(s.packages().len(), 1);
+        assert_eq!(s.packages()[0].source(), "npm:global-pkg");
+    }
+
+    #[test]
+    fn project_explicit_empty_packages_clears_global_list() {
+        // `Some(vec![])` is "explicitly cleared", distinct from `None`
+        // ("layer didn't say"). Confirm the merge respects that distinction.
+        let dir = TempDir::new().unwrap();
+        let g = write_yaml(&dir, "global.yaml", "packages:\n  - npm:global-pkg\n");
+        let p = write_yaml(&dir, "project.yaml", "packages: []\n");
+        let s = Settings::load(Some(&g), Some(&p)).unwrap();
+        assert!(s.packages().is_empty());
+    }
+
+    #[test]
+    fn extensions_skills_prompts_themes_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let body = "\
+extensions:
+  - ./local/ext.ts
+skills:
+  - ~/skills
+prompts:
+  - ./prompts
+themes:
+  - ./themes/dark.json
+";
+        let p = write_yaml(&dir, "settings.yaml", body);
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.extensions(), &["./local/ext.ts".to_string()]);
+        assert_eq!(s.skills(), &["~/skills".to_string()]);
+        assert_eq!(s.prompts(), &["./prompts".to_string()]);
+        assert_eq!(s.themes(), &["./themes/dark.json".to_string()]);
+    }
+
+    #[test]
+    fn project_extension_paths_replace_global() {
+        let dir = TempDir::new().unwrap();
+        let g = write_yaml(
+            &dir,
+            "global.yaml",
+            "extensions:\n  - /global/a\n  - /global/b\n",
+        );
+        let p = write_yaml(&dir, "project.yaml", "extensions:\n  - /project/x\n");
+        let s = Settings::load(Some(&g), Some(&p)).unwrap();
+        assert_eq!(s.extensions(), &["/project/x".to_string()]);
     }
 }
