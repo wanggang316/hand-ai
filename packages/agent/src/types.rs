@@ -254,7 +254,11 @@ pub struct AgentContext {
 /// `agent_end` is the final event for a run; observers may rely on seeing it for
 /// every run including failures.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum AgentEvent {
     AgentStart,
     AgentEnd {

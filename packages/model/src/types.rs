@@ -119,6 +119,7 @@ pub enum Provider {
     GoogleAntigravity,
     #[serde(rename = "google-vertex")]
     GoogleVertex,
+    #[serde(rename = "openai")]
     OpenAI,
     #[serde(rename = "azure-openai-responses")]
     AzureOpenAiResponses,
@@ -973,7 +974,11 @@ pub struct Context {
 
 /// Events emitted during streaming.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(
+    tag = "type",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum AssistantMessageEvent {
     Start {
         partial: AssistantMessage,
@@ -1006,15 +1011,18 @@ pub enum AssistantMessageEvent {
         content: String,
         partial: AssistantMessage,
     },
+    #[serde(rename = "toolcall_start")]
     ToolCallStart {
         content_index: u32,
         partial: AssistantMessage,
     },
+    #[serde(rename = "toolcall_delta")]
     ToolCallDelta {
         content_index: u32,
         delta: String,
         partial: AssistantMessage,
     },
+    #[serde(rename = "toolcall_end")]
     ToolCallEnd {
         content_index: u32,
         tool_call: ToolCall,
