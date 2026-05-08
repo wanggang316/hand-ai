@@ -13,11 +13,9 @@
 //! is per-effect (30 fps for most, 60 fps for `glitch`) and reported via
 //! [`ArminComponent::tick_interval`] so drivers can schedule appropriately.
 //!
-//! Parity scope: the data table and six effects (`Fade`, `Scanline`,
-//! `Typewriter`, `Rain`, `Crt`, `Glitch`) are ported. The remaining one
-//! (`Dissolve`) is tracked as `// TODO(parity): port additional reveal
-//! effects` and currently falls back to instant-reveal so callers never get a
-//! frozen splash.
+//! Parity scope: the data table and all seven reveal effects (`Fade`,
+//! `Scanline`, `Typewriter`, `Rain`, `Crt`, `Glitch`, `Dissolve`) are
+//! ported.
 
 use std::time::Duration;
 
@@ -144,9 +142,7 @@ struct RainDrop {
     settled: usize,
 }
 
-/// Per-effect mutable state. Only the ported effects carry meaningful state;
-/// the rest fall back to instant-reveal so the component never freezes
-/// mid-animation.
+/// Per-effect mutable state. One variant per [`Effect`] kind.
 enum EffectState {
     Scanline {
         row: usize,
@@ -167,10 +163,9 @@ enum EffectState {
     Glitch {
         phase: usize,
     },
-    /// Placeholder for the effects not yet ported. Always reveals on the
-    /// first tick — see TS source for the actual animation.
-    InstantReveal {
-        revealed: bool,
+    Dissolve {
+        positions: Vec<(usize, usize)>,
+        idx: usize,
     },
 }
 
@@ -203,7 +198,12 @@ impl ArminComponent {
 
     fn build(effect: Effect, mut rng: StdRng) -> Self {
         let final_grid = build_final_grid();
-        let current_grid = empty_grid();
+        // Dissolve seeds the canvas with random glyphs that resolve to the
+        // final image; every other effect starts from a blank grid.
+        let current_grid = match effect {
+            Effect::Dissolve => dissolve_initial_noise(&mut rng),
+            _ => empty_grid(),
+        };
         let state = init_state(effect, &mut rng);
         Self {
             effect,
@@ -257,12 +257,8 @@ impl ArminComponent {
                 &mut self.current_grid,
                 &mut self.rng,
             ),
-            EffectState::InstantReveal { revealed } => {
-                if !*revealed {
-                    self.current_grid = self.final_grid.clone();
-                    *revealed = true;
-                }
-                true
+            EffectState::Dissolve { positions, idx } => {
+                tick_dissolve(positions, idx, &self.final_grid, &mut self.current_grid)
             }
         };
         if finished {
@@ -330,11 +326,59 @@ fn init_state(effect: Effect, rng: &mut StdRng) -> EffectState {
             }
             EffectState::Fade { positions, idx: 0 }
         }
-        // TODO(parity): port the dissolve reveal effect. For now it
-        // instantly reveals on the first tick so the component never freezes
-        // mid-animation.
-        Effect::Dissolve => EffectState::InstantReveal { revealed: false },
+        Effect::Dissolve => {
+            // Same shuffled-positions schedule as `Fade`, but the canvas is
+            // pre-filled with random noise (see `dissolve_initial_noise`)
+            // and resolves 20 pixels per frame instead of 15.
+            let mut positions = Vec::with_capacity(DISPLAY_HEIGHT * WIDTH);
+            for row in 0..DISPLAY_HEIGHT {
+                for x in 0..WIDTH {
+                    positions.push((row, x));
+                }
+            }
+            // Fisher-Yates shuffle using the component-level seedable RNG so
+            // tests can pin the order via `with_effect_seeded`.
+            for i in (1..positions.len()).rev() {
+                let j = rng.gen_range(0..=i);
+                positions.swap(i, j);
+            }
+            EffectState::Dissolve { positions, idx: 0 }
+        }
     }
+}
+
+/// Glyphs used to seed the dissolve canvas. Matches the TS source order so
+/// the same seeded RNG produces identical noise patterns.
+const DISSOLVE_NOISE_GLYPHS: [char; 7] = [
+    ' ', '\u{2591}', '\u{2592}', '\u{2593}', '\u{2588}', '\u{2580}', '\u{2584}',
+];
+
+fn dissolve_initial_noise(rng: &mut StdRng) -> Vec<Vec<char>> {
+    (0..DISPLAY_HEIGHT)
+        .map(|_| {
+            (0..WIDTH)
+                .map(|_| DISSOLVE_NOISE_GLYPHS[rng.gen_range(0..DISSOLVE_NOISE_GLYPHS.len())])
+                .collect()
+        })
+        .collect()
+}
+
+fn tick_dissolve(
+    positions: &[(usize, usize)],
+    idx: &mut usize,
+    final_grid: &[Vec<char>],
+    current: &mut [Vec<char>],
+) -> bool {
+    let pixels_per_frame = 20;
+    for _ in 0..pixels_per_frame {
+        if *idx >= positions.len() {
+            return true;
+        }
+        let (row, x) = positions[*idx];
+        current[row][x] = final_grid[row][x];
+        *idx += 1;
+    }
+    *idx >= positions.len()
 }
 
 fn tick_scanline(row: &mut usize, final_grid: &[Vec<char>], current: &mut [Vec<char>]) -> bool {
@@ -726,12 +770,46 @@ mod tests {
     }
 
     #[test]
-    fn dissolve_instant_reveal_completes_in_one_tick() {
-        // TODO(parity): replace with a real animation test once the
-        // dissolve effect is ported.
-        let mut c = ArminComponent::with_effect(Effect::Dissolve);
-        c.tick();
-        assert_eq!(c.current_grid(), build_final_grid().as_slice());
+    fn dissolve_starts_with_noise_and_resolves_to_final_image() {
+        let mut c = ArminComponent::with_effect_seeded(Effect::Dissolve, 0);
+
+        // Initial canvas is the random-noise alphabet, not blank space and
+        // not the final image.
+        let initial: Vec<Vec<char>> = c.current_grid().to_vec();
+        let final_grid = build_final_grid();
+        assert_ne!(initial, final_grid);
+        for row in &initial {
+            for ch in row {
+                assert!(
+                    DISSOLVE_NOISE_GLYPHS.contains(ch),
+                    "dissolve noise produced unexpected glyph {ch:?}"
+                );
+            }
+        }
+
+        // 20 pixels per tick; ceil(total / 20) ticks should complete.
+        let total_pixels = DISPLAY_HEIGHT * WIDTH;
+        let max_ticks = total_pixels.div_ceil(20) + 2;
+        for _ in 0..max_ticks {
+            c.tick();
+            if c.is_done() {
+                break;
+            }
+        }
+        assert!(
+            c.is_done(),
+            "dissolve should complete in <= {max_ticks} ticks"
+        );
+        assert_eq!(c.current_grid(), final_grid.as_slice());
+    }
+
+    #[test]
+    fn dissolve_is_deterministic_for_same_seed() {
+        let a = ArminComponent::with_effect_seeded(Effect::Dissolve, 99);
+        let b = ArminComponent::with_effect_seeded(Effect::Dissolve, 99);
+        // Both initial noise canvases must match exactly when seeded the
+        // same.
+        assert_eq!(a.current_grid(), b.current_grid());
     }
 
     #[test]
