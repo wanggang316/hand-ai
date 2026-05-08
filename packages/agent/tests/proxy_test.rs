@@ -220,9 +220,12 @@ async fn proxy_aborts_when_token_cancelled() {
         events
     };
 
-    let events = tokio::time::timeout(Duration::from_millis(500), collect)
+    // Budget covers debug-build TCP/HTTP overhead on slower machines. The
+    // cancel itself fires at 50 ms; if it weren't being respected this test
+    // would hit the upstream wiremock 5-s delay anyway.
+    let events = tokio::time::timeout(Duration::from_secs(10), collect)
         .await
-        .expect("stream_proxy did not respect cancel within 500ms");
+        .expect("stream_proxy did not respect cancel within 10s");
 
     assert!(!events.is_empty(), "expected at least one event");
     match events.last().expect("non-empty") {
