@@ -60,13 +60,13 @@ fn build_image_lines() -> Vec<String> {
     let mut row = 0;
     while row < HEIGHT {
         let mut line = String::new();
-        for x in 0..WIDTH {
-            let top = pixels[row][x];
-            let bottom = if row + 1 < HEIGHT {
-                pixels[row + 1][x]
-            } else {
-                top
-            };
+        let top_row = &pixels[row];
+        let bottom_row = if row + 1 < HEIGHT {
+            &pixels[row + 1]
+        } else {
+            top_row
+        };
+        for (top, bottom) in top_row.iter().zip(bottom_row.iter()) {
             line.push_str(&rgb(bottom.0, bottom.1, bottom.2, false));
             line.push_str(&rgb(top.0, top.1, top.2, true));
             line.push('▄');

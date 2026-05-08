@@ -25,6 +25,8 @@
 //! TODO(parity): theme integration deferred — see
 //! docs/exec-plans/parity-completion.md §A1.
 
+use std::cmp::Reverse;
+
 use hand_tui::utils::truncate_to_width;
 use hand_tui::{
     Component, Container, FuzzyMatch, HandleResult, InputComponent, InputEvent, SpacerComponent,
@@ -117,7 +119,7 @@ impl OAuthSelectorComponent {
             let refs: Vec<&str> = haystacks.iter().map(String::as_str).collect();
             let mut matches: Vec<(usize, FuzzyMatch)> = fuzzy_filter(query, &refs);
             // Already sorted by score (highest first) per fuzzy_filter contract.
-            matches.sort_by(|a, b| b.1.score.cmp(&a.1.score));
+            matches.sort_by_key(|m| Reverse(m.1.score));
             self.filtered_indices = matches.into_iter().map(|(idx, _)| idx).collect();
         }
         if self.filtered_indices.is_empty() {

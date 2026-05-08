@@ -23,6 +23,7 @@
 //! TODO(parity): theme integration deferred — see
 //! docs/exec-plans/parity-completion.md §A1.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use hand_tui::{
@@ -242,7 +243,7 @@ impl ScopedModelsSelectorComponent {
                 .collect();
             let refs: Vec<&str> = haystacks.iter().map(String::as_str).collect();
             let mut matches: Vec<(usize, FuzzyMatch)> = fuzzy_filter(&query, &refs);
-            matches.sort_by(|a, b| b.1.score.cmp(&a.1.score));
+            matches.sort_by_key(|m| Reverse(m.1.score));
             self.filtered_items = matches
                 .into_iter()
                 .map(|(idx, _)| items[idx].clone())
