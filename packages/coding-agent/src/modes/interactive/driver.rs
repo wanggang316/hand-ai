@@ -37,8 +37,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use hand_tui::{
-    Component, EditorComponent, InputEvent, KeyName, ListenerResult, ProcessTerminal,
-    TextComponent, Tui, TuiError,
+    Component, EditorComponent, InputEvent, KeyName, ListenerResult, OverlayMounter,
+    OverlayOptions, ProcessTerminal, TextComponent, Tui, TuiError,
 };
 use tokio::sync::mpsc;
 
@@ -47,7 +47,10 @@ use crate::core::error::CodingAgentError;
 
 use super::components::{
     AssistantMessageComponent, BashExecutionComponent, BashStatus, FooterComponent,
-    FooterViewModel, ModelOutcome, TokenUsageSummary, ToolExecutionComponent, UserMessageComponent,
+    FooterViewModel, LoginDialogComponent, LoginDialogEvent, ModelOutcome, ModelSelectorComponent,
+    SessionSelectorComponent, SessionSelectorEvent, SettingsSelectorComponent,
+    SettingsSelectorEvent, ThinkingOutcome, ThinkingSelectorComponent, TokenUsageSummary,
+    ToolExecutionComponent, UserMessageComponent,
 };
 use super::event_dispatch::{ChatUpdate, dispatch as dispatch_event};
 use super::slash_commands::{
@@ -357,12 +360,11 @@ impl InteractiveMode {
         let stop_for_agent = Arc::clone(&stop);
         let stop_handle_for_agent = Arc::clone(&stop_handle);
         let agent_cwd = cwd.clone();
-        let model_outcome_state: Arc<StdMutex<Option<mpsc::UnboundedReceiver<ModelOutcome>>>> =
-            Arc::new(StdMutex::new(None));
-        let mo_for_agent = Arc::clone(&model_outcome_state);
+        let agent_mounter = tui.overlay_mounter();
         let agent_task = tokio::spawn(async move {
             let mut session = session;
             let cwd = agent_cwd;
+            let mounter = agent_mounter;
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while !stop_for_agent.load(Ordering::Relaxed) {
@@ -393,10 +395,14 @@ impl InteractiveMode {
                         };
                         match SlashCommandTable::dispatch(&parsed, &ctx) {
                             SlashCommandResult::Handled(action) => {
-                                let outcome =
-                                    apply_slash_action(action, &agent_chat, &mut session, &cwd)
-                                        .await;
-                                let _ = &mo_for_agent;
+                                let outcome = apply_slash_action(
+                                    action,
+                                    &agent_chat,
+                                    &mut session,
+                                    &cwd,
+                                    Some(&mounter),
+                                )
+                                .await;
                                 if matches!(outcome, SlashOutcome::Quit) {
                                     unsafe { stop_handle_for_agent.stop() };
                                     break;
@@ -685,47 +691,35 @@ pub(crate) enum SlashOutcome {
 }
 
 /// Apply a [`SlashCommandAction`] to the live driver state. Pulled out of
-/// the agent task body so each branch is independently testable. UI overlay
-/// commands (`Open*`) intentionally fall through to a status-line stub —
-/// see the existing TODO(parity) note in [`InteractiveMode::run`].
+/// the agent task body so each branch is independently testable. The
+/// `mounter`, when provided, is used to mount overlay-blocked commands
+/// (`/model`, `/resume`, `/thinking`, `/settings`, `/login`); when `None`
+/// (e.g. unit tests that don't drive a live Tui), those branches degrade
+/// to a status-line stub.
 pub(crate) async fn apply_slash_action(
     action: SlashCommandAction,
     chat: &ChatList,
     session: &mut AgentSession,
-    _cwd: &Path,
+    cwd: &Path,
+    mounter: Option<&OverlayMounter>,
 ) -> SlashOutcome {
     match action {
         SlashCommandAction::Quit => return SlashOutcome::Quit,
         SlashCommandAction::ShowText(s) => push_status(chat, s, None),
         SlashCommandAction::OpenModelSelector => {
-            push_status(chat, "[/model selector — pick from chat]".to_string(), None)
+            mount_model_selector(chat, session, mounter).await;
         }
         SlashCommandAction::OpenThinkingSelector { inline_level } => {
-            let msg = match inline_level {
-                Some(level) => format!("[/thinking inline level set to {level}]"),
-                None => "[/thinking selector opened]".to_string(),
-            };
-            push_status(chat, msg, None);
-            // TODO(parity): apply the level to the active session and open
-            // the ThinkingSelectorComponent overlay once shared Tui access
-            // lands.
+            mount_thinking_selector(chat, session, inline_level, mounter).await;
         }
         SlashCommandAction::OpenSettingsSelector => {
-            push_status(chat, "[/settings opened]".to_string(), None);
-            // TODO(parity): mount SettingsSelectorComponent.
+            mount_settings_selector(chat, mounter).await;
         }
         SlashCommandAction::OpenLoginDialog => {
-            push_status(chat, "[/login opened]".to_string(), None);
-            // TODO(parity): mount LoginDialogComponent.
+            mount_login_dialog(chat, mounter).await;
         }
         SlashCommandAction::OpenResumePicker => {
-            push_status(
-                chat,
-                "[/resume — most recent session selector]".to_string(),
-                None,
-            );
-            // TODO(parity): mount the resume picker; currently print-only
-            // because the listing UI isn't wired.
+            mount_resume_picker(chat, cwd, mounter).await;
         }
         SlashCommandAction::ClearChat => {
             if let Ok(mut list) = chat.lock() {
@@ -828,6 +822,252 @@ fn format_diagnostics_report(report: &crate::core::diagnostics::DiagnosticsRepor
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Overlay-mount helpers (used by the 5 slash commands that open a dialog).
+//
+// Each helper builds the component, hands it an outcome channel, mounts via
+// the supplied `OverlayMounter`, awaits the user's choice, applies it to
+// session state where applicable, and then unmounts. When the mounter is
+// absent (unit tests, headless contexts) the helper degrades to a
+// status-line stub so existing test fixtures continue to work.
+// ---------------------------------------------------------------------------
+
+async fn mount_model_selector(
+    chat: &ChatList,
+    session: &mut AgentSession,
+    mounter: Option<&OverlayMounter>,
+) {
+    let Some(mounter) = mounter else {
+        push_status(chat, "[/model selector — pick from chat]".to_string(), None);
+        return;
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel::<ModelOutcome>();
+    let current_model = session.model().clone();
+    let all_models: Vec<model::Model> = session.model_registry().all().to_vec();
+    // TODO(parity): scoped models are not yet plumbed through the session
+    // — pi-mono pulls these from the per-cwd settings file. The overlay
+    // works fine with an empty scoped list (scope toggle hidden).
+    let scoped_models: Vec<model::Model> = Vec::new();
+    let component = ModelSelectorComponent::new(Some(current_model), all_models, scoped_models, tx);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/model failed: {e}]"), Some(RED_FG));
+            return;
+        }
+    };
+    match rx.recv().await {
+        Some(ModelOutcome::Selected(model)) => {
+            let id = model.id.clone();
+            session.set_model(*model);
+            push_status(chat, format!("[model set to {id}]"), None);
+        }
+        Some(ModelOutcome::Cancelled) | None => {
+            push_status(chat, "[/model cancelled]".to_string(), None);
+        }
+    }
+    let _ = mounter.hide(handle);
+}
+
+async fn mount_thinking_selector(
+    chat: &ChatList,
+    _session: &mut AgentSession,
+    inline_level: Option<String>,
+    mounter: Option<&OverlayMounter>,
+) {
+    use model::ThinkingLevel;
+
+    // Inline form (`/thinking high`) bypasses the picker.
+    if let Some(level) = inline_level {
+        // TODO(parity): apply the parsed level to the active session once
+        // AgentSession exposes a thinking-level setter. For now, surface
+        // the choice in the status line so the user sees it took effect.
+        push_status(chat, format!("[thinking level: {level}]"), None);
+        return;
+    }
+
+    let Some(mounter) = mounter else {
+        push_status(chat, "[/thinking selector opened]".to_string(), None);
+        return;
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel::<ThinkingOutcome>();
+    let available_levels: Vec<Option<ThinkingLevel>> = vec![
+        None,
+        Some(ThinkingLevel::Minimal),
+        Some(ThinkingLevel::Low),
+        Some(ThinkingLevel::Medium),
+        Some(ThinkingLevel::High),
+        Some(ThinkingLevel::Xhigh),
+    ];
+    // TODO(parity): read the current thinking level from the session once
+    // exposed; for now we default to "off" so the cursor lands on the
+    // first row.
+    let component = ThinkingSelectorComponent::new(None, available_levels, tx);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/thinking failed: {e}]"), Some(RED_FG));
+            return;
+        }
+    };
+    match rx.recv().await {
+        Some(ThinkingOutcome::Selected(Some(level))) => {
+            push_status(
+                chat,
+                format!("[thinking level: {}]", level_label(level)),
+                None,
+            );
+        }
+        Some(ThinkingOutcome::Selected(None)) => {
+            push_status(chat, "[thinking off]".to_string(), None);
+        }
+        Some(ThinkingOutcome::Cancelled) | None => {
+            push_status(chat, "[/thinking cancelled]".to_string(), None);
+        }
+    }
+    let _ = mounter.hide(handle);
+}
+
+fn level_label(level: model::ThinkingLevel) -> &'static str {
+    use model::ThinkingLevel;
+    match level {
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::Xhigh => "xhigh",
+    }
+}
+
+async fn mount_settings_selector(chat: &ChatList, mounter: Option<&OverlayMounter>) {
+    let Some(mounter) = mounter else {
+        push_status(chat, "[/settings opened]".to_string(), None);
+        return;
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel::<SettingsSelectorEvent>();
+    // TODO(parity): build the entries list from the active SettingsManager.
+    // The pi-mono port enumerates a fixed set of settings (theme, auto-
+    // compaction, etc.) — porting the full list is out of scope for this
+    // batch. The selector renders the dialog frame even with no entries.
+    let entries = Vec::new();
+    let component = SettingsSelectorComponent::new(entries, 10, tx);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/settings failed: {e}]"), Some(RED_FG));
+            return;
+        }
+    };
+    match rx.recv().await {
+        Some(SettingsSelectorEvent::Changed { id, value }) => {
+            push_status(chat, format!("[setting {id} = {value}]"), None);
+        }
+        Some(SettingsSelectorEvent::Cancelled) | None => {
+            push_status(chat, "[/settings closed]".to_string(), None);
+        }
+    }
+    let _ = mounter.hide(handle);
+}
+
+async fn mount_login_dialog(chat: &ChatList, mounter: Option<&OverlayMounter>) {
+    let Some(mounter) = mounter else {
+        push_status(chat, "[/login opened]".to_string(), None);
+        return;
+    };
+    // LoginDialog uses std::sync::mpsc internally (mirrors the TS callback
+    // pattern); we bridge it onto a tokio channel via a helper task.
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<LoginDialogEvent>();
+    let (tokio_tx, mut tokio_rx) = mpsc::unbounded_channel::<LoginDialogEvent>();
+    std::thread::spawn(move || {
+        while let Ok(event) = std_rx.recv() {
+            if tokio_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    // TODO(parity): populate the providers list from the OAuth registry
+    // once it's wired into AgentSession. Empty slice falls back to using
+    // the raw provider id for the title, which is fine for this stub.
+    let providers: Vec<crate::modes::interactive::components::LoginProvider> = Vec::new();
+    let component = LoginDialogComponent::new("anthropic", &providers, None, None, std_tx);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/login failed: {e}]"), Some(RED_FG));
+            return;
+        }
+    };
+    match tokio_rx.recv().await {
+        Some(LoginDialogEvent::Submit(value)) => {
+            // TODO(parity): hand the captured value to the OAuth provider.
+            push_status(chat, format!("[login submitted: {value}]"), None);
+        }
+        Some(LoginDialogEvent::Cancel) | None => {
+            push_status(chat, "[/login cancelled]".to_string(), None);
+        }
+    }
+    let _ = mounter.hide(handle);
+}
+
+async fn mount_resume_picker(chat: &ChatList, cwd: &Path, mounter: Option<&OverlayMounter>) {
+    let Some(mounter) = mounter else {
+        push_status(
+            chat,
+            "[/resume — most recent session selector]".to_string(),
+            None,
+        );
+        return;
+    };
+    let sessions = match crate::core::session_manager::SessionManager::list(cwd) {
+        Ok(list) => list,
+        Err(e) => {
+            push_status(chat, format!("[/resume failed: {e}]"), Some(RED_FG));
+            return;
+        }
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel::<SessionSelectorEvent>();
+    let component = SessionSelectorComponent::new(sessions, tx);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/resume failed: {e}]"), Some(RED_FG));
+            return;
+        }
+    };
+    match rx.recv().await {
+        Some(SessionSelectorEvent::Selected(path)) => {
+            // TODO(parity): re-open the session in-place. The TS source
+            // calls `SessionManager.open(path)` and swaps the live session;
+            // the Rust port doesn't yet support hot-swap, so for now we
+            // surface the chosen path and let the user restart.
+            push_status(
+                chat,
+                format!("[would resume: {}]", path.display()),
+                Some(YELLOW_FG),
+            );
+        }
+        Some(SessionSelectorEvent::Cancelled) | None => {
+            push_status(chat, "[/resume cancelled]".to_string(), None);
+        }
+    }
+    let _ = mounter.hide(handle);
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,7 +1401,8 @@ mod tests {
                 provider: "y".into(),
             },
         );
-        let outcome = apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        let outcome =
+            apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
         assert_eq!(outcome, SlashOutcome::Continue);
         let list = chat.lock().unwrap();
         // List should contain only the post-clear status line.
@@ -1181,7 +1422,8 @@ mod tests {
                 provider: "y".into(),
             },
         );
-        let outcome = apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        let outcome =
+            apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
         assert_eq!(outcome, SlashOutcome::Continue);
         let joined = chat.lock().unwrap()[0].render(80).join("\n");
         assert!(joined.contains("no assistant message"), "{joined:?}");
@@ -1204,7 +1446,7 @@ mod tests {
             }
             other => panic!("expected OpenThinkingSelector, got {:?}", other),
         }
-        apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
         let joined = chat.lock().unwrap()[0].render(80).join("\n");
         assert!(joined.contains("high"), "{joined:?}");
     }
@@ -1225,7 +1467,7 @@ mod tests {
                     provider: "y".into(),
                 },
             );
-            apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+            apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
             let joined = chat.lock().unwrap()[0].render(80).join("\n");
             assert!(
                 joined.contains(marker),
@@ -1245,7 +1487,7 @@ mod tests {
                 provider: "y".into(),
             },
         );
-        apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
         let joined = chat.lock().unwrap()[0].render(80).join("\n");
         assert!(joined.contains("diagnostics"), "{joined:?}");
     }
@@ -1264,7 +1506,7 @@ mod tests {
                 provider: "y".into(),
             },
         );
-        apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
         // The chat should now hold exactly one element: the status line.
         let list = chat.lock().unwrap();
         assert_eq!(list.len(), 1);
@@ -1298,6 +1540,87 @@ mod tests {
         ] {
             assert!(s.contains(cmd), "/help missing {cmd}: {s}");
         }
+    }
+
+    /// With a closed mounter (run loop already dropped) each overlay-blocked
+    /// command surfaces a clearly-marked failure status — proves the helper
+    /// actually attempted the mount instead of falling through to the
+    /// placeholder text the no-mounter branch produces.
+    #[tokio::test]
+    async fn overlay_blocked_helpers_attempt_mount_when_mounter_present() {
+        // Build a Tui solely to obtain a mounter, then drop it — this closes
+        // the receiver so subsequent `show()` calls return TuiClosed.
+        let tui = hand_tui::Tui::new(Box::new(hand_tui::TestTerminal::new(80, 24)));
+        let mounter = tui.overlay_mounter();
+        drop(tui);
+
+        let cases = [
+            ("/model", "/model failed"),
+            ("/settings", "/settings failed"),
+            ("/login", "/login failed"),
+            ("/resume", "/resume failed"),
+        ];
+        let mut session = make_session();
+        for (cmd, marker) in cases {
+            let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+            let action = dispatch(
+                cmd,
+                &SlashCommandContext {
+                    model_id: "x".into(),
+                    provider: "y".into(),
+                },
+            );
+            apply_slash_action(
+                action,
+                &chat,
+                &mut session,
+                Path::new("/tmp"),
+                Some(&mounter),
+            )
+            .await;
+            let joined = chat.lock().unwrap()[0].render(80).join("\n");
+            assert!(
+                joined.contains(marker),
+                "expected `{marker}` in output of {cmd}: {joined:?}"
+            );
+        }
+    }
+
+    /// End-to-end: with a live run loop, mount/hide via the driver-side
+    /// mounter channel completes round-trip. This proves the wiring the
+    /// 5 overlay-blocked slash-command helpers rely on is intact.
+    #[tokio::test]
+    async fn overlay_mounter_round_trips_through_live_run_loop() {
+        use model::ThinkingLevel;
+
+        let mut tui = hand_tui::Tui::new(Box::new(hand_tui::TestTerminal::new(80, 24)));
+        let mounter = tui.overlay_mounter();
+        let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let run_handle = tokio::spawn(async move {
+            let _ = tui.run_with_events(event_rx).await;
+            tui
+        });
+
+        // Build the same component the `/thinking` helper would build and
+        // mount it directly. Confirm the handle came back, then hide it.
+        let (tx, _rx) = mpsc::unbounded_channel::<ThinkingOutcome>();
+        let component =
+            ThinkingSelectorComponent::new(None, vec![None, Some(ThinkingLevel::Low)], tx);
+        let handle = mounter
+            .show(Box::new(component), hand_tui::OverlayOptions::default())
+            .await
+            .expect("mount must succeed while run loop is alive");
+        mounter.hide(handle).expect("hide must reach run loop");
+
+        // Stop the loop and reclaim the Tui to inspect overlay state.
+        // The Tui's `stop()` is callable on `&self` so the foreground task
+        // can shut the loop down without owning the Tui.
+        // We reach the running flag via `mounter` indirectly: dropping the
+        // mounter doesn't stop the loop, so the cleanest exit is to abort
+        // the spawned task; the run loop's drop-on-await semantics handle
+        // the rest.
+        run_handle.abort();
     }
 
     #[test]
