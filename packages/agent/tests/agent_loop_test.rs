@@ -973,3 +973,96 @@ async fn after_tool_call_overrides_result() {
 fn queue_delivery_mode_default_is_one_at_a_time() {
     assert_eq!(QueueDeliveryMode::default(), QueueDeliveryMode::OneAtATime);
 }
+
+// ---------------------------------------------------------------------------
+// stream_fn injection
+// ---------------------------------------------------------------------------
+
+/// Asserts that when `AgentLoopConfig::stream_fn` is set, the loop drives the
+/// custom transport instead of `client.stream_simple`. The client is wired to
+/// a `PanickingProvider`, so any fallthrough to the default branch would
+/// panic; the injected closure flips an atomic flag we can read back.
+#[tokio::test]
+async fn stream_fn_injection_bypasses_client_stream_simple() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let called = Arc::new(AtomicBool::new(false));
+    let called_clone = called.clone();
+
+    let stream_fn = Arc::new(
+        move |_model: &model::Model,
+              _ctx: model::Context,
+              _opts: model::SimpleStreamOptions,
+              _cancel: tokio_util::sync::CancellationToken|
+              -> model::AssistantMessageEventStream<'static> {
+            called_clone.store(true, Ordering::SeqCst);
+            let msg = test_assistant_message("from-injected-stream");
+            Box::pin(async_stream::stream! {
+                yield model::AssistantMessageEvent::Start { partial: msg.clone() };
+                yield model::AssistantMessageEvent::Done {
+                    reason: model::StopReason::Stop,
+                    message: msg,
+                };
+            })
+        },
+    );
+
+    let client = Client::new();
+    // If the loop ever falls through to `client.stream_simple`, this provider
+    // panics, failing the test.
+    client.registry.register(
+        Api::OpenAICompletions,
+        Box::new(PanickingProvider),
+        Some("test".into()),
+    );
+
+    let mut config = default_config();
+    config.stream_fn = Some(stream_fn);
+
+    let (emit, _events) = collecting_event_sink();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext::default();
+    let prompt = vec![Message::User(UserMessage::new_text("hi"))];
+
+    let result = run_agent_loop(prompt, &mut context, &[], &config, &client, &emit, &cancel)
+        .await
+        .expect("loop completes via injected stream_fn");
+
+    assert!(
+        called.load(Ordering::SeqCst),
+        "injected stream_fn must have been invoked"
+    );
+
+    // The transcript's last message should be the assistant produced by the
+    // injected stream.
+    let last = context
+        .messages
+        .last()
+        .expect("at least one message in transcript");
+    match last {
+        Message::Assistant(am) => {
+            let text = am
+                .content
+                .iter()
+                .find_map(|b| match b {
+                    model::AssistantContentBlock::Text(t) => Some(t.text.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            assert_eq!(text, "from-injected-stream");
+        }
+        other => panic!("expected last message to be Assistant, got {other:?}"),
+    }
+
+    // Sanity: the loop returned the same final assistant message.
+    let final_assistant = result
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            Message::Assistant(a) => Some(a),
+            _ => None,
+        })
+        .expect("loop result contains an assistant message");
+    assert_eq!(final_assistant.stop_reason, model::StopReason::Stop);
+}
