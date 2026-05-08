@@ -2451,10 +2451,17 @@ mod tests {
         assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
 
         let yaml_body = std::fs::read_to_string(dir.path().join("settings.yaml")).unwrap();
-        assert!(
-            !yaml_body.contains("reserve"),
-            "legacy field leaked into yaml: {yaml_body}",
-        );
+        // The legacy `compaction.reserve_tokens` key must not survive into
+        // the new YAML — the schema dropped it. Match the kebab-case form
+        // because that's what serde emits, and qualify with "tokens" so we
+        // don't accidentally hit `branch-summary.reserve-tokens` (a real
+        // field on the new schema).
+        for legacy in ["reserve_tokens", "reserve-tokens: 5000"] {
+            assert!(
+                !yaml_body.contains(legacy),
+                "legacy field leaked into yaml: {yaml_body}",
+            );
+        }
         // Recognised fields survive.
         assert!(yaml_body.contains("keep-recent-tokens: 12345"));
 
@@ -2975,5 +2982,300 @@ themes:
         let pkgs = mgr.current().packages();
         assert_eq!(pkgs.len(), 1);
         assert_eq!(pkgs[0].source(), "npm:in-memory");
+    }
+
+    // ---------------------------------------------------------------------
+    // M2: pi-mono parity sub-structs — YAML round-trip + merge semantics.
+    // The JSON-import path is exercised by the dedicated integration test
+    // at `tests/settings_json_import_test.rs`.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn branch_summary_round_trips_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(
+            &dir,
+            "settings.yaml",
+            "branch-summary:\n  reserve-tokens: 8000\n  skip-prompt: true\n",
+        );
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.branch_summary.reserve_tokens, Some(8000));
+        assert_eq!(s.branch_summary.skip_prompt, Some(true));
+        // Accessors apply pi-mono defaults when a field is unset.
+        let absent = BranchSummarySettings::default();
+        assert_eq!(absent.reserve_tokens(), 16_384);
+        assert!(!absent.skip_prompt());
+    }
+
+    #[test]
+    fn provider_retry_round_trips_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let body = "\
+retry:
+  max-retries: 5
+  provider:
+    timeout-ms: 30000
+    max-retries: 4
+    max-retry-delay-ms: 90000
+";
+        let p = write_yaml(&dir, "settings.yaml", body);
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.retry.max_retries(), 5);
+        assert_eq!(s.retry.provider.timeout_ms, Some(30_000));
+        assert_eq!(s.retry.provider.max_retries, Some(4));
+        assert_eq!(s.retry.provider.max_retry_delay_ms(), 90_000);
+        // Default cap when unset.
+        let absent = ProviderRetrySettings::default();
+        assert_eq!(absent.max_retry_delay_ms(), 60_000);
+    }
+
+    #[test]
+    fn terminal_settings_round_trip_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let body = "\
+terminal:
+  show-images: false
+  image-width-cells: 120
+  clear-on-shrink: true
+  show-terminal-progress: true
+";
+        let p = write_yaml(&dir, "settings.yaml", body);
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert!(!s.terminal.show_images());
+        assert_eq!(s.terminal.image_width_cells(), 120);
+        assert!(s.terminal.clear_on_shrink());
+        assert!(s.terminal.show_terminal_progress());
+    }
+
+    #[test]
+    fn image_settings_round_trip_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let body = "images:\n  auto-resize: false\n  block-images: true\n";
+        let p = write_yaml(&dir, "settings.yaml", body);
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert!(!s.images.auto_resize());
+        assert!(s.images.block_images());
+    }
+
+    #[test]
+    fn thinking_budgets_round_trip_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let body = "\
+thinking-budgets:
+  minimal: 100
+  low: 1000
+  medium: 5000
+  high: 10000
+";
+        let p = write_yaml(&dir, "settings.yaml", body);
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.thinking_budgets.minimal, Some(100));
+        assert_eq!(s.thinking_budgets.low, Some(1000));
+        assert_eq!(s.thinking_budgets.medium, Some(5000));
+        assert_eq!(s.thinking_budgets.high, Some(10000));
+    }
+
+    #[test]
+    fn markdown_and_warnings_round_trip_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let body = "\
+markdown:
+  code-block-indent: \"    \"
+warnings:
+  anthropic-extra-usage: false
+";
+        let p = write_yaml(&dir, "settings.yaml", body);
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.markdown.code_block_indent(), "    ");
+        assert!(!s.warnings.anthropic_extra_usage());
+        // Defaults when unset.
+        let empty = Settings::default();
+        assert_eq!(empty.markdown.code_block_indent(), "  ");
+        assert!(empty.warnings.anthropic_extra_usage());
+    }
+
+    #[test]
+    fn enums_double_escape_action_and_tree_filter_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(
+            &dir,
+            "settings.yaml",
+            "double-escape-action: fork\ntree-filter-mode: labeled-only\n",
+        );
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.double_escape_action, Some(DoubleEscapeAction::Fork));
+        assert_eq!(s.tree_filter_mode, Some(TreeFilterMode::LabeledOnly));
+    }
+
+    #[test]
+    fn steering_and_follow_up_modes_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(
+            &dir,
+            "settings.yaml",
+            "steering-mode: all\nfollow-up-mode: one-at-a-time\n",
+        );
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.steering_mode, Some(SteeringMode::All));
+        assert_eq!(s.follow_up_mode, Some(SteeringMode::OneAtATime));
+    }
+
+    #[test]
+    fn transport_round_trips_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(&dir, "settings.yaml", "transport: websocket-cached\n");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.transport, Some(TransportSetting::WebsocketCached));
+    }
+
+    // -- merge semantics for the M2 fields ---------------------------------
+
+    #[test]
+    fn merge_hide_thinking_block_project_beats_base() {
+        let base = Settings {
+            hide_thinking_block: Some(true),
+            ..Settings::default()
+        };
+        let project = Settings {
+            hide_thinking_block: Some(false),
+            ..Settings::default()
+        };
+        let merged = Settings::merge(base.clone(), project);
+        assert_eq!(merged.hide_thinking_block, Some(false));
+        // And the missing-in-project case keeps base.
+        let project_empty = Settings::default();
+        let merged = Settings::merge(base, project_empty);
+        assert_eq!(merged.hide_thinking_block, Some(true));
+    }
+
+    #[test]
+    fn merge_session_dir_falls_back_to_base() {
+        let base = Settings {
+            session_dir: Some(PathBuf::from("/tmp/base")),
+            ..Settings::default()
+        };
+        let project = Settings::default();
+        let merged = Settings::merge(base, project);
+        assert_eq!(merged.session_dir.as_deref(), Some(Path::new("/tmp/base")));
+    }
+
+    #[test]
+    fn merge_terminal_sub_struct_per_field() {
+        let base = Settings {
+            terminal: TerminalSettings {
+                show_images: Some(true),
+                image_width_cells: Some(40),
+                ..TerminalSettings::default()
+            },
+            ..Settings::default()
+        };
+        let project = Settings {
+            terminal: TerminalSettings {
+                image_width_cells: Some(80),
+                clear_on_shrink: Some(true),
+                ..TerminalSettings::default()
+            },
+            ..Settings::default()
+        };
+        let merged = Settings::merge(base, project);
+        // Project supplied — wins.
+        assert_eq!(merged.terminal.image_width_cells, Some(80));
+        assert_eq!(merged.terminal.clear_on_shrink, Some(true));
+        // Project absent — base survives.
+        assert_eq!(merged.terminal.show_images, Some(true));
+        // Both absent — neither layer set it, accessor default applies.
+        assert!(merged.terminal.show_terminal_progress.is_none());
+        assert!(!merged.terminal.show_terminal_progress());
+    }
+
+    #[test]
+    fn merge_thinking_budgets_per_field() {
+        let base = Settings {
+            thinking_budgets: ThinkingBudgetsSettings {
+                minimal: Some(100),
+                low: Some(1000),
+                ..ThinkingBudgetsSettings::default()
+            },
+            ..Settings::default()
+        };
+        let project = Settings {
+            thinking_budgets: ThinkingBudgetsSettings {
+                low: Some(2000),
+                high: Some(20000),
+                ..ThinkingBudgetsSettings::default()
+            },
+            ..Settings::default()
+        };
+        let merged = Settings::merge(base, project);
+        assert_eq!(merged.thinking_budgets.minimal, Some(100));
+        assert_eq!(merged.thinking_budgets.low, Some(2000));
+        assert!(merged.thinking_budgets.medium.is_none());
+        assert_eq!(merged.thinking_budgets.high, Some(20000));
+    }
+
+    #[test]
+    fn merge_double_escape_action_project_overrides_base() {
+        let base = Settings {
+            double_escape_action: Some(DoubleEscapeAction::Tree),
+            ..Settings::default()
+        };
+        let project = Settings {
+            double_escape_action: Some(DoubleEscapeAction::Fork),
+            ..Settings::default()
+        };
+        let merged = Settings::merge(base.clone(), project);
+        assert_eq!(merged.double_escape_action, Some(DoubleEscapeAction::Fork));
+        // Project absent — base survives.
+        let merged = Settings::merge(base, Settings::default());
+        assert_eq!(merged.double_escape_action, Some(DoubleEscapeAction::Tree));
+    }
+
+    #[test]
+    fn merge_provider_retry_per_field() {
+        let base = Settings {
+            retry: RetrySettings {
+                provider: ProviderRetrySettings {
+                    timeout_ms: Some(10_000),
+                    max_retries: Some(2),
+                    ..ProviderRetrySettings::default()
+                },
+                ..RetrySettings::default()
+            },
+            ..Settings::default()
+        };
+        let project = Settings {
+            retry: RetrySettings {
+                provider: ProviderRetrySettings {
+                    max_retry_delay_ms: Some(120_000),
+                    ..ProviderRetrySettings::default()
+                },
+                ..RetrySettings::default()
+            },
+            ..Settings::default()
+        };
+        let merged = Settings::merge(base, project);
+        assert_eq!(merged.retry.provider.timeout_ms, Some(10_000));
+        assert_eq!(merged.retry.provider.max_retries, Some(2));
+        assert_eq!(merged.retry.provider.max_retry_delay_ms, Some(120_000));
+    }
+
+    #[test]
+    fn merge_npm_command_whole_list_override() {
+        let base = Settings {
+            npm_command: Some(vec!["npm".into()]),
+            ..Settings::default()
+        };
+        let project = Settings {
+            npm_command: Some(vec!["mise".into(), "exec".into(), "npm".into()]),
+            ..Settings::default()
+        };
+        let merged = Settings::merge(base.clone(), project);
+        assert_eq!(merged.npm_command.as_deref().unwrap().len(), 3);
+        // Absent in project keeps base.
+        let merged = Settings::merge(base, Settings::default());
+        assert_eq!(
+            merged.npm_command.as_deref(),
+            Some(&["npm".to_string()][..]),
+        );
     }
 }
