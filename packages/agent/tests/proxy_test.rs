@@ -6,7 +6,7 @@ mod common;
 
 use common::test_model;
 use futures::StreamExt;
-use hand_agent::proxy::{stream_proxy, ProxyStreamOptions};
+use hand_agent::proxy::{ProxyStreamOptions, stream_proxy};
 use model::{AssistantContentBlock, AssistantMessageEvent, Context, StopReason};
 use std::time::Duration;
 
@@ -65,7 +65,10 @@ async fn proxy_emits_full_event_arc() {
 
     match &events[0] {
         AssistantMessageEvent::Start { partial } => {
-            assert!(partial.content.is_empty(), "Start partial should have no content");
+            assert!(
+                partial.content.is_empty(),
+                "Start partial should have no content"
+            );
         }
         other => panic!("events[0] expected Start, got {other:?}"),
     }
@@ -157,7 +160,12 @@ async fn proxy_surfaces_http_error() {
         events.push(ev);
     }
 
-    assert_eq!(events.len(), 1, "expected exactly 1 event, got {}", events.len());
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly 1 event, got {}",
+        events.len()
+    );
 
     match &events[0] {
         AssistantMessageEvent::Error { reason, error } => {

@@ -241,7 +241,9 @@ fn process_proxy_event(
     partial: &mut model::AssistantMessage,
     tool_partial_json: &mut HashMap<u32, String>,
 ) -> Result<Option<model::AssistantMessageEvent>, AgentError> {
-    use model::{AssistantContentBlock, AssistantMessageEvent, TextContent, ThinkingContent, ToolCall};
+    use model::{
+        AssistantContentBlock, AssistantMessageEvent, TextContent, ThinkingContent, ToolCall,
+    };
 
     /// Insert at `idx` into `vec`, growing by one if `idx == len`. Existing
     /// slots are replaced. The proxy server emits `*_start` events in order,
@@ -317,9 +319,7 @@ fn process_proxy_event(
             }
             _ => Err(AgentError::Proxy {
                 status: 0,
-                message: format!(
-                    "Received text_end for non-text content at index {content_index}"
-                ),
+                message: format!("Received text_end for non-text content at index {content_index}"),
             }),
         },
 
@@ -715,8 +715,7 @@ mod tests {
     /// under round-trip, those JSON strings must be identical.
     fn assert_round_trip(value: &ProxyAssistantMessageEvent) -> String {
         let json = serde_json::to_string(value).expect("serialize");
-        let parsed: ProxyAssistantMessageEvent =
-            serde_json::from_str(&json).expect("deserialize");
+        let parsed: ProxyAssistantMessageEvent = serde_json::from_str(&json).expect("deserialize");
         let json2 = serde_json::to_string(&parsed).expect("re-serialize");
         assert_eq!(json, json2, "round-trip JSON mismatch");
         json
@@ -837,8 +836,7 @@ mod tests {
 
     #[test]
     fn round_trip_toolcall_end() {
-        let json =
-            assert_round_trip(&ProxyAssistantMessageEvent::ToolcallEnd { content_index: 8 });
+        let json = assert_round_trip(&ProxyAssistantMessageEvent::ToolcallEnd { content_index: 8 });
         assert!(json.contains(r#""type":"toolcall_end""#), "json={json}");
         assert!(json.contains(r#""contentIndex":8"#), "json={json}");
     }
@@ -877,9 +875,8 @@ mod tests {
 
     #[test]
     fn rejects_unknown_field() {
-        let result = serde_json::from_str::<ProxyAssistantMessageEvent>(
-            r#"{"type":"start","extra":"x"}"#,
-        );
+        let result =
+            serde_json::from_str::<ProxyAssistantMessageEvent>(r#"{"type":"start","extra":"x"}"#);
         assert!(
             result.is_err(),
             "deny_unknown_fields should reject extra fields, got: {result:?}"
@@ -938,10 +935,20 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
         let obj = value.as_object().expect("top-level object");
 
-        assert_eq!(obj.len(), 3, "expected exactly 3 top-level keys, got {obj:?}");
+        assert_eq!(
+            obj.len(),
+            3,
+            "expected exactly 3 top-level keys, got {obj:?}"
+        );
         assert!(obj.contains_key("model"), "missing `model` key in {obj:?}");
-        assert!(obj.contains_key("context"), "missing `context` key in {obj:?}");
-        assert!(obj.contains_key("options"), "missing `options` key in {obj:?}");
+        assert!(
+            obj.contains_key("context"),
+            "missing `context` key in {obj:?}"
+        );
+        assert!(
+            obj.contains_key("options"),
+            "missing `options` key in {obj:?}"
+        );
     }
 
     #[test]
@@ -954,7 +961,10 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
         let obj = value.as_object().expect("object");
         assert_eq!(obj.len(), 1, "expected 1 key, got {obj:?}");
-        assert!(obj.contains_key("temperature"), "missing temperature in {obj:?}");
+        assert!(
+            obj.contains_key("temperature"),
+            "missing temperature in {obj:?}"
+        );
 
         let temp_and_max = ProxyRequestOptions {
             temperature: Some(0.5),
@@ -965,8 +975,14 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
         let obj = value.as_object().expect("object");
         assert_eq!(obj.len(), 2, "expected 2 keys, got {obj:?}");
-        assert!(obj.contains_key("temperature"), "missing temperature in {obj:?}");
-        assert!(obj.contains_key("maxTokens"), "missing maxTokens in {obj:?}");
+        assert!(
+            obj.contains_key("temperature"),
+            "missing temperature in {obj:?}"
+        );
+        assert!(
+            obj.contains_key("maxTokens"),
+            "missing maxTokens in {obj:?}"
+        );
     }
 
     #[test]
@@ -986,9 +1002,18 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
         let obj = value.as_object().expect("object");
 
-        assert!(obj.contains_key("temperature"), "missing temperature in {obj:?}");
-        assert!(obj.contains_key("maxTokens"), "missing maxTokens in {obj:?}");
-        assert!(obj.contains_key("reasoning"), "missing reasoning in {obj:?}");
+        assert!(
+            obj.contains_key("temperature"),
+            "missing temperature in {obj:?}"
+        );
+        assert!(
+            obj.contains_key("maxTokens"),
+            "missing maxTokens in {obj:?}"
+        );
+        assert!(
+            obj.contains_key("reasoning"),
+            "missing reasoning in {obj:?}"
+        );
         assert!(
             !obj.contains_key("cacheRetention"),
             "cacheRetention should be absent in {obj:?}"
@@ -1058,7 +1083,13 @@ mod tests {
         .expect("ok")
         .expect("some");
 
-        assert!(matches!(out, model::AssistantMessageEvent::TextStart { content_index: 0, .. }));
+        assert!(matches!(
+            out,
+            model::AssistantMessageEvent::TextStart {
+                content_index: 0,
+                ..
+            }
+        ));
         match &partial.content[0] {
             model::AssistantContentBlock::Text(t) => assert_eq!(t.text, ""),
             other => panic!("expected Text, got {other:?}"),
@@ -1071,7 +1102,9 @@ mod tests {
         let mut partial = fresh_partial(&m);
         partial
             .content
-            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+            .push(model::AssistantContentBlock::Text(model::TextContent::new(
+                "hi",
+            )));
         let mut buf = HashMap::new();
 
         let out = process_proxy_event(
@@ -1108,7 +1141,9 @@ mod tests {
         let mut partial = fresh_partial(&m);
         partial
             .content
-            .push(model::AssistantContentBlock::Text(model::TextContent::new("done")));
+            .push(model::AssistantContentBlock::Text(model::TextContent::new(
+                "done",
+            )));
         let mut buf = HashMap::new();
 
         let out = process_proxy_event(
@@ -1157,7 +1192,10 @@ mod tests {
 
         assert!(matches!(
             out,
-            model::AssistantMessageEvent::ThinkingStart { content_index: 0, .. }
+            model::AssistantMessageEvent::ThinkingStart {
+                content_index: 0,
+                ..
+            }
         ));
         match &partial.content[0] {
             model::AssistantContentBlock::Thinking(t) => assert_eq!(t.thinking, ""),
@@ -1169,11 +1207,9 @@ mod tests {
     fn reducer_thinking_delta_appends_thinking() {
         let m = test_model();
         let mut partial = fresh_partial(&m);
-        partial
-            .content
-            .push(model::AssistantContentBlock::Thinking(
-                model::ThinkingContent::new("ponder"),
-            ));
+        partial.content.push(model::AssistantContentBlock::Thinking(
+            model::ThinkingContent::new("ponder"),
+        ));
         let mut buf = HashMap::new();
 
         let out = process_proxy_event(
@@ -1187,7 +1223,10 @@ mod tests {
         .expect("ok")
         .expect("some");
 
-        assert!(matches!(out, model::AssistantMessageEvent::ThinkingDelta { .. }));
+        assert!(matches!(
+            out,
+            model::AssistantMessageEvent::ThinkingDelta { .. }
+        ));
         match &partial.content[0] {
             model::AssistantContentBlock::Thinking(t) => assert_eq!(t.thinking, "pondering"),
             other => panic!("expected Thinking, got {other:?}"),
@@ -1198,11 +1237,9 @@ mod tests {
     fn reducer_thinking_end_sets_signature() {
         let m = test_model();
         let mut partial = fresh_partial(&m);
-        partial
-            .content
-            .push(model::AssistantContentBlock::Thinking(
-                model::ThinkingContent::new("done"),
-            ));
+        partial.content.push(model::AssistantContentBlock::Thinking(
+            model::ThinkingContent::new("done"),
+        ));
         let mut buf = HashMap::new();
 
         let out = process_proxy_event(
@@ -1250,7 +1287,10 @@ mod tests {
 
         assert!(matches!(
             out,
-            model::AssistantMessageEvent::ToolCallStart { content_index: 0, .. }
+            model::AssistantMessageEvent::ToolCallStart {
+                content_index: 0,
+                ..
+            }
         ));
         match &partial.content[0] {
             model::AssistantContentBlock::ToolCall(tc) => {
@@ -1267,13 +1307,9 @@ mod tests {
     fn reducer_toolcall_delta_parses_partial_json_into_arguments() {
         let m = test_model();
         let mut partial = fresh_partial(&m);
-        partial
-            .content
-            .push(model::AssistantContentBlock::ToolCall(model::ToolCall::new(
-                "tc1",
-                "echo",
-                serde_json::json!({}),
-            )));
+        partial.content.push(model::AssistantContentBlock::ToolCall(
+            model::ToolCall::new("tc1", "echo", serde_json::json!({})),
+        ));
         let mut buf = HashMap::new();
         buf.insert(0, String::new());
 
@@ -1288,7 +1324,10 @@ mod tests {
         .expect("ok")
         .expect("some");
 
-        assert!(matches!(out, model::AssistantMessageEvent::ToolCallDelta { .. }));
+        assert!(matches!(
+            out,
+            model::AssistantMessageEvent::ToolCallDelta { .. }
+        ));
         match &partial.content[0] {
             model::AssistantContentBlock::ToolCall(tc) => {
                 assert_eq!(tc.arguments, serde_json::json!({"x": 1}));
@@ -1302,13 +1341,9 @@ mod tests {
     fn reducer_toolcall_end_clears_buffer_and_returns_tool_call() {
         let m = test_model();
         let mut partial = fresh_partial(&m);
-        partial
-            .content
-            .push(model::AssistantContentBlock::ToolCall(model::ToolCall::new(
-                "tc1",
-                "echo",
-                serde_json::json!({"x": 1}),
-            )));
+        partial.content.push(model::AssistantContentBlock::ToolCall(
+            model::ToolCall::new("tc1", "echo", serde_json::json!({"x": 1})),
+        ));
         let mut buf = HashMap::new();
         buf.insert(0, r#"{"x":1}"#.to_string());
 
@@ -1405,11 +1440,9 @@ mod tests {
     fn reducer_text_delta_on_thinking_slot_returns_proxy_error() {
         let m = test_model();
         let mut partial = fresh_partial(&m);
-        partial
-            .content
-            .push(model::AssistantContentBlock::Thinking(
-                model::ThinkingContent::new("ponder"),
-            ));
+        partial.content.push(model::AssistantContentBlock::Thinking(
+            model::ThinkingContent::new("ponder"),
+        ));
         let mut buf = HashMap::new();
 
         let err = process_proxy_event(
@@ -1429,11 +1462,9 @@ mod tests {
     fn reducer_text_end_on_thinking_slot_returns_proxy_error() {
         let m = test_model();
         let mut partial = fresh_partial(&m);
-        partial
-            .content
-            .push(model::AssistantContentBlock::Thinking(
-                model::ThinkingContent::new("ponder"),
-            ));
+        partial.content.push(model::AssistantContentBlock::Thinking(
+            model::ThinkingContent::new("ponder"),
+        ));
         let mut buf = HashMap::new();
 
         let err = process_proxy_event(
@@ -1455,7 +1486,9 @@ mod tests {
         let mut partial = fresh_partial(&m);
         partial
             .content
-            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+            .push(model::AssistantContentBlock::Text(model::TextContent::new(
+                "hi",
+            )));
         let mut buf = HashMap::new();
 
         let err = process_proxy_event(
@@ -1477,7 +1510,9 @@ mod tests {
         let mut partial = fresh_partial(&m);
         partial
             .content
-            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+            .push(model::AssistantContentBlock::Text(model::TextContent::new(
+                "hi",
+            )));
         let mut buf = HashMap::new();
 
         let err = process_proxy_event(
@@ -1499,7 +1534,9 @@ mod tests {
         let mut partial = fresh_partial(&m);
         partial
             .content
-            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+            .push(model::AssistantContentBlock::Text(model::TextContent::new(
+                "hi",
+            )));
         let mut buf = HashMap::new();
 
         let err = process_proxy_event(
@@ -1552,7 +1589,10 @@ mod tests {
         .expect("ok");
         assert!(matches!(
             r1,
-            Some(model::AssistantMessageEvent::TextStart { content_index: 0, .. })
+            Some(model::AssistantMessageEvent::TextStart {
+                content_index: 0,
+                ..
+            })
         ));
 
         let r2 = process_proxy_event(
@@ -1564,7 +1604,10 @@ mod tests {
             &mut buf,
         )
         .expect("ok");
-        assert!(matches!(r2, Some(model::AssistantMessageEvent::TextDelta { .. })));
+        assert!(matches!(
+            r2,
+            Some(model::AssistantMessageEvent::TextDelta { .. })
+        ));
 
         let r3 = process_proxy_event(
             ProxyAssistantMessageEvent::TextDelta {
@@ -1575,7 +1618,10 @@ mod tests {
             &mut buf,
         )
         .expect("ok");
-        assert!(matches!(r3, Some(model::AssistantMessageEvent::TextDelta { .. })));
+        assert!(matches!(
+            r3,
+            Some(model::AssistantMessageEvent::TextDelta { .. })
+        ));
 
         let r4 = process_proxy_event(
             ProxyAssistantMessageEvent::TextEnd {
@@ -1586,7 +1632,10 @@ mod tests {
             &mut buf,
         )
         .expect("ok");
-        assert!(matches!(r4, Some(model::AssistantMessageEvent::TextEnd { .. })));
+        assert!(matches!(
+            r4,
+            Some(model::AssistantMessageEvent::TextEnd { .. })
+        ));
 
         match &partial.content[0] {
             model::AssistantContentBlock::Text(t) => {
@@ -1719,7 +1768,9 @@ mod tests {
         let mut partial = fresh_partial(&m);
         partial
             .content
-            .push(model::AssistantContentBlock::Text(model::TextContent::new("hi")));
+            .push(model::AssistantContentBlock::Text(model::TextContent::new(
+                "hi",
+            )));
         let mut buf = HashMap::new();
 
         let out = process_proxy_event(
@@ -1729,6 +1780,9 @@ mod tests {
         )
         .expect("ok");
 
-        assert!(out.is_none(), "toolcall_end on non-tool-call slot should yield None");
+        assert!(
+            out.is_none(),
+            "toolcall_end on non-tool-call slot should yield None"
+        );
     }
 }

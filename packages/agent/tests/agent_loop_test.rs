@@ -1024,17 +1024,9 @@ async fn stream_fn_injection_bypasses_client_stream_simple() {
     let mut context = AgentContext::default();
     let prompt = vec![Message::User(UserMessage::new_text("hi"))];
 
-    let result = run_agent_loop(
-        prompt,
-        &mut context,
-        &[],
-        &config,
-        &client,
-        &emit,
-        &cancel,
-    )
-    .await
-    .expect("loop completes via injected stream_fn");
+    let result = run_agent_loop(prompt, &mut context, &[], &config, &client, &emit, &cancel)
+        .await
+        .expect("loop completes via injected stream_fn");
 
     assert!(
         called.load(Ordering::SeqCst),
