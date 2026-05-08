@@ -34,6 +34,7 @@ pub mod skill_invocation_message;
 pub mod theme_selector;
 pub mod thinking_selector;
 pub mod tool_execution;
+pub mod tree_selector;
 pub mod user_message;
 pub mod user_message_selector;
 pub mod visual_truncate;
@@ -78,6 +79,7 @@ pub use skill_invocation_message::{ParsedSkillBlockData, SkillInvocationMessageC
 pub use theme_selector::{ThemeOutcome, ThemeSelectorComponent};
 pub use thinking_selector::{ThinkingOutcome, ThinkingSelectorComponent};
 pub use tool_execution::{ToolExecutionComponent, ToolExecutionStatus};
+pub use tree_selector::{TreeRow, TreeSelectorComponent, TreeSelectorEvent};
 pub use user_message::UserMessageComponent;
 pub use user_message_selector::{
     UserMessageItem, UserMessageSelectorComponent, UserMessageSelectorEvent,
