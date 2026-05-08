@@ -12,6 +12,8 @@
 //! CLI startup, before the main interactive driver is constructed.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hand_tui::{OverlayOptions, ProcessTerminal, Tui};
 use tokio::sync::mpsc;
@@ -50,11 +52,11 @@ pub async fn select_session(
 ) -> Result<Option<PathBuf>, SessionPickerError> {
     let mut tui = Tui::new(Box::new(ProcessTerminal::new()?));
     let mounter = tui.overlay_mounter();
-    let stop_handle = StopHandle::new(&tui);
+    let running = tui.running_handle();
     let run_handle = tokio::spawn(async move {
         let _ = tui.run().await;
     });
-    select_session_inner(sessions, mounter, stop_handle, run_handle).await
+    select_session_inner(sessions, mounter, running, run_handle).await
 }
 
 /// Test-friendly variant: accepts a pre-built [`Tui`] event channel so the
@@ -67,17 +69,17 @@ async fn select_session_with_events(
 ) -> Result<Option<PathBuf>, SessionPickerError> {
     let mut tui = Tui::new(terminal);
     let mounter = tui.overlay_mounter();
-    let stop_handle = StopHandle::new(&tui);
+    let running = tui.running_handle();
     let run_handle = tokio::spawn(async move {
         let _ = tui.run_with_events(events).await;
     });
-    select_session_inner(sessions, mounter, stop_handle, run_handle).await
+    select_session_inner(sessions, mounter, running, run_handle).await
 }
 
 async fn select_session_inner(
     sessions: Vec<SessionInfo>,
     mounter: hand_tui::OverlayMounter,
-    stop_handle: StopHandle,
+    running: Arc<AtomicBool>,
     run_handle: tokio::task::JoinHandle<()>,
 ) -> Result<Option<PathBuf>, SessionPickerError> {
     let (tx, mut rx) = mpsc::unbounded_channel::<SessionSelectorEvent>();
@@ -96,32 +98,9 @@ async fn select_session_inner(
     // Best-effort overlay teardown; errors are non-fatal because we're
     // about to stop the loop anyway.
     let _ = mounter.hide(handle);
-    stop_handle.stop();
-
+    running.store(false, Ordering::Relaxed);
     run_handle.await.map_err(|_| SessionPickerError::Join)?;
     Ok(selection)
-}
-
-/// Send-safe handle for `Tui::stop`. The Tui's stop only mutates atomics
-/// shared via `Arc`, so we wrap a raw pointer in a Send/Sync newtype the
-/// same way the interactive driver does.
-struct StopHandle(*const Tui);
-
-// Safety: Tui::stop only touches Send + Sync atomics under shared refs.
-unsafe impl Send for StopHandle {}
-unsafe impl Sync for StopHandle {}
-
-impl StopHandle {
-    fn new(tui: &Tui) -> Self {
-        Self(tui as *const _)
-    }
-
-    fn stop(&self) {
-        // Safety: caller holds the Tui alive at least until this fires;
-        // the run-loop task only exits *after* `stop()` flips the flag,
-        // and the task's future is awaited before this helper returns.
-        unsafe { (*self.0).stop() };
-    }
 }
 
 #[cfg(test)]

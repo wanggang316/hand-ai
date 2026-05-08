@@ -656,6 +656,15 @@ impl Tui {
         let _ = self.shutdown_tx.send(true);
     }
 
+    /// Return a clonable [`Arc<AtomicBool>`] that mirrors the run loop's
+    /// running flag. Setting it to `false` from another task signals the
+    /// loop to exit on its next iteration (within ~`RENDER_TICK_MS`).
+    /// Useful for helpers that move the [`Tui`] into a spawned task and
+    /// need a Send/Clone way to ask it to stop.
+    pub fn running_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.running)
+    }
+
     /// Get terminal dimensions `(columns, rows)` from the latest snapshot.
     pub fn size(&self) -> (u16, u16) {
         (self.terminal.columns(), self.terminal.rows())
