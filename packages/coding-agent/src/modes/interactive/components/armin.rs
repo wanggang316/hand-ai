@@ -649,11 +649,7 @@ mod tests {
         // First tick: positions 0..3 in row 0 should match the final grid.
         c.tick();
         let final_grid = build_final_grid();
-        for (got, want) in c.current_grid()[0]
-            .iter()
-            .zip(final_grid[0].iter())
-            .take(3)
-        {
+        for (got, want) in c.current_grid()[0].iter().zip(final_grid[0].iter()).take(3) {
             assert_eq!(got, want);
         }
         // Position 3 still blank.
