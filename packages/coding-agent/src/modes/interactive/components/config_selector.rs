@@ -20,20 +20,18 @@
 //!   the toggled item so the user sees immediate feedback.
 //! - It surfaces a [`ConfigSelectorEvent::ToggleRequested`] event over
 //!   the supplied [`mpsc::UnboundedSender`]. The driver is responsible
-//!   for translating that into a Settings write — which is currently
-//!   stubbed (see `core::extensions::source_registry`'s
-//!   `add_source_to_settings` / `remove_source_from_settings` returning
-//!   `NotYetImplemented`). Until persistence lands, the driver should
-//!   inject a toast such as
-//!   `"Toggle persistence not yet implemented — see GitHub for status."`
-//!   so the user understands the on-screen check-mark won't survive a
-//!   restart.
+//!   for translating that into the right call against
+//!   `core::extensions::source_registry`. The registry's
+//!   `add_source_to_settings` / `remove_source_from_settings` (and the
+//!   matching `install_and_persist` / `remove_and_persist` /
+//!   `update`) are now backed by real settings I/O and npm/git
+//!   shell-out; failure modes from the underlying calls should be
+//!   surfaced as a toast rather than swallowed.
 //!
-//! Other action TODOs that depend on
-//! `core::extensions::source_registry`'s install/remove/update path
-//! (e.g. an "install package" command bound to a key) are not wired up
-//! in this minimal port — they will become additional event variants
-//! when the install logic is in.
+//! Driver wiring for install / remove / update key bindings (extra
+//! `ConfigSelectorEvent` variants, an in-component menu) is still
+//! follow-up work — the registry capability is in place, the dialog
+//! does not yet expose it. See `parity-completion.md`.
 
 use std::collections::HashMap;
 
