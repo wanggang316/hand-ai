@@ -69,7 +69,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return modes::print::run(cli).await;
     }
 
-    // Interactive flow.
+    // Interactive TUI flow: only when stdin is a real terminal AND no
+    // `--prompt`/`--export` workflow was requested. The TUI is a full-screen
+    // diff renderer; piping into the binary or running in CI should fall
+    // through to the legacy line REPL below so existing automation keeps
+    // working.
+    {
+        use std::io::IsTerminal;
+        let tui_eligible = io::stdin().is_terminal()
+            && io::stdout().is_terminal()
+            && cli.prompt.is_none()
+            && cli.export.is_none();
+        if tui_eligible {
+            timings::print();
+            return modes::interactive::run_interactive(cli)
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e });
+        }
+    }
+
+    // Legacy line-REPL interactive flow (used when stdin is not a tty, or
+    // when `--prompt` / `--export` requires the older subscriber semantics).
     let setup = SessionSetup::resolve(&cli)?;
     timings::time("session_setup");
     let cwd = setup.cwd.clone();
