@@ -12,6 +12,7 @@ pub mod output_accumulator;
 pub mod path_utils;
 pub mod read;
 pub mod render_utils;
+pub mod tool_definition_wrapper;
 pub mod truncate;
 pub mod write;
 
