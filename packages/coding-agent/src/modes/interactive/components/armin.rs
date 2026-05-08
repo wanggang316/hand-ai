@@ -13,8 +13,8 @@
 //! is per-effect (30 fps for most, 60 fps for `glitch`) and reported via
 //! [`ArminComponent::tick_interval`] so drivers can schedule appropriately.
 //!
-//! Parity scope: the data table and three effects (`Fade`, `Scanline`,
-//! `Typewriter`) are ported. The remaining four (`Rain`, `Crt`, `Glitch`,
+//! Parity scope: the data table and four effects (`Fade`, `Scanline`,
+//! `Typewriter`, `Rain`) are ported. The remaining three (`Crt`, `Glitch`,
 //! `Dissolve`) are tracked as `// TODO(parity): port additional reveal
 //! effects` and currently fall back to instant-reveal so callers never get a
 //! frozen splash.
@@ -22,6 +22,7 @@
 use std::time::Duration;
 
 use hand_tui::Component;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 /// Image width in pixels.
 pub const WIDTH: usize = 31;
@@ -133,9 +134,19 @@ fn empty_grid() -> Vec<Vec<char>> {
     vec![vec![' '; WIDTH]; DISPLAY_HEIGHT]
 }
 
-/// Per-effect mutable state. Only the two ported effects (Fade/Scanline)
-/// carry meaningful state; the rest fall back to instant-reveal so the
-/// component never freezes mid-animation.
+/// Per-column state for the [`Effect::Rain`] effect.
+#[derive(Debug, Clone, Copy)]
+struct RainDrop {
+    /// Current vertical position of the falling pixel. Negative values mean
+    /// the drop is still above the visible area.
+    y: i32,
+    /// Number of rows already revealed at the bottom of this column.
+    settled: usize,
+}
+
+/// Per-effect mutable state. Only the ported effects carry meaningful state;
+/// the rest fall back to instant-reveal so the component never freezes
+/// mid-animation.
 enum EffectState {
     Scanline {
         row: usize,
@@ -146,6 +157,9 @@ enum EffectState {
     },
     Typewriter {
         pos: usize,
+    },
+    Rain {
+        drops: Vec<RainDrop>,
     },
     /// Placeholder for the effects not yet ported. Always reveals on the
     /// first tick — see TS source for the actual animation.
@@ -160,6 +174,7 @@ pub struct ArminComponent {
     final_grid: Vec<Vec<char>>,
     current_grid: Vec<Vec<char>>,
     state: EffectState,
+    rng: StdRng,
     done: bool,
 }
 
@@ -169,17 +184,27 @@ impl ArminComponent {
         Self::with_effect(Effect::random())
     }
 
-    /// Construct with a specific effect (useful for tests / deterministic
-    /// builds).
+    /// Construct with a specific effect, seeded from OS entropy.
     pub fn with_effect(effect: Effect) -> Self {
+        Self::build(effect, StdRng::from_entropy())
+    }
+
+    /// Construct with a specific effect and a deterministic seed (useful
+    /// for tests and reproducible builds).
+    pub fn with_effect_seeded(effect: Effect, seed: u64) -> Self {
+        Self::build(effect, StdRng::seed_from_u64(seed))
+    }
+
+    fn build(effect: Effect, mut rng: StdRng) -> Self {
         let final_grid = build_final_grid();
         let current_grid = empty_grid();
-        let state = init_state(effect);
+        let state = init_state(effect, &mut rng);
         Self {
             effect,
             final_grid,
             current_grid,
             state,
+            rng,
             done: false,
         }
     }
@@ -211,6 +236,12 @@ impl ArminComponent {
             EffectState::Typewriter { pos } => {
                 tick_typewriter(pos, &self.final_grid, &mut self.current_grid)
             }
+            EffectState::Rain { drops } => tick_rain(
+                drops,
+                &self.final_grid,
+                &mut self.current_grid,
+                &mut self.rng,
+            ),
             EffectState::InstantReveal { revealed } => {
                 if !*revealed {
                     self.current_grid = self.final_grid.clone();
@@ -243,10 +274,22 @@ impl Default for ArminComponent {
     }
 }
 
-fn init_state(effect: Effect) -> EffectState {
+fn init_state(effect: Effect, rng: &mut StdRng) -> EffectState {
     match effect {
         Effect::Scanline => EffectState::Scanline { row: 0 },
         Effect::Typewriter => EffectState::Typewriter { pos: 0 },
+        Effect::Rain => {
+            // Each column starts with a drop somewhere above the visible
+            // area. Mirrors `-Math.floor(Math.random() * DISPLAY_HEIGHT * 2)`
+            // in the TS source (range `(-DISPLAY_HEIGHT * 2, 0]`).
+            let drops = (0..WIDTH)
+                .map(|_| RainDrop {
+                    y: -(rng.gen_range(0..(DISPLAY_HEIGHT as i32 * 2))),
+                    settled: 0,
+                })
+                .collect();
+            EffectState::Rain { drops }
+        }
         Effect::Fade => {
             let mut positions = Vec::with_capacity(DISPLAY_HEIGHT * WIDTH);
             for row in 0..DISPLAY_HEIGHT {
@@ -270,10 +313,10 @@ fn init_state(effect: Effect) -> EffectState {
             }
             EffectState::Fade { positions, idx: 0 }
         }
-        // TODO(parity): port additional reveal effects (rain, crt, glitch,
+        // TODO(parity): port additional reveal effects (crt, glitch,
         // dissolve). For now they instantly reveal on the first tick so the
         // component never freezes mid-animation.
-        Effect::Rain | Effect::Crt | Effect::Glitch | Effect::Dissolve => {
+        Effect::Crt | Effect::Glitch | Effect::Dissolve => {
             EffectState::InstantReveal { revealed: false }
         }
     }
@@ -288,6 +331,72 @@ fn tick_scanline(row: &mut usize, final_grid: &[Vec<char>], current: &mut [Vec<c
     }
     *row += 1;
     *row >= DISPLAY_HEIGHT
+}
+
+fn tick_rain(
+    drops: &mut [RainDrop],
+    final_grid: &[Vec<char>],
+    current: &mut Vec<Vec<char>>,
+    rng: &mut StdRng,
+) -> bool {
+    let mut all_settled = true;
+    *current = empty_grid();
+    let display_height_i = DISPLAY_HEIGHT as i32;
+
+    for (x, drop) in drops.iter_mut().enumerate() {
+        // Draw the already-settled tail of this column.
+        if drop.settled > 0 {
+            let start = DISPLAY_HEIGHT - drop.settled;
+            for row in start..DISPLAY_HEIGHT {
+                current[row][x] = final_grid[row][x];
+            }
+        }
+
+        // Whole column already revealed; nothing to animate.
+        if drop.settled >= DISPLAY_HEIGHT {
+            continue;
+        }
+
+        // Find the lowest still-unrevealed foreground row in this column.
+        // Scans bottom-up over rows `[0, DISPLAY_HEIGHT - 1 - drop.settled]`.
+        let mut target_row: Option<usize> = None;
+        let upper_excl = DISPLAY_HEIGHT - drop.settled;
+        for row in (0..upper_excl).rev() {
+            if final_grid[row][x] != ' ' {
+                target_row = Some(row);
+                break;
+            }
+        }
+
+        // No foreground left in this column: mark it complete to guarantee
+        // termination. (Diverges from the TS source which would loop
+        // forever — see module docs.)
+        let target_row = match target_row {
+            Some(r) => r,
+            None => {
+                drop.settled = DISPLAY_HEIGHT;
+                continue;
+            }
+        };
+
+        all_settled = false;
+
+        // Advance the drop one row.
+        drop.y += 1;
+
+        if drop.y >= 0 && drop.y < display_height_i {
+            if drop.y as usize >= target_row {
+                // Settle on the target row and re-spawn above the screen.
+                drop.settled = DISPLAY_HEIGHT - target_row;
+                drop.y = -(rng.gen_range(0..5) + 1);
+            } else {
+                // Still falling: render a streak character.
+                current[drop.y as usize][x] = '\u{2593}';
+            }
+        }
+    }
+
+    all_settled
 }
 
 fn tick_typewriter(pos: &mut usize, final_grid: &[Vec<char>], current: &mut [Vec<char>]) -> bool {
@@ -438,8 +547,41 @@ mod tests {
     }
 
     #[test]
+    fn rain_terminates_and_reveals_final_image_with_seeded_rng() {
+        let mut c = ArminComponent::with_effect_seeded(Effect::Rain, 0);
+        // Worst case bound: each column needs at most O(DISPLAY_HEIGHT *
+        // initial_offset) ticks to settle every row, with re-spawn delays of
+        // up to 5. 10x DISPLAY_HEIGHT^2 is a generous ceiling.
+        let max_ticks = DISPLAY_HEIGHT * DISPLAY_HEIGHT * 10;
+        let mut ticks = 0;
+        loop {
+            ticks += 1;
+            c.tick();
+            if c.is_done() {
+                break;
+            }
+            assert!(
+                ticks < max_ticks,
+                "rain should settle within {max_ticks} ticks (took {ticks})"
+            );
+        }
+        assert_eq!(c.current_grid(), build_final_grid().as_slice());
+    }
+
+    #[test]
+    fn rain_is_deterministic_for_same_seed() {
+        let mut a = ArminComponent::with_effect_seeded(Effect::Rain, 42);
+        let mut b = ArminComponent::with_effect_seeded(Effect::Rain, 42);
+        for _ in 0..50 {
+            a.tick();
+            b.tick();
+            assert_eq!(a.current_grid(), b.current_grid());
+        }
+    }
+
+    #[test]
     fn instant_reveal_effects_complete_in_one_tick() {
-        for &effect in &[Effect::Rain, Effect::Crt, Effect::Glitch, Effect::Dissolve] {
+        for &effect in &[Effect::Crt, Effect::Glitch, Effect::Dissolve] {
             let mut c = ArminComponent::with_effect(effect);
             // First tick reveals everything but the component is still in
             // the "running" state until the *next* tick (mirrors the TS
