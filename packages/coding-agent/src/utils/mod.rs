@@ -11,6 +11,7 @@ pub mod clipboard;
 pub mod clipboard_image;
 pub mod exif_orientation;
 pub mod frontmatter;
+pub mod image_convert;
 pub mod mime;
 pub mod paths;
 pub mod pi_user_agent;

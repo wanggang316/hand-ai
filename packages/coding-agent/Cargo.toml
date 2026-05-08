@@ -38,7 +38,7 @@ mime_guess = "2"
 reqwest = { version = "0.12", features = ["json"] }
 arboard = "3"
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["process", "signal"] }
