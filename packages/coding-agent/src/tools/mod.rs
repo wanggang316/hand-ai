@@ -4,6 +4,7 @@
 
 pub mod bash;
 pub mod edit;
+pub mod file_mutation_queue;
 pub mod find;
 pub mod grep;
 pub mod ls;
