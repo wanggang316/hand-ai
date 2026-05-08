@@ -13,10 +13,10 @@
 //! is per-effect (30 fps for most, 60 fps for `glitch`) and reported via
 //! [`ArminComponent::tick_interval`] so drivers can schedule appropriately.
 //!
-//! Parity scope: the data table and five effects (`Fade`, `Scanline`,
-//! `Typewriter`, `Rain`, `Crt`) are ported. The remaining two (`Glitch`,
-//! `Dissolve`) are tracked as `// TODO(parity): port additional reveal
-//! effects` and currently fall back to instant-reveal so callers never get a
+//! Parity scope: the data table and six effects (`Fade`, `Scanline`,
+//! `Typewriter`, `Rain`, `Crt`, `Glitch`) are ported. The remaining one
+//! (`Dissolve`) is tracked as `// TODO(parity): port additional reveal
+//! effects` and currently falls back to instant-reveal so callers never get a
 //! frozen splash.
 
 use std::time::Duration;
@@ -164,6 +164,9 @@ enum EffectState {
     Crt {
         expansion: usize,
     },
+    Glitch {
+        phase: usize,
+    },
     /// Placeholder for the effects not yet ported. Always reveals on the
     /// first tick — see TS source for the actual animation.
     InstantReveal {
@@ -248,6 +251,12 @@ impl ArminComponent {
             EffectState::Crt { expansion } => {
                 tick_crt(expansion, &self.final_grid, &mut self.current_grid)
             }
+            EffectState::Glitch { phase } => tick_glitch(
+                phase,
+                &self.final_grid,
+                &mut self.current_grid,
+                &mut self.rng,
+            ),
             EffectState::InstantReveal { revealed } => {
                 if !*revealed {
                     self.current_grid = self.final_grid.clone();
@@ -285,6 +294,7 @@ fn init_state(effect: Effect, rng: &mut StdRng) -> EffectState {
         Effect::Scanline => EffectState::Scanline { row: 0 },
         Effect::Typewriter => EffectState::Typewriter { pos: 0 },
         Effect::Crt => EffectState::Crt { expansion: 0 },
+        Effect::Glitch => EffectState::Glitch { phase: 0 },
         Effect::Rain => {
             // Each column starts with a drop somewhere above the visible
             // area. Mirrors `-Math.floor(Math.random() * DISPLAY_HEIGHT * 2)`
@@ -320,10 +330,10 @@ fn init_state(effect: Effect, rng: &mut StdRng) -> EffectState {
             }
             EffectState::Fade { positions, idx: 0 }
         }
-        // TODO(parity): port additional reveal effects (glitch, dissolve).
-        // For now they instantly reveal on the first tick so the component
-        // never freezes mid-animation.
-        Effect::Glitch | Effect::Dissolve => EffectState::InstantReveal { revealed: false },
+        // TODO(parity): port the dissolve reveal effect. For now it
+        // instantly reveals on the first tick so the component never freezes
+        // mid-animation.
+        Effect::Dissolve => EffectState::InstantReveal { revealed: false },
     }
 }
 
@@ -402,6 +412,53 @@ fn tick_rain(
     }
 
     all_settled
+}
+
+/// Number of glitch frames before the final clean image is shown.
+const GLITCH_FRAMES: usize = 8;
+
+fn tick_glitch(
+    phase: &mut usize,
+    final_grid: &[Vec<char>],
+    current: &mut Vec<Vec<char>>,
+    rng: &mut StdRng,
+) -> bool {
+    if *phase < GLITCH_FRAMES {
+        // Build a corrupted frame: each row is either kept, swapped with a
+        // random row, or cyclically shifted.
+        let mut next: Vec<Vec<char>> = Vec::with_capacity(DISPLAY_HEIGHT);
+        for row in final_grid {
+            // Range mirrors `Math.floor(Math.random() * 7) - 3` → `[-3, 3]`.
+            let offset: i32 = rng.gen_range(0..7) - 3;
+            let shift_roll: f32 = rng.r#gen();
+            let swap_roll: f32 = rng.r#gen();
+
+            if shift_roll < 0.30 {
+                // Cyclic shift; positive offset rotates left, negative
+                // rotates right. Offset of 0 leaves the row unchanged.
+                let mut row_buf = row.clone();
+                if offset > 0 {
+                    row_buf.rotate_left(offset as usize);
+                } else if offset < 0 {
+                    row_buf.rotate_right((-offset) as usize);
+                }
+                next.push(row_buf);
+            } else if swap_roll < 0.20 {
+                // Vertical swap: replace this row with a random row.
+                let swap_row = rng.gen_range(0..DISPLAY_HEIGHT);
+                next.push(final_grid[swap_row].clone());
+            } else {
+                next.push(row.clone());
+            }
+        }
+        *current = next;
+        *phase += 1;
+        return false;
+    }
+
+    // Final frame: snap to the clean image.
+    *current = final_grid.to_vec();
+    true
 }
 
 fn tick_crt(expansion: &mut usize, final_grid: &[Vec<char>], current: &mut Vec<Vec<char>>) -> bool {
@@ -640,17 +697,41 @@ mod tests {
     }
 
     #[test]
-    fn instant_reveal_effects_complete_in_one_tick() {
-        for &effect in &[Effect::Glitch, Effect::Dissolve] {
-            let mut c = ArminComponent::with_effect(effect);
-            // First tick reveals everything but the component is still in
-            // the "running" state until the *next* tick (mirrors the TS
-            // pattern where `done=true` is returned only after rendering
-            // the final frame).
-            c.tick();
-            // After completion the grid equals the final image.
-            assert_eq!(c.current_grid(), build_final_grid().as_slice());
+    fn glitch_runs_eight_corrupt_frames_then_settles() {
+        let mut c = ArminComponent::with_effect_seeded(Effect::Glitch, 0);
+        // The TS source advances 8 corrupt frames before snapping to the
+        // clean image. Each corrupt tick keeps `is_done` false.
+        for i in 0..GLITCH_FRAMES {
+            assert!(c.tick(), "tick {i} should still be running");
+            assert!(!c.is_done(), "should not be done before final frame");
         }
+        // Next tick produces the clean final frame.
+        c.tick();
+        assert!(
+            c.is_done(),
+            "glitch should be done after {GLITCH_FRAMES} + 1 ticks"
+        );
+        assert_eq!(c.current_grid(), build_final_grid().as_slice());
+    }
+
+    #[test]
+    fn glitch_is_deterministic_for_same_seed() {
+        let mut a = ArminComponent::with_effect_seeded(Effect::Glitch, 7);
+        let mut b = ArminComponent::with_effect_seeded(Effect::Glitch, 7);
+        for _ in 0..GLITCH_FRAMES + 2 {
+            a.tick();
+            b.tick();
+            assert_eq!(a.current_grid(), b.current_grid());
+        }
+    }
+
+    #[test]
+    fn dissolve_instant_reveal_completes_in_one_tick() {
+        // TODO(parity): replace with a real animation test once the
+        // dissolve effect is ported.
+        let mut c = ArminComponent::with_effect(Effect::Dissolve);
+        c.tick();
+        assert_eq!(c.current_grid(), build_final_grid().as_slice());
     }
 
     #[test]
