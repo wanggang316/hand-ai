@@ -1,0 +1,126 @@
+//! Custom (extension-injected) message renderer.
+//!
+//! Ported from
+//! `pi-mono/packages/coding-agent/src/modes/interactive/components/custom-message.ts`.
+//!
+//! pi-mono extensions inject "custom" messages with a `customType` tag and a
+//! string-or-block content payload. The TS component supports two paths:
+//!
+//! 1. A caller-provided custom renderer (returns a fully-styled component).
+//! 2. A default rendering that puts a `[customType]` label above the
+//!    markdown body inside a tinted box.
+//!
+//! This Rust port covers path #2 — the default rendering — which is what
+//! every extension in `pi-mono/extensions/` falls back to. Custom-renderer
+//! injection lives with the extension runtime port (queued).
+//!
+//! The full `CustomMessage` Rust type belongs with the message-store port
+//! (also queued); the local [`CustomMessageData`] mirrors only the fields
+//! this renderer actually consumes.
+//!
+//! Theming caveat: same as other phase-1 components — slot lookups
+//! (`customMessageBg`, `customMessageLabel`, `customMessageText`) are
+//! hardcoded to dark-theme defaults pending the theme port.
+
+use hand_tui::components::markdown::DefaultTextStyle;
+use hand_tui::{BoxComponent, Color, Component, MarkdownComponent, NamedColor, TextComponent};
+
+/// Default background ANSI for a custom message — a muted purple matching
+/// pi-mono's `customMessageBg` dark slot.
+const DEFAULT_BG_ANSI: &str = "\x1b[48;5;53m";
+
+/// Local view-model carrying just the fields the renderer needs.
+///
+/// The full pi-mono `CustomMessage<T>` type also tracks `display`,
+/// `details`, and a timestamp, none of which influence rendering. They will
+/// land with the message-store port.
+#[derive(Debug, Clone)]
+pub struct CustomMessageData {
+    /// Tag shown in the `[bracketed]` label.
+    pub custom_type: String,
+    /// Body — either pre-flattened text or a list of text blocks already
+    /// concatenated by the caller. Image blocks are intentionally not
+    /// supported here; the TS path drops them in default rendering.
+    pub content: String,
+}
+
+impl CustomMessageData {
+    pub fn new(custom_type: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            custom_type: custom_type.into(),
+            content: content.into(),
+        }
+    }
+}
+
+/// Component that renders a custom (extension-injected) message.
+pub struct CustomMessageComponent {
+    inner: BoxComponent,
+}
+
+impl CustomMessageComponent {
+    /// Render `message` with the default styling.
+    pub fn new(message: CustomMessageData) -> Self {
+        // Label: bold bright-magenta-ish text inside the box.
+        let label = format!("\x1b[1m\x1b[95m[{}]\x1b[0m", message.custom_type);
+
+        let mut markdown = MarkdownComponent::new(message.content);
+        markdown.set_default_style(DefaultTextStyle {
+            fg: Some(Color::Named(NamedColor::BrightWhite)),
+            bg: None,
+            italic: false,
+        });
+
+        let mut inner = BoxComponent::new()
+            .with_padding(1, 1)
+            .with_background(DEFAULT_BG_ANSI);
+        inner.add_child(Box::new(TextComponent::new(label)));
+        // Spacer between label and body — single empty line.
+        inner.add_child(Box::new(TextComponent::new("")));
+        inner.add_child(Box::new(markdown));
+
+        Self { inner }
+    }
+}
+
+impl Component for CustomMessageComponent {
+    fn render(&self, width: u16) -> Vec<String> {
+        self.inner.render(width)
+    }
+
+    fn invalidate(&mut self) {
+        self.inner.invalidate();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renders_label_and_body() {
+        let comp = CustomMessageComponent::new(CustomMessageData::new("git", "branch: main"));
+        let lines = comp.render(40);
+        let joined = lines.join("\n");
+        assert!(joined.contains("[git]"), "missing label: {joined:?}");
+        assert!(joined.contains("branch: main"), "missing body: {joined:?}");
+    }
+
+    #[test]
+    fn applies_background_ansi() {
+        let comp = CustomMessageComponent::new(CustomMessageData::new("ext", "hi"));
+        let joined = comp.render(40).join("\n");
+        assert!(
+            joined.contains(DEFAULT_BG_ANSI),
+            "expected background SGR: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn label_is_bold() {
+        let comp = CustomMessageComponent::new(CustomMessageData::new("ext", "x"));
+        let joined = comp.render(40).join("\n");
+        // Bold SGR wraps the label.
+        assert!(joined.contains("\x1b[1m"), "expected bold label SGR");
+    }
+}
