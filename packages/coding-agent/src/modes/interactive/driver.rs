@@ -46,15 +46,16 @@ use crate::core::agent_session::{AgentSession, AgentSessionEvent};
 use crate::core::error::CodingAgentError;
 
 use super::components::{
-    AssistantMessageComponent, BashExecutionComponent, BashStatus, FooterComponent,
-    FooterViewModel, LoginDialogComponent, LoginDialogEvent, ModelOutcome, ModelSelectorComponent,
-    SessionSelectorComponent, SessionSelectorEvent, SettingsSelectorComponent,
-    SettingsSelectorEvent, ThinkingOutcome, ThinkingSelectorComponent, TokenUsageSummary,
-    ToolExecutionComponent, UserMessageComponent,
+    AssistantMessageComponent, BashExecutionComponent, BashStatus, CustomMessageComponent,
+    CustomMessageData, FooterComponent, FooterViewModel, LoginDialogComponent, LoginDialogEvent,
+    ModelOutcome, ModelSelectorComponent, SessionSelectorComponent, SessionSelectorEvent,
+    SettingsSelectorComponent, SettingsSelectorEvent, ThemeOutcome, ThemeSelectorComponent,
+    ThinkingOutcome, ThinkingSelectorComponent, TokenUsageSummary, ToolExecutionComponent,
+    UserMessageComponent,
 };
 use super::event_dispatch::{ChatUpdate, dispatch as dispatch_event};
 use super::slash_commands::{
-    ParsedSlashCommand, SlashCommandAction, SlashCommandContext, SlashCommandResult,
+    ExportFormat, ParsedSlashCommand, SlashCommandAction, SlashCommandContext, SlashCommandResult,
     SlashCommandTable,
 };
 
@@ -663,6 +664,13 @@ fn apply_updates_to_chat(
                 let mut list = chat.lock().expect("chat list mutex poisoned");
                 list.push(Box::new(coloured_text(text, Some(YELLOW_FG))));
             }
+            ChatUpdate::ThemeChanged { theme } => {
+                let mut list = chat.lock().expect("chat list mutex poisoned");
+                list.push(Box::new(coloured_text(
+                    format!("[theme: {theme}]"),
+                    Some(YELLOW_FG),
+                )));
+            }
         }
     }
 }
@@ -772,6 +780,40 @@ pub(crate) async fn apply_slash_action(
             let report = crate::core::diagnostics::run_diagnostics();
             let body = format_diagnostics_report(&report);
             push_status(chat, body, None);
+        }
+        SlashCommandAction::ModelByPattern(pattern) => {
+            apply_model_by_pattern(chat, session, &pattern);
+        }
+        SlashCommandAction::CopyN(n) => {
+            apply_copy_n(chat, session, n);
+        }
+        SlashCommandAction::Export(path, fmt) => {
+            apply_export(chat, session, &path, fmt);
+        }
+        SlashCommandAction::Import(path) => {
+            apply_import(chat, session, &path);
+        }
+        SlashCommandAction::Fork(entry_id) => {
+            apply_fork(chat, session, entry_id.as_deref());
+        }
+        SlashCommandAction::Clone => {
+            apply_clone(chat, session);
+        }
+        SlashCommandAction::Name(label) => match session.set_label(&label) {
+            Ok(()) => push_status(chat, format!("[session name set: {label}]"), None),
+            Err(e) => push_status(chat, format!("[/name failed: {e}]"), Some(RED_FG)),
+        },
+        SlashCommandAction::Theme(arg) => {
+            apply_theme(chat, arg, mounter).await;
+        }
+        SlashCommandAction::ListSkills => {
+            apply_list_skills(chat, session);
+        }
+        SlashCommandAction::ListExtensions => {
+            apply_list_extensions(chat, session);
+        }
+        SlashCommandAction::Changelog => {
+            apply_changelog(chat);
         }
         SlashCommandAction::Noop => {}
     }
@@ -1068,6 +1110,362 @@ async fn mount_resume_picker(chat: &ChatList, cwd: &Path, mounter: Option<&Overl
         }
     }
     let _ = mounter.hide(handle);
+}
+
+// ---------------------------------------------------------------------------
+// M3 slash-command appliers.
+//
+// Each helper here implements one of the new commands ported in M3 of the
+// parity-final-stretch plan. They route the request into an existing
+// core/utils API and push a single status line (or a small component)
+// into the chat scrollback. Errors render in red so the user sees clearly
+// that the side-effect didn't happen.
+// ---------------------------------------------------------------------------
+
+/// `/model <pattern>` — resolve the pattern via
+/// [`crate::core::model_resolver::parse_model_pattern_full`] and apply the
+/// match. Ambiguous / unknown patterns surface inline.
+fn apply_model_by_pattern(chat: &ChatList, session: &mut AgentSession, pattern: &str) {
+    use crate::core::model_resolver::{ParseModelPatternOptions, parse_model_pattern_full};
+    let available: Vec<model::Model> = session.model_registry().all().to_vec();
+    let result =
+        parse_model_pattern_full(pattern, &available, ParseModelPatternOptions::permissive());
+    if let Some(warning) = &result.warning {
+        push_status(chat, format!("[{warning}]"), Some(YELLOW_FG));
+    }
+    match result.model {
+        Some(model) => {
+            let id = model.id.clone();
+            session.set_model(model);
+            push_status(chat, format!("[model set to {id}]"), None);
+        }
+        None => push_status(
+            chat,
+            format!("[/model: no match for {pattern:?}]"),
+            Some(YELLOW_FG),
+        ),
+    }
+}
+
+/// `/copy n` — concatenate text blocks from the trailing `n` assistant
+/// messages (newest last) and copy to the system clipboard.
+fn apply_copy_n(chat: &ChatList, session: &AgentSession, n: usize) {
+    let texts = last_n_assistant_texts(session, n);
+    if texts.is_empty() {
+        push_status(
+            chat,
+            "[no assistant messages to copy]".to_string(),
+            Some(YELLOW_FG),
+        );
+        return;
+    }
+    let body = texts.join("\n\n");
+    match crate::utils::clipboard::copy_to_clipboard(&body) {
+        Ok(()) => push_status(
+            chat,
+            format!(
+                "[copied last {} assistant message(s) to clipboard]",
+                texts.len()
+            ),
+            None,
+        ),
+        Err(e) => push_status(chat, format!("[copy failed: {e}]"), Some(RED_FG)),
+    }
+}
+
+/// Collect up to `n` trailing assistant messages' text content. Older
+/// messages come first in the returned vec so callers can join them
+/// chronologically. Image-only messages are skipped — same contract as
+/// [`last_assistant_text`].
+fn last_n_assistant_texts(session: &AgentSession, n: usize) -> Vec<String> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut collected: Vec<String> = Vec::new();
+    for msg in session.messages().iter().rev() {
+        if collected.len() >= n {
+            break;
+        }
+        if let model::Message::Assistant(a) = msg {
+            let mut parts: Vec<String> = Vec::new();
+            for block in &a.content {
+                if let model::AssistantContentBlock::Text(t) = block {
+                    parts.push(t.text.clone());
+                }
+            }
+            if !parts.is_empty() {
+                collected.push(parts.join("\n"));
+            }
+        }
+    }
+    collected.reverse();
+    collected
+}
+
+/// `/export <path>` — dispatch to the right `core::export` entrypoint based
+/// on the parsed [`ExportFormat`].
+fn apply_export(chat: &ChatList, session: &AgentSession, path: &Path, fmt: ExportFormat) {
+    use crate::core::export::{export_to_html, export_to_jsonl};
+    match fmt {
+        ExportFormat::Jsonl | ExportFormat::Json => {
+            // For `.json` we still copy the JSONL stream verbatim — pi-mono
+            // has no separate JSON exporter and the JSONL form parses as a
+            // sequence of JSON values, which is what most consumers expect.
+            let manager = match session.session_file() {
+                Some(p) => match crate::core::session_manager::SessionManager::open(p) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        push_status(chat, format!("[/export failed: {e}]"), Some(RED_FG));
+                        return;
+                    }
+                },
+                None => {
+                    push_status(
+                        chat,
+                        "[/export: cannot export an in-memory session as JSONL]".to_string(),
+                        Some(RED_FG),
+                    );
+                    return;
+                }
+            };
+            match export_to_jsonl(&manager, path) {
+                Ok(()) => push_status(chat, format!("[exported to {}]", path.display()), None),
+                Err(e) => push_status(chat, format!("[/export failed: {e}]"), Some(RED_FG)),
+            }
+        }
+        ExportFormat::Html => {
+            let session_id = session.session_id().to_string();
+            let model_id = session.model().id.clone();
+            match export_to_html(session.messages(), &session_id, &model_id, path) {
+                Ok(()) => push_status(chat, format!("[exported to {}]", path.display()), None),
+                Err(e) => push_status(chat, format!("[/export failed: {e}]"), Some(RED_FG)),
+            }
+        }
+        ExportFormat::Markdown => {
+            // TODO(parity-M6): markdown export lands with the M6 batch.
+            push_status(
+                chat,
+                "[/export: markdown export not yet implemented (tracked in M6)]".to_string(),
+                Some(YELLOW_FG),
+            );
+        }
+    }
+}
+
+/// `/import <path>` — replace the active session in place.
+fn apply_import(chat: &ChatList, session: &mut AgentSession, path: &Path) {
+    if !path.exists() {
+        push_status(
+            chat,
+            format!("[/import: file not found: {}]", path.display()),
+            Some(RED_FG),
+        );
+        return;
+    }
+    match session.switch_session(path) {
+        Ok(()) => push_status(
+            chat,
+            format!("[imported session from {}]", path.display()),
+            None,
+        ),
+        Err(e) => push_status(chat, format!("[/import failed: {e}]"), Some(RED_FG)),
+    }
+}
+
+/// `/fork [<entry-id>]` — branch the session at the chosen user entry, or
+/// the most recent user message when no id was supplied.
+fn apply_fork(chat: &ChatList, session: &mut AgentSession, entry_id: Option<&str>) {
+    let target = match entry_id {
+        Some(id) => id.to_string(),
+        None => {
+            let entries = session.fork_messages();
+            match entries.last() {
+                Some(entry) => entry.entry_id.clone(),
+                None => {
+                    push_status(
+                        chat,
+                        "[/fork: no user messages to fork from]".to_string(),
+                        Some(YELLOW_FG),
+                    );
+                    return;
+                }
+            }
+        }
+    };
+    match session.fork(&target) {
+        Ok(text) => {
+            let preview: String = text.chars().take(60).collect();
+            push_status(chat, format!("[forked at: {preview}]"), None);
+        }
+        Err(e) => push_status(chat, format!("[/fork failed: {e}]"), Some(RED_FG)),
+    }
+}
+
+/// `/clone` — duplicate the current session under a fresh id.
+fn apply_clone(chat: &ChatList, session: &mut AgentSession) {
+    match session.clone_session() {
+        Ok(()) => push_status(
+            chat,
+            format!("[cloned session: new id {}]", session.session_id()),
+            None,
+        ),
+        Err(e) => push_status(chat, format!("[/clone failed: {e}]"), Some(RED_FG)),
+    }
+}
+
+/// `/theme [name]` — apply a theme inline or open the selector overlay.
+async fn apply_theme(chat: &ChatList, arg: Option<String>, mounter: Option<&OverlayMounter>) {
+    use crate::modes::interactive::theme::{
+        available_themes, default_custom_themes_dir, theme_by_name,
+    };
+
+    let custom_dir = default_custom_themes_dir().ok();
+    let custom_dir_ref = custom_dir.as_deref();
+
+    if let Some(name) = arg {
+        let Some(dir) = custom_dir_ref else {
+            push_status(
+                chat,
+                "[/theme failed: no home directory available]".to_string(),
+                Some(RED_FG),
+            );
+            return;
+        };
+        match theme_by_name(&name, dir, None) {
+            Some(_theme) => {
+                let mut list = chat.lock().expect("chat list mutex poisoned");
+                list.push(Box::new(coloured_text(
+                    format!("[theme: {name}]"),
+                    Some(YELLOW_FG),
+                )));
+            }
+            None => push_status(
+                chat,
+                format!("[/theme: unknown theme {name:?}]"),
+                Some(RED_FG),
+            ),
+        }
+        return;
+    }
+
+    let Some(mounter) = mounter else {
+        push_status(chat, "[/theme selector opened]".to_string(), None);
+        return;
+    };
+    let themes = match custom_dir_ref {
+        Some(dir) => available_themes(dir),
+        None => available_themes(std::path::Path::new("/")),
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel::<ThemeOutcome>();
+    let component = ThemeSelectorComponent::new("dark", themes, tx);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/theme failed: {e}]"), Some(RED_FG));
+            return;
+        }
+    };
+    loop {
+        match rx.recv().await {
+            Some(ThemeOutcome::Selected(name)) => {
+                let mut list = chat.lock().expect("chat list mutex poisoned");
+                list.push(Box::new(coloured_text(
+                    format!("[theme: {name}]"),
+                    Some(YELLOW_FG),
+                )));
+                break;
+            }
+            Some(ThemeOutcome::Cancelled) | None => {
+                push_status(chat, "[/theme cancelled]".to_string(), None);
+                break;
+            }
+            // Preview events are emitted on every navigation tick; the
+            // theme bridge will pick these up once the live palette swap
+            // lands. For now, ignore them so we don't spam the chat.
+            Some(ThemeOutcome::Preview(_)) => continue,
+        }
+    }
+    let _ = mounter.hide(handle);
+}
+
+/// `/skills` — render the discovered skills as a custom message.
+fn apply_list_skills(chat: &ChatList, session: &AgentSession) {
+    let skills = session.skills();
+    let body = if skills.is_empty() {
+        "_(no skills discovered)_".to_string()
+    } else {
+        let mut out = String::new();
+        for skill in skills {
+            out.push_str(&format!("- **{}** — {}\n", skill.name, skill.description));
+        }
+        out.trim_end().to_string()
+    };
+    let component = CustomMessageComponent::new(CustomMessageData::new("skills", body));
+    let mut list = chat.lock().expect("chat list mutex poisoned");
+    list.push(Box::new(component));
+}
+
+/// `/extensions` — render the loaded Tier 1 extensions as a custom message.
+fn apply_list_extensions(chat: &ChatList, session: &AgentSession) {
+    let exts = session.extensions();
+    let body = if exts.is_empty() {
+        "_(no extensions loaded)_".to_string()
+    } else {
+        let mut out = String::new();
+        for ext in exts {
+            let manifest = ext.manifest();
+            let desc = manifest.description.as_deref().unwrap_or("");
+            if desc.is_empty() {
+                out.push_str(&format!("- **{}** ({})\n", manifest.name, manifest.version));
+            } else {
+                out.push_str(&format!(
+                    "- **{}** ({}) — {desc}\n",
+                    manifest.name, manifest.version
+                ));
+            }
+        }
+        out.trim_end().to_string()
+    };
+    let component = CustomMessageComponent::new(CustomMessageData::new("extensions", body));
+    let mut list = chat.lock().expect("chat list mutex poisoned");
+    list.push(Box::new(component));
+}
+
+/// `/changelog` — render the agent's CHANGELOG.md (if present) as a custom
+/// message.
+fn apply_changelog(chat: &ChatList) {
+    use crate::utils::changelog::parse_changelog_file;
+    let candidates = [
+        PathBuf::from("CHANGELOG.md"),
+        PathBuf::from("packages/coding-agent/CHANGELOG.md"),
+    ];
+    let mut entries: Vec<crate::utils::changelog::ChangelogEntry> = Vec::new();
+    for path in &candidates {
+        if let Ok(parsed) = parse_changelog_file(path)
+            && !parsed.is_empty()
+        {
+            entries = parsed;
+            break;
+        }
+    }
+
+    let body = if entries.is_empty() {
+        "_(no changelog entries found)_".to_string()
+    } else {
+        // Newest first — `parse_changelog` preserves source order and the
+        // file is conventionally maintained newest-first already.
+        entries
+            .iter()
+            .map(|e| e.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    };
+    let component = CustomMessageComponent::new(CustomMessageData::new("changelog", body));
+    let mut list = chat.lock().expect("chat list mutex poisoned");
+    list.push(Box::new(component));
 }
 
 // ---------------------------------------------------------------------------
@@ -1537,9 +1935,155 @@ mod tests {
             "/login",
             "/logout",
             "/diagnostics",
+            "/export",
+            "/import",
+            "/fork",
+            "/clone",
+            "/name",
+            "/theme",
+            "/skills",
+            "/extensions",
+            "/changelog",
         ] {
             assert!(s.contains(cmd), "/help missing {cmd}: {s}");
         }
+    }
+
+    #[tokio::test]
+    async fn skills_action_renders_custom_message_in_chat() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = dispatch(
+            "/skills",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        let list = chat.lock().unwrap();
+        assert_eq!(list.len(), 1);
+        let joined = list[0].render(80).join("\n");
+        assert!(joined.contains("[skills]"), "{joined:?}");
+        // No skills are loaded into the in-memory test session, so the
+        // helper should surface the empty-list hint.
+        assert!(joined.contains("no skills"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn extensions_action_renders_custom_message_in_chat() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = dispatch(
+            "/extensions",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        let list = chat.lock().unwrap();
+        assert_eq!(list.len(), 1);
+        let joined = list[0].render(80).join("\n");
+        assert!(joined.contains("[extensions]"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn export_html_writes_file_and_pushes_status() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let output = dir.path().join("session.html");
+
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = SlashCommandAction::Export(output.clone(), ExportFormat::Html);
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+
+        assert!(output.exists(), "expected HTML file to be written");
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(
+            joined.contains("exported to"),
+            "expected status message, got {joined:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_jsonl_for_in_memory_session_pushes_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let output = dir.path().join("session.jsonl");
+
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = SlashCommandAction::Export(output.clone(), ExportFormat::Jsonl);
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+
+        assert!(!output.exists());
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("in-memory"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn import_missing_file_pushes_error() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = SlashCommandAction::Import(PathBuf::from("/tmp/definitely-does-not-exist.jsonl"));
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("not found"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn fork_with_no_messages_pushes_warning() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = SlashCommandAction::Fork(None);
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("no user messages"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn name_sets_session_label() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = SlashCommandAction::Name("my-label".into());
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        assert_eq!(session.label(), Some("my-label"));
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("my-label"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn clone_yields_fresh_session_id() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let original_id = session.session_id().to_string();
+        let action = SlashCommandAction::Clone;
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        assert_ne!(session.session_id(), original_id);
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("cloned session"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn changelog_action_renders_inline_message() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = SlashCommandAction::Changelog;
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        let list = chat.lock().unwrap();
+        assert_eq!(list.len(), 1);
+        let joined = list[0].render(80).join("\n");
+        assert!(joined.contains("[changelog]"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn theme_with_unknown_name_pushes_error() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = SlashCommandAction::Theme(Some("definitely-not-a-real-theme".into()));
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("unknown theme"), "{joined:?}");
     }
 
     /// With a closed mounter (run loop already dropped) each overlay-blocked
