@@ -3,13 +3,14 @@
 //!
 //! pi-mono's `interactive-mode.ts` handles ~20 distinct event variants with
 //! complex state (streaming components, pending tool calls, compaction
-//! loaders, ...). This skeleton ports the happy path: render
-//! `MessageStart`/`MessageEnd` for assistant + user messages and surface
-//! errors. Tool execution, streaming deltas, compaction UI, etc. are deferred.
+//! loaders, ...). The Rust port covers the happy path: render
+//! `MessageStart` / `MessageUpdate` / `MessageEnd` for assistant + user
+//! messages, surface tool-execution lifecycle events, and forward errors.
+//! Compaction-summary UI, login dialogs, etc. remain deferred.
 
 use crate::core::agent_session::AgentSessionEvent;
-use hand_agent::types::AgentEvent;
-use model::Message;
+use hand_agent::types::{AgentEvent, ToolResult};
+use model::{Message, ToolResultContent};
 
 /// Driver-side instruction emitted from the event dispatcher.
 ///
@@ -19,16 +20,47 @@ use model::Message;
 pub enum ChatUpdate {
     /// Append a user message renderer.
     AppendUser { text: String },
-    /// Append an assistant message renderer with the latest snapshot.
+    /// Append a fresh assistant message renderer with the given snapshot.
     ///
-    /// On `MessageStart` the snapshot may be empty; on `MessageEnd` it carries
-    /// the final content. The driver replaces the trailing assistant component
-    /// in place so the rendered result mirrors the streaming behaviour
-    /// upstream.
-    SetOrUpdateAssistant {
+    /// Emitted on `MessageStart` (snapshot may be empty) and on `MessageEnd`
+    /// (final content). The driver appends a new component each time so the
+    /// chat history retains a clear separator between turns.
+    AppendAssistant {
         message: Box<model::AssistantMessage>,
     },
-    /// Append a tool-result line (compact form for the skeleton).
+    /// Replace the trailing in-flight assistant message with the given
+    /// snapshot. Emitted on streaming `MessageUpdate` deltas so the user sees
+    /// partial output mirror the upstream behaviour. If the trailing component
+    /// is not an assistant message (defensive case), the driver appends.
+    ReplaceLastAssistant {
+        message: Box<model::AssistantMessage>,
+    },
+    /// Begin tracking a tool execution. The driver spawns a tool component
+    /// (or a [`super::components::BashExecutionComponent`] when `tool_name`
+    /// is `bash`) and remembers it under `tool_call_id` for subsequent
+    /// updates.
+    ToolStart {
+        tool_call_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+    },
+    /// Apply streaming output to an in-flight tool execution. The driver
+    /// looks up the component by `tool_call_id` and feeds the partial result
+    /// into it.
+    ToolUpdate {
+        tool_call_id: String,
+        partial_text: String,
+    },
+    /// Mark a tracked tool execution as complete. The driver finalises the
+    /// component (status, output, exit code).
+    ToolEnd {
+        tool_call_id: String,
+        result_text: String,
+        is_error: bool,
+        exit_code: Option<i32>,
+    },
+    /// Append a tool-result line (compact form, fallback path used when a
+    /// tool result arrives without a matching `ToolStart`).
     AppendToolResult { text: String },
     /// Append a transient status line (used for compaction notices, errors,
     /// `/help` output, ...).
@@ -55,23 +87,31 @@ pub fn dispatch(event: &AgentSessionEvent) -> Vec<ChatUpdate> {
 
 /// Pull a `ChatUpdate` chain from a raw [`AgentEvent`].
 ///
-/// We key off `MessageStart` / `MessageEnd` for the skeleton — streaming
-/// `MessageUpdate` deltas are rendered at end-of-message, so the user sees
-/// the final assistant response when the agent loop returns. Streaming with
-/// per-delta repaints is a follow-up batch.
+/// `MessageStart` and `MessageEnd` append fresh user/assistant components.
+/// `MessageUpdate` replaces the trailing in-flight assistant snapshot so the
+/// rendered output reflects streaming progress. Tool-execution events drive
+/// per-call components keyed off `tool_call_id`.
 pub fn dispatch_agent_event(event: &AgentEvent) -> Vec<ChatUpdate> {
     match event {
         AgentEvent::MessageStart { message } => match message {
             Message::User(u) => vec![ChatUpdate::AppendUser {
                 text: user_text_of(u),
             }],
-            Message::Assistant(a) => vec![ChatUpdate::SetOrUpdateAssistant {
+            Message::Assistant(a) => vec![ChatUpdate::AppendAssistant {
                 message: Box::new(a.clone()),
             }],
             Message::ToolResult(_) => vec![],
         },
+        AgentEvent::MessageUpdate {
+            message: Message::Assistant(a),
+            ..
+        } => vec![ChatUpdate::ReplaceLastAssistant {
+            message: Box::new(a.clone()),
+        }],
+        // Streaming user / tool-result deltas don't currently re-render.
+        AgentEvent::MessageUpdate { .. } => vec![],
         AgentEvent::MessageEnd { message } => match message {
-            Message::Assistant(a) => vec![ChatUpdate::SetOrUpdateAssistant {
+            Message::Assistant(a) => vec![ChatUpdate::ReplaceLastAssistant {
                 message: Box::new(a.clone()),
             }],
             Message::ToolResult(t) => {
@@ -80,8 +120,35 @@ pub fn dispatch_agent_event(event: &AgentEvent) -> Vec<ChatUpdate> {
             }
             Message::User(_) => vec![],
         },
-        // TODO(parity): handle MessageUpdate, ToolExecutionStart/Update/End,
-        // TurnStart/TurnEnd to drive streaming/tool overlays.
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => vec![ChatUpdate::ToolStart {
+            tool_call_id: tool_call_id.clone(),
+            tool_name: tool_name.clone(),
+            args: args.clone(),
+        }],
+        AgentEvent::ToolExecutionUpdate {
+            tool_call_id,
+            partial_result,
+            ..
+        } => vec![ChatUpdate::ToolUpdate {
+            tool_call_id: tool_call_id.clone(),
+            partial_text: tool_result_text(partial_result),
+        }],
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            result,
+            is_error,
+            ..
+        } => vec![ChatUpdate::ToolEnd {
+            tool_call_id: tool_call_id.clone(),
+            result_text: tool_result_text(result),
+            is_error: *is_error,
+            exit_code: bash_exit_code(result),
+        }],
+        // TODO(parity): TurnStart/TurnEnd hooks for compaction loaders etc.
         _ => vec![],
     }
 }
@@ -98,6 +165,33 @@ fn user_text_of(message: &model::UserMessage) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
     }
+}
+
+/// Concatenate text-typed content blocks of a [`ToolResult`]. Image blocks
+/// are dropped — the textual fallback path is what the chat-update consumer
+/// renders.
+fn tool_result_text(result: &ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            ToolResultContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Best-effort exit-code lookup for `bash`-flavoured tool results. The agent
+/// loop stores the spawned process's exit status under `details.exit_code`
+/// when it is available.
+fn bash_exit_code(result: &ToolResult) -> Option<i32> {
+    result
+        .details
+        .as_ref()?
+        .get("exit_code")?
+        .as_i64()
+        .map(|v| v as i32)
 }
 
 fn tool_result_summary(message: &model::ToolResultMessage) -> String {
@@ -118,8 +212,8 @@ fn tool_result_summary(message: &model::ToolResultMessage) -> String {
 mod tests {
     use super::*;
     use model::types::{
-        Api, AssistantContentBlock, AssistantMessage, Provider, StopReason, TextContent, Usage,
-        UserMessage,
+        Api, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Provider, StopReason,
+        TextContent, Usage, UserMessage,
     };
 
     fn make_assistant(text: &str) -> AssistantMessage {
@@ -154,7 +248,17 @@ mod tests {
     }
 
     #[test]
-    fn assistant_message_end_emits_assistant_update() {
+    fn assistant_message_start_emits_append_assistant() {
+        let event = AgentEvent::MessageStart {
+            message: Message::Assistant(make_assistant("")),
+        };
+        let updates = dispatch_agent_event(&event);
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(&updates[0], ChatUpdate::AppendAssistant { .. }));
+    }
+
+    #[test]
+    fn assistant_message_end_emits_replace_last_assistant() {
         let event = AgentEvent::MessageEnd {
             message: Message::Assistant(make_assistant("hi back")),
         };
@@ -162,8 +266,144 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert!(matches!(
             &updates[0],
-            ChatUpdate::SetOrUpdateAssistant { .. }
+            ChatUpdate::ReplaceLastAssistant { .. }
         ));
+    }
+
+    #[test]
+    fn assistant_message_update_emits_replace_last_with_partial() {
+        let event = AgentEvent::MessageUpdate {
+            message: Message::Assistant(make_assistant("partial body")),
+            assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: "partial body".to_string(),
+                partial: make_assistant("partial body"),
+            }),
+        };
+        let updates = dispatch_agent_event(&event);
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            ChatUpdate::ReplaceLastAssistant { message } => {
+                let text = match &message.content[0] {
+                    AssistantContentBlock::Text(t) => t.text.clone(),
+                    _ => String::new(),
+                };
+                assert_eq!(text, "partial body");
+            }
+            other => panic!("expected ReplaceLastAssistant, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn user_message_update_emits_no_chat_update() {
+        let event = AgentEvent::MessageUpdate {
+            message: Message::User(UserMessage::new_text("ignored")),
+            assistant_message_event: Box::new(AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: String::new(),
+                partial: make_assistant(""),
+            }),
+        };
+        let updates = dispatch_agent_event(&event);
+        assert!(updates.is_empty());
+    }
+
+    #[test]
+    fn tool_execution_start_emits_tool_start() {
+        let event = AgentEvent::ToolExecutionStart {
+            tool_call_id: "call-1".into(),
+            tool_name: "read".into(),
+            args: serde_json::json!({"path": "/x"}),
+        };
+        let updates = dispatch_agent_event(&event);
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            ChatUpdate::ToolStart {
+                tool_call_id,
+                tool_name,
+                args,
+            } => {
+                assert_eq!(tool_call_id, "call-1");
+                assert_eq!(tool_name, "read");
+                assert_eq!(args["path"], "/x");
+            }
+            other => panic!("expected ToolStart, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_execution_update_emits_tool_update_with_text() {
+        let partial = ToolResult::text("streaming...");
+        let event = AgentEvent::ToolExecutionUpdate {
+            tool_call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!({}),
+            partial_result: partial,
+        };
+        let updates = dispatch_agent_event(&event);
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            ChatUpdate::ToolUpdate {
+                tool_call_id,
+                partial_text,
+            } => {
+                assert_eq!(tool_call_id, "call-1");
+                assert!(partial_text.contains("streaming"));
+            }
+            other => panic!("expected ToolUpdate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_execution_end_emits_tool_end_with_exit_code() {
+        let mut result = ToolResult::text("done");
+        result.details = Some(serde_json::json!({"exit_code": 0}));
+        let event = AgentEvent::ToolExecutionEnd {
+            tool_call_id: "call-1".into(),
+            tool_name: "bash".into(),
+            result,
+            is_error: false,
+        };
+        let updates = dispatch_agent_event(&event);
+        assert_eq!(updates.len(), 1);
+        match &updates[0] {
+            ChatUpdate::ToolEnd {
+                tool_call_id,
+                result_text,
+                is_error,
+                exit_code,
+            } => {
+                assert_eq!(tool_call_id, "call-1");
+                assert!(result_text.contains("done"));
+                assert!(!is_error);
+                assert_eq!(*exit_code, Some(0));
+            }
+            other => panic!("expected ToolEnd, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_execution_end_propagates_is_error() {
+        let event = AgentEvent::ToolExecutionEnd {
+            tool_call_id: "call-x".into(),
+            tool_name: "read".into(),
+            result: ToolResult::error("nope"),
+            is_error: true,
+        };
+        let updates = dispatch_agent_event(&event);
+        match &updates[0] {
+            ChatUpdate::ToolEnd {
+                is_error,
+                result_text,
+                exit_code,
+                ..
+            } => {
+                assert!(is_error);
+                assert!(result_text.contains("nope"));
+                assert_eq!(*exit_code, None);
+            }
+            other => panic!("expected ToolEnd, got {:?}", other),
+        }
     }
 
     #[test]
