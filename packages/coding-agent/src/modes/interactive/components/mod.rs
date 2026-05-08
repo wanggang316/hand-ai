@@ -10,6 +10,7 @@ pub mod bash_execution;
 pub mod bordered_loader;
 pub mod branch_summary_message;
 pub mod compaction_summary_message;
+pub mod config_selector;
 pub mod countdown_timer;
 pub mod custom_editor;
 pub mod custom_message;
@@ -45,6 +46,10 @@ pub use bash_execution::{BashExecutionComponent, BashStatus, PREVIEW_LINES};
 pub use bordered_loader::BorderedLoaderComponent;
 pub use branch_summary_message::{BranchSummaryData, BranchSummaryMessageComponent};
 pub use compaction_summary_message::{CompactionSummaryData, CompactionSummaryMessageComponent};
+pub use config_selector::{
+    ConfigSelectorComponent, ConfigSelectorEvent, ResourceItem as ConfigSelectorResourceItem,
+    ResourceKind as ConfigSelectorResourceKind,
+};
 pub use countdown_timer::{CountdownTimer, DEFAULT_TICK_INTERVAL};
 pub use custom_editor::{ActionHandler, CustomEditor, ExtensionShortcutHandler};
 pub use custom_message::{CustomMessageComponent, CustomMessageData};
