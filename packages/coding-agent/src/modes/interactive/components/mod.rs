@@ -15,6 +15,7 @@ pub mod diff;
 pub mod dynamic_border;
 pub mod footer;
 pub mod keybinding_hints;
+pub mod oauth_selector;
 pub mod show_images_selector;
 pub mod skill_invocation_message;
 pub mod theme_selector;
@@ -34,6 +35,9 @@ pub use diff::render_diff;
 pub use dynamic_border::DynamicBorderComponent;
 pub use footer::{FooterComponent, FooterViewModel, TokenUsageSummary};
 pub use keybinding_hints::{format_keys, key_hint_for, key_text, raw_key_hint};
+pub use oauth_selector::{
+    AuthSelectorMode, AuthSelectorProvider, OAuthOutcome, OAuthSelectorComponent,
+};
 pub use show_images_selector::{ShowImagesOutcome, ShowImagesSelectorComponent};
 pub use skill_invocation_message::{ParsedSkillBlockData, SkillInvocationMessageComponent};
 pub use theme_selector::{ThemeOutcome, ThemeSelectorComponent};
