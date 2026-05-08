@@ -13,8 +13,8 @@
 //! is per-effect (30 fps for most, 60 fps for `glitch`) and reported via
 //! [`ArminComponent::tick_interval`] so drivers can schedule appropriately.
 //!
-//! Parity scope: the data table and four effects (`Fade`, `Scanline`,
-//! `Typewriter`, `Rain`) are ported. The remaining three (`Crt`, `Glitch`,
+//! Parity scope: the data table and five effects (`Fade`, `Scanline`,
+//! `Typewriter`, `Rain`, `Crt`) are ported. The remaining two (`Glitch`,
 //! `Dissolve`) are tracked as `// TODO(parity): port additional reveal
 //! effects` and currently fall back to instant-reveal so callers never get a
 //! frozen splash.
@@ -161,6 +161,9 @@ enum EffectState {
     Rain {
         drops: Vec<RainDrop>,
     },
+    Crt {
+        expansion: usize,
+    },
     /// Placeholder for the effects not yet ported. Always reveals on the
     /// first tick — see TS source for the actual animation.
     InstantReveal {
@@ -242,6 +245,9 @@ impl ArminComponent {
                 &mut self.current_grid,
                 &mut self.rng,
             ),
+            EffectState::Crt { expansion } => {
+                tick_crt(expansion, &self.final_grid, &mut self.current_grid)
+            }
             EffectState::InstantReveal { revealed } => {
                 if !*revealed {
                     self.current_grid = self.final_grid.clone();
@@ -278,6 +284,7 @@ fn init_state(effect: Effect, rng: &mut StdRng) -> EffectState {
     match effect {
         Effect::Scanline => EffectState::Scanline { row: 0 },
         Effect::Typewriter => EffectState::Typewriter { pos: 0 },
+        Effect::Crt => EffectState::Crt { expansion: 0 },
         Effect::Rain => {
             // Each column starts with a drop somewhere above the visible
             // area. Mirrors `-Math.floor(Math.random() * DISPLAY_HEIGHT * 2)`
@@ -313,12 +320,10 @@ fn init_state(effect: Effect, rng: &mut StdRng) -> EffectState {
             }
             EffectState::Fade { positions, idx: 0 }
         }
-        // TODO(parity): port additional reveal effects (crt, glitch,
-        // dissolve). For now they instantly reveal on the first tick so the
-        // component never freezes mid-animation.
-        Effect::Crt | Effect::Glitch | Effect::Dissolve => {
-            EffectState::InstantReveal { revealed: false }
-        }
+        // TODO(parity): port additional reveal effects (glitch, dissolve).
+        // For now they instantly reveal on the first tick so the component
+        // never freezes mid-animation.
+        Effect::Glitch | Effect::Dissolve => EffectState::InstantReveal { revealed: false },
     }
 }
 
@@ -397,6 +402,25 @@ fn tick_rain(
     }
 
     all_settled
+}
+
+fn tick_crt(expansion: &mut usize, final_grid: &[Vec<char>], current: &mut Vec<Vec<char>>) -> bool {
+    let mid_row = DISPLAY_HEIGHT / 2;
+    *current = empty_grid();
+
+    // Symmetric vertical sweep starting from the middle row.
+    let top = mid_row.saturating_sub(*expansion);
+    // `mid_row + expansion` may overflow `DISPLAY_HEIGHT`; clamp to the last
+    // valid index.
+    let bottom = (mid_row + *expansion).min(DISPLAY_HEIGHT - 1);
+    for row in top..=bottom {
+        for x in 0..WIDTH {
+            current[row][x] = final_grid[row][x];
+        }
+    }
+
+    *expansion += 1;
+    *expansion > DISPLAY_HEIGHT
 }
 
 fn tick_typewriter(pos: &mut usize, final_grid: &[Vec<char>], current: &mut [Vec<char>]) -> bool {
@@ -580,8 +604,44 @@ mod tests {
     }
 
     #[test]
+    fn crt_expands_symmetrically_from_middle_row() {
+        let mut c = ArminComponent::with_effect(Effect::Crt);
+        let final_grid = build_final_grid();
+        let mid_row = DISPLAY_HEIGHT / 2;
+
+        // Tick 1: only the middle row should be revealed.
+        c.tick();
+        for (row, current) in c.current_grid().iter().enumerate() {
+            if row == mid_row {
+                assert_eq!(current, &final_grid[row]);
+            } else {
+                assert!(
+                    current.iter().all(|&ch| ch == ' '),
+                    "row {row} should still be blank after first tick",
+                );
+            }
+        }
+
+        // Tick 2: rows mid-1, mid, mid+1 revealed (when in range).
+        c.tick();
+        let lo = mid_row.saturating_sub(1);
+        let hi = (mid_row + 1).min(DISPLAY_HEIGHT - 1);
+        assert_eq!(&c.current_grid()[lo..=hi], &final_grid[lo..=hi]);
+
+        // Tick to completion.
+        for _ in 0..(DISPLAY_HEIGHT + 4) {
+            c.tick();
+            if c.is_done() {
+                break;
+            }
+        }
+        assert!(c.is_done());
+        assert_eq!(c.current_grid(), final_grid.as_slice());
+    }
+
+    #[test]
     fn instant_reveal_effects_complete_in_one_tick() {
-        for &effect in &[Effect::Crt, Effect::Glitch, Effect::Dissolve] {
+        for &effect in &[Effect::Glitch, Effect::Dissolve] {
             let mut c = ArminComponent::with_effect(effect);
             // First tick reveals everything but the component is still in
             // the "running" state until the *next* tick (mirrors the TS
