@@ -197,10 +197,20 @@ impl CompactionSettings {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct RetrySettings {
+    #[serde(alias = "enabled")]
     pub enabled: Option<bool>,
+    #[serde(alias = "maxRetries")]
     pub max_retries: Option<u32>,
+    /// Base delay for exponential backoff. Aliased to the pi-mono TS field
+    /// `baseDelayMs` so JSON-import round-trips cleanly.
+    #[serde(alias = "initialDelayMs", alias = "baseDelayMs")]
     pub initial_delay_ms: Option<u32>,
+    #[serde(alias = "maxDelayMs")]
     pub max_delay_ms: Option<u32>,
+    /// Provider-level retry knobs (SDK request timeout, max retries, max
+    /// retry-after delay). Mirrors pi-mono's `RetrySettings.provider`.
+    #[serde(default)]
+    pub provider: ProviderRetrySettings,
 }
 
 impl RetrySettings {
@@ -211,6 +221,7 @@ impl RetrySettings {
             max_retries: Some(3),
             initial_delay_ms: Some(1_000),
             max_delay_ms: Some(30_000),
+            provider: ProviderRetrySettings::default(),
         }
     }
 
@@ -242,9 +253,261 @@ impl RetrySettings {
             max_retries: project.max_retries.or(base.max_retries),
             initial_delay_ms: project.initial_delay_ms.or(base.initial_delay_ms),
             max_delay_ms: project.max_delay_ms.or(base.max_delay_ms),
+            provider: ProviderRetrySettings::merge(base.provider, project.provider),
         }
     }
 }
+
+/// Provider-level retry tuning. Mirrors pi-mono's `ProviderRetrySettings`:
+/// SDK request timeout, max retry attempts, and the cap on a server-requested
+/// `retry-after` delay before we give up.
+///
+/// Read effective values via the accessor methods — direct field access
+/// yields `Option<T>` because the struct represents the raw YAML layer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct ProviderRetrySettings {
+    #[serde(alias = "timeoutMs")]
+    pub timeout_ms: Option<u32>,
+    #[serde(alias = "maxRetries")]
+    pub max_retries: Option<u32>,
+    #[serde(alias = "maxRetryDelayMs")]
+    pub max_retry_delay_ms: Option<u32>,
+}
+
+impl ProviderRetrySettings {
+    /// Default cap on server-requested retry delay before giving up.
+    /// Matches the TS reference (`60000`).
+    pub fn max_retry_delay_ms(&self) -> u32 {
+        self.max_retry_delay_ms.unwrap_or(60_000)
+    }
+
+    fn merge(base: Self, project: Self) -> Self {
+        Self {
+            timeout_ms: project.timeout_ms.or(base.timeout_ms),
+            max_retries: project.max_retries.or(base.max_retries),
+            max_retry_delay_ms: project.max_retry_delay_ms.or(base.max_retry_delay_ms),
+        }
+    }
+}
+
+/// Branch summarisation prompt knobs. Mirrors pi-mono `BranchSummarySettings`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct BranchSummarySettings {
+    #[serde(alias = "reserveTokens")]
+    pub reserve_tokens: Option<u32>,
+    #[serde(alias = "skipPrompt")]
+    pub skip_prompt: Option<bool>,
+}
+
+impl BranchSummarySettings {
+    /// Tokens reserved for the summarisation prompt + LLM response.
+    /// Matches the TS reference default (`16384`).
+    pub fn reserve_tokens(&self) -> u32 {
+        self.reserve_tokens.unwrap_or(16_384)
+    }
+
+    /// When `true`, the "Summarize branch?" prompt is skipped and no
+    /// summary is produced. Default: `false`.
+    pub fn skip_prompt(&self) -> bool {
+        self.skip_prompt.unwrap_or(false)
+    }
+
+    fn merge(base: Self, project: Self) -> Self {
+        Self {
+            reserve_tokens: project.reserve_tokens.or(base.reserve_tokens),
+            skip_prompt: project.skip_prompt.or(base.skip_prompt),
+        }
+    }
+}
+
+/// Terminal rendering preferences. Mirrors pi-mono `TerminalSettings`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct TerminalSettings {
+    #[serde(alias = "showImages")]
+    pub show_images: Option<bool>,
+    #[serde(alias = "imageWidthCells")]
+    pub image_width_cells: Option<u32>,
+    #[serde(alias = "clearOnShrink")]
+    pub clear_on_shrink: Option<bool>,
+    #[serde(alias = "showTerminalProgress")]
+    pub show_terminal_progress: Option<bool>,
+}
+
+impl TerminalSettings {
+    /// Whether inline images should be rendered when the terminal supports
+    /// them. Default: `true` (pi-mono parity).
+    pub fn show_images(&self) -> bool {
+        self.show_images.unwrap_or(true)
+    }
+
+    /// Preferred inline image width in terminal cells. Default: `60`.
+    pub fn image_width_cells(&self) -> u32 {
+        self.image_width_cells.unwrap_or(60)
+    }
+
+    /// Clear empty rows when content shrinks. Default: `false`.
+    pub fn clear_on_shrink(&self) -> bool {
+        self.clear_on_shrink.unwrap_or(false)
+    }
+
+    /// Emit OSC 9;4 terminal-progress sequences. Default: `false`.
+    pub fn show_terminal_progress(&self) -> bool {
+        self.show_terminal_progress.unwrap_or(false)
+    }
+
+    fn merge(base: Self, project: Self) -> Self {
+        Self {
+            show_images: project.show_images.or(base.show_images),
+            image_width_cells: project.image_width_cells.or(base.image_width_cells),
+            clear_on_shrink: project.clear_on_shrink.or(base.clear_on_shrink),
+            show_terminal_progress: project
+                .show_terminal_progress
+                .or(base.show_terminal_progress),
+        }
+    }
+}
+
+/// Image handling. Mirrors pi-mono `ImageSettings`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct ImageSettings {
+    #[serde(alias = "autoResize")]
+    pub auto_resize: Option<bool>,
+    #[serde(alias = "blockImages")]
+    pub block_images: Option<bool>,
+}
+
+impl ImageSettings {
+    /// Resize images to the model-friendly cap before sending. Default: `true`.
+    pub fn auto_resize(&self) -> bool {
+        self.auto_resize.unwrap_or(true)
+    }
+
+    /// When `true`, no images are forwarded to the LLM. Default: `false`.
+    pub fn block_images(&self) -> bool {
+        self.block_images.unwrap_or(false)
+    }
+
+    fn merge(base: Self, project: Self) -> Self {
+        Self {
+            auto_resize: project.auto_resize.or(base.auto_resize),
+            block_images: project.block_images.or(base.block_images),
+        }
+    }
+}
+
+/// Custom token budgets per thinking level. Mirrors pi-mono
+/// `ThinkingBudgetsSettings` — every field is optional so missing entries
+/// fall back to the provider default for that level.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct ThinkingBudgetsSettings {
+    pub minimal: Option<u32>,
+    pub low: Option<u32>,
+    pub medium: Option<u32>,
+    pub high: Option<u32>,
+}
+
+impl ThinkingBudgetsSettings {
+    fn merge(base: Self, project: Self) -> Self {
+        Self {
+            minimal: project.minimal.or(base.minimal),
+            low: project.low.or(base.low),
+            medium: project.medium.or(base.medium),
+            high: project.high.or(base.high),
+        }
+    }
+}
+
+/// Markdown rendering preferences. Mirrors pi-mono `MarkdownSettings`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct MarkdownSettings {
+    #[serde(alias = "codeBlockIndent")]
+    pub code_block_indent: Option<String>,
+}
+
+impl MarkdownSettings {
+    /// Indent prefix for rendered code blocks. Default: two spaces.
+    pub fn code_block_indent(&self) -> &str {
+        self.code_block_indent.as_deref().unwrap_or("  ")
+    }
+
+    fn merge(base: Self, project: Self) -> Self {
+        Self {
+            code_block_indent: project.code_block_indent.or(base.code_block_indent),
+        }
+    }
+}
+
+/// Soft warnings the UI surfaces. Mirrors pi-mono `WarningSettings`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case", default)]
+pub struct WarningSettings {
+    #[serde(alias = "anthropicExtraUsage")]
+    pub anthropic_extra_usage: Option<bool>,
+}
+
+impl WarningSettings {
+    /// Whether to warn about Anthropic extra-usage costs. Default: `true`.
+    pub fn anthropic_extra_usage(&self) -> bool {
+        self.anthropic_extra_usage.unwrap_or(true)
+    }
+
+    fn merge(base: Self, project: Self) -> Self {
+        Self {
+            anthropic_extra_usage: project
+                .anthropic_extra_usage
+                .or(base.anthropic_extra_usage),
+        }
+    }
+}
+
+/// Re-export of [`model::Transport`] under the pi-mono name `TransportSetting`.
+/// Settings YAML stores the transport selection as a kebab-case string
+/// (`auto`, `sse`, `websocket`, `websocket-cached`).
+pub type TransportSetting = model::Transport;
+
+/// Action taken when the user double-presses Escape on an empty editor.
+/// Mirrors pi-mono's `doubleEscapeAction`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DoubleEscapeAction {
+    Fork,
+    #[default]
+    Tree,
+    None,
+}
+
+/// Default filter applied when opening the conversation tree view.
+/// Mirrors pi-mono's `treeFilterMode`.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TreeFilterMode {
+    #[default]
+    Default,
+    NoTools,
+    UserOnly,
+    LabeledOnly,
+    All,
+}
+
+/// How the steering / follow-up queue surfaces pending items. Mirrors
+/// pi-mono's `steeringMode` / `followUpMode` (same value space).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SteeringMode {
+    All,
+    #[default]
+    OneAtATime,
+}
+
+/// Alias for `SteeringMode` — pi-mono uses identical semantics for the
+/// follow-up mode setting, so we share the type rather than duplicating it.
+pub type FollowUpMode = SteeringMode;
 
 /// UI theme.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
