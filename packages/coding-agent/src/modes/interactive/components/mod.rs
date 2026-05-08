@@ -10,6 +10,7 @@ pub mod branch_summary_message;
 pub mod compaction_summary_message;
 pub mod countdown_timer;
 pub mod custom_message;
+pub mod diff;
 pub mod dynamic_border;
 pub mod keybinding_hints;
 pub mod user_message;
@@ -21,6 +22,7 @@ pub use branch_summary_message::{BranchSummaryData, BranchSummaryMessageComponen
 pub use compaction_summary_message::{CompactionSummaryData, CompactionSummaryMessageComponent};
 pub use countdown_timer::{CountdownTimer, DEFAULT_TICK_INTERVAL};
 pub use custom_message::{CustomMessageComponent, CustomMessageData};
+pub use diff::render_diff;
 pub use dynamic_border::DynamicBorderComponent;
 pub use keybinding_hints::{format_keys, key_hint_for, key_text, raw_key_hint};
 pub use user_message::UserMessageComponent;
