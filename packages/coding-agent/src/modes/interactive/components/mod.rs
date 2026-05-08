@@ -12,6 +12,7 @@ pub mod custom_message;
 pub mod dynamic_border;
 pub mod keybinding_hints;
 pub mod user_message;
+pub mod visual_truncate;
 
 pub use assistant_message::{AssistantMessageComponent, DEFAULT_HIDDEN_THINKING_LABEL};
 pub use bordered_loader::BorderedLoaderComponent;
@@ -21,3 +22,4 @@ pub use custom_message::{CustomMessageComponent, CustomMessageData};
 pub use dynamic_border::DynamicBorderComponent;
 pub use keybinding_hints::{format_keys, key_hint_for, key_text, raw_key_hint};
 pub use user_message::UserMessageComponent;
+pub use visual_truncate::{VisualTruncateResult, truncate_to_visual_lines};
