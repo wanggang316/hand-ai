@@ -71,6 +71,7 @@ pub use terminal_image::{
 pub use theme::{Color, NamedColor, Style, Theme};
 pub use tui::{
     Component, ComponentId, Container, Focusable, HandleResult, InputEvent, InputListener,
-    ListenerId, ListenerResult, Tui, input_event_from_str,
+    ListenerId, ListenerResult, OverlayMountError, OverlayMountRequest, OverlayMounter, Tui,
+    input_event_from_str,
 };
 pub use utils::{truncate_to_width, visible_width, wrap_text};

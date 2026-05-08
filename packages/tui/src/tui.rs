@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time;
 
 use crate::error::TuiResult;
@@ -349,6 +349,78 @@ pub struct ListenerId(u64);
 /// Render tick interval. Mirrors the default in pi-tui (~4ms ≈ 240Hz cap).
 const RENDER_TICK_MS: u64 = 4;
 
+/// Cross-task overlay-mount request, dispatched via the channel returned by
+/// [`Tui::overlay_mounter`]. The run loop drains this channel each tick and
+/// applies the request to the owned [`Tui`] state, side-stepping the fact
+/// that `Tui` is not `Send`-shareable.
+pub enum OverlayMountRequest {
+    /// Mount `component` with `options` and return the resulting handle on
+    /// `id_back`. The receiver may have been dropped (e.g. the requesting
+    /// task was cancelled before the run loop processed the request); in
+    /// that case the overlay is still installed but the handle is silently
+    /// discarded — drivers that need cleanup must hide via a separate call
+    /// (e.g. by tracking the request id externally) or call
+    /// [`Tui::hide_all_overlays`] in a teardown step.
+    Show {
+        component: Box<dyn Component>,
+        options: OverlayOptions,
+        id_back: oneshot::Sender<OverlayHandle>,
+    },
+    /// Hide a previously-mounted overlay by handle. No-op if the handle is
+    /// unknown.
+    Hide(OverlayHandle),
+}
+
+/// Send-able / clone-able handle that lets a background task ask the Tui's
+/// run loop to mount or unmount an overlay.
+///
+/// This is the channel-based counterpart to the ownership-based
+/// [`Tui::show_overlay`] / [`Tui::hide_overlay`] APIs: it does **not** own the
+/// `Tui` and is safe to capture into a `tokio::spawn`ed task. Requests are
+/// drained each render tick on the run loop's side.
+#[derive(Debug, Clone)]
+pub struct OverlayMounter {
+    tx: mpsc::UnboundedSender<OverlayMountRequest>,
+}
+
+impl OverlayMounter {
+    /// Asynchronously mount `component` with `options`. Returns the assigned
+    /// [`OverlayHandle`] once the run loop has picked up and processed the
+    /// request. Errors if the run loop has already exited (channel closed).
+    pub async fn show(
+        &self,
+        component: Box<dyn Component>,
+        options: OverlayOptions,
+    ) -> Result<OverlayHandle, OverlayMountError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(OverlayMountRequest::Show {
+                component,
+                options,
+                id_back: tx,
+            })
+            .map_err(|_| OverlayMountError::TuiClosed)?;
+        rx.await.map_err(|_| OverlayMountError::TuiClosed)
+    }
+
+    /// Asynchronously hide a previously-mounted overlay. Errors only if the
+    /// run loop has already exited (channel closed).
+    pub fn hide(&self, handle: OverlayHandle) -> Result<(), OverlayMountError> {
+        self.tx
+            .send(OverlayMountRequest::Hide(handle))
+            .map_err(|_| OverlayMountError::TuiClosed)
+    }
+}
+
+/// Failure modes for [`OverlayMounter`] operations.
+#[derive(Debug, thiserror::Error)]
+pub enum OverlayMountError {
+    /// The Tui's run loop has stopped and the receiver was dropped, so no
+    /// mount/unmount request can be honoured.
+    #[error("tui run loop has exited")]
+    TuiClosed,
+}
+
 /// Main TUI engine: owns the terminal, the component tree, and the run loop.
 pub struct Tui {
     terminal: Box<dyn Terminal>,
@@ -376,6 +448,13 @@ pub struct Tui {
     /// next chunk's bytes accumulate here until the closing marker arrives,
     /// at which point a single [`InputEvent::Paste`] is emitted.
     paste_buffer: Option<String>,
+    /// Sender side of the overlay-mount channel. Cloned and handed to
+    /// background tasks via [`Self::overlay_mounter`]; the receiver is
+    /// drained on each render tick.
+    overlay_mount_tx: mpsc::UnboundedSender<OverlayMountRequest>,
+    /// Receiver side of the overlay-mount channel. Drained by
+    /// [`Self::drain_overlay_mounts`] once per loop iteration.
+    overlay_mount_rx: mpsc::UnboundedReceiver<OverlayMountRequest>,
 }
 
 impl Tui {
@@ -383,6 +462,7 @@ impl Tui {
     pub fn new(terminal: Box<dyn Terminal>) -> Self {
         let (cols, rows) = (terminal.columns(), terminal.rows());
         let (shutdown_tx, _) = watch::channel(false);
+        let (overlay_mount_tx, overlay_mount_rx) = mpsc::unbounded_channel();
         Self {
             terminal,
             root: Container::new(),
@@ -402,6 +482,8 @@ impl Tui {
             next_overlay_id: 0,
             shutdown_tx,
             paste_buffer: None,
+            overlay_mount_tx,
+            overlay_mount_rx,
         }
     }
 
@@ -521,6 +603,48 @@ impl Tui {
     /// Number of overlays currently shown (mostly for tests).
     pub fn overlay_count(&self) -> usize {
         self.overlays.len()
+    }
+
+    /// Returns a `Send + Clone` handle that lets background tasks ask the run
+    /// loop to mount or unmount overlays. Mount requests are processed at the
+    /// start of every render tick (see [`Self::drain_overlay_mounts`]).
+    ///
+    /// This API is additive: the existing ownership-based [`Self::show_overlay`]
+    /// / [`Self::hide_overlay`] methods continue to work for callers that hold
+    /// `&mut Tui`.
+    pub fn overlay_mounter(&self) -> OverlayMounter {
+        OverlayMounter {
+            tx: self.overlay_mount_tx.clone(),
+        }
+    }
+
+    /// Drain pending [`OverlayMountRequest`]s and apply them. Called once per
+    /// run-loop iteration before rendering. Safe to call when the receiver is
+    /// empty (returns immediately).
+    fn drain_overlay_mounts(&mut self) {
+        // Collect all pending requests first so we don't re-borrow `self` in
+        // the middle of the loop.
+        let mut pending = Vec::new();
+        while let Ok(req) = self.overlay_mount_rx.try_recv() {
+            pending.push(req);
+        }
+        for req in pending {
+            match req {
+                OverlayMountRequest::Show {
+                    component,
+                    options,
+                    id_back,
+                } => {
+                    let handle = self.show_overlay(component, options);
+                    // Receiver may have been dropped; that's fine — the
+                    // overlay is still installed.
+                    let _ = id_back.send(handle);
+                }
+                OverlayMountRequest::Hide(handle) => {
+                    self.hide_overlay(handle);
+                }
+            }
+        }
     }
 
     /// Stop the run loop. Safe to call from any thread. Also signals the
@@ -725,6 +849,11 @@ impl Tui {
 
     /// If a render is pending (or forced), draw a new frame.
     fn maybe_render(&mut self) {
+        // Process queued mount/unmount requests from background tasks before
+        // we check the render flag — `show_overlay` / `hide_overlay` set the
+        // flag themselves, so a freshly-arrived request still triggers a
+        // paint this tick.
+        self.drain_overlay_mounts();
         if !self.render_requested.swap(false, Ordering::Relaxed) {
             return;
         }
@@ -1891,5 +2020,99 @@ mod tests {
             InputEvent::Paste(s) => assert_eq!(s, payload),
             other => panic!("expected Paste, got {other:?}"),
         }
+    }
+
+    // ---------- overlay-mount channel ----------
+
+    /// A mounter handed to a background task can install an overlay; the run
+    /// loop drains the request, applies it, and returns the handle.
+    #[tokio::test]
+    async fn overlay_mounter_show_installs_overlay_and_returns_handle() {
+        let mut tui = make_tui();
+        let mounter = tui.overlay_mounter();
+        let running = tui.running.clone();
+        let (_event_tx, event_rx) = mpsc::unbounded_channel();
+
+        // Spawn the run loop on its own task; the mounter on the foreground.
+        let handle = tokio::spawn(async move {
+            let _ = tui.run_with_events(event_rx).await;
+            tui // return ownership back so we can inspect overlay state
+        });
+
+        // Submit a mount request.
+        let overlay_handle = mounter
+            .show(
+                Box::new(TestComponent::new(vec!["overlay-line"])),
+                OverlayOptions::default(),
+            )
+            .await
+            .expect("mount should succeed while run loop is alive");
+
+        // Stop the loop and reclaim the Tui.
+        running.store(false, Ordering::Relaxed);
+        let tui = tokio::time::timeout(Duration::from_millis(500), handle)
+            .await
+            .expect("run loop did not stop")
+            .expect("run task panicked");
+        assert_eq!(tui.overlay_count(), 1, "exactly one overlay must be live");
+        // Sanity-check: the returned handle survives back into raw form
+        // (mostly a smoke test that we round-tripped through the channel).
+        let _ = overlay_handle.raw();
+    }
+
+    /// Hide-via-handle works through the channel and removes the overlay.
+    #[tokio::test]
+    async fn overlay_mounter_hide_removes_previously_mounted_overlay() {
+        let mut tui = make_tui();
+        let mounter = tui.overlay_mounter();
+        let running = tui.running.clone();
+        let (_event_tx, event_rx) = mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(async move {
+            let _ = tui.run_with_events(event_rx).await;
+            tui
+        });
+
+        let overlay_handle = mounter
+            .show(
+                Box::new(TestComponent::new(vec!["soon-to-be-gone"])),
+                OverlayOptions::default(),
+            )
+            .await
+            .expect("mount should succeed");
+
+        // Hide it via the same channel.
+        mounter.hide(overlay_handle).expect("hide must reach loop");
+
+        // Give the loop one tick to drain the hide request.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        running.store(false, Ordering::Relaxed);
+        let tui = tokio::time::timeout(Duration::from_millis(500), handle)
+            .await
+            .expect("run loop did not stop")
+            .expect("run task panicked");
+        assert_eq!(
+            tui.overlay_count(),
+            0,
+            "hide-via-handle must clear the overlay"
+        );
+    }
+
+    /// After the run loop exits, mount/hide return `TuiClosed`.
+    #[tokio::test]
+    async fn overlay_mounter_returns_tui_closed_after_loop_exits() {
+        let tui = make_tui();
+        let mounter = tui.overlay_mounter();
+        // Drop the Tui; the receiver side goes with it.
+        drop(tui);
+
+        let result = mounter
+            .show(
+                Box::new(TestComponent::new(vec!["x"])),
+                OverlayOptions::default(),
+            )
+            .await;
+        assert!(matches!(result, Err(OverlayMountError::TuiClosed)));
     }
 }
