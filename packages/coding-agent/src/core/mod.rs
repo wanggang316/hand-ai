@@ -8,6 +8,7 @@ pub mod compaction;
 pub mod defaults;
 pub mod diagnostics;
 pub mod error;
+pub mod event_bus;
 pub mod export;
 pub mod extensions;
 pub mod footer_data_provider;
