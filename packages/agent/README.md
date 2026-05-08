@@ -220,6 +220,75 @@ let emit: AgentEventSink = Box::new(|event| { /* handle event */ });
 run_agent_loop(prompt_messages, &mut context, &tools, &config, &client, emit).await?;
 ```
 
+## Proxy Transport
+
+For applications that route LLM calls through a proxy server (the proxy
+holds provider auth and keeps API keys off the client), use
+`stream_fn_proxy` to swap the agent's transport:
+
+```rust,ignore
+use hand_agent::{Agent, AgentOptions, ProxyStreamOptions, stream_fn_proxy};
+use model::{Client, get_model};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new();
+    let model = get_model("anthropic", "claude-sonnet-4-20250514")
+        .expect("model not found");
+
+    let stream_fn = stream_fn_proxy(ProxyStreamOptions {
+        auth_token: std::env::var("MY_APP_AUTH_TOKEN")?,
+        proxy_url: "https://genai.example.com".into(),
+        ..Default::default()
+    });
+
+    let mut agent = Agent::with_options(
+        client,
+        model,
+        AgentOptions {
+            stream_fn: Some(stream_fn),
+            ..Default::default()
+        },
+    );
+    agent.set_system_prompt("You are a helpful assistant.");
+
+    let result = agent.prompt("Hello!").await?;
+    println!("messages: {}", result.messages.len());
+    Ok(())
+}
+```
+
+The proxy server must accept `POST {proxy_url}/api/stream` with a JSON
+body of `{ model, context, options }` and respond with `text/event-stream`
+delivering `ProxyAssistantMessageEvent` payloads as `data: <json>` SSE
+records.
+
+For low-level use (your own agent loop or no `Agent` at all), call
+`stream_proxy` directly:
+
+```rust,ignore
+use hand_agent::{stream_proxy, ProxyStreamOptions};
+use futures::StreamExt;
+use model::{Context, get_model};
+
+let model = get_model("anthropic", "claude-sonnet-4-20250514")
+    .expect("model not found");
+let context = Context::default();
+let auth_token = std::env::var("MY_APP_AUTH_TOKEN")?;
+
+let opts = ProxyStreamOptions {
+    auth_token,
+    proxy_url: "https://genai.example.com".into(),
+    ..Default::default()
+};
+let mut stream = stream_proxy(&model, context, opts);
+while let Some(event) = stream.next().await {
+    // event: model::AssistantMessageEvent
+    // Errors and cancellation are delivered as terminal events on the
+    // same stream — no separate Result channel.
+}
+```
+
 ## Development
 
 ```bash

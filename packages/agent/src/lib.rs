@@ -13,6 +13,7 @@
 pub mod agent;
 pub mod agent_loop;
 pub mod error;
+pub mod proxy;
 pub mod types;
 
 pub use agent::{AbortHandle, Agent, AgentOptions, IntoPromptInput, Listener, SubscriptionHandle};
@@ -21,13 +22,14 @@ pub use agent_loop::{
     run_agent_loop_with_messages,
 };
 pub use error::AgentError;
+pub use proxy::{ProxyAssistantMessageEvent, ProxyStreamOptions, stream_fn_proxy, stream_proxy};
 pub use types::{
     AfterToolCallContext, AfterToolCallHook, AfterToolCallResult, AgentContext, AgentEvent,
     AgentLoopConfig, AgentState, AgentTool, BeforeToolCallContext, BeforeToolCallHook,
     BeforeToolCallResult, BoxFuture, ConvertToLlmFn, GetApiKeyFn, GetFollowUpMessagesFn,
     GetSteeringMessagesFn, OnUpdate, PrepareArgumentsFn, QueueDeliveryMode,
-    ShouldStopAfterTurnContext, ShouldStopAfterTurnFn, ToolError, ToolExecuteCtx, ToolExecuteFn,
-    ToolExecutionMode, ToolResult, TransformContextFn, extract_tool_calls,
+    ShouldStopAfterTurnContext, ShouldStopAfterTurnFn, StreamFn, ToolError, ToolExecuteCtx,
+    ToolExecuteFn, ToolExecutionMode, ToolResult, TransformContextFn, extract_tool_calls,
 };
 
 // Re-export the cancellation token so consumers don't need to depend on tokio-util directly.

@@ -37,7 +37,7 @@ The plan is implemented in three milestones aligned with the P0/P1/P2 priority b
   - [ ] M2.T5 Wire `convert_to_llm`, `transform_context`, `get_api_key` from `Agent` into `AgentLoopConfig`; expose `streaming_message` / `pending_tool_calls` on state
 - [ ] **Milestone 3 (P2): `AgentMessage` abstraction, `stream_proxy`, missing config fields**
   - [ ] M3.T1 Introduce `AgentMessage` enum with a `Custom(serde_json::Value)` variant; default convert filters it out
-  - [ ] M3.T2 Port `proxy.ts` → `model::stream_proxy` with `ProxyAssistantMessageEvent` and partial reconstruction
+  - [x] M3.T2 Port `proxy.ts` → `hand_agent::stream_proxy` with `ProxyAssistantMessageEvent` and partial reconstruction (landed in `docs/exec-plans/agent-proxy-port.md`)
   - [ ] M3.T3 Add `thinking_budgets`, `transport`, `session_id`, `max_retry_delay_ms` to `Agent` / `AgentLoopConfig`
 
 ## Surprises & Discoveries

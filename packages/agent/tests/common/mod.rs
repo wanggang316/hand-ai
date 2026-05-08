@@ -342,6 +342,31 @@ impl ApiProvider for TruncatedStreamProvider {
     }
 }
 
+/// Provider whose `stream`/`stream_simple` panics if invoked. Used to assert
+/// that the agent loop's `stream_fn` injection branch bypasses the client's
+/// provider registry entirely.
+pub struct PanickingProvider;
+
+impl ApiProvider for PanickingProvider {
+    fn stream(
+        &self,
+        _model: Model,
+        _context: Context,
+        _options: Option<StreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        panic!("PanickingProvider::stream must not be called");
+    }
+
+    fn stream_simple(
+        &self,
+        _model: Model,
+        _context: Context,
+        _options: Option<SimpleStreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        panic!("PanickingProvider::stream_simple must not be called");
+    }
+}
+
 /// Provider that sleeps before producing a (non-tool) text response. Used to test cancellation.
 pub struct SlowTextProvider {
     pub delay_ms: u64,
