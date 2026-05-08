@@ -24,8 +24,11 @@ fn parse_image() -> Vec<Vec<(u8, u8, u8)>> {
         let mut row = Vec::with_capacity(WIDTH);
         for x in 0..WIDTH {
             let idx = (y * WIDTH + x) * 6;
-            let r = u8::from_str_radix(std::str::from_utf8(&bytes[idx..idx + 2]).unwrap_or("00"), 16)
-                .unwrap_or(0);
+            let r = u8::from_str_radix(
+                std::str::from_utf8(&bytes[idx..idx + 2]).unwrap_or("00"),
+                16,
+            )
+            .unwrap_or(0);
             let g = u8::from_str_radix(
                 std::str::from_utf8(&bytes[idx + 2..idx + 4]).unwrap_or("00"),
                 16,
@@ -131,15 +134,20 @@ impl Component for DaxnutsComponent {
 
         // Scanline reveal: progressively show rows of the image.
         let total_rows = self.image.len();
-        let revealed = ((self.tick as usize) * (total_rows + 3) / Self::MAX_TICKS as usize)
-            .min(total_rows);
+        let revealed =
+            ((self.tick as usize) * (total_rows + 3) / Self::MAX_TICKS as usize).min(total_rows);
 
         for (i, row) in self.image.iter().enumerate() {
             if i < revealed {
                 lines.push(center(row));
             } else if i == revealed {
                 let scanline = "▓".repeat(WIDTH);
-                lines.push(center(&format!("{}{}{}", rgb(100, 200, 255, false), scanline, RESET)));
+                lines.push(center(&format!(
+                    "{}{}{}",
+                    rgb(100, 200, 255, false),
+                    scanline,
+                    RESET
+                )));
             } else {
                 lines.push(center(&" ".repeat(WIDTH)));
             }
@@ -155,9 +163,13 @@ impl Component for DaxnutsComponent {
         let dim = "\x1b[2m";
         let link = "\x1b[38;5;39m\x1b[4m";
 
-        let text_phase = self.tick.saturating_sub((Self::MAX_TICKS as f64 * 0.6) as u32);
+        let text_phase = self
+            .tick
+            .saturating_sub((Self::MAX_TICKS as f64 * 0.6) as u32);
         if text_phase > 0 || self.tick >= Self::MAX_TICKS {
-            lines.push(center(&format!("{accent}Free Kimi K2.5 via OpenCode Zen{RESET}")));
+            lines.push(center(&format!(
+                "{accent}Free Kimi K2.5 via OpenCode Zen{RESET}"
+            )));
             lines.push(center(&format!("{success}\"Powered by daxnuts\"{RESET}")));
             lines.push(center(&format!("{muted}— @thdxr{RESET}")));
         } else {
