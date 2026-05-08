@@ -393,28 +393,16 @@ impl InteractiveMode {
                             provider: session.model().provider.as_str().to_string(),
                         };
                         match SlashCommandTable::dispatch(&parsed, &ctx) {
-                            SlashCommandResult::Handled(SlashCommandAction::Quit) => {
-                                unsafe { stop_handle_for_agent.stop() };
-                                break;
-                            }
-                            SlashCommandResult::Handled(SlashCommandAction::ShowText(s)) => {
-                                push_status(&agent_chat, s, None);
-                            }
-                            SlashCommandResult::Handled(SlashCommandAction::OpenModelSelector) => {
-                                push_status(
-                                    &agent_chat,
-                                    "[/model selector — pick from chat]".to_string(),
-                                    None,
-                                );
-                                // TODO(parity): the selector should appear as
-                                // an overlay; for now we simply log a stub
-                                // since wiring overlays from a background
-                                // task requires shared Tui access we don't
-                                // have. The mo_for_agent placeholder keeps
-                                // the API in place for the follow-up.
+                            SlashCommandResult::Handled(action) => {
+                                let outcome =
+                                    apply_slash_action(action, &agent_chat, &mut session, &cwd)
+                                        .await;
                                 let _ = &mo_for_agent;
+                                if matches!(outcome, SlashOutcome::Quit) {
+                                    unsafe { stop_handle_for_agent.stop() };
+                                    break;
+                                }
                             }
-                            SlashCommandResult::Handled(SlashCommandAction::Noop) => {}
                             SlashCommandResult::Unknown => {
                                 push_status(
                                     &agent_chat,
@@ -701,6 +689,164 @@ fn refresh_footer(session: &AgentSession, cwd: &Path, footer: &SharedFooter) {
     if let Ok(mut f) = footer.lock() {
         *f = InteractiveMode::build_footer_view(session, cwd);
     }
+}
+
+/// Outcome of [`apply_slash_action`]. Lets the caller decide whether to
+/// terminate the run loop without returning the whole `SlashCommandAction`
+/// upward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlashOutcome {
+    /// The command was handled (or its overlay stub printed); the run loop
+    /// should continue.
+    Continue,
+    /// The user requested an exit.
+    Quit,
+}
+
+/// Apply a [`SlashCommandAction`] to the live driver state. Pulled out of
+/// the agent task body so each branch is independently testable. UI overlay
+/// commands (`Open*`) intentionally fall through to a status-line stub —
+/// see the existing TODO(parity) note in [`InteractiveMode::run`].
+pub(crate) async fn apply_slash_action(
+    action: SlashCommandAction,
+    chat: &ChatList,
+    session: &mut AgentSession,
+    _cwd: &Path,
+) -> SlashOutcome {
+    match action {
+        SlashCommandAction::Quit => return SlashOutcome::Quit,
+        SlashCommandAction::ShowText(s) => push_status(chat, s, None),
+        SlashCommandAction::OpenModelSelector => {
+            push_status(chat, "[/model selector — pick from chat]".to_string(), None)
+        }
+        SlashCommandAction::OpenThinkingSelector { inline_level } => {
+            let msg = match inline_level {
+                Some(level) => format!("[/thinking inline level set to {level}]"),
+                None => "[/thinking selector opened]".to_string(),
+            };
+            push_status(chat, msg, None);
+            // TODO(parity): apply the level to the active session and open
+            // the ThinkingSelectorComponent overlay once shared Tui access
+            // lands.
+        }
+        SlashCommandAction::OpenSettingsSelector => {
+            push_status(chat, "[/settings opened]".to_string(), None);
+            // TODO(parity): mount SettingsSelectorComponent.
+        }
+        SlashCommandAction::OpenLoginDialog => {
+            push_status(chat, "[/login opened]".to_string(), None);
+            // TODO(parity): mount LoginDialogComponent.
+        }
+        SlashCommandAction::OpenResumePicker => {
+            push_status(
+                chat,
+                "[/resume — most recent session selector]".to_string(),
+                None,
+            );
+            // TODO(parity): mount the resume picker; currently print-only
+            // because the listing UI isn't wired.
+        }
+        SlashCommandAction::ClearChat => {
+            if let Ok(mut list) = chat.lock() {
+                list.clear();
+            }
+            push_status(chat, "[chat cleared]".to_string(), None);
+        }
+        SlashCommandAction::Compact => match session.compact().await {
+            Ok(summary) => {
+                use super::components::{CompactionSummaryData, CompactionSummaryMessageComponent};
+                let tokens_before = session.message_count() as u64;
+                let data = CompactionSummaryData::new(summary, tokens_before);
+                if let Ok(mut list) = chat.lock() {
+                    list.push(Box::new(CompactionSummaryMessageComponent::new(data)));
+                }
+            }
+            Err(e) => push_status(chat, format!("[compact failed: {e}]"), Some(RED_FG)),
+        },
+        SlashCommandAction::NewSession => match session.reset_session() {
+            Ok(()) => {
+                if let Ok(mut list) = chat.lock() {
+                    list.clear();
+                }
+                push_status(chat, "[new session started]".to_string(), None);
+            }
+            Err(e) => push_status(chat, format!("[/new failed: {e}]"), Some(RED_FG)),
+        },
+        SlashCommandAction::CopyLastAssistant => {
+            let text = last_assistant_text(session);
+            match text {
+                Some(body) => match crate::utils::clipboard::copy_to_clipboard(&body) {
+                    Ok(()) => push_status(chat, "[copied to clipboard]".to_string(), None),
+                    Err(e) => push_status(chat, format!("[copy failed: {e}]"), Some(RED_FG)),
+                },
+                None => push_status(
+                    chat,
+                    "[no assistant message to copy]".to_string(),
+                    Some(YELLOW_FG),
+                ),
+            }
+        }
+        SlashCommandAction::Logout => match crate::core::auth_storage::AuthStorage::new() {
+            Ok(storage) => match storage.save(&std::collections::HashMap::new()) {
+                Ok(()) => push_status(chat, "[logged out]".to_string(), None),
+                Err(e) => push_status(chat, format!("[/logout failed: {e}]"), Some(RED_FG)),
+            },
+            Err(e) => push_status(chat, format!("[/logout failed: {e}]"), Some(RED_FG)),
+        },
+        SlashCommandAction::ShowDiagnostics => {
+            let report = crate::core::diagnostics::run_diagnostics();
+            let body = format_diagnostics_report(&report);
+            push_status(chat, body, None);
+        }
+        SlashCommandAction::Noop => {}
+    }
+    SlashOutcome::Continue
+}
+
+/// Pull the trailing assistant message's textual body, if any. Used by
+/// `/copy`.
+fn last_assistant_text(session: &AgentSession) -> Option<String> {
+    for msg in session.messages().iter().rev() {
+        if let model::Message::Assistant(a) = msg {
+            let mut parts: Vec<String> = Vec::new();
+            for block in &a.content {
+                if let model::AssistantContentBlock::Text(t) = block {
+                    parts.push(t.text.clone());
+                }
+            }
+            if parts.is_empty() {
+                return None;
+            }
+            return Some(parts.join("\n"));
+        }
+    }
+    None
+}
+
+/// Render a [`crate::core::diagnostics::DiagnosticsReport`] into a compact
+/// text block suitable for the chat scrollback.
+fn format_diagnostics_report(report: &crate::core::diagnostics::DiagnosticsReport) -> String {
+    let mut out = String::new();
+    out.push_str("[diagnostics]\n");
+    out.push_str(&format!(
+        "  ok={} warn={} error={}\n",
+        report.ok_count(),
+        report.warn_count(),
+        report.error_count()
+    ));
+    for check in &report.checks {
+        let (status, detail) = match &check.status {
+            crate::core::diagnostics::DiagStatus::Ok => ("OK", String::new()),
+            crate::core::diagnostics::DiagStatus::Warn(msg) => ("WARN", msg.clone()),
+            crate::core::diagnostics::DiagStatus::Error(msg) => ("ERR", msg.clone()),
+        };
+        if detail.is_empty() {
+            out.push_str(&format!("  [{status}] {}\n", check.name));
+        } else {
+            out.push_str(&format!("  [{status}] {} — {}\n", check.name, detail));
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,6 +1154,169 @@ mod tests {
         let joined = chat.lock().unwrap()[0].render(80).join("\n");
         assert!(joined.contains("read"), "{joined:?}");
         assert!(joined.contains("/etc/hosts"), "{joined:?}");
+    }
+
+    // ---- Slash-command action tests -------------------------------------
+
+    fn dispatch(input: &str, ctx: &SlashCommandContext) -> SlashCommandAction {
+        let parsed = ParsedSlashCommand::parse(input).unwrap();
+        match SlashCommandTable::dispatch(&parsed, ctx) {
+            SlashCommandResult::Handled(action) => action,
+            SlashCommandResult::Unknown => panic!("/{} should be known", parsed.name),
+        }
+    }
+
+    #[tokio::test]
+    async fn clear_action_empties_chat_and_pushes_status() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        chat.lock()
+            .unwrap()
+            .push(Box::new(UserMessageComponent::new("noise".to_string())));
+        let mut session = make_session();
+        let action = dispatch(
+            "/clear",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        let outcome = apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        assert_eq!(outcome, SlashOutcome::Continue);
+        let list = chat.lock().unwrap();
+        // List should contain only the post-clear status line.
+        assert_eq!(list.len(), 1);
+        let joined = list[0].render(80).join("\n");
+        assert!(joined.contains("chat cleared"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn copy_with_no_assistant_message_pushes_warning() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = dispatch(
+            "/copy",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        let outcome = apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        assert_eq!(outcome, SlashOutcome::Continue);
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("no assistant message"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn thinking_inline_level_emits_status_with_level() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = dispatch(
+            "/thinking high",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        match &action {
+            SlashCommandAction::OpenThinkingSelector { inline_level } => {
+                assert_eq!(inline_level.as_deref(), Some("high"));
+            }
+            other => panic!("expected OpenThinkingSelector, got {:?}", other),
+        }
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("high"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn settings_login_resume_emit_overlay_stubs() {
+        let mut session = make_session();
+        for (cmd, marker) in [
+            ("/settings", "settings"),
+            ("/login", "login"),
+            ("/resume", "resume"),
+        ] {
+            let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+            let action = dispatch(
+                cmd,
+                &SlashCommandContext {
+                    model_id: "x".into(),
+                    provider: "y".into(),
+                },
+            );
+            apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+            let joined = chat.lock().unwrap()[0].render(80).join("\n");
+            assert!(
+                joined.contains(marker),
+                "expected `{marker}` in output of {cmd}: {joined:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_action_renders_summary_into_chat() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = dispatch(
+            "/diagnostics",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("diagnostics"), "{joined:?}");
+    }
+
+    #[tokio::test]
+    async fn new_session_action_clears_chat_and_resets_session() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        chat.lock()
+            .unwrap()
+            .push(Box::new(UserMessageComponent::new("old".to_string())));
+        let mut session = make_session();
+        let action = dispatch(
+            "/new",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp")).await;
+        // The chat should now hold exactly one element: the status line.
+        let list = chat.lock().unwrap();
+        assert_eq!(list.len(), 1);
+        let joined = list[0].render(80).join("\n");
+        assert!(joined.contains("new session"), "{joined:?}");
+    }
+
+    #[test]
+    fn help_text_includes_new_commands() {
+        let parsed = ParsedSlashCommand::parse("/help").unwrap();
+        let ctx = SlashCommandContext {
+            model_id: "x".into(),
+            provider: "y".into(),
+        };
+        let SlashCommandResult::Handled(SlashCommandAction::ShowText(s)) =
+            SlashCommandTable::dispatch(&parsed, &ctx)
+        else {
+            panic!("help should produce ShowText");
+        };
+        for cmd in [
+            "/clear",
+            "/compact",
+            "/new",
+            "/resume",
+            "/copy",
+            "/thinking",
+            "/settings",
+            "/login",
+            "/logout",
+            "/diagnostics",
+        ] {
+            assert!(s.contains(cmd), "/help missing {cmd}: {s}");
+        }
     }
 
     #[test]

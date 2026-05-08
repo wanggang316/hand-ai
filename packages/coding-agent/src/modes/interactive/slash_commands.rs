@@ -45,12 +45,39 @@ impl ParsedSlashCommand {
 
 /// Outcome of dispatching a slash command. Captures the side-effect intent so
 /// the driver can act on it (open an overlay, exit the session, ...).
+///
+/// Overlay-opening variants (`Open*`) currently fall through to the
+/// driver's print-only stub because mounting overlays from the background
+/// agent task requires shared `Tui` access we don't yet have. The same
+/// blocker applies to `OpenModelSelector` — see the existing TODO(parity)
+/// note in the driver.
 #[derive(Debug)]
 pub enum SlashCommandAction {
     /// Show a transient text message in the chat scrollback.
     ShowText(String),
     /// Open the model-selector overlay.
     OpenModelSelector,
+    /// Open the thinking-level selector overlay. Optional inline level (e.g.
+    /// `/thinking high`) sets the level directly without opening the overlay.
+    OpenThinkingSelector { inline_level: Option<String> },
+    /// Open the settings selector overlay.
+    OpenSettingsSelector,
+    /// Open the login dialog overlay.
+    OpenLoginDialog,
+    /// Open the session-resume picker (most-recent fallback).
+    OpenResumePicker,
+    /// Clear the chat scrollback (visual only — session history is kept).
+    ClearChat,
+    /// Trigger compaction on the active session and inject a summary message.
+    Compact,
+    /// Start a fresh session via `SessionManager::create()`.
+    NewSession,
+    /// Copy the most recent assistant message to the system clipboard.
+    CopyLastAssistant,
+    /// Clear stored auth credentials.
+    Logout,
+    /// Run diagnostics and dump the report into the chat.
+    ShowDiagnostics,
     /// Quit the interactive session.
     Quit,
     /// No-op acknowledgement (the handler did its work without producing any
@@ -86,6 +113,19 @@ impl fmt::Display for SlashCommandAction {
         match self {
             SlashCommandAction::ShowText(s) => f.write_str(s),
             SlashCommandAction::OpenModelSelector => f.write_str("[open model selector]"),
+            SlashCommandAction::OpenThinkingSelector { inline_level } => match inline_level {
+                Some(l) => write!(f, "[set thinking level: {l}]"),
+                None => f.write_str("[open thinking selector]"),
+            },
+            SlashCommandAction::OpenSettingsSelector => f.write_str("[open settings selector]"),
+            SlashCommandAction::OpenLoginDialog => f.write_str("[open login dialog]"),
+            SlashCommandAction::OpenResumePicker => f.write_str("[open resume picker]"),
+            SlashCommandAction::ClearChat => f.write_str("[clear chat]"),
+            SlashCommandAction::Compact => f.write_str("[compact]"),
+            SlashCommandAction::NewSession => f.write_str("[new session]"),
+            SlashCommandAction::CopyLastAssistant => f.write_str("[copy last assistant]"),
+            SlashCommandAction::Logout => f.write_str("[logout]"),
+            SlashCommandAction::ShowDiagnostics => f.write_str("[show diagnostics]"),
             SlashCommandAction::Quit => f.write_str("[quit]"),
             SlashCommandAction::Noop => Ok(()),
         }
@@ -133,10 +173,35 @@ impl SlashCommandTable {
                 ctx.model_id, ctx.provider
             ))),
 
-            // TODO(parity): /compact, /resume, /export, /copy, /name, /thinking,
-            // /settings, /new, /import, /fork, /clone, /login, /logout, /theme,
-            // /skills, /extensions, /diagnostics, /changelog, ... — see
-            // pi-mono's interactive-mode.ts for the full list.
+            "clear" => SlashCommandResult::Handled(SlashCommandAction::ClearChat),
+
+            "compact" => SlashCommandResult::Handled(SlashCommandAction::Compact),
+
+            "new" => SlashCommandResult::Handled(SlashCommandAction::NewSession),
+
+            "resume" => SlashCommandResult::Handled(SlashCommandAction::OpenResumePicker),
+
+            "copy" => SlashCommandResult::Handled(SlashCommandAction::CopyLastAssistant),
+
+            "thinking" => SlashCommandResult::Handled(SlashCommandAction::OpenThinkingSelector {
+                inline_level: if cmd.args.is_empty() {
+                    None
+                } else {
+                    Some(cmd.args.clone())
+                },
+            }),
+
+            "settings" => SlashCommandResult::Handled(SlashCommandAction::OpenSettingsSelector),
+
+            "login" => SlashCommandResult::Handled(SlashCommandAction::OpenLoginDialog),
+
+            "logout" => SlashCommandResult::Handled(SlashCommandAction::Logout),
+
+            "diagnostics" => SlashCommandResult::Handled(SlashCommandAction::ShowDiagnostics),
+
+            // TODO(parity): /export, /name, /import, /fork, /clone, /theme,
+            // /skills, /extensions, /changelog, ... — see pi-mono's
+            // interactive-mode.ts for the full list.
             _ => SlashCommandResult::Unknown,
         }
     }
@@ -149,6 +214,16 @@ Commands:
   /model               Open model selector
   /session             Show active model
   /hotkeys             Show keyboard shortcuts
+  /clear               Clear chat scrollback (history kept)
+  /compact             Compact context now
+  /new                 Start a fresh session
+  /resume              Resume the most recent session
+  /copy                Copy last assistant message to clipboard
+  /thinking [level]    Open thinking selector / set inline level
+  /settings            Open settings selector
+  /login               Open login dialog
+  /logout              Clear stored auth credentials
+  /diagnostics         Show diagnostics report
 
 (Other commands are still being ported — type the legacy CLI command via
  `--print` for full slash-command coverage in the meantime.)"
@@ -238,6 +313,77 @@ mod tests {
                 assert!(s.contains("anthropic"));
             }
             other => panic!("expected ShowText, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatches_clear_compact_new() {
+        for (input, expected) in [
+            ("/clear", "ClearChat"),
+            ("/compact", "Compact"),
+            ("/new", "NewSession"),
+        ] {
+            let parsed = ParsedSlashCommand::parse(input).unwrap();
+            match SlashCommandTable::dispatch(&parsed, &ctx()) {
+                SlashCommandResult::Handled(action) => {
+                    let actual = format!("{:?}", action);
+                    assert!(
+                        actual.contains(expected),
+                        "{input} expected variant {expected}, got {actual}"
+                    );
+                }
+                other => panic!("expected Handled, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn dispatches_thinking_with_inline_level() {
+        let parsed = ParsedSlashCommand::parse("/thinking medium").unwrap();
+        match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::OpenThinkingSelector {
+                inline_level,
+            }) => {
+                assert_eq!(inline_level.as_deref(), Some("medium"));
+            }
+            other => panic!("expected OpenThinkingSelector, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatches_thinking_without_args_opens_selector() {
+        let parsed = ParsedSlashCommand::parse("/thinking").unwrap();
+        match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::OpenThinkingSelector {
+                inline_level,
+            }) => {
+                assert!(inline_level.is_none());
+            }
+            other => panic!("expected OpenThinkingSelector, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatches_login_logout_diagnostics_settings_resume_copy() {
+        for (input, expected) in [
+            ("/login", "OpenLoginDialog"),
+            ("/logout", "Logout"),
+            ("/diagnostics", "ShowDiagnostics"),
+            ("/settings", "OpenSettingsSelector"),
+            ("/resume", "OpenResumePicker"),
+            ("/copy", "CopyLastAssistant"),
+        ] {
+            let parsed = ParsedSlashCommand::parse(input).unwrap();
+            match SlashCommandTable::dispatch(&parsed, &ctx()) {
+                SlashCommandResult::Handled(action) => {
+                    let actual = format!("{:?}", action);
+                    assert!(
+                        actual.contains(expected),
+                        "{input} expected {expected}, got {actual}"
+                    );
+                }
+                other => panic!("expected Handled, got {:?}", other),
+            }
         }
     }
 
