@@ -19,8 +19,8 @@
 //! theme port has a clear surface to wire into.
 
 pub mod components;
+pub mod theme;
 
 // TODO(parity): port modes/interactive/interactive-mode.ts driver
-// TODO(parity): port theme system from modes/interactive/theme/
 // TODO(parity): port the remaining ~29 components per
 //   docs/exec-plans/parity-completion.md §A1
