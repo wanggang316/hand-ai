@@ -9,6 +9,7 @@ pub mod grep;
 pub mod ls;
 pub mod path_utils;
 pub mod read;
+pub mod render_utils;
 pub mod write;
 
 use hand_agent::types::AgentTool;
