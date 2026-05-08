@@ -1,0 +1,77 @@
+{
+  "lastChangelogVersion": "0.42.1",
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-20250514",
+  "defaultThinkingLevel": "medium",
+  "transport": "websocket",
+  "steeringMode": "all",
+  "followUpMode": "one-at-a-time",
+  "theme": "dark",
+  "compaction": {
+    "enabled": true,
+    "keepRecentTokens": 18000
+  },
+  "branchSummary": {
+    "reserveTokens": 16384,
+    "skipPrompt": true
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 5,
+    "baseDelayMs": 2500,
+    "provider": {
+      "timeoutMs": 30000,
+      "maxRetries": 3,
+      "maxRetryDelayMs": 60000
+    }
+  },
+  "hideThinkingBlock": false,
+  "shellPath": "/bin/zsh",
+  "quietStartup": true,
+  "shellCommandPrefix": "shopt -s expand_aliases",
+  "npmCommand": ["mise", "exec", "node@20", "--", "npm"],
+  "collapseChangelog": true,
+  "enableInstallTelemetry": false,
+  "packages": [
+    "npm:@scope/pkg-a",
+    {
+      "source": "github:owner/repo",
+      "extensions": ["ext-a"],
+      "skills": ["skill-x"]
+    }
+  ],
+  "extensions": ["./local/ext.ts"],
+  "skills": ["~/skills"],
+  "prompts": ["./prompts"],
+  "themes": ["./themes/dark.json"],
+  "enableSkillCommands": true,
+  "terminal": {
+    "showImages": true,
+    "imageWidthCells": 72,
+    "clearOnShrink": false,
+    "showTerminalProgress": true
+  },
+  "images": {
+    "autoResize": true,
+    "blockImages": false
+  },
+  "enabledModels": ["claude-*", "gpt-4o*"],
+  "doubleEscapeAction": "fork",
+  "treeFilterMode": "no-tools",
+  "thinkingBudgets": {
+    "minimal": 1024,
+    "low": 4096,
+    "medium": 16384,
+    "high": 32768
+  },
+  "editorPaddingX": 2,
+  "autocompleteMaxVisible": 10,
+  "showHardwareCursor": false,
+  "markdown": {
+    "codeBlockIndent": "    "
+  },
+  "warnings": {
+    "anthropicExtraUsage": false
+  },
+  "sessionDir": "~/.local/share/pi-mono/sessions"
+}

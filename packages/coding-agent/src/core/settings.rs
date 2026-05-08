@@ -809,6 +809,22 @@ impl Settings {
         }
     }
 
+    /// Deserialize a pi-mono-style JSON document into [`Settings`].
+    ///
+    /// pi-mono persists settings as JSON with camelCase field names; the
+    /// hand port uses YAML with kebab-case. This function deserializes the
+    /// JSON shape via the camelCase aliases declared on every field, so
+    /// the same struct round-trips through both formats. Unknown JSON
+    /// fields are dropped silently (matching `serde(default)` semantics on
+    /// the container).
+    ///
+    /// Note that [`Settings::from_json_str`] does **not** apply legacy
+    /// migrations like the YAML loader does — pi-mono's runtime settings
+    /// are already in the new shape, so no key rewriting is performed.
+    pub fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str::<Self>(s)
+    }
+
     /// Load global and project layers from disk and merge them on top of
     /// [`Settings::default`].
     ///
