@@ -37,8 +37,10 @@
 //! (`Builtin/User/Project/Extension`); reusing it would be incorrect.
 //! This module defines its own [`InstallScope`] for clarity.
 
-use crate::core::settings::{PackageSource, SettingsManager};
+use crate::core::settings::{PackageSource, SettingsManager, SettingsScope};
+use crate::utils::child_process;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// On-disk install scope used by the source registry. Mirrors the TS
@@ -196,12 +198,33 @@ pub enum SourceRegistryError {
     NotYetImplemented(&'static str),
     #[error("unsupported source: {0}")]
     UnsupportedSource(String),
+    #[error("local source path does not exist: {path}", path = .0.display())]
+    LocalPathMissing(PathBuf),
     #[error("I/O error reading {path}: {source}", path = .path.display())]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
+    /// Spawning or waiting on `npm`/`git` failed.
+    #[error("process error: {0}")]
+    Process(String),
+    /// `npm install` / `git clone` exited non-zero. Stderr is included
+    /// verbatim so callers can surface it to the user.
+    #[error("{program} exited {code:?}: {stderr}")]
+    CommandFailed {
+        program: String,
+        code: Option<i32>,
+        stderr: String,
+    },
+    /// A persistence helper was called on a registry that was constructed
+    /// without a [`SettingsManager`] handle — see
+    /// [`DefaultSourceRegistry::with_settings_manager`].
+    #[error("registry has no SettingsManager handle for persistence")]
+    NoSettingsManager,
+    /// Settings I/O / serialisation failure surfaced from `SettingsManager::save`.
+    #[error("settings persistence failed: {0}")]
+    Settings(#[from] crate::core::settings::SettingsError),
 }
 
 /// The TS `PackageManager` interface, ported as a Rust trait.
@@ -304,41 +327,136 @@ pub type MissingSourceCallback = Box<
 >;
 
 // ---------------------------------------------------------------------------
+// ProcessRunner — abstracts npm/git shell-out so tests can mock
+// ---------------------------------------------------------------------------
+
+/// Result of one [`ProcessRunner::run`] invocation.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessRunResult {
+    pub exit_code: Option<i32>,
+    pub stderr: String,
+}
+
+impl ProcessRunResult {
+    pub fn success(&self) -> bool {
+        self.exit_code == Some(0)
+    }
+
+    pub fn ok() -> Self {
+        Self {
+            exit_code: Some(0),
+            stderr: String::new(),
+        }
+    }
+}
+
+/// Abstracts shell-out for npm/git so install/remove/update tests can
+/// inject deterministic responses without spawning a real process.
+///
+/// The trait is intentionally narrow (one method, no streaming) — match
+/// it to [`crate::utils::version_check::VersionFetcher`]'s pattern.
+#[async_trait::async_trait]
+pub trait ProcessRunner: Send + Sync {
+    /// Run `program args…` in `cwd`. Implementations should not surface
+    /// stdout — the registry only ever cares about exit code and stderr.
+    async fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+    ) -> Result<ProcessRunResult, SourceRegistryError>;
+}
+
+/// Real [`ProcessRunner`] that shells out via [`child_process::spawn_with_output`].
+pub struct DefaultProcessRunner;
+
+#[async_trait::async_trait]
+impl ProcessRunner for DefaultProcessRunner {
+    async fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: Option<&Path>,
+    ) -> Result<ProcessRunResult, SourceRegistryError> {
+        let output = child_process::spawn_with_output(program, args, cwd)
+            .await
+            .map_err(|e| SourceRegistryError::Process(e.to_string()))?;
+        Ok(ProcessRunResult {
+            exit_code: output.exit_code,
+            stderr: output.stderr_string(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DefaultSourceRegistry
 // ---------------------------------------------------------------------------
 
 /// Default in-process implementation of [`SourceRegistry`].
 ///
-/// Holds a borrowed `SettingsManager` snapshot (cloned `Settings`) and the
-/// agent + cwd dirs needed to compute install paths. The mutating
-/// operations are stubbed pending the Tier 3 install/persist port.
+/// Holds the agent + cwd dirs needed to compute install paths, a
+/// snapshot of the per-layer [`Settings`] for read-side resolve, an
+/// optional shared [`SettingsManager`] handle so the persistence
+/// helpers ([`SourceRegistry::add_source_to_settings`] et al.) can
+/// commit changes back to YAML, and a [`ProcessRunner`] used by the
+/// install/remove/update path so tests can mock npm/git.
 pub struct DefaultSourceRegistry {
     cwd: PathBuf,
     agent_dir: PathBuf,
-    settings_global: crate::core::settings::Settings,
-    settings_project: crate::core::settings::Settings,
+    /// Cached per-layer settings snapshot. Behind a mutex so persistence
+    /// helpers running on `&self` can refresh after a write.
+    settings_layers: Mutex<(
+        crate::core::settings::Settings,
+        crate::core::settings::Settings,
+    )>,
+    settings_manager: Option<Arc<Mutex<SettingsManager>>>,
+    runner: Arc<dyn ProcessRunner>,
     progress_callback: std::sync::Mutex<Option<ProgressCallback>>,
 }
 
 impl DefaultSourceRegistry {
-    /// Construct from a [`SettingsManager`] snapshot. The settings
-    /// layers are cloned at construction time; subsequent mutations to
-    /// the manager are not reflected without rebuilding the registry.
+    /// Construct from a [`SettingsManager`] snapshot. The settings layers
+    /// are cloned at construction time; subsequent mutations to the
+    /// manager are not reflected without rebuilding the registry.
+    /// Persistence helpers (`add_source_to_settings` /
+    /// `remove_source_from_settings` / `install_and_persist` /
+    /// `remove_and_persist`) will return
+    /// [`SourceRegistryError::NoSettingsManager`] — call
+    /// [`Self::with_settings_manager`] for a registry that can write
+    /// settings back.
     pub fn new(cwd: PathBuf, agent_dir: PathBuf, settings_manager: &SettingsManager) -> Self {
-        // The current Rust SettingsManager does not separately expose
-        // global vs. project layers. For the happy-path resolve we use
-        // the merged view as both layers — that means a project-only
-        // setting will also appear at user scope in the resolve output,
-        // but the resolved paths are the same.
-        // TODO(parity): once SettingsManager exposes layer-separated
-        // accessors (gated on the "settings setters" follow-up),
-        // re-thread them through here.
-        let merged = settings_manager.current().clone();
         Self {
             cwd,
             agent_dir,
-            settings_global: merged.clone(),
-            settings_project: merged,
+            settings_layers: Mutex::new((
+                settings_manager.global_layer().clone(),
+                settings_manager.project_layer().clone(),
+            )),
+            settings_manager: None,
+            runner: Arc::new(DefaultProcessRunner),
+            progress_callback: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Construct from a shared [`SettingsManager`] handle. The same
+    /// handle is used for read-side layer access *and* for the
+    /// persistence helpers — `set_packages` + `save` round-trips reflect
+    /// in subsequent `list_configured_packages` / `resolve` calls.
+    pub fn with_settings_manager(
+        cwd: PathBuf,
+        agent_dir: PathBuf,
+        settings_manager: Arc<Mutex<SettingsManager>>,
+    ) -> Self {
+        let (global, project) = {
+            let guard = settings_manager.lock().expect("settings manager poisoned");
+            (guard.global_layer().clone(), guard.project_layer().clone())
+        };
+        Self {
+            cwd,
+            agent_dir,
+            settings_layers: Mutex::new((global, project)),
+            settings_manager: Some(settings_manager),
+            runner: Arc::new(DefaultProcessRunner),
             progress_callback: std::sync::Mutex::new(None),
         }
     }
@@ -355,22 +473,319 @@ impl DefaultSourceRegistry {
         Self {
             cwd,
             agent_dir,
-            settings_global,
-            settings_project,
+            settings_layers: Mutex::new((settings_global, settings_project)),
+            settings_manager: None,
+            runner: Arc::new(DefaultProcessRunner),
             progress_callback: std::sync::Mutex::new(None),
         }
     }
 
-    /// Forward an event to the registered progress callback. The
-    /// install/remove/update implementations will use this once they
-    /// land; in the current port it's exercised by tests only.
-    #[allow(dead_code)] // TODO(parity): wired by install/remove/update once ported
+    /// Override the [`ProcessRunner`]. Test-only — production callers
+    /// stick with [`DefaultProcessRunner`].
+    #[doc(hidden)]
+    pub fn with_runner(mut self, runner: Arc<dyn ProcessRunner>) -> Self {
+        self.runner = runner;
+        self
+    }
+
+    /// Snapshot the cached `(global, project)` layer pair.
+    fn layer_snapshot(
+        &self,
+    ) -> (
+        crate::core::settings::Settings,
+        crate::core::settings::Settings,
+    ) {
+        let guard = self.settings_layers.lock().expect("layer lock poisoned");
+        guard.clone()
+    }
+
+    /// Forward an event to the registered progress callback. Used by
+    /// the install/remove/update path; production callers see start /
+    /// progress / complete / error events for each long-running op.
     fn emit_progress(&self, event: ProgressEvent) {
         if let Ok(guard) = self.progress_callback.lock()
             && let Some(cb) = guard.as_ref()
         {
             cb(&event);
         }
+    }
+
+    /// Wrap an install/remove/update operation with start/complete/error
+    /// progress events. Mirrors the TS `withProgress` helper.
+    async fn with_progress<F, Fut>(
+        &self,
+        action: ProgressAction,
+        source: &str,
+        message: &str,
+        operation: F,
+    ) -> Result<(), SourceRegistryError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(), SourceRegistryError>>,
+    {
+        self.emit_progress(ProgressEvent {
+            event_type: ProgressEventType::Start,
+            action,
+            source: source.to_string(),
+            message: Some(message.to_string()),
+        });
+        match operation().await {
+            Ok(()) => {
+                self.emit_progress(ProgressEvent {
+                    event_type: ProgressEventType::Complete,
+                    action,
+                    source: source.to_string(),
+                    message: None,
+                });
+                Ok(())
+            }
+            Err(e) => {
+                self.emit_progress(ProgressEvent {
+                    event_type: ProgressEventType::Error,
+                    action,
+                    source: source.to_string(),
+                    message: Some(e.to_string()),
+                });
+                Err(e)
+            }
+        }
+    }
+
+    /// Root directory under which `npm install --prefix <root>` lays
+    /// down `node_modules/<pkg>` for `scope`. Mirrors the TS
+    /// `getNpmInstallRoot` for the non-global case (we always use a
+    /// directory-scoped install rather than `npm install -g`).
+    fn npm_install_root(&self, scope: InstallScope) -> PathBuf {
+        match scope {
+            InstallScope::User => self.agent_dir.join("npm"),
+            InstallScope::Project => self.cwd.join(".hand/npm"),
+            InstallScope::Temporary => std::env::temp_dir()
+                .join("pi-extensions/npm")
+                .join(short_hash("temporary")),
+        }
+    }
+
+    /// Root directory under which git clones live for `scope`. Returns
+    /// `None` for [`InstallScope::Temporary`] which uses an unrooted
+    /// per-source tmp dir (no shared parent worth tracking).
+    fn git_install_root(&self, scope: InstallScope) -> Option<PathBuf> {
+        match scope {
+            InstallScope::User => Some(self.agent_dir.join("git")),
+            InstallScope::Project => Some(self.cwd.join(".hand/git")),
+            InstallScope::Temporary => None,
+        }
+    }
+
+    /// Ensure the npm install root has a minimal `package.json` so
+    /// `npm install --prefix` doesn't refuse to operate. Mirrors the TS
+    /// `ensureNpmProject`.
+    fn ensure_npm_project(&self, install_root: &Path) -> Result<(), SourceRegistryError> {
+        if !install_root.exists() {
+            std::fs::create_dir_all(install_root).map_err(|source| SourceRegistryError::Io {
+                path: install_root.to_path_buf(),
+                source,
+            })?;
+        }
+        Self::ensure_gitignore(install_root)?;
+        let package_json = install_root.join("package.json");
+        if !package_json.exists() {
+            let body = "{\n  \"name\": \"hand-extensions\",\n  \"private\": true\n}\n";
+            std::fs::write(&package_json, body).map_err(|source| SourceRegistryError::Io {
+                path: package_json,
+                source,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Drop a `.gitignore` next to the install root so the cache dir
+    /// doesn't leak into user repos. Mirrors the TS `ensureGitIgnore`.
+    fn ensure_gitignore(dir: &Path) -> Result<(), SourceRegistryError> {
+        if !dir.exists() {
+            std::fs::create_dir_all(dir).map_err(|source| SourceRegistryError::Io {
+                path: dir.to_path_buf(),
+                source,
+            })?;
+        }
+        let path = dir.join(".gitignore");
+        if !path.exists() {
+            std::fs::write(&path, "*\n!.gitignore\n")
+                .map_err(|source| SourceRegistryError::Io { path, source })?;
+        }
+        Ok(())
+    }
+
+    /// Resolve the install scope a `local: bool` option maps to.
+    /// Mirrors the TS `options?.local ? "project" : "user"`.
+    fn scope_from_options(options: &PackageInstallOptions) -> InstallScope {
+        if options.local {
+            InstallScope::Project
+        } else {
+            InstallScope::User
+        }
+    }
+
+    /// Run `npm install <spec> --prefix <root>` after preparing the
+    /// install root. Idempotent — running twice with the same spec is
+    /// a no-op for npm itself.
+    async fn install_npm(
+        &self,
+        npm: &NpmSource,
+        scope: InstallScope,
+    ) -> Result<(), SourceRegistryError> {
+        let root = self.npm_install_root(scope);
+        self.ensure_npm_project(&root)?;
+        let prefix = root.to_string_lossy().into_owned();
+        let result = self
+            .runner
+            .run("npm", &["install", &npm.spec, "--prefix", &prefix], None)
+            .await?;
+        if !result.success() {
+            return Err(SourceRegistryError::CommandFailed {
+                program: "npm".into(),
+                code: result.exit_code,
+                stderr: result.stderr,
+            });
+        }
+        Ok(())
+    }
+
+    /// Run `npm uninstall <name> --prefix <root>`. Skips when the root
+    /// directory does not exist (nothing to remove).
+    async fn uninstall_npm(
+        &self,
+        npm: &NpmSource,
+        scope: InstallScope,
+    ) -> Result<(), SourceRegistryError> {
+        let root = self.npm_install_root(scope);
+        if !root.exists() {
+            return Ok(());
+        }
+        let prefix = root.to_string_lossy().into_owned();
+        let result = self
+            .runner
+            .run("npm", &["uninstall", &npm.name, "--prefix", &prefix], None)
+            .await?;
+        if !result.success() {
+            return Err(SourceRegistryError::CommandFailed {
+                program: "npm".into(),
+                code: result.exit_code,
+                stderr: result.stderr,
+            });
+        }
+        Ok(())
+    }
+
+    /// `git clone <repo> <dest>` after creating the parent dir and
+    /// landing a `.gitignore`. Mirrors the TS `installGit`. No-op if the
+    /// destination already exists.
+    async fn install_git(
+        &self,
+        git: &GitSource,
+        scope: InstallScope,
+    ) -> Result<(), SourceRegistryError> {
+        let dest = self.git_install_path(git, scope);
+        if dest.exists() {
+            return Ok(());
+        }
+        if let Some(root) = self.git_install_root(scope) {
+            Self::ensure_gitignore(&root)?;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| SourceRegistryError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let dest_str = dest.to_string_lossy().into_owned();
+        let result = self
+            .runner
+            .run("git", &["clone", &git.repo, &dest_str], None)
+            .await?;
+        if !result.success() {
+            return Err(SourceRegistryError::CommandFailed {
+                program: "git".into(),
+                code: result.exit_code,
+                stderr: result.stderr,
+            });
+        }
+        Ok(())
+    }
+
+    /// `git pull` inside the install dir. Returns silently when the
+    /// install dir does not yet exist (caller is expected to install
+    /// first; the TS reference has the same shape via `installGit`).
+    async fn update_git(
+        &self,
+        git: &GitSource,
+        scope: InstallScope,
+    ) -> Result<(), SourceRegistryError> {
+        let dest = self.git_install_path(git, scope);
+        if !dest.exists() {
+            return self.install_git(git, scope).await;
+        }
+        let result = self.runner.run("git", &["pull"], Some(&dest)).await?;
+        if !result.success() {
+            return Err(SourceRegistryError::CommandFailed {
+                program: "git".into(),
+                code: result.exit_code,
+                stderr: result.stderr,
+            });
+        }
+        Ok(())
+    }
+
+    /// Recursively delete the package's install dir.
+    fn remove_install_dir(path: &Path) -> Result<(), SourceRegistryError> {
+        if !path.exists() {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(path).map_err(|source| SourceRegistryError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    /// Persistence helper: route an in-memory layer mutation + save
+    /// through the shared [`SettingsManager`]. Returns
+    /// [`SourceRegistryError::NoSettingsManager`] when no manager handle
+    /// was supplied at construction.
+    fn with_settings_lock<F, R>(&self, f: F) -> Result<R, SourceRegistryError>
+    where
+        F: FnOnce(&mut SettingsManager) -> Result<R, SourceRegistryError>,
+    {
+        let mgr = self
+            .settings_manager
+            .as_ref()
+            .ok_or(SourceRegistryError::NoSettingsManager)?;
+        let mut guard = mgr.lock().expect("settings manager poisoned");
+        f(&mut guard)
+    }
+
+    /// Map [`InstallScope`] (which has a Temporary variant) to
+    /// [`SettingsScope`] (which doesn't). Temporary scopes can never be
+    /// persisted — caller has already filtered.
+    fn settings_scope(scope: InstallScope) -> Option<SettingsScope> {
+        match scope {
+            InstallScope::User => Some(SettingsScope::Global),
+            InstallScope::Project => Some(SettingsScope::Project),
+            InstallScope::Temporary => None,
+        }
+    }
+
+    /// Refresh the cached `(global, project)` snapshot from the live
+    /// `SettingsManager` after a write. Keeps `resolve` /
+    /// `list_configured_packages` reflective of post-write state. No-op
+    /// when the registry has no `SettingsManager` handle.
+    fn refresh_settings_snapshot(&self) {
+        let Some(mgr) = self.settings_manager.as_ref() else {
+            return;
+        };
+        let mgr_guard = mgr.lock().expect("settings manager poisoned");
+        let mut layers = self.settings_layers.lock().expect("layer lock poisoned");
+        layers.0 = mgr_guard.global_layer().clone();
+        layers.1 = mgr_guard.project_layer().clone();
     }
 
     fn base_dir_for_scope(&self, scope: InstallScope) -> PathBuf {
@@ -586,17 +1001,16 @@ impl SourceRegistry for DefaultSourceRegistry {
         _on_missing: Option<MissingSourceCallback>,
     ) -> Result<ResolvedPaths, SourceRegistryError> {
         let mut paths = ResolvedPaths::default();
+        let (settings_global, settings_project) = self.layer_snapshot();
 
-        // Project layer first so its resources win on later dedup. Note
-        // that the current Rust SettingsManager doesn't separate layers,
-        // so we duplicate the merged view; see DefaultSourceRegistry::new.
-        for pkg in self.settings_project.packages() {
+        // Project layer first so its resources win on later dedup.
+        for pkg in settings_project.packages() {
             let source = pkg.source().to_string();
             if let Some(installed) = self.get_installed_path(&source, InstallScope::Project) {
                 self.add_package_resources(&installed, &source, InstallScope::Project, &mut paths);
             }
         }
-        for pkg in self.settings_global.packages() {
+        for pkg in settings_global.packages() {
             let source = pkg.source().to_string();
             if let Some(installed) = self.get_installed_path(&source, InstallScope::User) {
                 self.add_package_resources(&installed, &source, InstallScope::User, &mut paths);
@@ -606,13 +1020,13 @@ impl SourceRegistry for DefaultSourceRegistry {
         // Top-level / convention-path discovery for both scopes.
         self.add_scope_top_level(
             InstallScope::Project,
-            &self.settings_project,
+            &settings_project,
             &self.cwd.join(".hand"),
             &mut paths,
         );
         self.add_scope_top_level(
             InstallScope::User,
-            &self.settings_global,
+            &settings_global,
             &self.agent_dir,
             &mut paths,
         );
@@ -622,58 +1036,159 @@ impl SourceRegistry for DefaultSourceRegistry {
 
     async fn install(
         &self,
-        _source: &str,
-        _options: PackageInstallOptions,
+        source: &str,
+        options: PackageInstallOptions,
     ) -> Result<(), SourceRegistryError> {
-        // TODO(parity): port npm/git install logic — see docs/exec-plans/parity-completion.md
-        Err(SourceRegistryError::NotYetImplemented(
-            "install: npm/git network install not yet ported",
-        ))
+        let scope = Self::scope_from_options(&options);
+        let parsed = parse_source(source);
+        let message = format!("Installing {source}...");
+        self.with_progress(ProgressAction::Install, source, &message, || async {
+            match parsed {
+                ParsedSource::Npm(npm) => self.install_npm(&npm, scope).await,
+                ParsedSource::Git(git) => self.install_git(&git, scope).await,
+                ParsedSource::Local(local) => {
+                    let base = self.base_dir_for_scope(scope);
+                    let resolved = self.resolve_path_from_base(&local, &base);
+                    if !resolved.exists() {
+                        return Err(SourceRegistryError::LocalPathMissing(resolved));
+                    }
+                    Ok(())
+                }
+            }
+        })
+        .await
     }
 
     async fn install_and_persist(
         &self,
-        _source: &str,
-        _options: PackageInstallOptions,
+        source: &str,
+        options: PackageInstallOptions,
     ) -> Result<(), SourceRegistryError> {
-        // TODO(parity): port npm/git install logic — see docs/exec-plans/parity-completion.md
-        Err(SourceRegistryError::NotYetImplemented(
-            "install_and_persist: depends on install + settings write",
-        ))
+        // Bail early if there's no settings handle — calling install
+        // without persistence would leave the UI in a confused state
+        // (a fresh install dir but no settings entry pointing at it).
+        if self.settings_manager.is_none() {
+            return Err(SourceRegistryError::NoSettingsManager);
+        }
+        self.install(source, options.clone()).await?;
+        self.add_source_to_settings(source, options)?;
+        Ok(())
     }
 
     async fn remove(
         &self,
-        _source: &str,
-        _options: PackageInstallOptions,
+        source: &str,
+        options: PackageInstallOptions,
     ) -> Result<(), SourceRegistryError> {
-        // TODO(parity): port npm/git uninstall logic — see docs/exec-plans/parity-completion.md
-        Err(SourceRegistryError::NotYetImplemented(
-            "remove: npm/git uninstall not yet ported",
-        ))
+        let scope = Self::scope_from_options(&options);
+        let parsed = parse_source(source);
+        let message = format!("Removing {source}...");
+        self.with_progress(ProgressAction::Remove, source, &message, || async {
+            match parsed {
+                ParsedSource::Npm(npm) => {
+                    // Best-effort: ask npm to uninstall (so the
+                    // package.json is updated), then drop the per-pkg
+                    // dir as a belt-and-braces cleanup.
+                    self.uninstall_npm(&npm, scope).await?;
+                    let dir = self.npm_install_path(&npm, scope);
+                    Self::remove_install_dir(&dir)
+                }
+                ParsedSource::Git(git) => {
+                    let dir = self.git_install_path(&git, scope);
+                    Self::remove_install_dir(&dir)
+                }
+                // Local paths are user-managed — nothing to delete.
+                ParsedSource::Local(_) => Ok(()),
+            }
+        })
+        .await
     }
 
     async fn remove_and_persist(
         &self,
-        _source: &str,
-        _options: PackageInstallOptions,
+        source: &str,
+        options: PackageInstallOptions,
     ) -> Result<bool, SourceRegistryError> {
-        // TODO(parity): port npm/git uninstall logic — see docs/exec-plans/parity-completion.md
-        Err(SourceRegistryError::NotYetImplemented(
-            "remove_and_persist: depends on remove + settings write",
-        ))
+        if self.settings_manager.is_none() {
+            return Err(SourceRegistryError::NoSettingsManager);
+        }
+        self.remove(source, options.clone()).await?;
+        self.remove_source_from_settings(source, options)
     }
 
-    async fn update(&self, _source: Option<&str>) -> Result<(), SourceRegistryError> {
-        // TODO(parity): port npm/git update logic — see docs/exec-plans/parity-completion.md
-        Err(SourceRegistryError::NotYetImplemented(
-            "update: npm/git update not yet ported",
-        ))
+    async fn update(&self, source: Option<&str>) -> Result<(), SourceRegistryError> {
+        let targets: Vec<(String, InstallScope)> = match source {
+            Some(s) => {
+                // Update the scope where the source is configured. If
+                // the source is configured in both layers, update both
+                // (matches the TS reference's `update(source)` shape).
+                let mut out = Vec::new();
+                let (g, p) = self.layer_snapshot();
+                if g.packages().iter().any(|pkg| pkg.source() == s) {
+                    out.push((s.to_string(), InstallScope::User));
+                }
+                if p.packages().iter().any(|pkg| pkg.source() == s) {
+                    out.push((s.to_string(), InstallScope::Project));
+                }
+                if out.is_empty() {
+                    // Treat as ad-hoc update at user scope — the TS
+                    // reference lets you update an unconfigured source.
+                    out.push((s.to_string(), InstallScope::User));
+                }
+                out
+            }
+            None => {
+                let mut out = Vec::new();
+                let (g, p) = self.layer_snapshot();
+                for pkg in g.packages() {
+                    out.push((pkg.source().to_string(), InstallScope::User));
+                }
+                for pkg in p.packages() {
+                    out.push((pkg.source().to_string(), InstallScope::Project));
+                }
+                out
+            }
+        };
+
+        for (src, scope) in targets {
+            let parsed = parse_source(&src);
+            let message = format!("Updating {src}...");
+            self.with_progress(ProgressAction::Update, &src, &message, || async {
+                match parsed {
+                    ParsedSource::Npm(npm) => {
+                        // `npm install <pkg>@latest --prefix <root>` —
+                        // mirror the TS reference's update path.
+                        let root = self.npm_install_root(scope);
+                        self.ensure_npm_project(&root)?;
+                        let prefix = root.to_string_lossy().into_owned();
+                        let latest_spec = format!("{}@latest", npm.name);
+                        let result = self
+                            .runner
+                            .run("npm", &["install", &latest_spec, "--prefix", &prefix], None)
+                            .await?;
+                        if !result.success() {
+                            return Err(SourceRegistryError::CommandFailed {
+                                program: "npm".into(),
+                                code: result.exit_code,
+                                stderr: result.stderr,
+                            });
+                        }
+                        Ok(())
+                    }
+                    ParsedSource::Git(git) => self.update_git(&git, scope).await,
+                    // Local sources are user-managed.
+                    ParsedSource::Local(_) => Ok(()),
+                }
+            })
+            .await?;
+        }
+        Ok(())
     }
 
     fn list_configured_packages(&self) -> Vec<ConfiguredPackage> {
+        let (settings_global, settings_project) = self.layer_snapshot();
         let mut out = Vec::new();
-        for pkg in self.settings_global.packages() {
+        for pkg in settings_global.packages() {
             let source = pkg.source().to_string();
             let installed_path = self.get_installed_path(&source, InstallScope::User);
             out.push(ConfiguredPackage {
@@ -683,7 +1198,7 @@ impl SourceRegistry for DefaultSourceRegistry {
                 installed_path,
             });
         }
-        for pkg in self.settings_project.packages() {
+        for pkg in settings_project.packages() {
             let source = pkg.source().to_string();
             let installed_path = self.get_installed_path(&source, InstallScope::Project);
             out.push(ConfiguredPackage {
@@ -698,37 +1213,95 @@ impl SourceRegistry for DefaultSourceRegistry {
 
     async fn resolve_extension_sources(
         &self,
-        _sources: &[String],
-        _options: ResolveExtensionSourcesOptions,
+        sources: &[String],
+        options: ResolveExtensionSourcesOptions,
     ) -> Result<ResolvedPaths, SourceRegistryError> {
-        // TODO(parity): the CLI override path needs the install logic to
-        // handle missing sources for the temporary scope. Stubbed
-        // pending the Tier 3 port.
-        Err(SourceRegistryError::NotYetImplemented(
-            "resolve_extension_sources: depends on install for ephemeral scope",
-        ))
+        // Pick the install scope: temporary > local > user, mirroring TS.
+        let scope = if options.temporary {
+            InstallScope::Temporary
+        } else if options.local {
+            InstallScope::Project
+        } else {
+            InstallScope::User
+        };
+
+        let mut paths = ResolvedPaths::default();
+        for source in sources {
+            // Make sure each ephemeral source is laid down on disk
+            // before resolve. We don't go through `install()` — that
+            // path requires a SettingsManager when used via
+            // install_and_persist; resolve_extension_sources is by
+            // design ephemeral and never persists.
+            match parse_source(source) {
+                ParsedSource::Npm(npm) => self.install_npm(&npm, scope).await?,
+                ParsedSource::Git(git) => self.install_git(&git, scope).await?,
+                ParsedSource::Local(local) => {
+                    let base = self.base_dir_for_scope(scope);
+                    let resolved = self.resolve_path_from_base(&local, &base);
+                    if !resolved.exists() {
+                        return Err(SourceRegistryError::LocalPathMissing(resolved));
+                    }
+                }
+            }
+            if let Some(installed) = self.get_installed_path(source, scope) {
+                self.add_package_resources(&installed, source, scope, &mut paths);
+            }
+        }
+        Ok(paths)
     }
 
     fn add_source_to_settings(
         &self,
-        _source: &str,
-        _options: PackageInstallOptions,
+        source: &str,
+        options: PackageInstallOptions,
     ) -> Result<bool, SourceRegistryError> {
-        // TODO(parity): needs SettingsManager YAML writers — see docs/exec-plans/parity-completion.md
-        Err(SourceRegistryError::NotYetImplemented(
-            "add_source_to_settings: requires SettingsManager YAML writers",
-        ))
+        let install_scope = Self::scope_from_options(&options);
+        let settings_scope = Self::settings_scope(install_scope)
+            .expect("PackageInstallOptions only maps to User/Project");
+        let result = self.with_settings_lock(|mgr| {
+            let mut packages = mgr.layer(settings_scope).packages().to_vec();
+            // Dedupe on the source string. We don't normalise variants
+            // here — the TS reference does some normalisation around
+            // bare-vs-filtered round-tripping, but in this port a user
+            // who wants the filtered form is expected to construct the
+            // PackageSource themselves and call set_packages.
+            if packages.iter().any(|p| p.source() == source) {
+                return Ok(false);
+            }
+            packages.push(PackageSource::Bare(source.to_string()));
+            mgr.set_packages(settings_scope, Some(packages));
+            mgr.save(settings_scope)?;
+            Ok(true)
+        })?;
+        if result {
+            self.refresh_settings_snapshot();
+        }
+        Ok(result)
     }
 
     fn remove_source_from_settings(
         &self,
-        _source: &str,
-        _options: PackageInstallOptions,
+        source: &str,
+        options: PackageInstallOptions,
     ) -> Result<bool, SourceRegistryError> {
-        // TODO(parity): needs SettingsManager YAML writers — see docs/exec-plans/parity-completion.md
-        Err(SourceRegistryError::NotYetImplemented(
-            "remove_source_from_settings: requires SettingsManager YAML writers",
-        ))
+        let install_scope = Self::scope_from_options(&options);
+        let settings_scope = Self::settings_scope(install_scope)
+            .expect("PackageInstallOptions only maps to User/Project");
+        let result = self.with_settings_lock(|mgr| {
+            let mut packages = mgr.layer(settings_scope).packages().to_vec();
+            let original_len = packages.len();
+            packages.retain(|p| p.source() != source);
+            if packages.len() == original_len {
+                return Ok(false);
+            }
+            mgr.set_packages(settings_scope, Some(packages));
+            mgr.save(settings_scope)?;
+            Ok(true)
+        })?;
+        if result {
+            self.refresh_settings_snapshot();
+        }
+        Ok(result)
     }
 
     fn set_progress_callback(&self, callback: Option<ProgressCallback>) {
@@ -1145,34 +1718,8 @@ mod tests {
         assert!(listed[1].filtered);
     }
 
-    #[test]
-    fn install_returns_not_yet_implemented() {
-        let reg = registry_with(
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/agent"),
-            Settings::default(),
-            Settings::default(),
-        );
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let err = rt
-            .block_on(reg.install("npm:foo", PackageInstallOptions::default()))
-            .unwrap_err();
-        assert!(matches!(err, SourceRegistryError::NotYetImplemented(_)));
-    }
-
-    #[test]
-    fn add_source_to_settings_returns_not_yet_implemented() {
-        let reg = registry_with(
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/agent"),
-            Settings::default(),
-            Settings::default(),
-        );
-        let err = reg
-            .add_source_to_settings("npm:foo", PackageInstallOptions::default())
-            .unwrap_err();
-        assert!(matches!(err, SourceRegistryError::NotYetImplemented(_)));
-    }
+    // Replaced "returns_not_yet_implemented" tests with mocked
+    // install/remove/update coverage further below.
 
     #[test]
     fn get_installed_path_returns_none_when_dir_missing() {
@@ -1339,5 +1886,504 @@ mod tests {
             message: Some("boom".into()),
         });
         assert_eq!(counter.load(Ordering::Relaxed), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // install / remove / update / persist (Track 2)
+    // -----------------------------------------------------------------
+
+    use crate::core::settings::SettingsManager;
+    use std::sync::Mutex as StdMutex;
+
+    /// One recorded invocation: (program, args, cwd).
+    type RunnerCall = (String, Vec<String>, Option<PathBuf>);
+
+    /// Test ProcessRunner that records every invocation and returns
+    /// pre-canned results.
+    #[derive(Default)]
+    struct RecordingRunner {
+        calls: StdMutex<Vec<RunnerCall>>,
+        // Map from program name to result. Defaults to success.
+        outcomes: StdMutex<std::collections::HashMap<String, ProcessRunResult>>,
+    }
+
+    impl RecordingRunner {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn calls(&self) -> Vec<RunnerCall> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn set_outcome(&self, program: &str, result: ProcessRunResult) {
+            self.outcomes
+                .lock()
+                .unwrap()
+                .insert(program.to_string(), result);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcessRunner for RecordingRunner {
+        async fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+            cwd: Option<&Path>,
+        ) -> Result<ProcessRunResult, SourceRegistryError> {
+            self.calls.lock().unwrap().push((
+                program.to_string(),
+                args.iter().map(|a| a.to_string()).collect(),
+                cwd.map(Path::to_path_buf),
+            ));
+            Ok(self
+                .outcomes
+                .lock()
+                .unwrap()
+                .get(program)
+                .cloned()
+                .unwrap_or_else(ProcessRunResult::ok))
+        }
+    }
+
+    fn registry_with_runner(
+        cwd: PathBuf,
+        agent: PathBuf,
+        runner: Arc<RecordingRunner>,
+    ) -> DefaultSourceRegistry {
+        DefaultSourceRegistry::from_layers(cwd, agent, Settings::default(), Settings::default())
+            .with_runner(runner as Arc<dyn ProcessRunner>)
+    }
+
+    #[tokio::test]
+    async fn install_npm_runs_npm_install_with_prefix() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let reg = registry_with_runner(cwd, agent.clone(), Arc::clone(&runner));
+        reg.install("npm:foo", PackageInstallOptions::default())
+            .await
+            .expect("install ok");
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        let (program, args, _cwd) = &calls[0];
+        assert_eq!(program, "npm");
+        assert_eq!(args[0], "install");
+        assert_eq!(args[1], "foo");
+        assert_eq!(args[2], "--prefix");
+        // The prefix should resolve under the agent dir.
+        assert!(args[3].contains("npm"));
+        // The npm install root + .gitignore + package.json were all
+        // staged before the runner saw the call.
+        assert!(agent.join("npm/.gitignore").exists());
+        assert!(agent.join("npm/package.json").exists());
+    }
+
+    #[tokio::test]
+    async fn install_npm_surfaces_command_failure() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        runner.set_outcome(
+            "npm",
+            ProcessRunResult {
+                exit_code: Some(1),
+                stderr: "ERR: boom".into(),
+            },
+        );
+        let reg = registry_with_runner(cwd, agent, Arc::clone(&runner));
+        let err = reg
+            .install("npm:foo", PackageInstallOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SourceRegistryError::CommandFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn install_git_clones_into_destination() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let reg = registry_with_runner(cwd, agent.clone(), Arc::clone(&runner));
+        reg.install("github:owner/repo", PackageInstallOptions::default())
+            .await
+            .expect("install ok");
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        let (program, args, _cwd) = &calls[0];
+        assert_eq!(program, "git");
+        assert_eq!(args[0], "clone");
+        assert_eq!(args[1], "https://github.com/owner/repo");
+        // Destination ends with the repo path so the install layout is
+        // observable through `get_installed_path` post-install.
+        assert!(args[2].ends_with("owner/repo"));
+        // git_install_root .gitignore landed.
+        assert!(agent.join("git/.gitignore").exists());
+    }
+
+    #[tokio::test]
+    async fn install_git_skip_when_destination_exists() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(agent.join("git/github.com/owner/repo")).unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let reg = registry_with_runner(cwd, agent, Arc::clone(&runner));
+        reg.install("github:owner/repo", PackageInstallOptions::default())
+            .await
+            .unwrap();
+        // Runner not called — install short-circuited.
+        assert!(runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn install_local_path_validates_existence() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&agent).unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let reg = registry_with_runner(cwd, agent, Arc::clone(&runner));
+        // Missing path -> error, no shell-out.
+        let err = reg
+            .install("./does-not-exist", PackageInstallOptions::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SourceRegistryError::LocalPathMissing(_)));
+        assert!(runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_npm_invokes_uninstall_then_drops_dir() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        // Pre-create the install dir + npm prefix layout.
+        let install_root = agent.join("npm");
+        fs::create_dir_all(install_root.join("node_modules/foo")).unwrap();
+        fs::write(install_root.join("package.json"), "{}").unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let reg = registry_with_runner(cwd, agent.clone(), Arc::clone(&runner));
+        reg.remove("npm:foo", PackageInstallOptions::default())
+            .await
+            .unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "npm");
+        assert_eq!(calls[0].1[0], "uninstall");
+        assert_eq!(calls[0].1[1], "foo");
+        // Per-package dir cleaned up belt-and-braces.
+        assert!(!install_root.join("node_modules/foo").exists());
+    }
+
+    #[tokio::test]
+    async fn remove_git_drops_install_dir_without_shelling_out() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        let dest = agent.join("git/github.com/owner/repo");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("README.md"), "x").unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let reg = registry_with_runner(cwd, agent, Arc::clone(&runner));
+        reg.remove("github:owner/repo", PackageInstallOptions::default())
+            .await
+            .unwrap();
+        assert!(!dest.exists());
+        assert!(
+            runner.calls().is_empty(),
+            "remove should not shell out for git"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_git_runs_pull_in_install_dir() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        let dest = agent.join("git/github.com/owner/repo");
+        fs::create_dir_all(&dest).unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let global = Settings {
+            packages: Some(vec![PackageSource::Bare("github:owner/repo".into())]),
+            ..Settings::default()
+        };
+        let reg = DefaultSourceRegistry::from_layers(cwd, agent, global, Settings::default())
+            .with_runner(Arc::clone(&runner) as Arc<dyn ProcessRunner>);
+        reg.update(Some("github:owner/repo")).await.unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "git");
+        assert_eq!(calls[0].1, vec!["pull"]);
+        assert_eq!(calls[0].2.as_deref(), Some(dest.as_path()));
+    }
+
+    #[tokio::test]
+    async fn update_npm_runs_install_at_latest() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let global = Settings {
+            packages: Some(vec![PackageSource::Bare("npm:foo".into())]),
+            ..Settings::default()
+        };
+        let reg = DefaultSourceRegistry::from_layers(cwd, agent, global, Settings::default())
+            .with_runner(Arc::clone(&runner) as Arc<dyn ProcessRunner>);
+        reg.update(Some("npm:foo")).await.unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "npm");
+        assert_eq!(calls[0].1[0], "install");
+        assert_eq!(calls[0].1[1], "foo@latest");
+    }
+
+    #[tokio::test]
+    async fn install_emits_start_complete_progress_events() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let reg = registry_with_runner(cwd, agent, Arc::clone(&runner));
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        reg.set_progress_callback(Some(Box::new(move |ev| {
+            captured.lock().unwrap().push(ev.event_type);
+        })));
+        reg.install("npm:foo", PackageInstallOptions::default())
+            .await
+            .unwrap();
+        let kinds = events.lock().unwrap().clone();
+        assert_eq!(
+            kinds,
+            vec![ProgressEventType::Start, ProgressEventType::Complete]
+        );
+    }
+
+    #[test]
+    fn add_source_to_settings_without_manager_errors() {
+        let reg = DefaultSourceRegistry::from_layers(
+            PathBuf::from("/tmp/proj"),
+            PathBuf::from("/tmp/agent"),
+            Settings::default(),
+            Settings::default(),
+        );
+        let err = reg
+            .add_source_to_settings("npm:foo", PackageInstallOptions::default())
+            .unwrap_err();
+        assert!(matches!(err, SourceRegistryError::NoSettingsManager));
+    }
+
+    #[test]
+    fn add_source_to_settings_persists_and_dedupes() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&agent).unwrap();
+        let global_yaml = agent.join("settings.yaml");
+        let project_yaml = cwd.join("settings.yaml");
+        fs::write(&global_yaml, "").unwrap();
+        fs::write(&project_yaml, "").unwrap();
+
+        let mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            Some(global_yaml.clone()),
+            Some(project_yaml.clone()),
+        );
+        let mgr = Arc::new(StdMutex::new(mgr));
+        let reg = DefaultSourceRegistry::with_settings_manager(
+            cwd.clone(),
+            agent.clone(),
+            Arc::clone(&mgr),
+        );
+
+        // First add → true, written to disk.
+        let added = reg
+            .add_source_to_settings("npm:foo", PackageInstallOptions::default())
+            .unwrap();
+        assert!(added);
+        // Reload from disk to confirm round-trip.
+        let reloaded = Settings::load(Some(&global_yaml), Some(&project_yaml)).unwrap();
+        let pkgs = reloaded.packages();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].source(), "npm:foo");
+
+        // Second add → false (no change).
+        let added_again = reg
+            .add_source_to_settings("npm:foo", PackageInstallOptions::default())
+            .unwrap();
+        assert!(!added_again);
+
+        // Cached snapshot inside the registry should reflect the write.
+        let listed = reg.list_configured_packages();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].source, "npm:foo");
+        assert_eq!(listed[0].scope, InstallScope::User);
+    }
+
+    #[test]
+    fn add_source_to_settings_local_uses_project_layer() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&agent).unwrap();
+        let global_yaml = agent.join("settings.yaml");
+        let project_yaml = cwd.join("settings.yaml");
+        fs::write(&global_yaml, "").unwrap();
+        fs::write(&project_yaml, "").unwrap();
+
+        let mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            Some(global_yaml.clone()),
+            Some(project_yaml.clone()),
+        );
+        let mgr = Arc::new(StdMutex::new(mgr));
+        let reg = DefaultSourceRegistry::with_settings_manager(
+            cwd.clone(),
+            agent.clone(),
+            Arc::clone(&mgr),
+        );
+        reg.add_source_to_settings("npm:proj-only", PackageInstallOptions { local: true })
+            .unwrap();
+
+        // Project YAML carries the entry, global YAML does not.
+        let project_yaml_body = fs::read_to_string(&project_yaml).unwrap();
+        assert!(project_yaml_body.contains("npm:proj-only"));
+        let global_yaml_body = fs::read_to_string(&global_yaml).unwrap();
+        assert!(!global_yaml_body.contains("npm:proj-only"));
+    }
+
+    #[test]
+    fn remove_source_from_settings_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&agent).unwrap();
+        let global_yaml = agent.join("settings.yaml");
+        let project_yaml = cwd.join("settings.yaml");
+        fs::write(&global_yaml, "packages:\n  - npm:foo\n  - npm:bar\n").unwrap();
+        fs::write(&project_yaml, "").unwrap();
+
+        let (g, p, _) = Settings::load_layers(Some(&global_yaml), Some(&project_yaml)).unwrap();
+        let mgr = SettingsManager::from_layers_for_test(
+            g,
+            p,
+            Some(global_yaml.clone()),
+            Some(project_yaml),
+        );
+        let mgr = Arc::new(StdMutex::new(mgr));
+        let reg = DefaultSourceRegistry::with_settings_manager(cwd, agent, Arc::clone(&mgr));
+
+        let removed = reg
+            .remove_source_from_settings("npm:foo", PackageInstallOptions::default())
+            .unwrap();
+        assert!(removed);
+
+        // Settings file lost npm:foo, npm:bar still present.
+        let body = fs::read_to_string(&global_yaml).unwrap();
+        assert!(!body.contains("npm:foo"));
+        assert!(body.contains("npm:bar"));
+
+        // Removing again -> false.
+        let removed_again = reg
+            .remove_source_from_settings("npm:foo", PackageInstallOptions::default())
+            .unwrap();
+        assert!(!removed_again);
+    }
+
+    #[tokio::test]
+    async fn install_and_persist_writes_settings() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&agent).unwrap();
+        let global_yaml = agent.join("settings.yaml");
+        let project_yaml = cwd.join("settings.yaml");
+        fs::write(&global_yaml, "").unwrap();
+        fs::write(&project_yaml, "").unwrap();
+
+        let mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            Some(global_yaml.clone()),
+            Some(project_yaml),
+        );
+        let mgr = Arc::new(StdMutex::new(mgr));
+
+        let runner = Arc::new(RecordingRunner::new());
+        let reg = DefaultSourceRegistry::with_settings_manager(cwd, agent, Arc::clone(&mgr))
+            .with_runner(Arc::clone(&runner) as Arc<dyn ProcessRunner>);
+        reg.install_and_persist("npm:foo", PackageInstallOptions::default())
+            .await
+            .unwrap();
+
+        // npm install was invoked.
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "npm");
+        // Settings YAML on disk now mentions npm:foo.
+        let body = fs::read_to_string(&global_yaml).unwrap();
+        assert!(body.contains("npm:foo"));
+    }
+
+    #[tokio::test]
+    async fn resolve_extension_sources_uses_temporary_when_flag_set() {
+        let dir = TempDir::new().unwrap();
+        let cwd = dir.path().join("proj");
+        let agent = dir.path().join("agent");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&agent).unwrap();
+
+        let runner = Arc::new(RecordingRunner::new());
+        let reg = registry_with_runner(cwd, agent.clone(), Arc::clone(&runner));
+        let _resolved = reg
+            .resolve_extension_sources(
+                &["npm:foo".to_string()],
+                ResolveExtensionSourcesOptions {
+                    local: false,
+                    temporary: true,
+                },
+            )
+            .await
+            .unwrap();
+        // The npm runner was invoked with a tmp-dir prefix.
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        let prefix = &calls[0].1[3];
+        assert!(
+            prefix.starts_with(std::env::temp_dir().to_string_lossy().as_ref()),
+            "expected temp prefix, got: {prefix}",
+        );
     }
 }
