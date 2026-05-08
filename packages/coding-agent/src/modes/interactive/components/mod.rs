@@ -16,6 +16,7 @@ pub mod dynamic_border;
 pub mod footer;
 pub mod keybinding_hints;
 pub mod skill_invocation_message;
+pub mod tool_execution;
 pub mod user_message;
 pub mod visual_truncate;
 
@@ -31,5 +32,6 @@ pub use dynamic_border::DynamicBorderComponent;
 pub use footer::{FooterComponent, FooterViewModel, TokenUsageSummary};
 pub use keybinding_hints::{format_keys, key_hint_for, key_text, raw_key_hint};
 pub use skill_invocation_message::{ParsedSkillBlockData, SkillInvocationMessageComponent};
+pub use tool_execution::{ToolExecutionComponent, ToolExecutionStatus};
 pub use user_message::UserMessageComponent;
 pub use visual_truncate::{VisualTruncateResult, truncate_to_visual_lines};
