@@ -13,6 +13,7 @@ pub mod countdown_timer;
 pub mod custom_message;
 pub mod diff;
 pub mod dynamic_border;
+pub mod earendil_announcement;
 pub mod extension_input;
 pub mod extension_selector;
 pub mod footer;
@@ -39,6 +40,10 @@ pub use countdown_timer::{CountdownTimer, DEFAULT_TICK_INTERVAL};
 pub use custom_message::{CustomMessageComponent, CustomMessageData};
 pub use diff::render_diff;
 pub use dynamic_border::DynamicBorderComponent;
+pub use earendil_announcement::{
+    BLOG_URL as EARENDIL_BLOG_URL, EarendilAnnouncementComponent,
+    IMAGE_FILENAME as EARENDIL_IMAGE_FILENAME, IMAGE_MAX_WIDTH_CELLS as EARENDIL_IMAGE_MAX_WIDTH,
+};
 pub use extension_input::{ExtensionInputComponent, ExtensionInputEvent};
 pub use extension_selector::{ExtensionSelectorComponent, ExtensionSelectorEvent};
 pub use footer::{FooterComponent, FooterViewModel, TokenUsageSummary};
