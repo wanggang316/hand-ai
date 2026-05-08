@@ -17,6 +17,7 @@ pub mod footer;
 pub mod keybinding_hints;
 pub mod model_selector;
 pub mod oauth_selector;
+pub mod scoped_models_selector;
 pub mod show_images_selector;
 pub mod skill_invocation_message;
 pub mod theme_selector;
@@ -39,6 +40,9 @@ pub use keybinding_hints::{format_keys, key_hint_for, key_text, raw_key_hint};
 pub use model_selector::{ModelOutcome, ModelScope, ModelSelectorComponent};
 pub use oauth_selector::{
     AuthSelectorMode, AuthSelectorProvider, OAuthOutcome, OAuthSelectorComponent,
+};
+pub use scoped_models_selector::{
+    ScopedModelsConfig, ScopedModelsOutcome, ScopedModelsSelectorComponent,
 };
 pub use show_images_selector::{ShowImagesOutcome, ShowImagesSelectorComponent};
 pub use skill_invocation_message::{ParsedSkillBlockData, SkillInvocationMessageComponent};
