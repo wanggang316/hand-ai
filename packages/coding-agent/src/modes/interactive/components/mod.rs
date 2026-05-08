@@ -4,6 +4,7 @@
 //! `pi-mono/packages/coding-agent/src/modes/interactive/components/`. See the
 //! parent module's docs for the theming caveat.
 
+pub mod armin;
 pub mod assistant_message;
 pub mod bash_execution;
 pub mod bordered_loader;
@@ -32,6 +33,7 @@ pub mod user_message;
 pub mod user_message_selector;
 pub mod visual_truncate;
 
+pub use armin::{ArminComponent, Effect as ArminEffect};
 pub use assistant_message::{AssistantMessageComponent, DEFAULT_HIDDEN_THINKING_LABEL};
 pub use bash_execution::{BashExecutionComponent, BashStatus, PREVIEW_LINES};
 pub use bordered_loader::BorderedLoaderComponent;
