@@ -1051,15 +1051,44 @@ impl Component for EditorComponent {
 }
 
 impl EditorComponent {
-    /// Compose the cursor's logical line with any active IME composition for
-    /// rendering. Inserts an underline-styled composition string at the
-    /// cursor column.
+    /// Compose the cursor's logical line with any active IME composition AND
+    /// a visible reverse-video cursor at [`Self::cursor_col`] for rendering.
+    ///
+    /// When [`Self::focused`] is true the [`crate::tui::CURSOR_MARKER`] APC
+    /// sequence is also emitted immediately before the visible cursor so the
+    /// host [`crate::Tui`] can reposition the hardware cursor for IME
+    /// candidate windows. The marker is zero-width and gets stripped by the
+    /// Tui before the line hits the terminal.
     fn compose_line_for_render(&self, line: &str) -> String {
-        let Some(comp) = &self.composing else {
-            return line.to_string();
+        // IME composition path: inline the in-progress string with an
+        // underline. Composition handling already prevents a stray cursor
+        // from drifting around the candidate window, so we don't add the
+        // reverse-video block here.
+        if let Some(comp) = &self.composing {
+            let (before, after) = line.split_at(self.cursor_col.min(line.len()));
+            return format!("{}\x1b[4m{}\x1b[24m{}", before, comp, after);
+        }
+
+        // Visible-cursor path: split at cursor_col (byte offset), highlight
+        // exactly one grapheme (or a trailing space when the cursor is past
+        // the end of the line).
+        let split = self.cursor_col.min(line.len());
+        let (before, after) = line.split_at(split);
+        let marker = if self.focused {
+            crate::tui::CURSOR_MARKER
+        } else {
+            ""
         };
-        let (before, after) = line.split_at(self.cursor_col.min(line.len()));
-        format!("{}\x1b[4m{}\x1b[24m{}", before, comp, after)
+        if after.is_empty() {
+            format!("{before}{marker}\x1b[7m \x1b[0m")
+        } else {
+            let first_grapheme = after
+                .graphemes(true)
+                .next()
+                .expect("non-empty after has at least one grapheme");
+            let rest = &after[first_grapheme.len()..];
+            format!("{before}{marker}\x1b[7m{first_grapheme}\x1b[0m{rest}")
+        }
     }
 
     fn handle_key(&mut self, key: &Key, raw: &str) -> HandleResult {
@@ -1532,7 +1561,9 @@ mod tests {
             .with_border(false);
         editor.set_text("hello");
         let lines = editor.render(40);
-        assert!(lines[0].contains("hello"));
+        // The cursor decoration ("\x1b[7m...\x1b[0m") splits the literal
+        // "hello" with ANSI codes; assert against the visible text.
+        assert!(utils::strip_ansi(&lines[0]).contains("hello"));
     }
 
     #[test]

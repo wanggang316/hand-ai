@@ -62,6 +62,37 @@ pub fn input_event_from_str(data: &str) -> InputEvent {
     InputEvent::Raw(data.to_string())
 }
 
+/// Hardware-cursor positioning marker — a zero-width APC sequence
+/// (`ESC _ hand:c BEL`). Focused components embed this in their rendered
+/// output at the cursor position; [`Tui`]'s render path scans every frame
+/// for it, strips it from the line, and repositions the terminal's
+/// hardware cursor. The marker is the parity equivalent of pi-mono's
+/// `CURSOR_MARKER`. Terminals treat APC as zero-width and ignore the
+/// payload, so there is no visible artefact if it ever leaks through.
+pub const CURSOR_MARKER: &str = "\x1b_hand:c\x07";
+
+/// Find the [`CURSOR_MARKER`] in `lines` (scanning the bottom `height` rows
+/// only — the visible viewport) and return its `(row, col)` while removing
+/// the marker bytes in place. `col` is the visible column width of the
+/// text preceding the marker, which matches what the terminal will render
+/// after the marker is stripped.
+fn extract_cursor_position(lines: &mut [String], height: u16) -> Option<(u16, u16)> {
+    let viewport_top = lines.len().saturating_sub(height as usize);
+    for row in (viewport_top..lines.len()).rev() {
+        let line = &lines[row];
+        if let Some(idx) = line.find(CURSOR_MARKER) {
+            let before = &line[..idx];
+            let col = crate::utils::visible_width(before) as u16;
+            let mut new_line = String::with_capacity(line.len() - CURSOR_MARKER.len());
+            new_line.push_str(before);
+            new_line.push_str(&line[idx + CURSOR_MARKER.len()..]);
+            lines[row] = new_line;
+            return Some((row as u16, col));
+        }
+    }
+    None
+}
+
 /// Core component trait — all UI elements implement this.
 pub trait Component: Send {
     /// Render the component to a list of terminal lines.
@@ -437,6 +468,14 @@ pub struct Tui {
     max_lines_rendered: usize,
     clear_on_shrink: bool,
     show_hardware_cursor: bool,
+    /// Rows the hardware cursor sits *above* the bottom of the rendered
+    /// region. After [`crate::render::DiffRenderer::diff`] writes a frame,
+    /// the cursor is at the bottom of the region; if a focused component
+    /// emitted [`CURSOR_MARKER`] we move the cursor up to the marker — but
+    /// before the next diff we restore it to the bottom so the diff
+    /// engine's invariant still holds. Always 0 between frames when no
+    /// marker was found.
+    cursor_offset_above_bottom: u16,
     overlays: Vec<(OverlayHandle, Box<dyn Component>, OverlayOptions)>,
     next_overlay_id: u64,
     /// Shutdown signal for background tasks (e.g. the stdin reader). The
@@ -477,7 +516,8 @@ impl Tui {
             previous_height: rows,
             max_lines_rendered: 0,
             clear_on_shrink: false,
-            show_hardware_cursor: false,
+            show_hardware_cursor: true,
+            cursor_offset_above_bottom: 0,
             overlays: Vec::new(),
             next_overlay_id: 0,
             shutdown_tx,
@@ -541,10 +581,11 @@ impl Tui {
         self.clear_on_shrink = enabled;
     }
 
-    /// When true, the hardware cursor is left visible after each render.
-    /// Defaults to off (cursor hidden). The change is applied to the
-    /// terminal immediately so callers don't have to wait for the next
-    /// render tick.
+    /// When true, the hardware cursor is shown at the [`CURSOR_MARKER`]
+    /// position emitted by the focused component (and hidden when no
+    /// marker is found). Defaults to on. Hosts that intentionally render
+    /// without a focused component can disable it to keep the terminal
+    /// caret hidden across frames.
     pub fn set_show_hardware_cursor(&mut self, enabled: bool) {
         if self.show_hardware_cursor == enabled {
             return;
@@ -891,7 +932,7 @@ impl Tui {
         }
 
         let base = self.root.render(width);
-        let lines = if self.overlays.is_empty() {
+        let mut lines = if self.overlays.is_empty() {
             base
         } else {
             let refs: Vec<(&dyn Component, &OverlayOptions)> = self
@@ -901,9 +942,44 @@ impl Tui {
                 .collect();
             compose_overlays(&base, &refs, width, height)
         };
+
+        // Marker → hardware cursor position, *before* diff so the diff
+        // engine sees the stripped lines. Without this the marker bytes
+        // would leak into the prev-frame cache and never get cleaned up.
+        let cursor_pos = extract_cursor_position(&mut lines, height);
+
+        // The diff engine's invariant requires the terminal cursor to sit
+        // exactly at the bottom of the previously rendered region. If the
+        // last frame shifted the cursor up to a marker, restore it now.
+        let mut prelude = String::new();
+        if self.cursor_offset_above_bottom > 0 {
+            prelude.push_str(&format!("\x1b[{}B", self.cursor_offset_above_bottom));
+            self.cursor_offset_above_bottom = 0;
+        }
+
         let commands = self.renderer.diff(&lines);
-        if !commands.is_empty() {
-            self.terminal.write(&commands);
+        if !prelude.is_empty() || !commands.is_empty() {
+            self.terminal.write(&format!("{prelude}{commands}"));
+        }
+
+        // After diff, the cursor is at the bottom of the new region. Move
+        // it up to the marker (if any) and toggle visibility.
+        if self.show_hardware_cursor
+            && let Some((row, col)) = cursor_pos
+        {
+            let new_len = lines.len() as u16;
+            let rows_up = new_len.saturating_sub(row);
+            let mut buf = String::new();
+            if rows_up > 0 {
+                buf.push_str(&format!("\x1b[{rows_up}A"));
+            }
+            // \x1b[NG sets the absolute column (1-indexed).
+            buf.push_str(&format!("\x1b[{}G", col + 1));
+            self.terminal.write(&buf);
+            self.terminal.show_cursor();
+            self.cursor_offset_above_bottom = rows_up;
+        } else {
+            self.terminal.hide_cursor();
         }
 
         self.previous_width = width;
@@ -915,9 +991,11 @@ impl Tui {
 
     /// Restore terminal state on exit.
     fn shutdown_terminal(&mut self) {
-        if !self.show_hardware_cursor {
-            self.terminal.show_cursor();
-        }
+        // Always re-show the cursor on exit so the user's shell prompt is
+        // not left with a hidden caret. The render loop hides it whenever
+        // no focused component published a marker, so without this the
+        // shell could inherit the hidden state.
+        self.terminal.show_cursor();
         self.terminal.clear_from_cursor();
     }
 }
@@ -1658,10 +1736,53 @@ mod tests {
     }
 
     #[test]
+    fn extract_cursor_position_finds_marker_and_strips_in_place() {
+        let mut lines = vec![
+            "before".to_string(),
+            format!("a{}b", CURSOR_MARKER),
+            "after".to_string(),
+        ];
+        let pos = extract_cursor_position(&mut lines, 10);
+        assert_eq!(pos, Some((1, 1)));
+        // Marker bytes must be removed; visible text stays intact.
+        assert_eq!(lines[1], "ab");
+    }
+
+    #[test]
+    fn extract_cursor_position_returns_none_when_no_marker() {
+        let mut lines = vec!["plain".to_string(), "lines".to_string()];
+        assert_eq!(extract_cursor_position(&mut lines, 10), None);
+        assert_eq!(lines, vec!["plain".to_string(), "lines".to_string()]);
+    }
+
+    #[test]
+    fn extract_cursor_position_picks_bottom_match_when_multiple() {
+        let mut lines = vec![
+            format!("{}top", CURSOR_MARKER),
+            format!("{}bot", CURSOR_MARKER),
+        ];
+        // Bottom-up scan returns the lower (visually most recent) marker.
+        assert_eq!(extract_cursor_position(&mut lines, 10), Some((1, 0)));
+    }
+
+    #[test]
+    fn extract_cursor_position_counts_visible_width_for_col() {
+        // CJK graphemes count as width 2 — the col returned must reflect
+        // visible width (not byte offset) so it lines up with what the
+        // terminal actually rendered.
+        let mut lines = vec![format!("你{}", CURSOR_MARKER)];
+        let pos = extract_cursor_position(&mut lines, 10);
+        assert_eq!(pos, Some((0, 2)));
+    }
+
+    #[test]
     fn test_set_show_hardware_cursor_writes_show_sequence() {
         let (term, output) = SharedTerminal::new();
         let mut tui = Tui::new(Box::new(term));
-        // Default is hidden; flipping to true must emit the show-cursor escape.
+        // Default is on; flip to false then back to true to observe the
+        // show-cursor escape in isolation.
+        tui.set_show_hardware_cursor(false);
+        output.lock().unwrap().clear();
         tui.set_show_hardware_cursor(true);
         let out = output.lock().unwrap();
         assert!(
@@ -1675,9 +1796,7 @@ mod tests {
     fn test_set_show_hardware_cursor_writes_hide_sequence() {
         let (term, output) = SharedTerminal::new();
         let mut tui = Tui::new(Box::new(term));
-        // Toggle on, then off — the off transition must emit hide-cursor.
-        tui.set_show_hardware_cursor(true);
-        output.lock().unwrap().clear();
+        // Default is on; flipping to false must emit hide-cursor.
         tui.set_show_hardware_cursor(false);
         let out = output.lock().unwrap();
         assert!(
@@ -1691,8 +1810,8 @@ mod tests {
     fn test_set_show_hardware_cursor_idempotent_no_writes() {
         let (term, output) = SharedTerminal::new();
         let mut tui = Tui::new(Box::new(term));
-        // Already false; calling false again must not write.
-        tui.set_show_hardware_cursor(false);
+        // Already true (default); setting to true again must not write.
+        tui.set_show_hardware_cursor(true);
         assert!(output.lock().unwrap().is_empty());
     }
 

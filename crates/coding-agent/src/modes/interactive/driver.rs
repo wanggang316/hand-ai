@@ -204,7 +204,6 @@ impl InteractiveMode {
         // Build the TUI tree.
         let terminal = Box::new(ProcessTerminal::new()?);
         let mut tui = Tui::new(terminal);
-        tui.set_show_hardware_cursor(false);
         tui.root_mut().add_child_with_id(Box::new(ChatScrollback {
             list: Arc::clone(&chat),
         }));
