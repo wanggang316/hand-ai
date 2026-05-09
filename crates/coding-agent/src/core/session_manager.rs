@@ -30,33 +30,187 @@ pub struct SessionHeader {
 }
 
 /// Entry types in a session file.
+///
+/// The on-disk shape uses `{"type": <tag>, "data": {...}}` (an envelope
+/// established before the entry-tree port). pi-mono's JSONL is flat with
+/// `type` at the top level. This Rust port keeps the envelope for
+/// backwards compatibility with already-written `.jsonl` files; cross-
+/// implementation interop with pi-mono is tracked separately.
+///
+/// Every variant carries `parent_id: Option<String>`, deserialized with
+/// `#[serde(default)]` so older fixtures (written before parent-id
+/// landed) still parse. The field is `null` for tree roots and for
+/// flat-list sessions that never tracked parentage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SessionEntry {
     Session(SessionHeader),
     Message {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
         message: Box<Message>,
         timestamp: i64,
     },
     ModelChange {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
         provider: String,
         model_id: String,
         timestamp: i64,
     },
     Compaction {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
         summary: String,
         first_kept_entry_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens_before: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_hook: Option<bool>,
         timestamp: i64,
     },
     Label {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
         target_id: String,
         label: Option<String>,
         timestamp: i64,
     },
+    /// Branch summary entry — see TS `BranchSummaryEntry`.
+    /// Pi-generated when `from_hook` is `None`/`Some(false)`.
+    BranchSummary {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        from_id: String,
+        summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_hook: Option<bool>,
+        timestamp: i64,
+    },
+    /// Custom message entry — extension-injected message that DOES
+    /// participate in LLM context. Mirrors TS `CustomMessageEntry`.
+    CustomMessage {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        custom_type: String,
+        content: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<serde_json::Value>,
+        display: bool,
+        timestamp: i64,
+    },
+    /// Custom (opaque) entry — extension state that does NOT participate
+    /// in LLM context. Mirrors TS `CustomEntry`.
+    Custom {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        custom_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Value>,
+        timestamp: i64,
+    },
+    /// Bash command execution recorded via the interactive `!` prefix.
+    /// Stored as a dedicated variant (not wrapped in `Custom`) so call
+    /// sites can pattern-match without parsing JSON. The TS reference
+    /// stores this on the `message` of a regular message entry, but a
+    /// dedicated variant is closer to existing Rust call sites and
+    /// keeps the data typed.
+    BashExecution {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        command: String,
+        output: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        timestamp: i64,
+    },
+    /// Thinking-level change entry — TS `ThinkingLevelChangeEntry`.
+    ThinkingLevelChange {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        thinking_level: String,
+        timestamp: i64,
+    },
+    /// Session metadata entry (display name) — TS `SessionInfoEntry`.
+    SessionInfo {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        timestamp: i64,
+    },
+}
+
+impl SessionEntry {
+    /// Return the entry id, if any. The session-header variant has no
+    /// id (it carries the session id on its own struct).
+    ///
+    /// Mirrors TS `entry.id` access patterns.
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            SessionEntry::Session(_) => None,
+            SessionEntry::Message { id, .. }
+            | SessionEntry::ModelChange { id, .. }
+            | SessionEntry::Compaction { id, .. }
+            | SessionEntry::Label { id, .. }
+            | SessionEntry::BranchSummary { id, .. }
+            | SessionEntry::CustomMessage { id, .. }
+            | SessionEntry::Custom { id, .. }
+            | SessionEntry::BashExecution { id, .. }
+            | SessionEntry::ThinkingLevelChange { id, .. }
+            | SessionEntry::SessionInfo { id, .. } => Some(id),
+        }
+    }
+
+    /// Return the parent id, if any. Always `None` for the session
+    /// header (and for flat-list sessions that never tracked parentage).
+    pub fn parent_id(&self) -> Option<&str> {
+        match self {
+            SessionEntry::Session(_) => None,
+            SessionEntry::Message { parent_id, .. }
+            | SessionEntry::ModelChange { parent_id, .. }
+            | SessionEntry::Compaction { parent_id, .. }
+            | SessionEntry::Label { parent_id, .. }
+            | SessionEntry::BranchSummary { parent_id, .. }
+            | SessionEntry::CustomMessage { parent_id, .. }
+            | SessionEntry::Custom { parent_id, .. }
+            | SessionEntry::BashExecution { parent_id, .. }
+            | SessionEntry::ThinkingLevelChange { parent_id, .. }
+            | SessionEntry::SessionInfo { parent_id, .. } => parent_id.as_deref(),
+        }
+    }
+
+    /// Return the entry timestamp (millis since epoch), if any. The
+    /// session-header variant carries its own timestamp on the struct.
+    pub fn timestamp(&self) -> Option<i64> {
+        match self {
+            SessionEntry::Session(h) => Some(h.timestamp),
+            SessionEntry::Message { timestamp, .. }
+            | SessionEntry::ModelChange { timestamp, .. }
+            | SessionEntry::Compaction { timestamp, .. }
+            | SessionEntry::Label { timestamp, .. }
+            | SessionEntry::BranchSummary { timestamp, .. }
+            | SessionEntry::CustomMessage { timestamp, .. }
+            | SessionEntry::Custom { timestamp, .. }
+            | SessionEntry::BashExecution { timestamp, .. }
+            | SessionEntry::ThinkingLevelChange { timestamp, .. }
+            | SessionEntry::SessionInfo { timestamp, .. } => Some(*timestamp),
+        }
+    }
 }
 
 /// Summary information about a session, suitable for listing UI and
@@ -543,6 +697,7 @@ impl SessionManager {
         let id = generate_entry_id();
         let entry = SessionEntry::Message {
             id: id.clone(),
+            parent_id: None,
             message: Box::new(message),
             timestamp: Utc::now().timestamp_millis(),
         };
@@ -561,6 +716,7 @@ impl SessionManager {
     ) -> Result<(), CodingAgentError> {
         let entry = SessionEntry::ModelChange {
             id: generate_entry_id(),
+            parent_id: None,
             provider: provider.into(),
             model_id: model_id.into(),
             timestamp: Utc::now().timestamp_millis(),
@@ -580,8 +736,12 @@ impl SessionManager {
     ) -> Result<(), CodingAgentError> {
         let entry = SessionEntry::Compaction {
             id: generate_entry_id(),
+            parent_id: None,
             summary: summary.into(),
             first_kept_entry_id: first_kept_entry_id.into(),
+            tokens_before: None,
+            details: None,
+            from_hook: None,
             timestamp: Utc::now().timestamp_millis(),
         };
         self.entries.push(entry);
@@ -595,6 +755,7 @@ impl SessionManager {
     pub fn append_label(&mut self, label: &str) -> Result<(), CodingAgentError> {
         let entry = SessionEntry::Label {
             id: generate_entry_id(),
+            parent_id: None,
             target_id: self.header.id.clone(),
             label: Some(label.into()),
             timestamp: Utc::now().timestamp_millis(),
@@ -1099,6 +1260,12 @@ mod tests {
                         saw_label = true;
                     }
                 }
+                SessionEntry::BranchSummary { .. }
+                | SessionEntry::CustomMessage { .. }
+                | SessionEntry::Custom { .. }
+                | SessionEntry::BashExecution { .. }
+                | SessionEntry::ThinkingLevelChange { .. }
+                | SessionEntry::SessionInfo { .. } => {}
             }
         }
         assert!(saw_message_with_orig_id, "message id was rewritten");
