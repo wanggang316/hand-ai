@@ -1,13 +1,13 @@
 [workspace]
 members = [
-    "packages/model",
-    "packages/agent",
-    "packages/tui",
-    "packages/coding-agent",
+    "crates/model",
+    "crates/agent",
+    "crates/tui",
+    "crates/coding-agent",
     "examples",
-    "packages/coding-agent/examples/extensions/permission-gate",
-    "packages/coding-agent/examples/extensions/dirty-repo-guard",
-    "packages/coding-agent/examples/extensions/auto-commit-on-exit",
+    "crates/coding-agent/examples/extensions/permission-gate",
+    "crates/coding-agent/examples/extensions/dirty-repo-guard",
+    "crates/coding-agent/examples/extensions/auto-commit-on-exit",
 ]
 resolver = "2"
 

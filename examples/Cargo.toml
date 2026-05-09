@@ -13,7 +13,7 @@ name = "tui-demo"
 path = "src/tui_demo.rs"
 
 [dependencies]
-model = { path = "../packages/model" }
-hand-tui = { path = "../packages/tui" }
+model = { path = "../crates/model" }
+hand-tui = { path = "../crates/tui" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"

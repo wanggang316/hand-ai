@@ -1440,7 +1440,7 @@ fn apply_changelog(chat: &ChatList) {
     use crate::utils::changelog::parse_changelog_file;
     let candidates = [
         PathBuf::from("CHANGELOG.md"),
-        PathBuf::from("packages/coding-agent/CHANGELOG.md"),
+        PathBuf::from("crates/coding-agent/CHANGELOG.md"),
     ];
     let mut entries: Vec<crate::utils::changelog::ChangelogEntry> = Vec::new();
     for path in &candidates {

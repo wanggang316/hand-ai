@@ -4,7 +4,7 @@
 set -e
 
 PACKAGES=(
-  "packages/model"
+  "crates/model"
   # Add more packages here as they are created
 )
 
