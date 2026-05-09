@@ -11,10 +11,10 @@
 
 ```
 pi-mono                                 hand-ai                  status
-packages/ai/                       →   packages/model/         ~95% (small OAuth gaps)
-packages/agent/                    →   packages/agent/         ~98% (per-spec; M3 deferred)
-packages/coding-agent/             →   packages/coding-agent/  ~50% (interactive mode missing)
-packages/tui/                      →   packages/tui/           ~90% (Important review items)
+crates/ai/                       →   crates/model/         ~95% (small OAuth gaps)
+crates/agent/                    →   crates/agent/         ~98% (per-spec; M3 deferred)
+crates/coding-agent/             →   crates/coding-agent/  ~50% (interactive mode missing)
+crates/tui/                      →   crates/tui/           ~90% (Important review items)
 ```
 
 Out of scope: `web-ui`, `pods`, `mom`, `bun/*` runtime — explicitly excluded
@@ -28,7 +28,7 @@ by the user.
 
 Source: `pi-mono/packages/coding-agent/src/modes/interactive/` (5493-line
 `interactive-mode.ts` + 35 components in `components/` + theme assets).
-Target: `packages/coding-agent/src/modes/interactive/` (does not exist).
+Target: `crates/coding-agent/src/modes/interactive/` (does not exist).
 
 | Component | TS LOC | Notes |
 |---|---:|---|

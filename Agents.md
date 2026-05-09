@@ -5,11 +5,11 @@
 If the user did not give you a concrete task in their first message,
 read README.md, then ask which module(s) to work on. Based on the answer, read the relevant README.md files in parallel.
 
-- packages/model/README.md
-- packages/tui/README.md
-- packages/agent/README.md
-- packages/coding-agent/README.md
-- packages/web-ui/README.md
+- crates/model/README.md
+- crates/tui/README.md
+- crates/agent/README.md
+- crates/coding-agent/README.md
+- crates/web-ui/README.md
 
 ## Code Quality
 
@@ -23,7 +23,7 @@ read README.md, then ask which module(s) to work on. Based on the answer, read t
 ### Check Methods
 
 - Total check: `./check.sh`
-- Per-package: `cd packages/<name> && cargo check && cargo test`
+- Per-package: `cd crates/<name> && cargo check && cargo test`
 
 ## Commands
 
@@ -36,7 +36,7 @@ read README.md, then ask which module(s) to work on. Based on the answer, read t
 
 ## Changelog
 
-Location: `packages/*/CHANGELOG.md` (each package has its own)
+Location: `crates/*/CHANGELOG.md` (each package has its own)
 
 ### Format
 
@@ -61,7 +61,7 @@ Use these sections under `## [Unreleased]`:
 - **Internal changes (from issues)**: `Fixed foo bar ([#123](https://github.com/wanggang316/hand-ai/issues/123))`
 - **External contributions**: `Added feature X ([#456](https://github.com/wanggang316/hand-ai/pull/456) by [@username](https://github.com/username))`
 
-## Adding a New LLM Provider (packages/ai)
+## Adding a New LLM Provider (crates/ai)
 
 ## Releasing
 
@@ -99,8 +99,8 @@ These commands can destroy other agents' work:
 git status
 
 # 2. Add ONLY your specific files
-git add packages/ai/src/providers/transform-messages.rs
-git add packages/ai/CHANGELOG.md
+git add crates/ai/src/providers/transform-messages.rs
+git add crates/ai/CHANGELOG.md
 
 # 3. Commit
 git commit -m "fix(ai): description"

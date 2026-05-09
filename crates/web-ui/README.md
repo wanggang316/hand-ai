@@ -21,8 +21,8 @@ Web UI 说明文档。
 
 可用的交互入口包括：
 
-- `packages/coding-agent`：终端编码代理
-- `packages/tui`：终端 UI 基础组件
+- `crates/coding-agent`：终端编码代理
+- `crates/tui`：终端 UI 基础组件
 
 ## License
 

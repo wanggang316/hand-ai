@@ -70,25 +70,25 @@ Related documents:
 - Conversion guidelines (binding rules for TS→Rust style): `docs/conversion-guidelines.md`
 - Workspace-level conversion plan (covers all crates, this plan zooms into Stage 2): `docs/conversion-plan.md`
 - Workspace manifest: `Cargo.toml`
-- TUI crate manifest: `packages/tui/Cargo.toml`
-- TUI README (current Rust API surface): `packages/tui/README.md`
+- TUI crate manifest: `crates/tui/Cargo.toml`
+- TUI README (current Rust API surface): `crates/tui/README.md`
 
 Source-of-truth TypeScript implementation:
 - `~/dev/opensource/pi-mono/packages/tui/src/` — production code
 - `~/dev/opensource/pi-mono/packages/tui/test/` — 28 test files including named regression cases
 
 Key source files (Rust side, current state):
-- `packages/tui/src/lib.rs` — module declarations and re-exports
-- `packages/tui/src/tui.rs` (242 lines) — minimal `Component`/`Container`/`Tui`. Missing: async `run()`, input dispatch, focus, overlay integration, resize handling.
-- `packages/tui/src/terminal.rs` (270 lines) — `Terminal` trait + `ProcessTerminal`. Missing: raw-mode entry/exit, stdin reading, alternate-screen handling.
-- `packages/tui/src/render.rs` (213 lines) — `DiffRenderer`. Mostly complete; needs viewport-aware diffing for resize.
-- `packages/tui/src/keys.rs` (498 lines vs TS 1400) — basic CSI parsing. Missing: Kitty event types (release/repeat), modifyOtherKeys, `KeyId` system, `matchesKey`, base-layout-key, Windows Terminal quirks.
-- `packages/tui/src/utils.rs` (266 lines vs TS 1140) — basic ANSI strip and width. Missing: grapheme segmentation, OSC 8 hyperlink tracking, `wrapTextWithAnsi`, `sliceByColumn/sliceWithWidth`, `applyBackgroundToLine`.
-- `packages/tui/src/overlay.rs` — standalone `render_with_overlay` helper, NOT integrated into `Tui`.
-- `packages/tui/src/components/editor.rs` (545 lines vs TS 2292) — basic editing. Missing: word-wrap with graphemes, paste markers, autocomplete integration, IME, viewport scrolling.
-- `packages/tui/src/components/autocomplete.rs` (264 lines vs TS 783) — only the dropdown view component. Missing: provider system entirely.
-- `packages/tui/src/components/markdown.rs` (280 lines vs TS 852) — basic. Missing: tables, links, theme.
-- `packages/tui/src/components/image.rs` — image *component* (renders pre-encoded data). NOT the image-encoding layer (which TS has as `terminal-image.ts` and Rust lacks entirely).
+- `crates/tui/src/lib.rs` — module declarations and re-exports
+- `crates/tui/src/tui.rs` (242 lines) — minimal `Component`/`Container`/`Tui`. Missing: async `run()`, input dispatch, focus, overlay integration, resize handling.
+- `crates/tui/src/terminal.rs` (270 lines) — `Terminal` trait + `ProcessTerminal`. Missing: raw-mode entry/exit, stdin reading, alternate-screen handling.
+- `crates/tui/src/render.rs` (213 lines) — `DiffRenderer`. Mostly complete; needs viewport-aware diffing for resize.
+- `crates/tui/src/keys.rs` (498 lines vs TS 1400) — basic CSI parsing. Missing: Kitty event types (release/repeat), modifyOtherKeys, `KeyId` system, `matchesKey`, base-layout-key, Windows Terminal quirks.
+- `crates/tui/src/utils.rs` (266 lines vs TS 1140) — basic ANSI strip and width. Missing: grapheme segmentation, OSC 8 hyperlink tracking, `wrapTextWithAnsi`, `sliceByColumn/sliceWithWidth`, `applyBackgroundToLine`.
+- `crates/tui/src/overlay.rs` — standalone `render_with_overlay` helper, NOT integrated into `Tui`.
+- `crates/tui/src/components/editor.rs` (545 lines vs TS 2292) — basic editing. Missing: word-wrap with graphemes, paste markers, autocomplete integration, IME, viewport scrolling.
+- `crates/tui/src/components/autocomplete.rs` (264 lines vs TS 783) — only the dropdown view component. Missing: provider system entirely.
+- `crates/tui/src/components/markdown.rs` (280 lines vs TS 852) — basic. Missing: tables, links, theme.
+- `crates/tui/src/components/image.rs` — image *component* (renders pre-encoded data). NOT the image-encoding layer (which TS has as `terminal-image.ts` and Rust lacks entirely).
 
 **Terms of art used in this plan:**
 - *Differential rendering* — comparing the previous frame's lines against the new ones and emitting only the changed lines as ANSI cursor-move + line-rewrite sequences. Lives in `render.rs`.
@@ -158,7 +158,7 @@ After this milestone, the editor and markdown components produce output indistin
 
 ### Milestone 4: Test parity & regression coverage
 
-After this milestone, regressions caught by the TS suite cannot silently slip into the Rust port. All 28 TS test files have a Rust counterpart in `packages/tui/tests/`.
+After this milestone, regressions caught by the TS suite cannot silently slip into the Rust port. All 28 TS test files have a Rust counterpart in `crates/tui/tests/`.
 
 **M4.T1 — Create `tests/` integration directory and port the easy 22 files.** Files: `autocomplete.rs`, `editor.rs`, `fuzzy.rs`, `image.rs`, `input.rs`, `keybindings.rs`, `keys.rs`, `markdown.rs`, `select_list.rs`, `stdin_buffer.rs`, `terminal_image.rs`, `terminal.rs`, `truncate_to_width.rs`, `truncated_text.rs`, `tui_render.rs`, `wrap_ansi.rs`, plus shared `common/mod.rs` for fixtures (mock terminal, golden-line helpers).
 
@@ -176,7 +176,7 @@ After this milestone, regressions caught by the TS suite cannot silently slip in
 
 **M5.T1 — Wire `hand-coding-agent` to use `hand-tui`.** This is consumer-side work but proves the API. Add a minimal `use hand_tui::*` somewhere in `coding-agent` (likely a placeholder render mode in `src/main.rs`) so the Cargo dependency is exercised. If API friction surfaces, file as a new task and adjust `hand-tui` accordingly.
 
-**M5.T2 — `clippy --workspace -- -D warnings` clean-up + Migration notes.** Fix any lints that surfaced over the milestones. Update `packages/tui/README.md`'s "Core Traits" section to reflect the expanded `Component`/`Focusable`. Add a brief `MIGRATION.md` for anyone (future) who held a pre-port `hand-tui` reference — likely empty since no real consumer exists.
+**M5.T2 — `clippy --workspace -- -D warnings` clean-up + Migration notes.** Fix any lints that surfaced over the milestones. Update `crates/tui/README.md`'s "Core Traits" section to reflect the expanded `Component`/`Focusable`. Add a brief `MIGRATION.md` for anyone (future) who held a pre-port `hand-tui` reference — likely empty since no real consumer exists.
 
 ## Concrete Steps
 
@@ -212,7 +212,7 @@ All three must succeed. Update Outcomes & Retrospective at each milestone close.
 
 The plan is complete when:
 
-1. **Test parity.** `ls packages/tui/tests/*.rs | wc -l` ≥ 22 plus 6 regression files = ≥ 28 files. `cargo test -p hand-tui` reports ≥ (192 inline + ~150 integration) passing tests.
+1. **Test parity.** `ls crates/tui/tests/*.rs | wc -l` ≥ 22 plus 6 regression files = ≥ 28 files. `cargo test -p hand-tui` reports ≥ (192 inline + ~150 integration) passing tests.
 2. **Behavioral parity.** `cargo run --example tui-demo` opens an interactive editor, accepts `Ctrl+C`-once-cancel-twice-quit, shows a slash-command popup on `/`, dismisses overlays cleanly, and re-flows on `tput cols 60` resize.
 3. **Build hygiene.** `cargo clippy --workspace -- -D warnings` and `cargo fmt -- --check` exit zero.
 4. **Consumer smoke.** `hand-coding-agent` has at least one `use hand_tui::Tui` import and `cargo build -p hand-coding-agent` succeeds.
@@ -224,7 +224,7 @@ For each individual `T` row, acceptance is: the named TS test file's cases pass 
 
 Every task is structured as additive (new file) or rewriting a single Rust file. Rerunning a task is safe: the Rust source is overwritten to match the TS file's current state. Git is the recovery substrate — if a milestone introduces a regression, `git revert <commit-range>` restores the prior milestone's state because of the per-task atomic-commit rule.
 
-The `tests/` directory is created idempotently via `mkdir -p packages/tui/tests`. Cargo discovers integration tests by file presence, no manifest entry needed.
+The `tests/` directory is created idempotently via `mkdir -p crates/tui/tests`. Cargo discovers integration tests by file presence, no manifest entry needed.
 
 If `cargo clippy -- -D warnings` blocks a commit, the failure mode is to fix the warnings rather than `--no-verify` past them (per user's global rule and `CLAUDE.md`).
 
@@ -240,7 +240,7 @@ The work can stop and resume at any milestone boundary because every milestone l
 
 ## Interfaces and Dependencies
 
-**New crate dependencies** (added to `packages/tui/Cargo.toml`):
+**New crate dependencies** (added to `crates/tui/Cargo.toml`):
 ```toml
 unicode-segmentation = "1"
 base64 = "0.22"

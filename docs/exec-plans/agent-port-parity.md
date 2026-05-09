@@ -64,13 +64,13 @@ Related documents:
 - Source of truth for behavior: `/Users/wanggang/dev/opensource/pi-mono/packages/agent/` (TypeScript reference implementation)
 
 Key source files to read before starting any task:
-- `packages/agent/src/types.rs` — current Rust types; needs additive changes (no full rewrite)
-- `packages/agent/src/agent_loop.rs` — main loop; the largest delta lives here
-- `packages/agent/src/agent.rs` — high-level wrapper; hooks need wiring, listeners need real plumbing
-- `packages/agent/src/error.rs` — extend with `Cancelled`, `SchemaValidation` variants
-- `packages/agent/src/lib.rs` — re-export surface; keep stable except where types are renamed
-- `packages/agent/tests/common/mod.rs` — shared test helpers; already provides `test_model`, etc.
-- `packages/model/src/types.rs` lines ~340-430 — `StreamOptions` / `SimpleStreamOptions`
+- `crates/agent/src/types.rs` — current Rust types; needs additive changes (no full rewrite)
+- `crates/agent/src/agent_loop.rs` — main loop; the largest delta lives here
+- `crates/agent/src/agent.rs` — high-level wrapper; hooks need wiring, listeners need real plumbing
+- `crates/agent/src/error.rs` — extend with `Cancelled`, `SchemaValidation` variants
+- `crates/agent/src/lib.rs` — re-export surface; keep stable except where types are renamed
+- `crates/agent/tests/common/mod.rs` — shared test helpers; already provides `test_model`, etc.
+- `crates/model/src/types.rs` lines ~340-430 — `StreamOptions` / `SimpleStreamOptions`
 - Mirror files in `pi-mono/packages/agent/src/` (TypeScript) — read alongside the Rust file when porting
 - `pi-mono/packages/agent/test/agent-loop.test.ts` (1278 lines) — the canonical behavior contract; use it as a checklist when writing Rust tests
 
@@ -151,7 +151,7 @@ pub struct CustomAgentMessage {
 ```
 Replace `Vec<Message>` in `AgentContext`, `AgentState`, events, and hooks with `Vec<AgentMessage>`. The default `convert_to_llm` filters out `Custom`. Provide `From<Message> for AgentMessage` so call sites need minimal changes. Files touched: `types.rs`, `agent_loop.rs`, `agent.rs`, `tests/common/mod.rs`. ~4 files.
 
-**M3.T2 — `stream_proxy` port.** New module `packages/model/src/proxy.rs` (decision: belongs in `model`, mirroring TS where `proxy.ts` lives in agent only because TS conflates layers — Rust splits more cleanly). Defines `ProxyAssistantMessageEvent` enum (tag `"type"`, snake_case), `ProxyStreamOptions`, and `pub fn stream_proxy(model: &Model, context: Context, options: ProxyStreamOptions) -> impl Stream<Item = AssistantMessageEvent>` using `reqwest` with SSE line buffering and `parse_streaming_json` from `model`. Re-export from `model::lib.rs`. Mirrors `pi-mono/packages/agent/src/proxy.ts:116-368`. Files touched: `packages/model/src/proxy.rs` (new), `packages/model/src/lib.rs`, `packages/model/Cargo.toml` (already has reqwest). ~3 files.
+**M3.T2 — `stream_proxy` port.** New module `crates/model/src/proxy.rs` (decision: belongs in `model`, mirroring TS where `proxy.ts` lives in agent only because TS conflates layers — Rust splits more cleanly). Defines `ProxyAssistantMessageEvent` enum (tag `"type"`, snake_case), `ProxyStreamOptions`, and `pub fn stream_proxy(model: &Model, context: Context, options: ProxyStreamOptions) -> impl Stream<Item = AssistantMessageEvent>` using `reqwest` with SSE line buffering and `parse_streaming_json` from `model`. Re-export from `model::lib.rs`. Mirrors `pi-mono/packages/agent/src/proxy.ts:116-368`. Files touched: `crates/model/src/proxy.rs` (new), `crates/model/src/lib.rs`, `crates/model/Cargo.toml` (already has reqwest). ~3 files.
 
 **M3.T3 — Missing config fields.** Add `thinking_budgets: Option<ThinkingBudgets>`, `transport: Option<Transport>`, `session_id: Option<String>`, `max_retry_delay_ms: Option<u64>` to `Agent`. Wire into `build_config` → `SimpleStreamOptions`. Most are pass-through. Files touched: `agent.rs`, `types.rs`. ~2 files.
 
@@ -200,7 +200,7 @@ The plan is complete when:
 1. `cargo test -p hand-agent` reports all tests passing, including the new tests listed under each milestone's acceptance criteria.
 2. `cargo clippy -p hand-agent -- -D warnings` reports zero warnings.
 3. The `examples/` directory contains at least one new file `examples/agent_abort.rs` that demonstrates `agent.abort()` cancelling a long-running tool, runnable with `cargo run --example agent_abort`. Output should show `tool_execution_start` followed by `agent_end` with no `tool_execution_end`.
-4. A manual diff of `packages/agent/src/lib.rs` against `pi-mono/packages/agent/src/index.ts` shows every TS export has a Rust counterpart (or a documented intentional omission in `docs/exec-plans/agent-port-parity.md` Decision Log).
+4. A manual diff of `crates/agent/src/lib.rs` against `pi-mono/packages/agent/src/index.ts` shows every TS export has a Rust counterpart (or a documented intentional omission in `docs/exec-plans/agent-port-parity.md` Decision Log).
 5. The test file `pi-mono/packages/agent/test/agent-loop.test.ts` has been read end-to-end and every test scenario it covers is either ported, intentionally skipped (with rationale in Decision Log), or replaced by an equivalent Rust test.
 
 ## Idempotence and Recovery
@@ -209,7 +209,7 @@ Every step is a code edit on tracked files; no external state is created. Failed
 
 If `cargo test` fails partway through a milestone, run `cargo test -p hand-agent --test <name> -- --nocapture` to surface event sequences. The agent loop is deterministic given a fake `Client`; flakes indicate a real bug, not test infrastructure.
 
-If introducing the `AgentMessage` enum (M3.T1) breaks downstream crates inside this workspace, fix call sites in `packages/coding-agent` and `examples/` in the same PR rather than leaving the workspace in a broken state.
+If introducing the `AgentMessage` enum (M3.T1) breaks downstream crates inside this workspace, fix call sites in `crates/coding-agent` and `examples/` in the same PR rather than leaving the workspace in a broken state.
 
 ## Artifacts and Notes
 
@@ -245,14 +245,14 @@ The order asymmetry (completion order for `tool_execution_end`, source order for
 
 ## Interfaces and Dependencies
 
-In `packages/agent/Cargo.toml` add:
+In `crates/agent/Cargo.toml` add:
 
 ```toml
 tokio-util = { version = "0.7", features = ["rt"] }
 jsonschema = { version = "0.18", default-features = false }
 ```
 
-In `packages/agent/src/types.rs`, the post-plan public surface includes:
+In `crates/agent/src/types.rs`, the post-plan public surface includes:
 
 ```rust
 pub enum AgentMessage { User(UserMessage), Assistant(AssistantMessage), ToolResult(ToolResultMessage), Custom(CustomAgentMessage) }
@@ -301,7 +301,7 @@ pub type ShouldStopAfterTurnFn =
     Box<dyn for<'a> Fn(ShouldStopAfterTurnContext<'a>) -> BoxFuture<'a, bool> + Send + Sync>;
 ```
 
-In `packages/agent/src/agent_loop.rs`, the post-plan exported entry points:
+In `crates/agent/src/agent_loop.rs`, the post-plan exported entry points:
 
 ```rust
 pub type AgentEventSink = std::sync::Arc<dyn Fn(AgentEvent) + Send + Sync>;
@@ -326,7 +326,7 @@ pub async fn run_agent_loop_continue(
 ) -> Result<AgentLoopResult, AgentError>;
 ```
 
-In `packages/agent/src/agent.rs`, `Agent` gains:
+In `crates/agent/src/agent.rs`, `Agent` gains:
 
 ```rust
 impl Agent {
@@ -349,7 +349,7 @@ impl Agent {
 pub struct SubscriptionHandle { /* drops to unsubscribe */ }
 ```
 
-In `packages/model/src/proxy.rs` (new in M3.T2):
+In `crates/model/src/proxy.rs` (new in M3.T2):
 
 ```rust
 pub fn stream_proxy(

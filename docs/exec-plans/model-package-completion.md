@@ -8,7 +8,7 @@ This is a living document. The Progress, Surprises & Discoveries, Decision Log, 
 
 ## Purpose
 
-After this work, the Rust `model` crate at `packages/model/` reaches feature parity with `pi-mono/packages/ai` (TypeScript). The user can:
+After this work, the Rust `model` crate at `crates/model/` reaches feature parity with `pi-mono/packages/ai` (TypeScript). The user can:
 
 1. Drive `Anthropic`, `OpenAI Codex`, and `GitHub Copilot` providers using OAuth credentials (no manual API key required) by calling `OAuthProvider::login()` and persisting tokens to `~/.hand-ai/oauth.json`.
 2. Send requests to six additional provider/API combinations not previously supported: `openai-codex-responses` (with WebSocket and cached transports), `azure-openai-responses`, `google-vertex` (ADC-authenticated), `mistral` (`mistral-conversations` API), `cloudflare-workers-ai`, and an in-process `faux` provider for tests.
@@ -79,11 +79,11 @@ The original "pick port 0, OS-assigned" Mitigation in the Risks section is incor
 
 All 14 milestones landed. The Rust `model` crate now mirrors `pi-mono/packages/ai`'s feature surface across 11 wire-protocol APIs, three OAuth flows, the full Compat matrix, and the advanced `StreamOptions` envelope.
 
-**LOC delta (cumulative for `packages/model/`, measured via `git log --numstat`):** approximately **+44 350 / -6 180**, net ~**+38 175** lines. The crate roughly doubled vs. the M0 baseline, in line with the ~7.8k src + ~2.1k tests estimate (additional growth comes from `models.json` regenerations and the parity test corpus).
+**LOC delta (cumulative for `crates/model/`, measured via `git log --numstat`):** approximately **+44 350 / -6 180**, net ~**+38 175** lines. The crate roughly doubled vs. the M0 baseline, in line with the ~7.8k src + ~2.1k tests estimate (additional growth comes from `models.json` regenerations and the parity test corpus).
 
 **Test count growth:** baseline of 3 integration files (~50 tests) at M0 → **321 passing tests** at M14 (`cargo test -p model --features faux`), spread across:
 
-- 23 integration / parity test files in `packages/model/tests/`.
+- 23 integration / parity test files in `crates/model/tests/`.
 - Per-module unit tests in `src/` (types, utils, transform, providers, oauth, stream wrapper).
 - 2 ignored live-API tests (manual smoke).
 
@@ -118,7 +118,7 @@ These were considered in scope but consciously deferred; none block downstream c
 ### Notes for follow-up work
 
 - Downstream crates (`agent`, `coding-agent`) can rely on the public surface enumerated in *Interfaces and Dependencies* without further model-side changes.
-- The `faux` feature is the recommended extension point for tests in those crates; see `packages/model/tests/parity_faux.rs` for canonical usage.
+- The `faux` feature is the recommended extension point for tests in those crates; see `crates/model/tests/parity_faux.rs` for canonical usage.
 - Future provider additions (e.g. service-account Vertex, native WebSocket Codex) should land as new milestones in a follow-up exec plan rather than retrofitting this one.
 
 ## Context and Orientation
@@ -130,7 +130,7 @@ These were considered in scope but consciously deferred; none block downstream c
 - TS source of truth: `/Users/wanggang/dev/opensource/pi-mono/packages/ai/src/`
 - TS test suite (parity reference): `/Users/wanggang/dev/opensource/pi-mono/packages/ai/test/`
 
-### Current Rust crate layout (`packages/model/src/`)
+### Current Rust crate layout (`crates/model/src/`)
 
 - `lib.rs` — public API surface; re-exports types/clients/providers
 - `types.rs` — core types: `Api`, `Provider`, `Model`, `Message`, `StreamOptions`, `Compat`, content blocks, events
@@ -183,7 +183,7 @@ The work is sliced as 14 milestones. Each milestone leaves the crate compiling a
 
 ### Milestone 1: Type-system extensions
 
-In `packages/model/src/types.rs`, add these structures and enum variants:
+In `crates/model/src/types.rs`, add these structures and enum variants:
 
 - New `Transport` enum (`Sse`, `Websocket`, `WebsocketCached`, `Auto`); serialized kebab-case.
 - New `CacheRetention` enum (`None`, `Short`, `Long`); serialized lowercase.
@@ -205,7 +205,7 @@ Verification: `cargo test -p model` (existing 3 integration files) still green; 
 
 ### Milestone 2: Utilities foundation
 
-Create `packages/model/src/utils/` with:
+Create `crates/model/src/utils/` with:
 
 - `mod.rs`
 - `event_stream.rs` — wrapper struct `EventStream` containing the existing `Pin<Box<dyn Stream>>`, plus helpers: `collect_to_message() -> Result<AssistantMessage, AssistantMessage>` (the Err carries the error stop), `text_deltas()`, `tool_calls()`. Mirrors `AssistantMessageEventStream` in `pi-mono/packages/ai/src/utils/event-stream.ts`.
@@ -235,7 +235,7 @@ Verification: parity tests ported from `test/transform-messages-copilot-openai-t
 
 ### Milestone 4: OAuth subsystem
 
-Create `packages/model/src/oauth/` mirroring `pi-mono/packages/ai/src/utils/oauth/`:
+Create `crates/model/src/oauth/` mirroring `pi-mono/packages/ai/src/utils/oauth/`:
 
 - `mod.rs`, `types.rs` — `OAuthCredentials`, `OAuthAuthInfo`, `OAuthProvider` trait (with `login()`, `refresh()`, `revoke()`), `OAuthProviderId`, prompt enums.
 - `pkce.rs` — `generate_pkce_pair() -> (verifier, challenge)`; verifier ≥ 43 chars, challenge = base64-url(sha256(verifier)).
@@ -253,7 +253,7 @@ Verification: ported tests `test/anthropic-oauth.test.ts`, `test/openai-codex-oa
 
 ### Milestone 5: Faux provider + parity test harness
 
-Add `packages/model/src/providers/faux.rs` mirroring `pi-mono/packages/ai/src/providers/faux.ts`. The faux provider:
+Add `crates/model/src/providers/faux.rs` mirroring `pi-mono/packages/ai/src/providers/faux.ts`. The faux provider:
 
 - Implements `ApiProvider` for an arbitrary `Api` (registered against `Api::Faux` — add this enum variant).
 - Accepts a `Vec<FauxScript>` describing the events to emit (text deltas, tool calls, errors, abort, redacted thinking, etc.).
@@ -276,7 +276,7 @@ Verification: `cargo test -p model --features faux` reports the ported test coun
 
 ### Milestone 6: `mistral-conversations` provider
 
-Add `packages/model/src/providers/mistral.rs` (target ~600 LOC). Mirrors `pi-mono/packages/ai/src/providers/mistral.ts`. Key concerns:
+Add `crates/model/src/providers/mistral.rs` (target ~600 LOC). Mirrors `pi-mono/packages/ai/src/providers/mistral.ts`. Key concerns:
 
 - Uses Mistral's `/v1/agents/completions` conversations endpoint, not OpenAI Completions.
 - Tool-id normalization: 9-char alphanumeric uppercase IDs (`normalize_mistral_tool_id` already exists in `providers/openai_completions.rs:13`; reuse it).
@@ -288,7 +288,7 @@ Verification: parity ports of `test/mistral-tool-schema.test.ts`, `test/mistral-
 
 ### Milestone 7: `azure-openai-responses` provider
 
-Add `packages/model/src/providers/azure_openai_responses.rs` (≤ 300 LOC). Mostly a thin wrapper:
+Add `crates/model/src/providers/azure_openai_responses.rs` (≤ 300 LOC). Mostly a thin wrapper:
 
 - Constructs the Azure base URL from `model.base_url` (form: `https://{resource}.openai.azure.com/openai/v1/responses?api-version=...`).
 - Adds `api-key` header instead of `Authorization: Bearer`.
@@ -300,7 +300,7 @@ Verification: ports of `test/azure-openai-base-url.test.ts`.
 
 ### Milestone 8: `google-vertex` provider
 
-Add `packages/model/src/providers/google_vertex.rs` (≤ 600 LOC). Refactor `google_generative_ai.rs` to expose a shared `google_shared` submodule and reuse it.
+Add `crates/model/src/providers/google_vertex.rs` (≤ 600 LOC). Refactor `google_generative_ai.rs` to expose a shared `google_shared` submodule and reuse it.
 
 - Auth: ADC via `gcloud auth application-default login` token cache OR explicit `api_key`. Reuses existing `env_api_keys::clear_vertex_adc_cache` and adds `vertex_access_token()` async helper.
 - Base URL: `https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:streamGenerateContent`.
@@ -315,7 +315,7 @@ The largest single milestone (target ~1300 LOC). Mirrors `pi-mono/packages/ai/sr
 
 - **SSE** (default): same as `openai-responses` but pointed at `https://api.openai.com/v1/codex/responses` and authenticated via OAuth bearer.
 - **WebSocket**: `wss://api.openai.com/v1/codex/responses?stream=ws`. Uses `tokio-tungstenite`. Frame protocol identical to SSE event names.
-- **WebSocket-cached**: same endpoint but reuses an idle connection from a `SessionResources` pool (Milestone 2 dep — add session-resources port: `packages/model/src/session_resources.rs`). Pool keyed by `(session_id, transport)`.
+- **WebSocket-cached**: same endpoint but reuses an idle connection from a `SessionResources` pool (Milestone 2 dep — add session-resources port: `crates/model/src/session_resources.rs`). Pool keyed by `(session_id, transport)`.
 
 OAuth integration: when `options.api_key` is `None`, look up `OAuthProvider::OpenAICodex.credentials()`. Surface a `ClientError::OAuthRequired` if missing.
 
@@ -323,7 +323,7 @@ Verification: ports of `test/openai-codex-oauth.test.ts`, `test/openai-codex-str
 
 ### Milestone 10: Cloudflare overlays
 
-Add `packages/model/src/providers/cloudflare.rs` (≤ 50 LOC). Two thin overlays on `openai-completions`:
+Add `crates/model/src/providers/cloudflare.rs` (≤ 50 LOC). Two thin overlays on `openai-completions`:
 
 - `cloudflare-workers-ai`: base URL `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`. Compat: `supports_strict_mode = false`.
 - `cloudflare-ai-gateway`: base URL `https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai`.
@@ -334,7 +334,7 @@ Verification: smoke test that constructs a `Model` for each and asserts the reso
 
 ### Milestone 11: `register_builtins()` + Compat auto-detect
 
-Create `packages/model/src/providers/register_builtins.rs` exposing:
+Create `crates/model/src/providers/register_builtins.rs` exposing:
 
 ```rust
 pub fn register_builtins(registry: &ApiProviderRegistry) {
@@ -358,7 +358,7 @@ Verification: ports of `test/openai-completions-cache-control-format.test.ts`, `
 
 ### Milestone 12: Stream wrapper with cancellation/retry/timeout
 
-Create `packages/model/src/stream.rs` with `stream_simple()` and `complete_simple()`:
+Create `crates/model/src/stream.rs` with `stream_simple()` and `complete_simple()`:
 
 - Resolve provider from registry.
 - Apply `transform_messages` for cross-provider compat.
@@ -371,7 +371,7 @@ Verification: port of `test/abort.test.ts`, `test/responseid.test.ts`, `test/tot
 
 ### Milestone 13: CLI surface parity
 
-Update `packages/model/src/cli.rs` and `bin/model_cli.rs`:
+Update `crates/model/src/cli.rs` and `bin/model_cli.rs`:
 
 - Add `oauth` subcommand: `oauth login <provider>`, `oauth status`, `oauth logout <provider>`. Calls the matching `OAuthProvider` from Milestone 4.
 - Add `--transport` flag to `chat` (sse/websocket/auto).
@@ -384,8 +384,8 @@ Verification: manual smoke (documented in `Concrete Steps`).
 
 Update:
 
-- `packages/model/README.md` — provider matrix, OAuth flow, transport options, link to this plan.
-- `packages/model/CLI.md` — full subcommand reference.
+- `crates/model/README.md` — provider matrix, OAuth flow, transport options, link to this plan.
+- `crates/model/CLI.md` — full subcommand reference.
 - `docs/conversion-plan.md` — mark "阶段 0" items complete; reference this exec-plan.
 
 No code changes; verification is a manual reading pass.
@@ -415,7 +415,7 @@ cargo fmt -p model -- --check
 ```
 
 The `faux` feature is required because integration tests under
-`packages/model/tests/parity_*.rs` import `model::FauxProvider` and friends,
+`crates/model/tests/parity_*.rs` import `model::FauxProvider` and friends,
 which are gated behind `cfg(any(test, feature = "faux"))`. The lib's own
 `cfg(test)` does not extend to integration test crates, so the feature must
 be opted in explicitly.
@@ -527,7 +527,7 @@ thiserror = "1"
 
 ### Final public surface (after Milestone 14)
 
-In `packages/model/src/lib.rs`, the following must be exported:
+In `crates/model/src/lib.rs`, the following must be exported:
 
 ```rust
 // Core types (Milestone 1)
@@ -576,7 +576,7 @@ pub use stream::{stream_simple, complete_simple};
 
 ### Key trait signatures
 
-In `packages/model/src/oauth/types.rs`:
+In `crates/model/src/oauth/types.rs`:
 
 ```rust
 #[async_trait::async_trait]
@@ -589,7 +589,7 @@ pub trait OAuthProvider: Send + Sync {
 }
 ```
 
-In `packages/model/src/utils/event_stream.rs`:
+In `crates/model/src/utils/event_stream.rs`:
 
 ```rust
 pub struct EventStream {
@@ -603,7 +603,7 @@ impl EventStream {
 }
 ```
 
-In `packages/model/src/stream.rs`:
+In `crates/model/src/stream.rs`:
 
 ```rust
 pub async fn stream_simple(

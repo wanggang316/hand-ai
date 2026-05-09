@@ -25,7 +25,7 @@ Runs in two modes: interactive REPL and non-interactive print. Built on `hand-ag
 ## Quick Start
 
 ```bash
-cd packages/coding-agent
+cd crates/coding-agent
 cargo run --bin hand
 ```
 
@@ -62,7 +62,7 @@ cargo run --bin hand -- --list-models
 cargo run --bin hand -- --list-models openai
 ```
 
-See [packages/model](../model) for supported providers and environment variables.
+See [crates/model](../model) for supported providers and environment variables.
 
 ---
 
@@ -322,7 +322,7 @@ cargo run --bin hand -- --tools read,grep,find,ls --print --prompt "Review the c
 ## Development
 
 ```bash
-cd packages/coding-agent
+cd crates/coding-agent
 cargo check
 cargo test   # 82 tests
 ```

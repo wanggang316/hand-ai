@@ -20,7 +20,7 @@ pi-ai ← pi-agent-core ← pi-coding-agent ← pi-mom
 ### 目标 Rust Workspace
 
 ```
-packages/
+crates/
 ├── model/          ✅ 已基本完成（对应 pi-ai → hand-model）
 ├── agent/          🔲 待实现（对应 pi-agent-core → hand-agent）
 ├── tui/            🔲 待实现（对应 pi-tui → hand-tui）
@@ -76,7 +76,7 @@ packages/
 - [x] **OAuth 子系统**（M4）：Anthropic / OpenAI Codex / GitHub Copilot；PKCE + 设备流；凭证存于 `~/.hand-ai/oauth.json`。
 - [x] **`stream_simple` / `complete_simple` 包装层**（M12）：`signal` 取消、`timeout_ms`、`max_retries` 指数退避、`metadata`、`on_payload` / `on_response` 回调、自动 `transform_messages`。
 - [x] **CLI surface 对齐**（M13）：`oauth login/status/logout`、`chat --transport`、`chat --cache-retention`、`list-providers` 显示 OAuth 状态。
-- [x] **文档刷新**（M14）：本文件、`packages/model/README.md`、`packages/model/CLI.md`、ExecPlan Progress / Outcomes 更新。
+- [x] **文档刷新**（M14）：本文件、`crates/model/README.md`、`crates/model/CLI.md`、ExecPlan Progress / Outcomes 更新。
 
 ---
 
@@ -86,7 +86,7 @@ packages/
 
 ### 1.1 核心类型
 
-对应文件: `packages/agent/src/types.ts`
+对应文件: `crates/agent/src/types.ts`
 
 ```rust
 // 核心类型定义
@@ -127,7 +127,7 @@ pub enum AgentEvent {
 
 ### 1.2 Agent Loop
 
-对应文件: `packages/agent/src/agent-loop.ts`
+对应文件: `crates/agent/src/agent-loop.ts`
 
 ```rust
 pub struct AgentLoopConfig {
@@ -169,7 +169,7 @@ pub async fn agent_loop_continue(
 
 ### 1.3 Agent struct
 
-对应文件: `packages/agent/src/agent.ts`
+对应文件: `crates/agent/src/agent.ts`
 
 ```rust
 pub struct Agent {
@@ -206,7 +206,7 @@ pub struct ChannelEventSink {
 
 ### 1.5 Proxy / 自定义 StreamFn
 
-对应: `packages/agent/src/proxy.ts`
+对应: `crates/agent/src/proxy.ts`
 
 ```rust
 /// 支持自定义后端（代理、缓存等）
@@ -241,7 +241,7 @@ tracing = "0.1"       # 结构化日志（替代 console.log）
 
 ### 2.1 核心抽象
 
-对应: `packages/tui/src/tui.ts`
+对应: `crates/tui/src/tui.ts`
 
 ```rust
 /// 组件 trait（替代 TS 的 Component 接口）

@@ -118,7 +118,7 @@ summarization on real branched sessions, and `/fork`/`/clone` correctness.
   All `pi-mono/packages/{ai, agent, coding-agent, tui}/src/` are in scope.
   `bun/`, `web-ui/`, `pods/`, `mom/` are out of scope.
 - **hand-ai (Rust target)** at `/Users/wanggang/dev/00/hand-ai/`. Crates
-  under `packages/{model, agent, coding-agent, tui}/`.
+  under `crates/{model, agent, coding-agent, tui}/`.
 
 ### Related documents (read these first)
 
@@ -143,32 +143,32 @@ summarization on real branched sessions, and `/fork`/`/clone` correctness.
 
 ### Key source files this plan touches
 
-- `packages/model/src/types.rs` — wire types for `AssistantMessageEvent`,
+- `crates/model/src/types.rs` — wire types for `AssistantMessageEvent`,
   `Api`, `Provider`, `AssistantMessage`, `Usage`, `Cost`, `ToolCall`,
   `Compat`, `Message`. Currently `rename_all = "snake_case"` at the enum
   level, fields default-snake_case. Needs camelCase normalization for
   cross-process types (M1, M5).
-- `packages/agent/src/types.rs` — `AgentEvent` enum, `AgentLoopConfig`,
+- `crates/agent/src/types.rs` — `AgentEvent` enum, `AgentLoopConfig`,
   `BeforeToolCallHook` etc. `AgentEvent` is what the RPC layer ships
   (M1.T4).
-- `packages/agent/src/proxy.rs` — already does camelCase right via
+- `crates/agent/src/proxy.rs` — already does camelCase right via
   `#[serde(rename = "contentIndex")]` per-field. M1.T5 verifies no
   double-renaming after the global change.
-- `packages/coding-agent/src/rpc/server.rs` — line 109's
+- `crates/coding-agent/src/rpc/server.rs` — line 109's
   `RpcMessage::Agent(Box<AgentEvent>)` is the cross-process boundary.
-- `packages/coding-agent/src/core/settings.rs` — currently 72 fields
+- `crates/coding-agent/src/core/settings.rs` — currently 72 fields
   across all types in this file; TS has 35+ on `Settings` alone plus 7+
   supporting types. M2 is the largest single file expansion.
-- `packages/coding-agent/src/core/session_manager.rs` —
+- `crates/coding-agent/src/core/session_manager.rs` —
   `SessionEntry` enum is the data structure compaction needs extended
   (M4.T1).
-- `packages/coding-agent/src/core/compaction/{compactor, branch_summarization, utils}.rs` —
+- `crates/coding-agent/src/core/compaction/{compactor, branch_summarization, utils}.rs` —
   contain the `// TODO(parity): requires SessionEntry tree extension`
   markers M4 closes.
-- `packages/coding-agent/src/modes/interactive/{driver, slash_commands, event_dispatch}.rs` —
+- `crates/coding-agent/src/modes/interactive/{driver, slash_commands, event_dispatch}.rs` —
   M3 lands here.
-- `packages/coding-agent/src/utils/` — M6 adds new util files.
-- `packages/coding-agent/src/core/export.rs` — M6.T4 expands this from
+- `crates/coding-agent/src/utils/` — M6 adds new util files.
+- `crates/coding-agent/src/core/export.rs` — M6.T4 expands this from
   the current minimal export to a full HTML pipeline.
 
 ### Terms
@@ -202,8 +202,8 @@ the TS source. The fix is mechanical (serde annotations) but the audit
 step is non-trivial because we need to decide which types are wire-types
 and which are internal-Rust-only.
 
-**M1.T1 — Wire-type audit.** Open `packages/model/src/types.rs`,
-`packages/agent/src/types.rs`, and `packages/coding-agent/src/rpc/types.rs`.
+**M1.T1 — Wire-type audit.** Open `crates/model/src/types.rs`,
+`crates/agent/src/types.rs`, and `crates/coding-agent/src/rpc/types.rs`.
 Tag each `Serialize`/`Deserialize`-deriving type as either *wire* (used
 in `serde_json::to_string` somewhere that crosses a process boundary) or
 *internal* (used only inside one Rust process for in-memory persistence
@@ -225,14 +225,14 @@ data-shape reasons.
 
 **M1.T3 — Wire parity tests.** Capture JSON fixtures from a running
 pi-mono `coding-agent` RPC server (or extract from TS unit tests) for
-each event type. Add `packages/{model,agent}/tests/wire_parity_test.rs`
+each event type. Add `crates/{model,agent}/tests/wire_parity_test.rs`
 that round-trips each fixture through the Rust serde and asserts
 byte-equality (or at least field-set equality if key ordering differs).
 
 Acceptance: 12+ new passing tests, one per `AssistantMessageEvent`
 variant + a handful for `AgentEvent` and key wire structs.
 
-**M1.T4 — RPC envelope audit.** `packages/coding-agent/src/rpc/types.rs`
+**M1.T4 — RPC envelope audit.** `crates/coding-agent/src/rpc/types.rs`
 defines `RpcMessage` and `MessagesData`. Verify these use camelCase for
 fields, with proper `tag = "type"` discrimination. The dispatch is what
 TS clients consume.
@@ -261,7 +261,7 @@ markdown rendering preferences.
 **M2.T1 — Field inventory and serde shape.** From
 `/Users/wanggang/dev/opensource/pi-mono/packages/coding-agent/src/core/settings-manager.ts`,
 extract every field of `interface Settings` and its supporting types.
-Add them to `packages/coding-agent/src/core/settings.rs` as
+Add them to `crates/coding-agent/src/core/settings.rs` as
 `Option<T>` fields with appropriate serde shape. The container-level
 attribute should be `#[serde(rename_all = "camelCase")]` since pi-mono
 serializes settings as JSON (TS default is camelCase).
@@ -304,7 +304,7 @@ JSON or YAML and merges into the active settings. Use this to
 verify pi-mono-written settings files load without modification.
 
 Acceptance: a fixture file
-`packages/coding-agent/tests/fixtures/pi-mono-settings.json` parses
+`crates/coding-agent/tests/fixtures/pi-mono-settings.json` parses
 cleanly into the Rust `Settings` struct.
 
 ### Milestone 3 — Slash command suite
@@ -323,7 +323,7 @@ extensions, theme_selector for theme).
 - `/copy [n]` → already partial; finish by wiring last-n-message
   selection to `utils::clipboard::copy_to_clipboard`.
 
-In `packages/coding-agent/src/modes/interactive/slash_commands.rs`,
+In `crates/coding-agent/src/modes/interactive/slash_commands.rs`,
 add `Action::{Export(PathBuf), Import(PathBuf), CopyN(u32)}`. In
 `driver.rs`, wire dispatch.
 
@@ -376,7 +376,7 @@ This is the deepest architectural change in the plan. **It must come
 before any feature that relies on accurate auto-compaction.**
 
 **M4.T1 — Extend `SessionEntry`.** In
-`packages/coding-agent/src/core/session_manager.rs`, the existing
+`crates/coding-agent/src/core/session_manager.rs`, the existing
 `SessionEntry` enum has variants for `Message`, `ModelChange`,
 `Compaction`, `Label`. Add:
 - `BranchSummary { id: String, parent_id: Option<String>, summary: String, ... }`
@@ -423,7 +423,7 @@ produces a branch summary that references the correct ancestor chain.
 Replace each with the real implementation now that the tree is live.
 
 Acceptance: `git grep "TODO(parity): requires SessionEntry"` returns
-zero hits in `packages/coding-agent/src/core/compaction/`.
+zero hits in `crates/coding-agent/src/core/compaction/`.
 
 ### Milestone 5 — Open `Api` / `Provider`
 
@@ -510,7 +510,7 @@ queue. `tools/bash.rs` uses the output accumulator.
 
 **M6.T3 — TUI undo-stack.** TS `tui/undo-stack.ts` is a generic
 undo/redo stack used by the editor. The Rust editor likely already has
-some undo wired internally; check `packages/tui/src/components/editor.rs`
+some undo wired internally; check `crates/tui/src/components/editor.rs`
 and either extract to a standalone `tui/undo_stack.rs` or document the
 behavior already in `editor.rs`.
 
@@ -576,7 +576,7 @@ The plan is complete when all of the following are observable:
    cd /Users/wanggang/dev/00/hand-ai
    cargo run -p hand-coding-agent -- --rpc &
    cd /Users/wanggang/dev/opensource/pi-mono
-   bun run packages/coding-agent/src/modes/rpc/rpc-client.ts --connect-stdio
+   bun run crates/coding-agent/src/modes/rpc/rpc-client.ts --connect-stdio
    # Send a few prompts; observe that AssistantMessageEvent payloads
    # parse cleanly into the TS client's typed handlers.
    ```
@@ -607,7 +607,7 @@ The plan is complete when all of the following are observable:
 
 6. **Test count**: `cargo test --workspace` reports ≥2300 passing.
 
-7. **TODO sweep**: `git grep "TODO(parity):" packages/` returns ≤5
+7. **TODO sweep**: `git grep "TODO(parity):" crates/` returns ≤5
    matches, all of them in `// TODO(parity): theme integration deferred`
    form (that's the pre-existing one for component theming).
 
@@ -645,7 +645,7 @@ call sites. If `cargo build` breaks midway, `git stash`, `git reset
 set -euo pipefail
 cd /Users/wanggang/dev/00/hand-ai
 # After M5.T1/T2 land, this script rewrites match arms:
-rg -l 'Api::OpenAICompletions' packages/ --type rust | while read f; do
+rg -l 'Api::OpenAICompletions' crates/ --type rust | while read f; do
   sed -i.bak \
     -e 's/Api::OpenAICompletions/Api::openai_completions()/g' \
     -e 's/Api::AnthropicMessages/Api::anthropic_messages()/g' \

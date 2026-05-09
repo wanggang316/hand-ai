@@ -1,6 +1,6 @@
 //! Shared test utilities for the coding-agent crate.
 //!
-//! Mirrors the conventions used in `packages/agent/tests/common/mod.rs` but
+//! Mirrors the conventions used in `crates/agent/tests/common/mod.rs` but
 //! is scoped to coding-agent's needs. The agent crate's `common` module is
 //! private to that crate's tests, so we re-implement the equivalents here.
 

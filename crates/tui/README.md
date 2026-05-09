@@ -244,7 +244,7 @@ let caps = TerminalCapabilities::default();
 ## Development
 
 ```bash
-cd packages/tui
+cd crates/tui
 cargo check
 cargo test
 ```
@@ -257,29 +257,29 @@ are known; downstream consumers should be aware of them.
 
 - **`EditorComponent::yank_pop` perturbs the redo stack.** Cycling the
   kill-ring with `M-y` clears any in-flight redo history that the
-  TS port preserves. See `packages/tui/src/components/editor.rs`
+  TS port preserves. See `crates/tui/src/components/editor.rs`
   (`yank_pop` impl).
 - **`SelectListComponent::set_filter` / `set_selected_index` do not
   fire `on_selection_change`** for programmatic changes — only
   user-driven navigation triggers the callback. See
-  `packages/tui/src/components/select_list.rs`.
+  `crates/tui/src/components/select_list.rs`.
 - **`KeybindingsManager::unset` permanently disables a binding** rather
   than restoring the framework default, which is a divergence from
   pi-tui. To restore a default, re-register it explicitly. See
-  `packages/tui/src/keybindings.rs`.
+  `crates/tui/src/keybindings.rs`.
 - **`Tui::run` is single-shot.** Calling it twice on the same `Tui`
   without a manual stdin-reader teardown leaks the background reader
   task. Construct a new `Tui` per session for now. See
-  `packages/tui/src/tui.rs` (`Tui::run`).
+  `crates/tui/src/tui.rs` (`Tui::run`).
 - **`ProcessTerminal::Drop` does not run on `panic = "abort"` profiles.**
   Terminal restoration relies on stack unwinding; binaries built with
   `panic = "abort"` may exit with the terminal in raw / alt-screen mode.
   Install a panic hook if you need guaranteed restoration. See
-  `packages/tui/src/terminal.rs`.
+  `crates/tui/src/terminal.rs`.
 - **Rainbow flag emoji (🏳️‍🌈) measures display width 1 in this port**
   versus 2 with pi-tui's `Intl.Segmenter`. Other ZWJ sequences may
   differ similarly because `unicode-width` doesn't fully model
-  grapheme cluster widths. See `packages/tui/src/utils.rs`
+  grapheme cluster widths. See `crates/tui/src/utils.rs`
   (`visible_width`).
 - **`parse_key` returns `Key` (not `Option<Key>`)** for backward
   compatibility with components that ship today. Unrecognized

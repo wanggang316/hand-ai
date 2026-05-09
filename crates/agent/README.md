@@ -292,7 +292,7 @@ while let Some(event) = stream.next().await {
 ## Development
 
 ```bash
-cd packages/agent
+cd crates/agent
 cargo check
 cargo test   # 28 tests (agent_test + agent_loop_test)
 ```

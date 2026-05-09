@@ -10,7 +10,7 @@
 | TypeScript 概念 | Rust 对应 | 说明 |
 |----------------|-----------|------|
 | npm workspace | Cargo workspace | 已有 `Cargo.toml` workspace 配置 |
-| package | crate | `packages/` 目录下每个子目录对应一个 crate |
+| package | crate | `crates/` 目录下每个子目录对应一个 crate |
 | `index.ts` (导出) | `lib.rs` (pub mod + pub use) | Rust 通过 `pub` 可见性控制公开 API |
 | `package.json` | `Cargo.toml` | 依赖、元信息、features 等 |
 | `tsconfig.json` path aliases | Cargo workspace dependencies | workspace 级别统一依赖版本 |

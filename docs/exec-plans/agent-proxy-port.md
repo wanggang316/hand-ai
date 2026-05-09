@@ -33,7 +33,7 @@ The user-visible behavior:
 
 ## Decision Log
 
-- **2026-05-07**: Place the new module in `packages/agent/src/proxy.rs`, not in `packages/model/src/proxy.rs`. The earlier draft `docs/exec-plans/agent-port-parity.md` (M3.T2) suggested `model::stream_proxy`. Reasoning to override that earlier note: the proxy is an agent-flavoured transport (it bundles `Model` + `Context` + agent-style options into one HTTP call) and conceptually pairs with `Agent::stream_fn`. Keeping it in `hand-agent` mirrors the TS layout (`pi-agent-core/src/proxy.ts`) and avoids polluting `hand-model` with the proxy wire format. `hand-model` retains its single responsibility: provider catalog + direct streaming.
+- **2026-05-07**: Place the new module in `crates/agent/src/proxy.rs`, not in `crates/model/src/proxy.rs`. The earlier draft `docs/exec-plans/agent-port-parity.md` (M3.T2) suggested `model::stream_proxy`. Reasoning to override that earlier note: the proxy is an agent-flavoured transport (it bundles `Model` + `Context` + agent-style options into one HTTP call) and conceptually pairs with `Agent::stream_fn`. Keeping it in `hand-agent` mirrors the TS layout (`pi-agent-core/src/proxy.ts`) and avoids polluting `hand-model` with the proxy wire format. `hand-model` retains its single responsibility: provider catalog + direct streaming.
 - **2026-05-07**: Use a hand-rolled SSE line buffer (matching `pi-mono/packages/agent/src/proxy.ts:181-206`) rather than pulling in the `eventsource-stream` crate. Reasoning: the protocol is trivial (one `data: <json>` per line, `\n\n` boundaries, no `event:` names, no last-id, no retries), `hand-model` already uses the same pattern in `providers/anthropic_messages.rs:546-559`, and avoiding a dependency keeps the agent crate's surface small. We will, however, switch to a streaming `bytes_stream()` rather than `response.text().await` (which the anthropic provider uses) so that long-running streams begin emitting events immediately.
 - **2026-05-07**: Returned stream type is `Pin<Box<dyn Stream<Item = AssistantMessageEvent> + Send + 'static>>` — exactly the alias `model::AssistantMessageEventStream<'static>`. Re-using the alias keeps `stream_proxy` plug-compatible with the future `stream_fn` injection point (T6).
 - **2026-05-07**: Cancellation goes through `tokio_util::sync::CancellationToken` — `ProxyStreamOptions::cancel` is `Option<CancellationToken>`, not `AbortSignal`/`Box<dyn Fn>`. This matches the rest of the agent crate (already passes `CancellationToken` everywhere per `agent.rs:736-740`) and lets the implementation use `tokio::select!` to race the HTTP body read against the cancel future.
@@ -52,14 +52,14 @@ Related documents:
 
 Key source files to read before starting:
 - `/Users/wanggang/dev/opensource/pi-mono/packages/agent/src/proxy.ts` — line-by-line behavioural reference. Important regions: 36–80 (event/options types), 116–233 (stream driver), 238–367 (`processProxyEvent` reducer).
-- `packages/agent/src/lib.rs` — current public re-exports; the new module is added here.
-- `packages/agent/src/error.rs` — extend with one variant.
-- `packages/agent/Cargo.toml` — add the small set of new dependencies.
-- `packages/model/src/types.rs:740-748` (`ToolCall`), `:836-840` (`AssistantContentBlock`), `:842-863` (`AssistantMessage`), `:967-972` (`Context`), `:489-561` (`StreamOptions` / `SimpleStreamOptions`), `:769-781` (`StopReason`), `:977-1031` (`AssistantMessageEvent`), `:359-378` (`Usage`). These are the building blocks the proxy module composes.
-- `packages/model/src/utils/json_parse.rs:29` — `safe_parse_partial(&str) -> Option<Value>`. This is the Rust analogue of TS `parseStreamingJson`. Used by `process_proxy_event` for the `toolcall_delta` branch.
-- `packages/model/src/api_registry.rs:14-16` — `pub type AssistantMessageEventStream<'a> = Pin<Box<dyn Stream<Item = AssistantMessageEvent> + Send + 'a>>`. The proxy returns this exact alias parameterised at `'static`.
-- `packages/model/src/providers/anthropic_messages.rs:546-559` — the pattern for `data: <json>` SSE line decoding already used elsewhere in the workspace; copy the shape, but feed it from `bytes_stream()` instead of `response.text().await`.
-- `packages/agent/tests/common/mod.rs` — shared test helpers (`test_model`, `MockTextProvider`).
+- `crates/agent/src/lib.rs` — current public re-exports; the new module is added here.
+- `crates/agent/src/error.rs` — extend with one variant.
+- `crates/agent/Cargo.toml` — add the small set of new dependencies.
+- `crates/model/src/types.rs:740-748` (`ToolCall`), `:836-840` (`AssistantContentBlock`), `:842-863` (`AssistantMessage`), `:967-972` (`Context`), `:489-561` (`StreamOptions` / `SimpleStreamOptions`), `:769-781` (`StopReason`), `:977-1031` (`AssistantMessageEvent`), `:359-378` (`Usage`). These are the building blocks the proxy module composes.
+- `crates/model/src/utils/json_parse.rs:29` — `safe_parse_partial(&str) -> Option<Value>`. This is the Rust analogue of TS `parseStreamingJson`. Used by `process_proxy_event` for the `toolcall_delta` branch.
+- `crates/model/src/api_registry.rs:14-16` — `pub type AssistantMessageEventStream<'a> = Pin<Box<dyn Stream<Item = AssistantMessageEvent> + Send + 'a>>`. The proxy returns this exact alias parameterised at `'static`.
+- `crates/model/src/providers/anthropic_messages.rs:546-559` — the pattern for `data: <json>` SSE line decoding already used elsewhere in the workspace; copy the shape, but feed it from `bytes_stream()` instead of `response.text().await`.
+- `crates/agent/tests/common/mod.rs` — shared test helpers (`test_model`, `MockTextProvider`).
 
 How the pieces fit (one paragraph):
 
@@ -76,20 +76,20 @@ The work is sliced vertically. Each task is independently verifiable; T1–T5 fo
 
 ### T1 — Scaffold module and dependencies
 
-Create `packages/agent/src/proxy.rs` with module-level docstring referencing the TS source path, and an empty `pub use` block. Register it in `packages/agent/src/lib.rs` with `pub mod proxy;`. Add to `packages/agent/Cargo.toml`:
+Create `crates/agent/src/proxy.rs` with module-level docstring referencing the TS source path, and an empty `pub use` block. Register it in `crates/agent/src/lib.rs` with `pub mod proxy;`. Add to `crates/agent/Cargo.toml`:
 
-- `reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }` — `stream` feature is required for `bytes_stream()`. `rustls-tls` matches the policy already in use elsewhere (verify by inspecting `packages/model/Cargo.toml`; if the model crate uses default `native-tls`, mirror that instead).
+- `reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }` — `stream` feature is required for `bytes_stream()`. `rustls-tls` matches the policy already in use elsewhere (verify by inspecting `crates/model/Cargo.toml`; if the model crate uses default `native-tls`, mirror that instead).
 - `bytes = "1"` — for working with `bytes::Bytes` chunks from `reqwest`.
 
 `futures` and `async-stream` are already present. Update `[dev-dependencies]` to add `wiremock = "0.6"` (used in T7).
 
-Files touched: `packages/agent/Cargo.toml`, `packages/agent/src/lib.rs`, `packages/agent/src/proxy.rs` (new). ≤3 files.
+Files touched: `crates/agent/Cargo.toml`, `crates/agent/src/lib.rs`, `crates/agent/src/proxy.rs` (new). ≤3 files.
 
 Verification: `cargo check -p hand-agent` succeeds.
 
 ### T2 — `ProxyAssistantMessageEvent` enum
 
-In `packages/agent/src/proxy.rs`, define the wire-format enum mirroring `proxy.ts:36-57`. Use `#[serde(tag = "type", rename_all = "snake_case")]` and snake_case Rust variants. Field rules:
+In `crates/agent/src/proxy.rs`, define the wire-format enum mirroring `proxy.ts:36-57`. Use `#[serde(tag = "type", rename_all = "snake_case")]` and snake_case Rust variants. Field rules:
 
 - 13 variants: `Start`, `TextStart`, `TextDelta`, `TextEnd`, `ThinkingStart`, `ThinkingDelta`, `ThinkingEnd`, `ToolcallStart`, `ToolcallDelta`, `ToolcallEnd`, `Done`, `Error`.
 - `content_index: u32` matches the alias in `model::AssistantMessageEvent`.
@@ -99,13 +99,13 @@ In `packages/agent/src/proxy.rs`, define the wire-format enum mirroring `proxy.t
 
 Add a single `#[test]` round-tripping each variant through `serde_json::from_str` / `to_string` against fixture strings copied verbatim from a real TS proxy response. At least one fixture per variant; place fixtures inline in the test module.
 
-Files touched: `packages/agent/src/proxy.rs`. ≤1 file.
+Files touched: `crates/agent/src/proxy.rs`. ≤1 file.
 
 Verification: `cargo test -p hand-agent --test proxy_event_serde` (place the test in `tests/` if external integration is preferred, or as `#[cfg(test)] mod tests` in `proxy.rs` — choose the latter, it keeps the round-trip tight to the type).
 
 ### T3 — `ProxyStreamOptions` and the request body
 
-In `packages/agent/src/proxy.rs`, define:
+In `crates/agent/src/proxy.rs`, define:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Default)]
@@ -147,7 +147,7 @@ struct ProxyRequest<'a> {
 }
 ```
 
-Files touched: `packages/agent/src/proxy.rs`. ≤1 file.
+Files touched: `crates/agent/src/proxy.rs`. ≤1 file.
 
 Verification: `cargo check -p hand-agent`. Add a unit test asserting `serde_json::to_string(&ProxyRequest { ... })` produces JSON whose top-level keys are exactly `model`, `context`, `options` and that `options` only contains the keys actually set (proves `skip_serializing_if` works).
 
@@ -172,7 +172,7 @@ The extra `tool_partial_json` parameter holds the streaming JSON buffer per `con
 - For `Error`: mutate `partial.stop_reason`, `partial.error_message`, `partial.usage`, return `AssistantMessageEvent::Error { reason, error: partial.clone() }`.
 - The TS default branch warns and returns `undefined`. In Rust the enum match is exhaustive — no default arm. Translate "warn" into a `tracing::warn!` only if a future variant slips in via deserialisation, which can't happen given `#[serde(deny_unknown_fields)]` on the enum (add it).
 
-Files touched: `packages/agent/src/proxy.rs`. ≤1 file.
+Files touched: `crates/agent/src/proxy.rs`. ≤1 file.
 
 Verification: in-file `#[cfg(test)] mod tests` adds 13 unit tests, one per branch, plus two cross-cutting tests:
 - `text_round_trip`: feed `TextStart` → `TextDelta(" hello")` → `TextDelta(" world")` → `TextEnd { content_signature: Some("sig") }`; assert `partial.content[0]` is `Text { text: " hello world", text_signature: Some("sig") }` and the four returned events all carry that growing partial.
@@ -208,7 +208,7 @@ Implementation outline (non-async outer, async inner via `async_stream::stream!`
      - On cancel mid-stream: drop the body stream (which cancels the HTTP read), yield `AssistantMessageEvent::Error { reason: Aborted, error: { partial.stop_reason = Aborted; partial.error_message = Some("Aborted".into()); partial.clone() } }`, return.
 4. Wrap in `Box::pin` and return.
 
-Files touched: `packages/agent/src/proxy.rs`, `packages/agent/src/error.rs` (add `Proxy { status: u16, message: String }` variant). ≤2 files.
+Files touched: `crates/agent/src/proxy.rs`, `crates/agent/src/error.rs` (add `Proxy { status: u16, message: String }` variant). ≤2 files.
 
 Verification: `cargo build -p hand-agent`. The integration test in T7 exercises the runtime path.
 
@@ -244,13 +244,13 @@ pub fn stream_fn_proxy(opts_template: ProxyStreamOptions) -> StreamFn {
 }
 ```
 
-Files touched: `packages/agent/src/types.rs`, `packages/agent/src/agent.rs`, `packages/agent/src/agent_loop.rs`, `packages/agent/src/proxy.rs`. ≤4 files.
+Files touched: `crates/agent/src/types.rs`, `crates/agent/src/agent.rs`, `crates/agent/src/agent_loop.rs`, `crates/agent/src/proxy.rs`. ≤4 files.
 
 Verification: `cargo check -p hand-agent --tests`; existing tests still pass (`cargo test -p hand-agent`).
 
 ### T7 — Integration test against `wiremock`
 
-Add `packages/agent/tests/proxy_test.rs`. Use `wiremock::MockServer` to host a `POST /api/stream` that responds with `Content-Type: text/event-stream` and a hand-written `data: …\n` body containing the canonical 8-event arc:
+Add `crates/agent/tests/proxy_test.rs`. Use `wiremock::MockServer` to host a `POST /api/stream` that responds with `Content-Type: text/event-stream` and a hand-written `data: …\n` body containing the canonical 8-event arc:
 
 ```
 data: {"type":"start"}
@@ -267,22 +267,22 @@ Tests:
 - `proxy_surfaces_http_error`: mock returns `401` with `{ "error": "bad token" }`; assert the stream yields exactly one `AssistantMessageEvent::Error` whose `error.error_message` contains `"bad token"`, then ends.
 - `proxy_aborts_when_token_cancelled`: mock holds the response open via `wiremock::ResponseTemplate::set_delay(Duration::from_secs(5))` after the first event; cancel the token after 50 ms; assert the stream yields the first `Start`/`TextStart` events then exactly one `Error { reason: Aborted, … }` and ends within 200 ms wall-clock.
 
-Files touched: `packages/agent/tests/proxy_test.rs` (new). ≤1 file.
+Files touched: `crates/agent/tests/proxy_test.rs` (new). ≤1 file.
 
 Verification: `cargo test -p hand-agent --test proxy_test` — three tests pass.
 
 ### T8 — Public API and README
 
-In `packages/agent/src/lib.rs`, add:
+In `crates/agent/src/lib.rs`, add:
 
 ```rust
 pub mod proxy;
 pub use proxy::{stream_proxy, stream_fn_proxy, ProxyAssistantMessageEvent, ProxyStreamOptions};
 ```
 
-Append a short "Proxy transport" section to `packages/agent/README.md` mirroring the TS doc-comment example at `proxy.ts:90-99`, but in Rust. Update `docs/exec-plans/agent-port-parity.md` Progress to mark M3.T2 done with a footnote pointing at this plan.
+Append a short "Proxy transport" section to `crates/agent/README.md` mirroring the TS doc-comment example at `proxy.ts:90-99`, but in Rust. Update `docs/exec-plans/agent-port-parity.md` Progress to mark M3.T2 done with a footnote pointing at this plan.
 
-Files touched: `packages/agent/src/lib.rs`, `packages/agent/README.md`, `docs/exec-plans/agent-port-parity.md`. ≤3 files.
+Files touched: `crates/agent/src/lib.rs`, `crates/agent/README.md`, `docs/exec-plans/agent-port-parity.md`. ≤3 files.
 
 Verification: `cargo doc -p hand-agent --no-deps` succeeds with no broken intra-doc links; `cargo test -p hand-agent` passes; `cargo clippy -p hand-agent --tests -- -D warnings` is clean.
 
@@ -360,7 +360,7 @@ wiremock::Mock::given(wiremock::matchers::method("POST"))
 
 ## Interfaces and Dependencies
 
-In `packages/agent/src/proxy.rs`, the following must exist when this plan is complete:
+In `crates/agent/src/proxy.rs`, the following must exist when this plan is complete:
 
 ```rust
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -384,7 +384,7 @@ pub fn stream_proxy(
 pub fn stream_fn_proxy(template: ProxyStreamOptions) -> crate::types::StreamFn;
 ```
 
-In `packages/agent/src/types.rs`:
+In `crates/agent/src/types.rs`:
 
 ```rust
 pub type StreamFn = Arc<
@@ -402,14 +402,14 @@ pub type StreamFn = Arc<
 pub stream_fn: Option<StreamFn>,
 ```
 
-In `packages/agent/src/error.rs`:
+In `crates/agent/src/error.rs`:
 
 ```rust
 #[error("Proxy error: HTTP {status}: {message}")]
 Proxy { status: u16, message: String },
 ```
 
-In `packages/agent/Cargo.toml`:
+In `crates/agent/Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -420,7 +420,7 @@ bytes = "1"
 wiremock = "0.6"
 ```
 
-In `packages/agent/src/lib.rs` (re-exports):
+In `crates/agent/src/lib.rs` (re-exports):
 
 ```rust
 pub mod proxy;

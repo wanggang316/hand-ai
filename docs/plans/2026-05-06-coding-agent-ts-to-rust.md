@@ -10,7 +10,7 @@ This is a living document. Keep Progress, Surprises & Discoveries, Decision Log,
 
 ## Purpose
 
-Today, `packages/coding-agent` is a thin REPL on top of `hand-agent` and `model`: 7 file/shell tools work, JSONL session persistence works, compaction runs. After this plan lands, a developer using `cargo run --bin hand` will have feature parity with `pi-coding-agent` for the four user-visible jobs that matter most:
+Today, `crates/coding-agent` is a thin REPL on top of `hand-agent` and `model`: 7 file/shell tools work, JSONL session persistence works, compaction runs. After this plan lands, a developer using `cargo run --bin hand` will have feature parity with `pi-coding-agent` for the four user-visible jobs that matter most:
 
 1. Drive an agent **headlessly** via JSONL RPC, so `hand` is usable as an SDK backend and integration-testable without a TUI (Phase 1).
 2. **Customize prompts and behavior at runtime** — discover Skills (markdown plugins) and prompt templates from disk, no recompile (Phase 2).
@@ -83,27 +83,27 @@ Update at the start and end of every working session. Timestamp each state chang
 
 **Source of truth (TypeScript):** `/Users/wanggang/dev/opensource/pi-mono/packages/coding-agent` (~45.6k LOC, npm package `@mariozechner/pi-coding-agent`). Don't read it linearly — use it as a behavior reference for individual subsystems as we port them.
 
-**Target (Rust, this repo):** `packages/coding-agent` — currently ~7.3k LOC. The crate exports `AgentSession`, 7 builtin tools, JSONL session manager, basic compaction.
+**Target (Rust, this repo):** `crates/coding-agent` — currently ~7.3k LOC. The crate exports `AgentSession`, 7 builtin tools, JSONL session manager, basic compaction.
 
 **Conversion guidelines:** `docs/conversion-guidelines.md`. Treat as authoritative for type mappings (`Option<T>` for optional fields, tagged enums for unions, `thiserror` for crate errors, `tokio` for async, snake_case identifiers + `#[serde(rename_all = "camelCase")]` where the JSON wire format must match TS). Do not mechanically translate JS idioms — see Section 15 of that doc.
 
 **Sibling crates we depend on (do not change without an explicit task):**
 
-- `packages/model` — LLM provider abstraction. Exposes `Client`, `Model`, `Context`, `AssistantMessageEvent`, `SimpleStreamOptions`. Stable.
-- `packages/agent` — Agent runtime. Exposes `AgentLoopConfig`, `AgentTool`, `AgentEvent`, `AgentEventSink`, `agent_loop::run_agent_loop`. Stable.
-- `packages/tui` — Terminal UI primitives (used in Phase 5). Capability needs to be audited in T5.1.
+- `crates/model` — LLM provider abstraction. Exposes `Client`, `Model`, `Context`, `AssistantMessageEvent`, `SimpleStreamOptions`. Stable.
+- `crates/agent` — Agent runtime. Exposes `AgentLoopConfig`, `AgentTool`, `AgentEvent`, `AgentEventSink`, `agent_loop::run_agent_loop`. Stable.
+- `crates/tui` — Terminal UI primitives (used in Phase 5). Capability needs to be audited in T5.1.
 
 **Existing Rust files relevant to this plan (full paths, what they do):**
 
-- `packages/coding-agent/src/main.rs` — CLI + interactive readline loop + print-mode driver. 770 LOC, will be split in T0.1.
-- `packages/coding-agent/src/core/agent_session.rs` — `AgentSession` orchestrates loop, persistence, compaction, and event fan-out. The pivot point for Phases 1, 3, 5.
-- `packages/coding-agent/src/core/session_manager.rs` — JSONL append-only session, fork/branch surface partial.
-- `packages/coding-agent/src/core/compaction.rs` — token estimation, split, prompt build, LLM-based summary. Branch summarization missing.
-- `packages/coding-agent/src/core/extensions/{loader,runner,types,wrapper}.rs` — types-only scaffold today; gets a real runtime in Phase 3.
-- `packages/coding-agent/src/core/system_prompt.rs` — system prompt builder; gets skills + templates injected in Phase 2.
-- `packages/coding-agent/src/core/slash_commands.rs` — command enum + dispatch hook; expands in Phase 3 and 5.
-- `packages/coding-agent/src/tools/*.rs` — 7 tools. `edit.rs` needs multi-edit + diff in Phase 5 (consumed by message renderer).
-- `packages/coding-agent/src/lib.rs` — public re-exports. Each phase appends one or two re-exports; keep tidy.
+- `crates/coding-agent/src/main.rs` — CLI + interactive readline loop + print-mode driver. 770 LOC, will be split in T0.1.
+- `crates/coding-agent/src/core/agent_session.rs` — `AgentSession` orchestrates loop, persistence, compaction, and event fan-out. The pivot point for Phases 1, 3, 5.
+- `crates/coding-agent/src/core/session_manager.rs` — JSONL append-only session, fork/branch surface partial.
+- `crates/coding-agent/src/core/compaction.rs` — token estimation, split, prompt build, LLM-based summary. Branch summarization missing.
+- `crates/coding-agent/src/core/extensions/{loader,runner,types,wrapper}.rs` — types-only scaffold today; gets a real runtime in Phase 3.
+- `crates/coding-agent/src/core/system_prompt.rs` — system prompt builder; gets skills + templates injected in Phase 2.
+- `crates/coding-agent/src/core/slash_commands.rs` — command enum + dispatch hook; expands in Phase 3 and 5.
+- `crates/coding-agent/src/tools/*.rs` — 7 tools. `edit.rs` needs multi-edit + diff in Phase 5 (consumed by message renderer).
+- `crates/coding-agent/src/lib.rs` — public re-exports. Each phase appends one or two re-exports; keep tidy.
 
 **Repo-level docs we must respect:**
 
@@ -135,7 +135,7 @@ The work is sliced **vertically per phase**: each phase delivers a complete user
 |---|---|---|---|---|
 | T0.1 | Extract CLI args | `src/cli/mod.rs`, `src/cli/args.rs`, slim `src/main.rs` | Unit-test `Args::parse_from_iter` covering `--rpc`, `--print`, `-p`, `--model`, `--tools`, `--no-tools` | `cargo test -p hand-coding-agent cli::args` ≥ 6 cases pass |
 | T0.2 | Stable prelude + lib re-exports | `src/lib.rs`, `src/core/mod.rs` | Compile test that downstream consumer can import only via `hand_coding_agent::prelude::*` | `cargo build` clean; one doc-test in `lib.rs` |
-| T0.3 | Test harness | `tests/common/mod.rs`, `tests/common/mocks.rs` | Provide `mock_text_provider`, `mock_tool_provider`, `temp_session_dir`. Mirror sibling `packages/agent/tests/common` patterns. | One smoke test using the harness exercises `AgentSession::in_memory` + a mocked turn |
+| T0.3 | Test harness | `tests/common/mod.rs`, `tests/common/mocks.rs` | Provide `mock_text_provider`, `mock_tool_provider`, `temp_session_dir`. Mirror sibling `crates/agent/tests/common` patterns. | One smoke test using the harness exercises `AgentSession::in_memory` + a mocked turn |
 
 **Integration points unchanged.** No new public API on `model` or `agent`.
 
@@ -245,7 +245,7 @@ Reference: `pi-mono/.../core/settings-manager.ts`, `core/keybindings.ts`, `core/
 
 ## Concrete Steps
 
-Run from `packages/coding-agent` unless noted.
+Run from `crates/coding-agent` unless noted.
 
 ```bash
 # Per task — start of work
@@ -262,7 +262,7 @@ cargo test  -p hand-coding-agent <test_filter>
 cargo clippy -p hand-coding-agent --all-targets -- -D warnings
 
 # Commit after each logical change
-git add packages/coding-agent/<specific-file> ...
+git add crates/coding-agent/<specific-file> ...
 git commit -m "feat(coding-agent): <what>"
 
 # At phase end — full sweep
@@ -308,8 +308,8 @@ Each phase additionally requires:
 
 Reference snippets to keep on hand while implementing:
 
-- **Existing in-memory test setup** — `packages/coding-agent/src/core/agent_session.rs` lines 113–135 and 372–435 show the shape of a mocked session and the pattern for wiring the event sink in tests. Reuse this in Phase 1's RPC tests.
-- **TS fixture corpus** — `pi-mono/packages/coding-agent/test/fixtures/skills/` has ~14 fixtures covering every pathological frontmatter case. Mirror them under `packages/coding-agent/tests/fixtures/skills/` for Phase 2.
+- **Existing in-memory test setup** — `crates/coding-agent/src/core/agent_session.rs` lines 113–135 and 372–435 show the shape of a mocked session and the pattern for wiring the event sink in tests. Reuse this in Phase 1's RPC tests.
+- **TS fixture corpus** — `pi-mono/packages/coding-agent/test/fixtures/skills/` has ~14 fixtures covering every pathological frontmatter case. Mirror them under `crates/coding-agent/tests/fixtures/skills/` for Phase 2.
 - **Conversion-plan.md test catalogue** — `docs/conversion-plan.md` already lists the C-001 .. C-113 test IDs for this crate; tasks here should add tests under those IDs where they overlap (e.g. T1.6 contributes to C-110-class scenarios).
 
 ## Interfaces and Dependencies

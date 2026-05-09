@@ -86,7 +86,7 @@ We adopt a two-tier architecture. Every extension is one or the other; both shar
 
 ### Tier 1 — Compiled-in Rust trait extension
 
-Tier 1 is the default. An extension is a small Rust crate under `packages/coding-agent/examples/extensions/<name>/` that depends on `hand-coding-agent` and implements:
+Tier 1 is the default. An extension is a small Rust crate under `crates/coding-agent/examples/extensions/<name>/` that depends on `hand-coding-agent` and implements:
 
 ```rust
 pub trait Extension: Send + Sync {
@@ -214,4 +214,4 @@ Future phases:
 *Mitigation.* `schema_version` field at the top, mandatory. Parser uses `deny_unknown_fields` and emits a structured error when it sees a field from a future version. Bumping the schema version is a documented event with a migration note.
 
 **R-EXT-4 — Tier 1 ABI compatibility across `hand` versions.** A user's example crate compiled against `hand-coding-agent 0.1` may not link against `0.2` if the `Extension` trait shifts.
-*Mitigation.* Tier 1 extensions ship **in-tree** under `packages/coding-agent/examples/extensions/`, pinned to the exact `hand` version they live alongside. Out-of-tree third-party extensions are a Tier 2 use case (immune to ABI drift, by design). When/if Tier 3 (WASM) lands, it offers the same out-of-tree story with a stable wasm interface contract.
+*Mitigation.* Tier 1 extensions ship **in-tree** under `crates/coding-agent/examples/extensions/`, pinned to the exact `hand` version they live alongside. Out-of-tree third-party extensions are a Tier 2 use case (immune to ABI drift, by design). When/if Tier 3 (WASM) lands, it offers the same out-of-tree story with a stable wasm interface contract.

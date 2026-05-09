@@ -1,4 +1,4 @@
-//! Model registry and helpers. Mirrors pi-mono `packages/ai/src/models.ts`.
+//! Model registry and helpers. Mirrors pi-mono `crates/ai/src/models.ts`.
 //!
 //! Run `cargo run --bin generate_models` to regenerate `models.json`.
 

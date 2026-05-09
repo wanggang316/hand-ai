@@ -275,7 +275,7 @@ cargo run -p model --bin generate_models
 ## Development
 
 ```bash
-cd packages/model
+cd crates/model
 cargo build
 cargo test --features faux        # 320+ unit + integration + parity tests
 cargo clippy --all-targets --features faux -- -D warnings
