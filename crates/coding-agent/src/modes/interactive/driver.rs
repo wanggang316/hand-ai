@@ -46,9 +46,10 @@ use crate::core::agent_session::{AgentSession, AgentSessionEvent};
 use crate::core::error::CodingAgentError;
 
 use super::components::{
-    AssistantMessageComponent, BashExecutionComponent, BashStatus, CustomMessageComponent,
-    CustomMessageData, FooterComponent, FooterViewModel, LoginDialogComponent, LoginDialogEvent,
-    ModelOutcome, ModelSelectorComponent, SessionSelectorComponent, SessionSelectorEvent,
+    AssistantMessageComponent, AuthSelectorMode, AuthSelectorProvider, BashExecutionComponent,
+    BashStatus, CustomMessageComponent, CustomMessageData, FooterComponent, FooterViewModel,
+    LoginDialogComponent, LoginDialogEvent, ModelOutcome, ModelSelectorComponent, OAuthOutcome,
+    OAuthSelectorComponent, SessionSelectorComponent, SessionSelectorEvent,
     SettingsSelectorComponent, SettingsSelectorEvent, ThemeOutcome, ThemeSelectorComponent,
     ThinkingOutcome, ThinkingSelectorComponent, TokenUsageSummary, ToolExecutionComponent,
     UserMessageComponent,
@@ -366,6 +367,26 @@ impl InteractiveMode {
             let mut session = session;
             let cwd = agent_cwd;
             let mounter = agent_mounter;
+            // First-run onboarding: if no provider has a credential on
+            // file (stored or via env var), greet the user and open the
+            // login picker right away.
+            if !any_provider_has_credentials(&session) {
+                push_status(
+                    &agent_chat,
+                    "Welcome to hand. No provider credentials were found — opening /login.\n\
+                     Pick a provider, paste an API key, and you're ready to go."
+                        .to_string(),
+                    None,
+                );
+                apply_slash_action(
+                    SlashCommandAction::OpenLoginDialog { provider: None },
+                    &agent_chat,
+                    &mut session,
+                    &cwd,
+                    Some(&mounter),
+                )
+                .await;
+            }
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while !stop_for_agent.load(Ordering::Relaxed) {
@@ -724,7 +745,13 @@ pub(crate) async fn apply_slash_action(
             mount_settings_selector(chat, mounter).await;
         }
         SlashCommandAction::OpenLoginDialog { provider } => {
-            mount_login_dialog(chat, provider.as_deref(), mounter).await;
+            let chosen = match provider {
+                Some(p) => Some(p),
+                None => mount_login_provider_picker(chat, session, mounter).await,
+            };
+            if let Some(provider_id) = chosen {
+                mount_login_key_input(chat, &provider_id, mounter).await;
+            }
         }
         SlashCommandAction::OpenResumePicker => {
             mount_resume_picker(chat, cwd, mounter).await;
@@ -1022,17 +1049,92 @@ async fn mount_settings_selector(chat: &ChatList, mounter: Option<&OverlayMounte
     let _ = mounter.hide(handle);
 }
 
-async fn mount_login_dialog(
+/// Build the provider list shown by `/login` from the session's model
+/// catalog: one entry per unique provider id, with a short status badge
+/// indicating whether credentials are already on file.
+fn build_login_provider_list(session: &AgentSession) -> Vec<AuthSelectorProvider> {
+    use crate::core::model_registry::AuthSource;
+
+    let registry = session.model_registry();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<AuthSelectorProvider> = Vec::new();
+    for model in registry.all() {
+        let id = model.provider.as_str().to_string();
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let name = registry.provider_display_name(&id);
+        let status_obj = registry.provider_auth_status(&id);
+        let status = match (status_obj.configured, status_obj.source) {
+            (true, _) => "\x1b[32mconfigured\x1b[0m".to_string(), // green
+            (false, Some(AuthSource::Environment)) => "\x1b[33menv detected\x1b[0m".to_string(),
+            _ => String::new(),
+        };
+        out.push(AuthSelectorProvider { id, name, status });
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
+}
+
+/// Mount the provider picker for `/login`. Returns the chosen provider id
+/// or `None` when the user cancels (or the picker can't mount).
+async fn mount_login_provider_picker(
     chat: &ChatList,
-    provider: Option<&str>,
+    session: &AgentSession,
+    mounter: Option<&OverlayMounter>,
+) -> Option<String> {
+    let Some(mounter) = mounter else {
+        push_status(
+            chat,
+            "[/login: no overlay; pass `/login <provider>` to skip the picker]".to_string(),
+            None,
+        );
+        return None;
+    };
+    let providers = build_login_provider_list(session);
+    if providers.is_empty() {
+        push_status(
+            chat,
+            "[/login: no providers in the model catalog]".to_string(),
+            Some(RED_FG),
+        );
+        return None;
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel::<OAuthOutcome>();
+    let component = OAuthSelectorComponent::new(AuthSelectorMode::Login, providers, tx);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/login failed: {e}]"), Some(RED_FG));
+            return None;
+        }
+    };
+    let chosen = match rx.recv().await {
+        Some(OAuthOutcome::Selected(id)) => Some(id),
+        Some(OAuthOutcome::Cancelled) | None => {
+            push_status(chat, "[/login cancelled]".to_string(), None);
+            None
+        }
+    };
+    let _ = mounter.hide(handle);
+    chosen
+}
+
+/// Mount the manual-input dialog for `provider_id` and persist any
+/// submitted key to `~/.hand/agent/auth.json`.
+async fn mount_login_key_input(
+    chat: &ChatList,
+    provider_id: &str,
     mounter: Option<&OverlayMounter>,
 ) {
     use crate::core::auth_storage::{AuthRecord, AuthStorage};
 
-    // Resolve provider id. Unknown ids fall back to the input as-is so
-    // users can still log in to providers we don't statically know
-    // about; the title and storage key both use the raw id.
-    let provider_id = provider.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("anthropic");
+    // Canonicalise the provider id when it matches a known one; unknown
+    // ids are accepted verbatim so users can still log in to providers
+    // we don't statically know about.
     let canonical = model::types::Provider::from_str(provider_id)
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| provider_id.to_string());
@@ -1101,6 +1203,23 @@ async fn mount_login_dialog(
         }
     }
     let _ = mounter.hide(handle);
+}
+
+/// Whether any provider in the active session's catalog has a usable
+/// credential (stored or env-var). Drives the first-run onboarding gate.
+fn any_provider_has_credentials(session: &AgentSession) -> bool {
+    let registry = session.model_registry();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for model in registry.all() {
+        let pid = model.provider.as_str();
+        if !seen.insert(pid.to_string()) {
+            continue;
+        }
+        if registry.has_provider_auth_configured(pid) {
+            return true;
+        }
+    }
+    false
 }
 
 async fn mount_resume_picker(chat: &ChatList, cwd: &Path, mounter: Option<&OverlayMounter>) {
