@@ -8,8 +8,10 @@
 // `EditorComponent` (which already implements those features in Rust). Adding
 // them here would duplicate ~400 lines of editor logic for marginal gain.
 
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::keys::{Key, KeyName, parse_key};
-use crate::tui::{Component, Focusable, HandleResult, InputEvent};
+use crate::tui::{CURSOR_MARKER, Component, Focusable, HandleResult, InputEvent};
 use crate::utils;
 
 /// Callback type for input submission.
@@ -167,22 +169,51 @@ impl Component for InputComponent {
         let prefix_width = utils::visible_width(&self.prefix);
         let available = (width as usize).saturating_sub(prefix_width + 1); // +1 for cursor
 
-        let display_text = if self.text.is_empty() {
-            &self.placeholder
+        let line = if self.text.is_empty() {
+            let placeholder_to_show = if utils::visible_width(&self.placeholder) > available {
+                utils::truncate_to_width(&self.placeholder, available)
+            } else {
+                self.placeholder.clone()
+            };
+            if self.focused {
+                if placeholder_to_show.is_empty() {
+                    format!("{}{}\x1b[7m \x1b[0m", self.prefix, CURSOR_MARKER)
+                } else {
+                    format!(
+                        "{}{}\x1b[7m \x1b[0m\x1b[90m{}\x1b[0m",
+                        self.prefix, CURSOR_MARKER, placeholder_to_show
+                    )
+                }
+            } else if placeholder_to_show.is_empty() {
+                self.prefix.clone()
+            } else {
+                format!("{}\x1b[90m{}\x1b[0m", self.prefix, placeholder_to_show)
+            }
         } else {
-            &self.text
-        };
-
-        let text_to_show = if utils::visible_width(display_text) > available {
-            utils::truncate_to_width(display_text, available)
-        } else {
-            display_text.to_string()
-        };
-
-        let line = if self.text.is_empty() && !self.placeholder.is_empty() {
-            format!("{}\x1b[90m{}\x1b[0m", self.prefix, text_to_show)
-        } else {
-            format!("{}{}", self.prefix, text_to_show)
+            let text_to_show = if utils::visible_width(&self.text) > available {
+                utils::truncate_to_width(&self.text, available)
+            } else {
+                self.text.clone()
+            };
+            if self.focused {
+                let split = self.cursor.min(text_to_show.len());
+                let (before, after) = text_to_show.split_at(split);
+                if after.is_empty() {
+                    format!(
+                        "{}{}{}\x1b[7m \x1b[0m",
+                        self.prefix, before, CURSOR_MARKER
+                    )
+                } else {
+                    let first = after.graphemes(true).next().unwrap_or(after);
+                    let rest = &after[first.len()..];
+                    format!(
+                        "{}{}{}\x1b[7m{}\x1b[0m{}",
+                        self.prefix, before, CURSOR_MARKER, first, rest
+                    )
+                }
+            } else {
+                format!("{}{}", self.prefix, text_to_show)
+            }
         };
 
         vec![line]
@@ -457,6 +488,41 @@ mod tests {
             input.handle_input(&InputEvent::Raw("a".into())),
             HandleResult::Ignored
         );
+    }
+
+    #[test]
+    fn test_input_emits_cursor_marker_when_focused() {
+        let mut input = InputComponent::new();
+        input.set_text("hello");
+        let lines = input.render(80);
+        assert!(
+            lines[0].contains(CURSOR_MARKER),
+            "focused input should emit CURSOR_MARKER"
+        );
+    }
+
+    #[test]
+    fn test_input_omits_cursor_marker_when_unfocused() {
+        let mut input = InputComponent::new();
+        input.set_text("hello");
+        input.set_focused(false);
+        let lines = input.render(80);
+        assert!(
+            !lines[0].contains(CURSOR_MARKER),
+            "unfocused input should not emit CURSOR_MARKER"
+        );
+    }
+
+    #[test]
+    fn test_input_marker_position_tracks_cursor() {
+        let mut input = InputComponent::new();
+        input.set_text("hello");
+        input.cursor = 2; // between "he" and "llo"
+        let lines = input.render(80);
+        let marker_idx = lines[0].find(CURSOR_MARKER).expect("marker present");
+        let prefix = &lines[0][..marker_idx];
+        let stripped = utils::strip_ansi(prefix);
+        assert_eq!(stripped, "he", "marker should sit after the first 2 chars");
     }
 
     #[test]
