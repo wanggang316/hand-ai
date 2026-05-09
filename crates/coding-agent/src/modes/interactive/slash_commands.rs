@@ -93,8 +93,10 @@ pub enum SlashCommandAction {
     OpenThinkingSelector { inline_level: Option<String> },
     /// Open the settings selector overlay.
     OpenSettingsSelector,
-    /// Open the login dialog overlay.
-    OpenLoginDialog,
+    /// Open the login dialog overlay. `provider` is the provider id to
+    /// authenticate against (e.g. `"anthropic"`, `"openai"`); when `None`
+    /// the dialog defaults to Anthropic.
+    OpenLoginDialog { provider: Option<String> },
     /// Open the session-resume picker (most-recent fallback).
     OpenResumePicker,
     /// Clear the chat scrollback (visual only — session history is kept).
@@ -174,7 +176,10 @@ impl fmt::Display for SlashCommandAction {
                 None => f.write_str("[open thinking selector]"),
             },
             SlashCommandAction::OpenSettingsSelector => f.write_str("[open settings selector]"),
-            SlashCommandAction::OpenLoginDialog => f.write_str("[open login dialog]"),
+            SlashCommandAction::OpenLoginDialog { provider } => match provider {
+                Some(p) => write!(f, "[open login dialog: {p}]"),
+                None => f.write_str("[open login dialog]"),
+            },
             SlashCommandAction::OpenResumePicker => f.write_str("[open resume picker]"),
             SlashCommandAction::ClearChat => f.write_str("[clear chat]"),
             SlashCommandAction::Compact => f.write_str("[compact]"),
@@ -305,7 +310,13 @@ impl SlashCommandTable {
 
             "settings" => SlashCommandResult::Handled(SlashCommandAction::OpenSettingsSelector),
 
-            "login" => SlashCommandResult::Handled(SlashCommandAction::OpenLoginDialog),
+            "login" => SlashCommandResult::Handled(SlashCommandAction::OpenLoginDialog {
+                provider: cmd
+                    .args
+                    .split_whitespace()
+                    .next()
+                    .map(|s| s.to_string()),
+            }),
 
             "logout" => SlashCommandResult::Handled(SlashCommandAction::Logout),
 

@@ -135,6 +135,7 @@ impl AuthRecord {
 /// ([`set`](Self::set), [`remove`](Self::remove)) load, mutate, and save in
 /// one shot; callers that need to batch many edits should use
 /// [`load`](Self::load) + [`save`](Self::save) directly.
+#[derive(Clone)]
 pub struct AuthStorage {
     path: PathBuf,
 }

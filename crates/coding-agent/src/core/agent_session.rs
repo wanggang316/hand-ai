@@ -248,7 +248,14 @@ impl AgentSession {
             messages,
         };
 
-        let model_registry = ModelRegistry::build(&client);
+        // Bind on-disk auth storage so credentials saved via `/login` are
+        // visible to provider request resolution. Falls back to an
+        // unbound registry when the home dir can't be resolved (the
+        // env-var fallback path still works).
+        let model_registry = match crate::core::auth_storage::AuthStorage::new() {
+            Ok(auth) => ModelRegistry::create(auth),
+            Err(_) => ModelRegistry::build(&client),
+        };
         Ok(Self {
             config,
             session_manager,

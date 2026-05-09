@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use hand_tui::{
-    Component, EditorComponent, InputEvent, KeyName, ListenerResult, OverlayMounter,
+    Component, EditorComponent, Focusable, InputEvent, KeyName, ListenerResult, OverlayMounter,
     OverlayOptions, ProcessTerminal, TextComponent, Tui, TuiError,
 };
 use tokio::sync::mpsc;
@@ -723,8 +723,8 @@ pub(crate) async fn apply_slash_action(
         SlashCommandAction::OpenSettingsSelector => {
             mount_settings_selector(chat, mounter).await;
         }
-        SlashCommandAction::OpenLoginDialog => {
-            mount_login_dialog(chat, mounter).await;
+        SlashCommandAction::OpenLoginDialog { provider } => {
+            mount_login_dialog(chat, provider.as_deref(), mounter).await;
         }
         SlashCommandAction::OpenResumePicker => {
             mount_resume_picker(chat, cwd, mounter).await;
@@ -1022,9 +1022,23 @@ async fn mount_settings_selector(chat: &ChatList, mounter: Option<&OverlayMounte
     let _ = mounter.hide(handle);
 }
 
-async fn mount_login_dialog(chat: &ChatList, mounter: Option<&OverlayMounter>) {
+async fn mount_login_dialog(
+    chat: &ChatList,
+    provider: Option<&str>,
+    mounter: Option<&OverlayMounter>,
+) {
+    use crate::core::auth_storage::{AuthRecord, AuthStorage};
+
+    // Resolve provider id. Unknown ids fall back to the input as-is so
+    // users can still log in to providers we don't statically know
+    // about; the title and storage key both use the raw id.
+    let provider_id = provider.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("anthropic");
+    let canonical = model::types::Provider::from_str(provider_id)
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| provider_id.to_string());
+
     let Some(mounter) = mounter else {
-        push_status(chat, "[/login opened]".to_string(), None);
+        push_status(chat, format!("[/login {canonical}]"), None);
         return;
     };
     // LoginDialog uses std::sync::mpsc internally (mirrors the TS callback
@@ -1038,11 +1052,18 @@ async fn mount_login_dialog(chat: &ChatList, mounter: Option<&OverlayMounter>) {
             }
         }
     });
-    // TODO(parity): populate the providers list from the OAuth registry
-    // once it's wired into AgentSession. Empty slice falls back to using
-    // the raw provider id for the title, which is fine for this stub.
+    // TODO(parity): populate the providers list + OAuth flows from the
+    // pi-ai OAuth registry once it's wired in. For now the dialog runs a
+    // pure manual-input path: paste an API key and persist it.
     let providers: Vec<crate::modes::interactive::components::LoginProvider> = Vec::new();
-    let component = LoginDialogComponent::new("anthropic", &providers, None, None, std_tx);
+    let mut component = LoginDialogComponent::new(&canonical, &providers, None, None, std_tx);
+    component.show_manual_input(format!(
+        "Paste API key for {canonical} and press Enter (Esc to cancel):"
+    ));
+    // Capturing overlays receive raw events, but the embedded
+    // InputComponent gates on its own focus flag — explicitly focus the
+    // dialog so keystrokes reach the input.
+    component.set_focused(true);
     let handle = match mounter
         .show(Box::new(component), OverlayOptions::default())
         .await
@@ -1055,8 +1076,25 @@ async fn mount_login_dialog(chat: &ChatList, mounter: Option<&OverlayMounter>) {
     };
     match tokio_rx.recv().await {
         Some(LoginDialogEvent::Submit(value)) => {
-            // TODO(parity): hand the captured value to the OAuth provider.
-            push_status(chat, format!("[login submitted: {value}]"), None);
+            let key = value.trim().to_string();
+            if key.is_empty() {
+                push_status(chat, "[/login cancelled: empty key]".to_string(), None);
+            } else {
+                let result = AuthStorage::new()
+                    .and_then(|s| s.set(&canonical, AuthRecord::ApiKey { key }));
+                match result {
+                    Ok(()) => push_status(
+                        chat,
+                        format!("[login: api key saved for {canonical}]"),
+                        None,
+                    ),
+                    Err(e) => push_status(
+                        chat,
+                        format!("[/login failed to save key: {e}]"),
+                        Some(RED_FG),
+                    ),
+                }
+            }
         }
         Some(LoginDialogEvent::Cancel) | None => {
             push_status(chat, "[/login cancelled]".to_string(), None);
