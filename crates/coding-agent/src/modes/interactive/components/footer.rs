@@ -221,7 +221,9 @@ impl Component for FooterComponent {
             let pad = " ".repeat(width as usize - stats_left_width - right_width);
             format!("{stats_left}{pad}{right_side}")
         } else {
-            let avail_for_right = width as usize - stats_left_width - min_padding;
+            let avail_for_right = (width as usize)
+                .saturating_sub(stats_left_width)
+                .saturating_sub(min_padding);
             if avail_for_right > 0 {
                 let truncated = truncate_to_width_with(&right_side, avail_for_right, "", false);
                 let truncated_w = visible_width(&truncated);
