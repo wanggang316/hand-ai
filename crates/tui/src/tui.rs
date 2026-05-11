@@ -937,6 +937,20 @@ impl Tui {
         }
 
         if force {
+            // Restore cursor to the top of the previous rendered region
+            // before resetting.  After a marker-positioning frame the
+            // hardware cursor sits partway up the region; a full render
+            // (triggered by reset) writes from the cursor position, so
+            // we must home to row 0 of the region first.
+            let prev = self.renderer.prev_line_count();
+            if self.cursor_offset_above_bottom > 0 {
+                self.terminal
+                    .write(&format!("\x1b[{}B", self.cursor_offset_above_bottom));
+            }
+            if prev > 0 {
+                self.terminal.write(&format!("\x1b[{prev}A"));
+            }
+            self.cursor_offset_above_bottom = 0;
             self.renderer.reset();
         }
 
@@ -2186,6 +2200,117 @@ mod tests {
             InputEvent::Paste(s) => assert_eq!(s, payload),
             other => panic!("expected Paste, got {other:?}"),
         }
+    }
+
+    // ---------- CURSOR_MARKER multi-frame integration ----------
+
+    /// Component that emits a CURSOR_MARKER on a specific line (simulates a
+    /// focused editor/input emitting the marker for hardware-cursor anchoring).
+    struct MarkerComponent {
+        lines: Vec<String>,
+        marker_line: usize,
+        marker_col: usize,
+    }
+
+    impl MarkerComponent {
+        fn new(lines: Vec<&str>, marker_line: usize, marker_col: usize) -> Self {
+            Self {
+                lines: lines.into_iter().map(String::from).collect(),
+                marker_line,
+                marker_col,
+            }
+        }
+    }
+
+    impl Component for MarkerComponent {
+        fn render(&self, _width: u16) -> Vec<String> {
+            let mut out = self.lines.clone();
+            if self.marker_line < out.len() {
+                let line = &mut out[self.marker_line];
+                let byte = line
+                    .char_indices()
+                    .nth(self.marker_col)
+                    .map(|(i, _)| i)
+                    .unwrap_or(line.len());
+                line.insert_str(byte, CURSOR_MARKER);
+            }
+            out
+        }
+    }
+
+    impl Focusable for MarkerComponent {
+        fn focused(&self) -> bool {
+            true
+        }
+        fn set_focused(&mut self, _f: bool) {}
+        fn cursor_position(&self) -> Option<(u16, u16)> {
+            Some((self.marker_col as u16, self.marker_line as u16))
+        }
+    }
+
+    /// End-to-end: three consecutive frames with a CURSOR_MARKER must
+    /// (1) never leak `_hand:c` into the terminal output, and (2) leave the
+    /// cursor at the marker row after each frame.
+    #[test]
+    fn marker_rendering_never_leaks_apc_bytes() {
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        tui.root_mut().add_child_with_id(Box::new(
+            MarkerComponent::new(vec!["line0", "line1", "line2"], 1, 2),
+        ));
+
+        // Frame 1
+        tui.request_render();
+        tui.maybe_render();
+        let all: String = output.lock().unwrap().join("");
+        assert!(
+            !all.contains("_hand:c"),
+            "frame 1 leaked APC marker: {all:?}"
+        );
+
+        output.lock().unwrap().clear();
+
+        // Frame 2 (same content — diff should be no-op)
+        tui.request_render();
+        tui.maybe_render();
+        let all: String = output.lock().unwrap().join("");
+        assert!(
+            !all.contains("_hand:c"),
+            "frame 2 leaked APC marker: {all:?}"
+        );
+
+        output.lock().unwrap().clear();
+
+        // Frame 3: force-render (simulates width change)
+        tui.request_render_force();
+        tui.maybe_render();
+        let all: String = output.lock().unwrap().join("");
+        assert!(
+            !all.contains("_hand:c"),
+            "frame 3 (force) leaked APC marker: {all:?}"
+        );
+    }
+
+    /// Two focused components both emitting markers — only the bottommost
+    /// viewport marker drives hardware-cursor position, but ALL markers
+    /// must be stripped.
+    #[test]
+    fn multiple_markers_all_stripped() {
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        let mut root = Container::new();
+        root.add_child(Box::new(MarkerComponent::new(vec!["top"], 0, 0)));
+        root.add_child(Box::new(MarkerComponent::new(vec!["bot"], 0, 0)));
+        tui.root_mut().add_child_with_id(Box::new(root));
+
+        tui.request_render();
+        tui.maybe_render();
+
+        let all: String = output.lock().unwrap().join("");
+        assert!(
+            !all.contains("_hand:c"),
+            "multiple markers leaked: {all:?}"
+        );
     }
 
     // ---------- overlay-mount channel ----------
