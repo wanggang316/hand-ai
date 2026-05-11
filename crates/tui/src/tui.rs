@@ -71,26 +71,35 @@ pub fn input_event_from_str(data: &str) -> InputEvent {
 /// payload, so there is no visible artefact if it ever leaks through.
 pub const CURSOR_MARKER: &str = "\x1b_hand:c\x07";
 
-/// Find the [`CURSOR_MARKER`] in `lines` (scanning the bottom `height` rows
-/// only — the visible viewport) and return its `(row, col)` while removing
-/// the marker bytes in place. `col` is the visible column width of the
-/// text preceding the marker, which matches what the terminal will render
-/// after the marker is stripped.
+/// Scan all `lines` for [`CURSOR_MARKER`] and strip every occurrence so
+/// that APC bytes never reach the terminal (many terminals display APC
+/// payloads as visible garbage). Returns the `(row, col)` of the
+/// bottommost marker that falls within the visible viewport (bottom
+/// `height` rows) for hardware-cursor positioning.
 fn extract_cursor_position(lines: &mut [String], height: u16) -> Option<(u16, u16)> {
     let viewport_top = lines.len().saturating_sub(height as usize);
+
+    // 1. Find bottommost viewport marker position BEFORE mutating.
+    let mut cursor_pos = None;
     for row in (viewport_top..lines.len()).rev() {
-        let line = &lines[row];
-        if let Some(idx) = line.find(CURSOR_MARKER) {
-            let before = &line[..idx];
-            let col = crate::utils::visible_width(before) as u16;
-            let mut new_line = String::with_capacity(line.len() - CURSOR_MARKER.len());
-            new_line.push_str(before);
-            new_line.push_str(&line[idx + CURSOR_MARKER.len()..]);
-            lines[row] = new_line;
-            return Some((row as u16, col));
+        if let Some(idx) = lines[row].find(CURSOR_MARKER) {
+            let col = crate::utils::visible_width(&lines[row][..idx]) as u16;
+            cursor_pos = Some((row as u16, col));
+            break;
         }
     }
-    None
+
+    // 2. Strip ALL markers from ALL lines.
+    for line in lines.iter_mut() {
+        while let Some(idx) = line.find(CURSOR_MARKER) {
+            let mut new_line = String::with_capacity(line.len() - CURSOR_MARKER.len());
+            new_line.push_str(&line[..idx]);
+            new_line.push_str(&line[idx + CURSOR_MARKER.len()..]);
+            *line = new_line;
+        }
+    }
+
+    cursor_pos
 }
 
 /// Core component trait — all UI elements implement this.
@@ -1763,6 +1772,35 @@ mod tests {
         ];
         // Bottom-up scan returns the lower (visually most recent) marker.
         assert_eq!(extract_cursor_position(&mut lines, 10), Some((1, 0)));
+        // ALL markers must be stripped, not just the one used for positioning.
+        assert!(!lines[0].contains(CURSOR_MARKER));
+        assert!(!lines[1].contains(CURSOR_MARKER));
+        assert_eq!(lines[0], "top");
+        assert_eq!(lines[1], "bot");
+    }
+
+    #[test]
+    fn extract_cursor_position_strips_marker_above_viewport() {
+        let mut lines = vec![
+            format!("above{}", CURSOR_MARKER),
+            "visible".to_string(),
+        ];
+        // height=1 → viewport is only line 1; marker at line 0 is outside
+        // the viewport and should NOT be used for positioning, but MUST
+        // still be stripped to prevent APC leaking.
+        assert_eq!(extract_cursor_position(&mut lines, 1), None);
+        assert!(!lines[0].contains(CURSOR_MARKER));
+        assert_eq!(lines[0], "above");
+    }
+
+    #[test]
+    fn extract_cursor_position_strips_multiple_markers_in_same_line() {
+        let mut lines = vec![format!("a{}b{}c", CURSOR_MARKER, CURSOR_MARKER)];
+        let pos = extract_cursor_position(&mut lines, 10);
+        // Position is at the first marker's location (col 1).
+        assert_eq!(pos, Some((0, 1)));
+        // Both markers stripped.
+        assert_eq!(lines[0], "abc");
     }
 
     #[test]
