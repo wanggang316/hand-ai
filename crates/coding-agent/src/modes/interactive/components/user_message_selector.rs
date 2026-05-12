@@ -16,6 +16,7 @@
 use std::sync::mpsc::Sender;
 
 use hand_tui::keybindings::Keybinding;
+use hand_tui::keys::KeyName;
 use hand_tui::tui::{Component, HandleResult, InputEvent};
 use hand_tui::utils::{truncate_to_width, visible_width};
 use hand_tui::{KeybindingsManager, get_keybindings};
@@ -148,9 +149,25 @@ impl UserMessageSelectorComponent {
         lines
     }
 
-    fn raw_key(event: &InputEvent) -> Option<&str> {
+    fn raw_key(event: &InputEvent) -> Option<std::borrow::Cow<'_, str>> {
         match event {
-            InputEvent::Raw(s) | InputEvent::Paste(s) => Some(s.as_str()),
+            InputEvent::Raw(s) | InputEvent::Paste(s) => Some(std::borrow::Cow::Borrowed(s.as_str())),
+            // The Tui parses ESC-prefixed sequences and single-byte
+            // control codes (arrows, Escape, Enter, Tab, Backspace) as
+            // `InputEvent::Key`. Convert back to the canonical byte
+            // string so the keybinding matcher recognises them.
+            InputEvent::Key(key) => match key.name {
+                KeyName::Up => Some(std::borrow::Cow::Borrowed("\x1b[A")),
+                KeyName::Down => Some(std::borrow::Cow::Borrowed("\x1b[B")),
+                KeyName::Right => Some(std::borrow::Cow::Borrowed("\x1b[C")),
+                KeyName::Left => Some(std::borrow::Cow::Borrowed("\x1b[D")),
+                KeyName::Enter => Some(std::borrow::Cow::Borrowed("\r")),
+                KeyName::Escape => Some(std::borrow::Cow::Borrowed("\x1b")),
+                KeyName::Tab => Some(std::borrow::Cow::Borrowed("\t")),
+                KeyName::Backspace => Some(std::borrow::Cow::Borrowed("\x7f")),
+                KeyName::Char(c) => Some(std::borrow::Cow::Owned(c.to_string())),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -207,6 +224,7 @@ impl Component for UserMessageSelectorComponent {
         let Some(data) = Self::raw_key(event) else {
             return HandleResult::Ignored;
         };
+        let data = data.as_ref();
         let kb = get_keybindings();
         if self.navigate(&kb, data) {
             return HandleResult::Handled;
@@ -317,6 +335,34 @@ mod tests {
         let messages = vec![item("a", "1")];
         let mut comp = UserMessageSelectorComponent::new(messages, None, tx, None);
         comp.handle_input(&make_event("\x1b"));
+        let evt = rx.recv().unwrap();
+        assert_eq!(evt, UserMessageSelectorEvent::Cancel);
+    }
+
+    /// Regression: the real Tui dispatches arrows / Escape / Enter as
+    /// `InputEvent::Key`, not `Raw`. The picker must respond to both.
+    #[test]
+    fn key_events_drive_navigation_selection_and_cancel() {
+        use hand_tui::keys::parse_key;
+        let (tx, rx) = mpsc::channel();
+        let messages = vec![item("a", "1"), item("b", "2")];
+        let mut comp = UserMessageSelectorComponent::new(messages, Some("a"), tx, None);
+        comp.handle_input(&InputEvent::Key(parse_key("\x1b[B")));
+        assert_eq!(comp.selected_id(), Some("b"));
+        comp.handle_input(&InputEvent::Key(parse_key("\r")));
+        match rx.recv().unwrap() {
+            UserMessageSelectorEvent::Select { entry_id } => assert_eq!(entry_id, "b"),
+            other => panic!("expected Select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_escape_event_cancels() {
+        use hand_tui::keys::parse_key;
+        let (tx, rx) = mpsc::channel();
+        let messages = vec![item("a", "1")];
+        let mut comp = UserMessageSelectorComponent::new(messages, None, tx, None);
+        comp.handle_input(&InputEvent::Key(parse_key("\x1b")));
         let evt = rx.recv().unwrap();
         assert_eq!(evt, UserMessageSelectorEvent::Cancel);
     }

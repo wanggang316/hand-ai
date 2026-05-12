@@ -32,6 +32,7 @@
 
 use hand_tui::Component;
 use hand_tui::keybindings::{Keybinding, get_keybindings};
+use hand_tui::keys::KeyName;
 use hand_tui::tui::{HandleResult, InputEvent};
 use hand_tui::utils::{truncate_to_width, visible_width};
 use tokio::sync::mpsc;
@@ -203,21 +204,35 @@ impl Component for TreeSelectorComponent {
     }
 
     fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
-        let raw = match event {
-            InputEvent::Raw(s) => s.clone(),
+        // The Tui dispatches ESC-prefixed sequences (arrows, escape) and
+        // single-byte control codes (Enter, Ctrl+C) as `InputEvent::Key`
+        // rather than `InputEvent::Raw`. Encode either form to the
+        // canonical byte string the keybinding matcher expects so the
+        // picker responds to keyboard input identically regardless of how
+        // the host renders it.
+        let raw_buf;
+        let raw: &str = match event {
+            InputEvent::Raw(s) => s.as_str(),
+            InputEvent::Key(key) => match key_to_canonical_bytes(&key.name) {
+                Some(bytes) => {
+                    raw_buf = bytes;
+                    raw_buf.as_str()
+                }
+                None => return HandleResult::Ignored,
+            },
             _ => return HandleResult::Ignored,
         };
         let kb = get_keybindings();
 
-        if kb.matches(&raw, Keybinding::SelectUp) {
+        if kb.matches(raw, Keybinding::SelectUp) {
             self.move_up();
             return HandleResult::Handled;
         }
-        if kb.matches(&raw, Keybinding::SelectDown) {
+        if kb.matches(raw, Keybinding::SelectDown) {
             self.move_down();
             return HandleResult::Handled;
         }
-        if kb.matches(&raw, Keybinding::SelectConfirm)
+        if kb.matches(raw, Keybinding::SelectConfirm)
             && let Some(row) = self.selected()
         {
             let _ = self
@@ -225,13 +240,32 @@ impl Component for TreeSelectorComponent {
                 .send(TreeSelectorEvent::Selected(row.id.clone()));
             return HandleResult::Handled;
         }
-        if kb.matches(&raw, Keybinding::SelectCancel) {
+        if kb.matches(raw, Keybinding::SelectCancel) {
             let _ = self.events.send(TreeSelectorEvent::Cancelled);
             return HandleResult::Handled;
         }
 
         HandleResult::Ignored
     }
+}
+
+/// Round-trip a parsed key back to the canonical byte sequence the
+/// `Keybinding::matches` matcher expects. Covers the keys used by
+/// list-style selectors (arrows / Enter / Escape / Ctrl+C / Tab). Other
+/// keys return `None` and are ignored.
+fn key_to_canonical_bytes(name: &KeyName) -> Option<String> {
+    Some(match name {
+        KeyName::Up => "\x1b[A".to_string(),
+        KeyName::Down => "\x1b[B".to_string(),
+        KeyName::Right => "\x1b[C".to_string(),
+        KeyName::Left => "\x1b[D".to_string(),
+        KeyName::Enter => "\r".to_string(),
+        KeyName::Escape => "\x1b".to_string(),
+        KeyName::Tab => "\t".to_string(),
+        KeyName::Backspace => "\x7f".to_string(),
+        KeyName::Char(c) => c.to_string(),
+        _ => return None,
+    })
 }
 
 fn pad_line(line: &str, width: u16) -> String {
@@ -340,6 +374,33 @@ mod tests {
     fn escape_emits_cancelled() {
         let (mut c, mut rx) = make(vec![row("a", 0, "x")]);
         c.handle_input(&InputEvent::Raw("\x1b".into()));
+        match rx.try_recv() {
+            Ok(TreeSelectorEvent::Cancelled) => {}
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
+
+    /// Regression: the real Tui dispatches ESC-prefixed sequences (arrows,
+    /// Escape) and single-byte control codes (Enter) as `InputEvent::Key`,
+    /// not `InputEvent::Raw`. The picker must respond to both forms.
+    #[test]
+    fn key_events_drive_navigation_and_selection() {
+        use hand_tui::keys::parse_key;
+        let (mut c, mut rx) = make(vec![row("a", 0, "x"), row("b", 0, "y")]);
+        c.handle_input(&InputEvent::Key(parse_key("\x1b[B")));
+        assert_eq!(c.selected().map(|r| r.id.clone()), Some("b".into()));
+        c.handle_input(&InputEvent::Key(parse_key("\r")));
+        match rx.try_recv() {
+            Ok(TreeSelectorEvent::Selected(id)) => assert_eq!(id, "b"),
+            other => panic!("expected Selected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_escape_event_emits_cancelled() {
+        use hand_tui::keys::parse_key;
+        let (mut c, mut rx) = make(vec![row("a", 0, "x")]);
+        c.handle_input(&InputEvent::Key(parse_key("\x1b")));
         match rx.try_recv() {
             Ok(TreeSelectorEvent::Cancelled) => {}
             other => panic!("expected Cancelled, got {other:?}"),
