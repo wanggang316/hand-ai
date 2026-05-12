@@ -392,7 +392,7 @@ impl InteractiveMode {
                         list.push(Box::new(UserMessageComponent::new(trimmed.clone())));
                     }
                     if let Err(e) = session.send_message(&trimmed).await {
-                        push_status(&agent_chat, format!("Error: {e}"), Some(RED_FG));
+                        push_error(&agent_chat, format!("send failed: {e}"));
                     }
                     refresh_footer(&session, &cwd, &agent_footer);
                 }
@@ -446,6 +446,17 @@ fn coloured_text(text: impl AsRef<str>, ansi_prefix: Option<&str>) -> TextCompon
         None => text.as_ref().to_string(),
     };
     TextComponent::new(body)
+}
+
+/// Push a clearly-visible error banner into the chat scrollback. Unlike a
+/// bare red text line, this prefixes the message with a `✘ Error:` marker
+/// and renders it in bold bright red on a black background so it isn't
+/// lost in tool output / dim messages above it.
+fn push_error(chat: &ChatList, msg: impl AsRef<str>) {
+    // \x1b[1;97;41m = bold + bright white + red background.
+    let body = format!("\x1b[1;97;41m ✘ Error  \x1b[0m \x1b[1;91m{}{RESET}", msg.as_ref());
+    let mut list = chat.lock().expect("chat list mutex poisoned");
+    list.push(Box::new(TextComponent::new(body)));
 }
 
 fn replay_messages_into(chat: &ChatList, messages: &[model::Message]) {
