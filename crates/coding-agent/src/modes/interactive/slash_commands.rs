@@ -144,6 +144,9 @@ pub enum SlashCommandAction {
     /// passes the resulting list to `/model` so the quick-cycle reaches
     /// only the user's chosen subset.
     OpenScopedModelsSelector,
+    /// Open the filesystem-tree picker (M4.4). Optional argument is a
+    /// path relative to cwd to start from; defaults to cwd itself.
+    OpenTreeSelector(Option<String>),
     /// Quit the interactive session.
     Quit,
     /// No-op acknowledgement (the handler did its work without producing any
@@ -218,6 +221,10 @@ impl fmt::Display for SlashCommandAction {
             SlashCommandAction::OpenScopedModelsSelector => {
                 f.write_str("[open scoped-models selector]")
             }
+            SlashCommandAction::OpenTreeSelector(p) => match p {
+                Some(path) => write!(f, "[open tree at {path}]"),
+                None => f.write_str("[open tree at cwd]"),
+            },
             SlashCommandAction::Quit => f.write_str("[quit]"),
             SlashCommandAction::Noop => Ok(()),
         }
@@ -342,6 +349,10 @@ impl SlashCommandTable {
             "scoped-models" | "scoped_models" => {
                 SlashCommandResult::Handled(SlashCommandAction::OpenScopedModelsSelector)
             }
+
+            "tree" => SlashCommandResult::Handled(SlashCommandAction::OpenTreeSelector(
+                Some(cmd.args.clone()).filter(|s| !s.is_empty()),
+            )),
 
             _ => SlashCommandResult::Unknown,
         }

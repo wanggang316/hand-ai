@@ -53,6 +53,7 @@ use super::components::{
     FooterViewModel, LoginDialogComponent, LoginDialogEvent, ModelOutcome, ModelSelectorComponent,
     OAuthOutcome, OAuthSelectorComponent, ScopedModelsConfig, ScopedModelsOutcome,
     ScopedModelsSelectorComponent, SessionSelectorComponent, SessionSelectorEvent,
+    TreeRow, TreeSelectorComponent, TreeSelectorEvent,
     SettingsSelectorComponent, SettingsSelectorEvent, ThemeOutcome, ThemeSelectorComponent,
     ThinkingOutcome, ThinkingSelectorComponent, TokenUsageSummary, ToolExecutionComponent,
     UserMessageComponent,
@@ -1450,6 +1451,9 @@ pub(crate) async fn apply_slash_action(
         SlashCommandAction::OpenScopedModelsSelector => {
             mount_scoped_models_selector(chat, session, mounter).await;
         }
+        SlashCommandAction::OpenTreeSelector(sub) => {
+            mount_tree_selector(chat, cwd, sub.as_deref(), mounter).await;
+        }
         SlashCommandAction::ModelByPattern(pattern) => {
             apply_model_by_pattern(chat, session, &pattern);
         }
@@ -1544,6 +1548,145 @@ fn format_diagnostics_report(report: &crate::core::diagnostics::DiagnosticsRepor
 // absent (unit tests, headless contexts) the helper degrades to a
 // status-line stub so existing test fixtures continue to work.
 // ---------------------------------------------------------------------------
+
+/// M4.4 — mount a filesystem-tree picker. Builds a depth-bounded BFS
+/// flat tree from `root` (cwd, plus optional sub-path argument from
+/// `/tree <subdir>`), skips noise directories, and renders the tree
+/// selector. The chosen entry is pushed as a status line — pi-mono
+/// uses this primarily to /attach@ the picked path, which our editor
+/// already handles via `@`-autocomplete, so a status-only outcome
+/// keeps the surface minimal until paste-attach is wired.
+async fn mount_tree_selector(
+    chat: &ChatList,
+    cwd: &Path,
+    sub: Option<&str>,
+    mounter: Option<&OverlayMounter>,
+) {
+    let Some(mounter) = mounter else {
+        push_status(chat, "[/tree opened]".to_string(), None);
+        return;
+    };
+    let root = match sub {
+        Some(s) => cwd.join(s),
+        None => cwd.to_path_buf(),
+    };
+    if !root.is_dir() {
+        push_status(
+            chat,
+            format!("[/tree: not a directory: {}]", root.display()),
+            Some(YELLOW_FG),
+        );
+        return;
+    }
+    let rows = build_tree_rows(&root);
+    if rows.is_empty() {
+        push_status(
+            chat,
+            format!("[/tree: empty: {}]", root.display()),
+            Some(YELLOW_FG),
+        );
+        return;
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel::<TreeSelectorEvent>();
+    let component = TreeSelectorComponent::new(rows, tx);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/tree failed: {e}]"), Some(RED_FG));
+            return;
+        }
+    };
+    match rx.recv().await {
+        Some(TreeSelectorEvent::Selected(id)) => {
+            push_status(chat, format!("[/tree picked: {id}]"), None);
+        }
+        Some(TreeSelectorEvent::Cancelled) | None => {
+            push_status(chat, "[/tree cancelled]".to_string(), None);
+        }
+    }
+    let _ = mounter.hide(handle);
+}
+
+/// Build a depth-bounded BFS flat tree under `root`. Skips `.git`,
+/// `target`, `node_modules`, `.venv`, `.cache`. Caps total rows at 500
+/// so the selector stays usable on large repos. The `id` field carries
+/// the path relative to `root`.
+fn build_tree_rows(root: &Path) -> Vec<TreeRow> {
+    const MAX_DEPTH: usize = 4;
+    const MAX_ROWS: usize = 500;
+    let skip: &[&str] = &[".git", "target", "node_modules", ".venv", ".cache"];
+    let mut out: Vec<TreeRow> = Vec::new();
+    fn walk(
+        dir: &Path,
+        depth: usize,
+        max_depth: usize,
+        max_rows: usize,
+        skip: &[&str],
+        root: &Path,
+        out: &mut Vec<TreeRow>,
+    ) {
+        if out.len() >= max_rows {
+            return;
+        }
+        if depth >= max_depth {
+            return;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(it) => it,
+            Err(_) => return,
+        };
+        let mut items: Vec<(std::path::PathBuf, bool)> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if skip.contains(&name.as_str()) {
+                    return None;
+                }
+                let p = e.path();
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                Some((p, is_dir))
+            })
+            .collect();
+        // Stable order: directories first, then files, both alphabetic.
+        items.sort_by(|a, b| match (a.1, b.1) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.0.file_name().cmp(&b.0.file_name()),
+        });
+        for (path, is_dir) in items {
+            if out.len() >= max_rows {
+                break;
+            }
+            let rel = path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+            let label = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let display = if is_dir {
+                format!("{label}/")
+            } else {
+                label
+            };
+            out.push(TreeRow {
+                id: rel,
+                depth,
+                label: display,
+                secondary: None,
+            });
+            if is_dir {
+                walk(&path, depth + 1, max_depth, max_rows, skip, root, out);
+            }
+        }
+    }
+    walk(root, 0, MAX_DEPTH, MAX_ROWS, skip, root, &mut out);
+    out
+}
 
 /// M4.5 — mount the scoped-models multi-select overlay. The outcome
 /// channel emits either a session-only `Change` (`enabled_models`
@@ -3183,6 +3326,37 @@ mod tests {
     /// M3.3 — the editor's focused-border color tracks the active
     /// thinking level. Each level maps to a distinct truecolor SGR;
     /// `None` falls back to the default `BORDER_FOCUS` cyan.
+    #[test]
+    fn build_tree_rows_walks_root_skips_noise_and_orders_dirs_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src/inner")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "noise").unwrap();
+        std::fs::write(root.join("README.md"), "readme").unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main(){}").unwrap();
+        std::fs::write(root.join("src/inner/deep.rs"), "").unwrap();
+
+        let rows = build_tree_rows(root);
+        let labels: Vec<String> = rows.iter().map(|r| r.label.clone()).collect();
+        // .git is skipped entirely.
+        assert!(!labels.iter().any(|l| l == ".git/"), "got: {labels:?}");
+        // src/ comes before README.md (dirs first).
+        let src_pos = labels.iter().position(|l| l == "src/").unwrap();
+        let readme_pos = labels.iter().position(|l| l == "README.md").unwrap();
+        assert!(src_pos < readme_pos, "dirs first: {labels:?}");
+        // Walks into subdirs (depth 1+).
+        assert!(rows.iter().any(|r| r.depth >= 1 && r.label == "main.rs"));
+        assert!(rows.iter().any(|r| r.depth >= 2 && r.label == "deep.rs"));
+        // Ids carry the path relative to root.
+        let main_row = rows.iter().find(|r| r.label == "main.rs").unwrap();
+        assert!(
+            main_row.id.contains("src") && main_row.id.contains("main.rs"),
+            "rel id: {}",
+            main_row.id
+        );
+    }
+
     #[test]
     fn editor_border_color_tracks_thinking_level() {
         use model::ThinkingLevel;
