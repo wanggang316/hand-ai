@@ -151,13 +151,25 @@ impl SessionSetup {
             tools::create_default_tools(&cwd)
         };
 
+        // --append-system-prompt and --system-prompt both auto-load from
+        // disk when the value resolves to an existing file. Mirrors
+        // pi-mono's resolvePromptInput: arg is a file path → read it;
+        // otherwise treat as literal text. Silent fallthrough to literal
+        // on read errors (with a stderr warning) so a transient FS issue
+        // doesn't kill the run.
+        let custom_system_prompt = args.system_prompt.as_deref().map(resolve_prompt_input);
+        let custom_guidelines = args
+            .append_system_prompt
+            .as_deref()
+            .map(resolve_prompt_input);
+
         Ok(Self {
             cwd,
             model: resolved.model,
             stream_options,
             agent_tools,
-            custom_system_prompt: args.system_prompt.clone(),
-            custom_guidelines: args.append_system_prompt.clone(),
+            custom_system_prompt,
+            custom_guidelines,
             no_session: args.no_session,
             no_context_files: args.no_context_files,
             session_dir: args.session_dir.clone(),
@@ -185,6 +197,37 @@ impl SessionSetup {
             no_skills: self.no_skills,
         }
     }
+}
+
+/// Pi-mono `resolvePromptInput` parity: if `input` resolves to an
+/// existing file on disk, return that file's contents; otherwise return
+/// `input` verbatim as the literal prompt text. A read error (e.g.
+/// permission denied on an existing path) emits a stderr warning and
+/// falls through to the literal value rather than aborting setup.
+///
+/// Used for both `--system-prompt` and `--append-system-prompt` so
+/// users can pin guidelines/prompts in a file and feed the path on
+/// the CLI without an `@` sigil.
+pub(crate) fn resolve_prompt_input(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+    let path = std::path::Path::new(input);
+    if path.exists()
+        && let Ok(meta) = std::fs::metadata(path)
+        && meta.is_file()
+    {
+        match std::fs::read_to_string(path) {
+            Ok(content) => return content,
+            Err(e) => {
+                eprintln!(
+                    "Warning: could not read prompt file {}: {e}",
+                    path.display()
+                );
+            }
+        }
+    }
+    input.to_string()
 }
 
 /// Build the agent tool list for a comma-separated `--tools` argument.
@@ -353,6 +396,45 @@ mod tests {
             cfg.session_dir.as_deref(),
             Some(std::path::Path::new("/tmp/custom-sessions")),
         );
+    }
+
+    /// Pi-mono parity: --system-prompt and --append-system-prompt
+    /// auto-load file contents when the value resolves to an existing
+    /// file. Non-file values pass through as literal text.
+    #[test]
+    fn resolve_prompt_input_reads_existing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "hand-prompt-load-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "loaded from disk").unwrap();
+        let got = resolve_prompt_input(&path.display().to_string());
+        assert_eq!(got, "loaded from disk");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn resolve_prompt_input_passes_literal_text_through() {
+        let got = resolve_prompt_input("just a sentence, not a path");
+        assert_eq!(got, "just a sentence, not a path");
+    }
+
+    #[test]
+    fn resolve_prompt_input_passes_missing_path_through_as_text() {
+        // A path-shaped string that doesn't exist becomes the literal
+        // text — pi-mono's resolvePromptInput drops back to the input
+        // in that case rather than erroring.
+        let got = resolve_prompt_input("/definitely/not/a/real/path/zz.md");
+        assert_eq!(got, "/definitely/not/a/real/path/zz.md");
+    }
+
+    #[test]
+    fn resolve_prompt_input_empty_stays_empty() {
+        assert_eq!(resolve_prompt_input(""), "");
     }
 
     /// `--session <id>` must be accepted as a pi-mono-compat alias for
