@@ -483,6 +483,45 @@ impl InteractiveMode {
             ListenerResult::pass()
         }));
 
+        // Ctrl+V listener: read an image from the system clipboard, write
+        // it to a temp file, and insert the path at the cursor. Pi-mono
+        // parity item M4.2. The actual clipboard read + file write runs
+        // off-thread (arboard / tempfile are sync) and the resulting path
+        // is inserted via the editor's Arc handle.
+        let chat_for_img = Arc::clone(&chat);
+        let editor_for_img = Arc::clone(&editor);
+        let render_for_img: Arc<dyn Fn() + Send + Sync + 'static> =
+            Arc::new(tui.render_handle());
+        tui.add_input_listener(Box::new(move |event: &InputEvent| {
+            if let InputEvent::Key(key) = event
+                && matches!(&key.name, KeyName::Char('v'))
+                && key.modifiers.ctrl
+            {
+                let chat_clone = Arc::clone(&chat_for_img);
+                let editor_clone = Arc::clone(&editor_for_img);
+                let render_clone = Arc::clone(&render_for_img);
+                std::thread::spawn(move || match handle_clipboard_image_paste() {
+                    Ok(Some(path)) => {
+                        if let Ok(mut e) = editor_clone.lock() {
+                            e.insert_text(&path);
+                        }
+                        render_clone();
+                    }
+                    Ok(None) => {}
+                    Err(e) => push_status(
+                        &chat_clone,
+                        format!("[clipboard image paste failed: {e}]"),
+                        Some(RED_FG),
+                    ),
+                });
+                return ListenerResult {
+                    consume: true,
+                    data: None,
+                };
+            }
+            ListenerResult::pass()
+        }));
+
         // Escape listener: cancel the in-flight agent turn (HTTP call,
         // tool execution, retry, etc). Only fires when a loader is mounted
         // — otherwise Escape falls through so the editor can use it for
@@ -945,6 +984,37 @@ enum ProgressState {
     Indeterminate,
     /// Error / failure state — red bar.
     Error,
+}
+
+/// M4.2 — Ctrl+V clipboard-image handler. Reads an image from the system
+/// clipboard via `arboard` (re-encoded to PNG), writes it to a temp file
+/// named `hand-clipboard-<uuid>.png`, and returns the absolute path so the
+/// driver can insert it at the cursor. Returns `Ok(None)` when the
+/// clipboard exists but doesn't hold an image — the common "you Ctrl+V'd
+/// with text on the clipboard" case.
+fn handle_clipboard_image_paste() -> Result<Option<String>, String> {
+    let image = match crate::utils::clipboard_image::read_clipboard_image() {
+        Ok(Some(img)) => img,
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let ext =
+        crate::utils::clipboard_image::extension_for_image_mime_type(&image.mime_type)
+            .unwrap_or("png");
+    let tmp_dir = std::env::temp_dir();
+    // Cheap unique suffix — nanos since UNIX epoch plus a process-local
+    // counter. We don't need cryptographic uniqueness, just enough to
+    // avoid stomping across rapid pastes.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let file_path = tmp_dir.join(format!("hand-clipboard-{ts}-{n}.{ext}"));
+    std::fs::write(&file_path, &image.bytes).map_err(|e| e.to_string())?;
+    Ok(Some(file_path.to_string_lossy().to_string()))
 }
 
 /// M4.3 — paste-transform: when a terminal pastes a file-drop payload
