@@ -1033,18 +1033,24 @@ fn parse_streaming_json(input: &str) -> Value {
     if trimmed.is_empty() {
         return serde_json::json!({});
     }
-    serde_json::from_str(input).unwrap_or_else(|_| {
-        if trimmed.starts_with('{') {
-            // Truncated mid-stream object — degrade to empty object rather
-            // than passing fragmentary JSON downstream.
-            serde_json::json!({})
-        } else {
-            // Genuinely non-JSON payload (e.g. some providers send the
-            // arguments as a bare string for single-arg tools). Preserve
-            // as a JSON string so the agent can still see what was sent.
-            Value::String(input.to_string())
-        }
-    })
+    if let Ok(v) = serde_json::from_str::<Value>(input) {
+        return v;
+    }
+    // Retry with pi-mono's repair pass — fixes raw control bytes and
+    // invalid backslash escapes inside string literals (pi-mono #1022).
+    if let Some(v) = crate::transform::parse_json_with_repair(input) {
+        return v;
+    }
+    if trimmed.starts_with('{') {
+        // Truncated mid-stream object — degrade to empty object rather
+        // than passing fragmentary JSON downstream.
+        serde_json::json!({})
+    } else {
+        // Genuinely non-JSON payload (e.g. some providers send the
+        // arguments as a bare string for single-arg tools). Preserve
+        // as a JSON string so the agent can still see what was sent.
+        Value::String(input.to_string())
+    }
 }
 
 fn map_thinking_level(level: ThinkingLevel) -> openai_rust::types::ReasoningEffort {
@@ -1351,6 +1357,20 @@ mod tests {
     fn parse_streaming_json_empty_input_returns_empty_object() {
         let result = parse_streaming_json("");
         assert_eq!(result, serde_json::json!({}));
+    }
+
+    /// Tool-call argument streams sometimes contain raw control bytes or
+    /// invalid backslash escapes from the model. Plain `from_str` rejects
+    /// them and historically dropped the entire payload to `{}`, silently
+    /// breaking the tool call. The repair pass (mirrors pi-mono #1022) lets
+    /// us still recover the structured args.
+    #[test]
+    fn parse_streaming_json_recovers_malformed_payload_via_repair() {
+        // Raw tab inside the string + invalid `\H` escape.
+        let input = "{\"path\":\"A\\H\",\"text\":\"col1\tcol2\"}";
+        let result = parse_streaming_json(input);
+        assert_eq!(result["path"], "A\\H");
+        assert_eq!(result["text"], "col1\tcol2");
     }
 
     /// Whitespace-only input is treated the same as empty — the model

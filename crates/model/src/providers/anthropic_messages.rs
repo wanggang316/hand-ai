@@ -798,10 +798,18 @@ async fn parse_sse_stream(
                                 });
                             }
                             ContentBlockState::ToolCall(mut tc, args_buf) => {
-                                // Final parse of accumulated JSON
+                                // Final parse of accumulated JSON. Models
+                                // sometimes emit raw control bytes or invalid
+                                // backslash escapes inside `input_json_delta`
+                                // payloads; fall back to the repair pass so
+                                // we don't silently drop the entire tool call
+                                // to `{}`. See pi-mono issue #1022 /
+                                // anthropic-sse-parsing.test.ts.
                                 if !args_buf.is_empty() {
-                                    tc.arguments = serde_json::from_str(&args_buf)
-                                        .unwrap_or(serde_json::json!({}));
+                                    tc.arguments = crate::transform::parse_json_with_repair(
+                                        &args_buf,
+                                    )
+                                    .unwrap_or(serde_json::json!({}));
                                 }
                                 if let Some(AssistantContentBlock::ToolCall(out_tc)) =
                                     output.content.get_mut(index)

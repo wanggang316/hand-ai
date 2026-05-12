@@ -84,6 +84,98 @@ pub fn normalize_tool_call_id_for_anthropic(id: &str) -> String {
 /// behavior); other APIs default to `false`.
 ///
 /// An explicit `Compat::AnthropicMessages` override always wins.
+/// Repair a JSON payload that may contain raw control characters and
+/// invalid backslash escapes inside string literals.
+///
+/// Streaming providers (notably Anthropic with `input_json_delta`) sometimes
+/// emit tool-call arguments containing literal `\t`/`\n`/`\r` bytes or
+/// invalid escape sequences such as `\H`. Plain `serde_json::from_str` fails
+/// on these and we'd otherwise drop the entire payload to `{}`, silently
+/// breaking the tool call. This mirrors pi-mono's `repairJson` so the same
+/// arguments round-trip through hand.
+pub fn repair_json(json: &str) -> String {
+    const VALID_ESCAPES: &[char] = &['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'];
+    let chars: Vec<char> = json.chars().collect();
+    let mut out = String::with_capacity(json.len());
+    let mut in_string = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+        if !in_string {
+            out.push(ch);
+            if ch == '"' {
+                in_string = true;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            out.push(ch);
+            in_string = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            if i + 1 >= chars.len() {
+                out.push_str("\\\\");
+                i += 1;
+                continue;
+            }
+            let next = chars[i + 1];
+            if next == 'u' && i + 5 < chars.len() {
+                let hex: String = chars[i + 2..i + 6].iter().collect();
+                if hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    out.push_str("\\u");
+                    out.push_str(&hex);
+                    i += 6;
+                    continue;
+                }
+            }
+            if VALID_ESCAPES.contains(&next) {
+                out.push('\\');
+                out.push(next);
+                i += 2;
+                continue;
+            }
+            // Invalid escape: double the backslash and keep the original
+            // char on the next iteration so it can be control-escaped if
+            // needed.
+            out.push_str("\\\\");
+            i += 1;
+            continue;
+        }
+        let cp = ch as u32;
+        if cp < 0x20 {
+            match ch {
+                '\u{08}' => out.push_str("\\b"),
+                '\u{0c}' => out.push_str("\\f"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ => out.push_str(&format!("\\u{:04x}", cp)),
+            }
+        } else {
+            out.push(ch);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Parse a JSON payload, retrying with [`repair_json`] on failure. Returns
+/// `None` if both passes fail.
+pub fn parse_json_with_repair(json: &str) -> Option<serde_json::Value> {
+    if let Ok(v) = serde_json::from_str(json) {
+        return Some(v);
+    }
+    let repaired = repair_json(json);
+    if repaired != json {
+        serde_json::from_str(&repaired).ok()
+    } else {
+        None
+    }
+}
+
 pub fn supports_eager_tool_input_streaming(model: &Model) -> bool {
     if let Some(Compat::AnthropicMessages(AnthropicMessagesCompat {
         supports_eager_tool_input_streaming: Some(value),
@@ -704,5 +796,78 @@ mod tests {
         {
             assert!(tc.thought_signature.is_none());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON repair (pi-mono parity: utils/json-parse.ts)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn repair_passes_through_valid_json() {
+        let input = r#"{"key":"value","n":42}"#;
+        assert_eq!(repair_json(input), input);
+    }
+
+    #[test]
+    fn repair_escapes_raw_tab_inside_string() {
+        let input = "{\"text\":\"col1\tcol2\"}";
+        let repaired = repair_json(input);
+        assert_eq!(repaired, r#"{"text":"col1\tcol2"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&repaired).unwrap();
+        assert_eq!(parsed["text"], "col1\tcol2");
+    }
+
+    #[test]
+    fn repair_escapes_raw_newline_and_carriage_return() {
+        let input = "{\"text\":\"a\nb\rc\"}";
+        let parsed: serde_json::Value = serde_json::from_str(&repair_json(input)).unwrap();
+        assert_eq!(parsed["text"], "a\nb\rc");
+    }
+
+    #[test]
+    fn repair_doubles_invalid_backslash_escape() {
+        let input = r#"{"path":"A\H"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(&repair_json(input)).unwrap();
+        // \H is invalid → repaired as literal "\H" (two chars: backslash + H).
+        assert_eq!(parsed["path"], "A\\H");
+    }
+
+    #[test]
+    fn repair_preserves_valid_unicode_escape() {
+        let input = r#"{"s":"é"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(&repair_json(input)).unwrap();
+        assert_eq!(parsed["s"], "é");
+    }
+
+    #[test]
+    fn repair_handles_trailing_backslash() {
+        let input = "{\"s\":\"a\\";
+        let repaired = repair_json(input);
+        // Trailing lone backslash gets doubled. Result still isn't valid JSON
+        // (truncated mid-string), but it's no longer malformed in a way that
+        // poisons later passes.
+        assert!(repaired.ends_with("\\\\"));
+    }
+
+    #[test]
+    fn repair_pi_1022_anthropic_tool_payload() {
+        // Exact payload from pi-mono's anthropic-sse-parsing test:
+        // path="A\H" (invalid escape) and text="col1<TAB>col2" (raw control).
+        let input = "{\"path\":\"A\\H\",\"text\":\"col1\tcol2\"}";
+        let parsed = parse_json_with_repair(input).expect("must repair successfully");
+        assert_eq!(parsed["path"], "A\\H");
+        assert_eq!(parsed["text"], "col1\tcol2");
+    }
+
+    #[test]
+    fn parse_json_with_repair_returns_none_on_truncated_input() {
+        // Repair can't conjure a closing brace.
+        assert!(parse_json_with_repair("{\"k\":").is_none());
+    }
+
+    #[test]
+    fn parse_json_with_repair_passes_clean_input_through() {
+        let v = parse_json_with_repair(r#"{"k":1}"#).unwrap();
+        assert_eq!(v["k"], 1);
     }
 }
