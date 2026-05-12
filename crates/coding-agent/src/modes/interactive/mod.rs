@@ -19,6 +19,7 @@ pub mod components;
 pub mod driver;
 pub mod event_dispatch;
 pub mod slash_commands;
+pub mod syntax_highlight;
 pub mod theme;
 
 pub use driver::{InteractiveError, InteractiveMode};

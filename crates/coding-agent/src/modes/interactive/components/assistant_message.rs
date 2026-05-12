@@ -133,6 +133,9 @@ impl AssistantMessageComponent {
             match block {
                 AssistantContentBlock::Text(t) if !t.text.trim().is_empty() => {
                     let mut md = MarkdownComponent::new(t.text.trim().to_string());
+                    md.set_theme(
+                        crate::modes::interactive::syntax_highlight::default_markdown_theme(),
+                    );
                     md.set_default_style(DefaultTextStyle::default());
                     container.add_child(Box::new(md));
                 }
@@ -146,6 +149,9 @@ impl AssistantMessageComponent {
                         ))));
                     } else {
                         let mut md = MarkdownComponent::new(t.thinking.trim().to_string());
+                        md.set_theme(
+                            crate::modes::interactive::syntax_highlight::default_markdown_theme(),
+                        );
                         md.set_default_style(DefaultTextStyle {
                             fg: Some(Color::Named(NamedColor::BrightBlack)),
                             bg: None,

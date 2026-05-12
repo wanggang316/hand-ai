@@ -6,10 +6,20 @@
 //! are translated to ANSI on render. Plain-text fallback (no styling) is used
 //! when a theme color is `None`.
 
+use std::sync::Arc;
+
 use crate::theme::{Color, NamedColor};
 use crate::tui::Component;
 use crate::utils;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+/// Closure that highlights a code block by language tag. Returns the list of
+/// already-ANSI-escaped lines (one per source newline) to render inside the
+/// fenced block. When the highlighter cannot handle the language it should
+/// return the input split on newlines — the renderer adds the default
+/// foreground color itself.
+pub type CodeHighlighter =
+    Arc<dyn Fn(&str, Option<&str>) -> Vec<String> + Send + Sync + 'static>;
 
 // ---------------------------------------------------------------------------
 // Theme + default-style types
@@ -19,7 +29,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 ///
 /// Any field set to `None` falls back to plain text. `heading_fg[i]` colors
 /// the `i+1`-th heading level (index 0 → H1).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MarkdownTheme {
     pub heading_fg: [Option<Color>; 6],
     pub heading_bold: bool,
@@ -31,6 +41,30 @@ pub struct MarkdownTheme {
     pub list_marker_fg: Option<Color>,
     pub table_header_bold: bool,
     pub table_border_fg: Option<Color>,
+    /// Optional syntax highlighter for fenced code blocks. When set, the
+    /// renderer calls it with the raw code body and the optional language
+    /// tag and uses the returned lines as-is (the highlighter is expected
+    /// to emit ANSI). When unset, code lines fall back to a flat
+    /// `code_fg`-colored render. Mirrors pi-mono's `theme.highlightCode`.
+    pub highlight: Option<CodeHighlighter>,
+}
+
+impl std::fmt::Debug for MarkdownTheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MarkdownTheme")
+            .field("heading_fg", &self.heading_fg)
+            .field("heading_bold", &self.heading_bold)
+            .field("code_bg", &self.code_bg)
+            .field("code_fg", &self.code_fg)
+            .field("link_fg", &self.link_fg)
+            .field("blockquote_fg", &self.blockquote_fg)
+            .field("blockquote_bar_fg", &self.blockquote_bar_fg)
+            .field("list_marker_fg", &self.list_marker_fg)
+            .field("table_header_bold", &self.table_header_bold)
+            .field("table_border_fg", &self.table_border_fg)
+            .field("highlight", &self.highlight.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 impl Default for MarkdownTheme {
@@ -53,6 +87,7 @@ impl Default for MarkdownTheme {
             list_marker_fg: Some(Color::Named(NamedColor::Cyan)),
             table_header_bold: true,
             table_border_fg: Some(Color::Named(NamedColor::BrightBlack)),
+            highlight: None,
         }
     }
 }
@@ -192,6 +227,11 @@ struct RenderState {
     list_stack: Vec<ListFrame>,
     heading_level: Option<u8>,
     in_code_block: bool,
+    /// Buffered raw code-block text. Flushed in TagEnd::CodeBlock so the
+    /// highlighter (if any) can see the entire block at once.
+    code_buffer: String,
+    /// Language tag from the fenced opener, if any. Lower-cased ASCII.
+    code_lang: Option<String>,
     blockquote_depth: usize,
     table: Option<TableState>,
     in_table_cell: bool,
@@ -352,9 +392,13 @@ fn start_tag(tag: Tag<'_>, state: &mut RenderState, ctx: &mut RenderCtx) {
             state.in_code_block = true;
             state.flush_paragraph_line();
             let lang = match &kind {
-                CodeBlockKind::Fenced(lang) if !lang.is_empty() => Some(lang.to_string()),
+                CodeBlockKind::Fenced(lang) if !lang.is_empty() => {
+                    Some(lang.to_string().to_ascii_lowercase())
+                }
                 _ => None,
             };
+            state.code_lang = lang.clone();
+            state.code_buffer.clear();
             let border = code_border(ctx);
             if let Some(lang) = lang {
                 state.lines.push(format!("{border}# lang: {lang}\x1b[0m"));
@@ -473,7 +517,38 @@ fn end_tag(tag: TagEnd, state: &mut RenderState, ctx: &mut RenderCtx) {
         TagEnd::CodeBlock => {
             state.in_code_block = false;
             state.flush_paragraph_line();
+            // Flush the buffered code body, either via the highlighter
+            // closure (when the theme provides one) or via the legacy
+            // single-color render. Splitting here gives the highlighter a
+            // whole-block view so it can do multi-line stateful tokens
+            // (e.g. `/*...*/` comments) without buffering itself.
             let border = code_border(ctx);
+            let body = std::mem::take(&mut state.code_buffer);
+            let lang = state.code_lang.take();
+            let highlighted: Option<Vec<String>> = ctx
+                .theme
+                .highlight
+                .as_ref()
+                .map(|h| h(&body, lang.as_deref()));
+            let code_fg = ctx
+                .theme
+                .code_fg
+                .as_ref()
+                .map(|c| c.to_fg_ansi())
+                .unwrap_or_else(|| "\x1b[37m".to_string());
+            let rendered_lines: Vec<String> = match highlighted {
+                Some(lines) => lines
+                    .into_iter()
+                    .map(|line| format!("{border}│\x1b[0m {line}\x1b[0m"))
+                    .collect(),
+                None => body
+                    .lines()
+                    .map(|line| format!("{border}│\x1b[0m {code_fg}{line}\x1b[0m"))
+                    .collect(),
+            };
+            for line in rendered_lines {
+                state.lines.push(line);
+            }
             state.lines.push(format!(
                 "{border}└───────────────────────────────────┘\x1b[0m"
             ));
@@ -553,20 +628,10 @@ fn end_tag(tag: TagEnd, state: &mut RenderState, ctx: &mut RenderCtx) {
 
 fn on_text(text: &str, state: &mut RenderState, ctx: &mut RenderCtx) {
     if state.in_code_block {
-        let border = code_border(ctx);
-        for line in text.lines() {
-            let mut out = String::new();
-            out.push_str(&border);
-            out.push_str("│\x1b[0m ");
-            if let Some(c) = &ctx.theme.code_fg {
-                out.push_str(&c.to_fg_ansi());
-            } else {
-                out.push_str("\x1b[37m");
-            }
-            out.push_str(line);
-            out.push_str("\x1b[0m");
-            state.lines.push(out);
-        }
+        // Buffer the raw block body; rendering happens in TagEnd::CodeBlock
+        // so the highlighter (if any) gets the entire block at once.
+        let _ = ctx; // ctx is still passed for symmetry with future hooks.
+        state.code_buffer.push_str(text);
         return;
     }
     state.append_text(text);
@@ -870,6 +935,43 @@ mod tests {
         let lines = md.render(80);
         let joined = lines.join("\n");
         assert!(strip(&joined).contains("# lang: rust"));
+    }
+
+    #[test]
+    fn test_code_block_highlight_hook_replaces_body() {
+        // The highlight hook receives the full block body and language and
+        // returns one ANSI-formatted line per input line. We verify the
+        // hook is invoked with the right inputs and its output reaches the
+        // rendered lines verbatim.
+        use std::sync::Mutex;
+        let captured: Arc<Mutex<Option<(String, Option<String>)>>> =
+            Arc::new(Mutex::new(None));
+        let cap2 = Arc::clone(&captured);
+        let hook: CodeHighlighter = Arc::new(move |code: &str, lang: Option<&str>| {
+            *cap2.lock().unwrap() = Some((code.to_string(), lang.map(|s| s.to_string())));
+            code.lines()
+                .map(|l| format!("\x1b[35m{l}\x1b[0m"))
+                .collect()
+        });
+        let mut md = MarkdownComponent::new("```ts\nconst x = 1;\nconst y = 2;\n```");
+        let mut theme = MarkdownTheme::default();
+        theme.highlight = Some(hook);
+        md.set_theme(theme);
+        let lines = md.render(80);
+        let joined = lines.join("\n");
+        // The hook was invoked with the buffered body (including trailing
+        // newline from pulldown-cmark) and the lowercased language tag.
+        let (body, lang) = captured.lock().unwrap().clone().expect("hook invoked");
+        assert_eq!(lang.as_deref(), Some("ts"));
+        assert!(body.contains("const x = 1;"));
+        assert!(body.contains("const y = 2;"));
+        // The magenta SGR (35) from the hook output reaches the rendered
+        // line. The default code_fg color path is bypassed.
+        assert!(joined.contains("\x1b[35m"), "missing hook color in {joined:?}");
+        // Both code lines render.
+        let stripped = strip(&joined);
+        assert!(stripped.contains("const x = 1;"));
+        assert!(stripped.contains("const y = 2;"));
     }
 
     #[test]
