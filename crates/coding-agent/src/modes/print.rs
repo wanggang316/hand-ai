@@ -457,6 +457,18 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
                     content,
                 );
             }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // Non-UTF-8 (likely a binary file e.g. image). Pi-mono
+                // supports image @file attachments via base64 + image
+                // content blocks; hand's --prompt API is currently
+                // text-only, so surface a clean error pointing at the
+                // problem path instead of the cryptic
+                // "stream did not contain valid UTF-8" raw IO message.
+                return Err(format!(
+                    "Cannot attach {}: binary files (e.g. images) are not yet supported by `--prompt @<path>` — text attachments only for now",
+                    abs.display()
+                ));
+            }
             Err(e) => {
                 return Err(format!(
                     "Could not read file {}: {e}",
@@ -578,6 +590,33 @@ mod tests {
             "expected pi-mono-style error, got: {err}"
         );
         assert!(err.contains("definitely-not-a-real-path-xyz-12345"));
+    }
+
+    #[test]
+    fn at_mentions_binary_file_returns_clear_error() {
+        // Write a non-UTF-8 byte sequence (invalid lone high surrogate
+        // start, etc.). std::fs::read_to_string fails with
+        // ErrorKind::InvalidData which our handler routes to a clear
+        // "binary not supported" message instead of leaking the raw
+        // "stream did not contain valid UTF-8" text.
+        let dir = std::env::temp_dir().join(format!(
+            "hand-bin-at-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("binary.bin");
+        std::fs::write(&path, &[0xFF, 0xFE, 0xFD, 0x00, 0x01]).unwrap();
+        let prompt = format!("@{} describe", path.display());
+        let err = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap_err();
+        assert!(
+            err.contains("binary files"),
+            "expected binary-files hint, got: {err}"
+        );
+        assert!(err.contains(&path.display().to_string()));
     }
 
     #[test]
