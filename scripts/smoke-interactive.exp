@@ -1,0 +1,128 @@
+#!/usr/bin/expect -f
+# End-to-end PTY smoke test for the interactive TUI.
+#
+# Exercises the slash commands + key bindings that depend on full
+# InputEvent::Key dispatch (which `tc pane send-key` partially supports
+# today). Run after any change to the picker / editor / slash-command
+# subsystem.
+#
+# Usage:
+#   ./scripts/smoke-interactive.exp [path/to/hand]
+# Default binary path is target/debug/hand. Requires ~/.config/secrets.env
+# with an OPENROUTER_API_KEY for the deepseek-v4-flash baseline.
+
+set timeout 60
+# Bump the expect match buffer (default 2 KiB) — the scoped-models picker
+# alone streams ~50 KiB of bedrock/openrouter model rows, which can push
+# subsequent matches past the buffer head.
+match_max 200000
+log_file -noappend /tmp/hand-smoke.log
+
+set hand_bin [lindex $argv 0]
+if {$hand_bin eq ""} { set hand_bin "./target/debug/hand" }
+
+set fails 0
+set results_path "/tmp/hand-smoke.results"
+set rfh [open $results_path "w"]
+proc check {label cond} {
+    upvar fails fails
+    upvar rfh rfh
+    if {$cond} {
+        puts $rfh "  PASS  $label"
+    } else {
+        puts $rfh "  FAIL  $label"
+        incr fails
+    }
+}
+proc section {name} {
+    upvar rfh rfh
+    puts $rfh "\n\[$name\]"
+}
+
+spawn bash -c "stty cols 120 rows 40; source ~/.config/secrets.env && exec $hand_bin --provider openrouter -m deepseek/deepseek-v4-flash --no-tools"
+
+# Wait for the welcome banner.
+expect {
+    -re "v0\\.1\\.0" {}
+    timeout { puts "FAIL: welcome never printed"; exit 2 }
+}
+sleep 1
+
+# --- M5.5: Ctrl+T toggles hide-thinking ----------------------------------
+section "M5.5 Ctrl+T toggle"
+send -- "\x14"
+expect {
+    -re "thinking blocks: hidden" { check "hidden banner"  1 }
+    timeout                        { check "hidden banner"  0 }
+}
+send -- "\x14"
+expect {
+    -re "thinking blocks: visible" { check "visible banner" 1 }
+    timeout                        { check "visible banner" 0 }
+}
+sleep 0.5
+
+# --- M4.4: /tree picker ---------------------------------------------------
+section "M4.4 /tree picker"
+send -- "/tree\r"
+expect {
+    -re "Session Tree" { check "picker mounts" 1 }
+    timeout            { check "picker mounts" 0 }
+}
+# Arrow down + Enter should pick the second row.
+send -- "\x1b\[B"
+sleep 0.3
+send -- "\r"
+expect {
+    -re "\\\[/tree picked:" { check "Enter picks row" 1 }
+    timeout                  { check "Enter picks row" 0 }
+}
+
+# Reopen and dismiss with Escape.
+send -- "/tree\r"
+sleep 0.5
+send -- "\x1b"
+expect {
+    -re "\\\[/tree cancelled\\\]" { check "Escape cancels"   1 }
+    timeout                        { check "Escape cancels"   0 }
+}
+
+# --- M4.5: /scoped-models picker -----------------------------------------
+section "M4.5 /scoped-models picker"
+send -- "/scoped-models\r"
+expect {
+    -re "Model Configuration" { check "picker mounts" 1 }
+    timeout                    { check "picker mounts" 0 }
+}
+send -- "\x1b"
+expect {
+    -re "\\\[/scoped-models cancelled\\\]" { check "Escape cancels" 1 }
+    timeout                                  { check "Escape cancels" 0 }
+}
+
+# NOTE: deliberately do not assert post-picker slash command output here.
+# `expect` accumulates buffer state across the streaming overlays above
+# (scoped-models alone emits ~50 KiB of row data). Even with `match_max`
+# bumped, subsequent chat-status banners after the pickers race the
+# differential renderer in ways that aren't worth fighting in a harness —
+# slash command dispatch is covered by unit tests in driver.rs and the
+# isolated /diagnostics + /thinking checks worked end-to-end in tc.
+
+# Quit cleanly.
+send -- "\x04"
+expect eof
+
+close $rfh
+puts "\n=================="
+puts "Results: $results_path"
+# Stream the results file to stdout so callers see them inline.
+set fh [open $results_path "r"]
+while {[gets $fh line] >= 0} { puts $line }
+close $fh
+if {$fails == 0} {
+    puts "OK: all checks passed"
+    exit 0
+} else {
+    puts "FAIL: $fails check(s) failed (PTY log: /tmp/hand-smoke.log)"
+    exit 1
+}
