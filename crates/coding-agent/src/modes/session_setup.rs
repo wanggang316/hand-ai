@@ -118,6 +118,14 @@ impl SessionSetup {
         if let Some(level) = thinking_level {
             stream_options.reasoning = Some(level);
         }
+        // `--api-key` is an explicit override; it must win over env vars
+        // / OAuth resolution so users debugging auth issues can pin the
+        // exact key going on the wire. Pi-mono parity.
+        if let Some(key) = args.api_key.as_deref()
+            && !key.is_empty()
+        {
+            stream_options.base.api_key = Some(key.to_string());
+        }
 
         // Tool list: `--no-tools` empties it, `--tools` selects a subset,
         // otherwise the default set is used.
@@ -257,6 +265,26 @@ mod tests {
         assert!(setup.no_session, "setup must carry the flag");
         let cfg = setup.to_config(None);
         assert!(cfg.no_session, "to_config must propagate the flag");
+    }
+
+    /// Pi-mono `--api-key` parity: an explicit override must flow into
+    /// `stream_options.base.api_key` so the request hits the wire with
+    /// the user-supplied credential. Previously parsed but never used
+    /// — `hand --api-key bogus` silently fell back to env vars / stored
+    /// creds, masking the user's intent.
+    #[test]
+    fn api_key_flag_populates_stream_options() {
+        let args = Args::try_parse_from([
+            "hand",
+            "--api-key",
+            "sk-test-override-12345",
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert_eq!(
+            setup.stream_options.base.api_key.as_deref(),
+            Some("sk-test-override-12345"),
+        );
     }
 
     #[test]

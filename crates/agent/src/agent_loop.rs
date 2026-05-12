@@ -381,9 +381,14 @@ async fn stream_assistant_response(
         },
     };
 
-    // Resolve API key dynamically (e.g. for OAuth tokens).
+    // Resolve API key dynamically (e.g. for OAuth tokens). Skip the hook
+    // when stream_options already carries an explicit api_key — the user
+    // has pinned it via `--api-key` and shouldn't have it silently
+    // overwritten by a refresh resolver.
     let mut stream_opts = config.stream_options.clone();
-    if let Some(get_api_key) = &config.get_api_key {
+    if stream_opts.base.api_key.is_none()
+        && let Some(get_api_key) = &config.get_api_key
+    {
         let provider_str = config.model.provider.as_str().to_string();
         if let Some(resolved_key) = get_api_key(provider_str).await {
             stream_opts.base.api_key = Some(resolved_key);
