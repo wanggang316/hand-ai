@@ -1248,7 +1248,43 @@ pub fn apply_background_to_line(line: &str, width: usize, bg: impl Fn(&str) -> S
     if padding_needed > 0 {
         padded.push_str(&" ".repeat(padding_needed));
     }
-    bg(&padded)
+    // Determine the bg open sequence so we can re-arm it after every inner
+    // `\x1b[0m`. We sample by calling the closure with an empty string —
+    // the result is `{open}{}{close}` so the open is the prefix up to where
+    // the empty content sits. See [`apply_background`] for the underlying
+    // motivation.
+    let sample = bg("");
+    let bg_open = extract_bg_open(&sample);
+    let restored = if bg_open.is_empty() {
+        padded
+    } else {
+        restore_bg_after_resets(&padded, bg_open)
+    };
+    bg(&restored)
+}
+
+/// Return the prefix of `sample` up to but excluding the trailing closer.
+///
+/// `bg("")` produces `{open}{close}` (e.g. `\x1b[44m\x1b[49m`); we need
+/// just the open so [`apply_background_to_line`] can splice it back in
+/// after each inner full-reset. If the close is a plain `\x1b[49m` /
+/// `\x1b[0m`, splitting on the first ESC after the open captures the
+/// boundary; otherwise we fall back to returning the whole sample (which
+/// is conservative — re-arming a slightly larger prefix is still
+/// idempotent because subsequent SGRs override prior state).
+fn extract_bg_open(sample: &str) -> &str {
+    // Find the last ESC index; everything before it is the open.
+    let bytes = sample.as_bytes();
+    let mut last_esc: Option<usize> = None;
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == 0x1b {
+            last_esc = Some(i);
+        }
+    }
+    match last_esc {
+        Some(0) | None => sample,
+        Some(idx) => &sample[..idx],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1453,9 +1489,43 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
 /// Legacy helper for callers that pre-format their `bg_code` and `reset` as
 /// strings rather than supplying a closure. For closure-based usage prefer
 /// [`apply_background_to_line`].
+///
+/// **Important:** if `line` contains an inline `\x1b[0m` (full attribute
+/// reset — emitted by virtually every styled span produced by chalk /
+/// markdown / pretty-printers), the bg is killed at that point and every
+/// subsequent column — including the right-pad we just added — paints on
+/// the terminal's default background, producing a white half-stripe inside
+/// the bubble. To keep the row uniform we replace every embedded
+/// full-reset with `\x1b[0m{bg_code}` so the bg re-arms after each inner
+/// span closes. The trailing closer is left to the caller (`reset`).
 pub fn apply_background(line: &str, width: usize, bg_code: &str, reset: &str) -> String {
     let padded = pad_to_width(line, width);
-    format!("{bg_code}{padded}{reset}")
+    let restored = restore_bg_after_resets(&padded, bg_code);
+    format!("{bg_code}{restored}{reset}")
+}
+
+/// Re-arm `bg_code` after every embedded `\x1b[0m` in `line`.
+///
+/// Pulled out of [`apply_background`] so unit tests can verify the
+/// behaviour without going through the full padding pipeline.
+fn restore_bg_after_resets(line: &str, bg_code: &str) -> String {
+    if bg_code.is_empty() {
+        return line.to_string();
+    }
+    const FULL_RESET: &str = "\x1b[0m";
+    if !line.contains(FULL_RESET) {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len() + 16);
+    let mut rest = line;
+    while let Some(idx) = rest.find(FULL_RESET) {
+        let end = idx + FULL_RESET.len();
+        out.push_str(&rest[..end]);
+        out.push_str(bg_code);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Stub for paste-marker-aware grapheme segmentation. Currently yields plain
@@ -1921,6 +1991,50 @@ mod tests {
     fn apply_background_to_line_pads_and_styles() {
         let r = apply_background_to_line("hi", 5, |s| format!("\x1b[44m{s}\x1b[0m"));
         assert_eq!(r, "\x1b[44mhi   \x1b[0m");
+    }
+
+    // --- apply_background bg-restore -------------------------------------
+
+    /// Regression: every embedded `\x1b[0m` inside the wrapped content
+    /// must re-apply `bg_code`. Without that, the trailing padding spaces
+    /// paint on the terminal default background — visible to the user as
+    /// a half-width "white stripe" cutting through the bubble.
+    #[test]
+    fn apply_background_rearms_bg_after_inner_reset() {
+        let content = "\x1b[1mboldhi\x1b[0m"; // closes with full reset
+        let out = apply_background(content, 10, "\x1b[44m", "\x1b[49m");
+        // Outer open at the start.
+        assert!(out.starts_with("\x1b[44m"), "got: {out:?}");
+        // Inner full-reset must be followed immediately by the bg re-arm.
+        let after_reset = "\x1b[0m\x1b[44m";
+        assert!(
+            out.contains(after_reset),
+            "bg not re-armed after inner reset; got: {out:?}"
+        );
+        // The trailing padding (after the inner content closes) must
+        // therefore be styled by `\x1b[44m` — verified by the substring
+        // above, which is the only opportunity for the bg to apply to
+        // those padding spaces.
+        assert!(out.ends_with("\x1b[49m"));
+    }
+
+    #[test]
+    fn apply_background_without_inner_reset_unchanged() {
+        let out = apply_background("hi", 5, "\x1b[44m", "\x1b[0m");
+        // Same shape as before the fix — no spurious re-arm sequences.
+        assert_eq!(out, "\x1b[44mhi   \x1b[0m");
+    }
+
+    #[test]
+    fn restore_bg_after_resets_noop_when_no_reset() {
+        assert_eq!(super::restore_bg_after_resets("hello", "\x1b[44m"), "hello");
+    }
+
+    #[test]
+    fn restore_bg_after_resets_handles_multiple() {
+        let line = "a\x1b[0mb\x1b[0mc";
+        let out = super::restore_bg_after_resets(line, "\x1b[44m");
+        assert_eq!(out, "a\x1b[0m\x1b[44mb\x1b[0m\x1b[44mc");
     }
 
     #[test]
