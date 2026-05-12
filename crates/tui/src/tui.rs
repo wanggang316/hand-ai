@@ -20,7 +20,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time;
 
-use crate::error::TuiResult;
+use crate::error::{TuiError, TuiResult};
 use crate::overlay::{OverlayHandle, OverlayOptions, compose_overlays};
 use crate::render::DiffRenderer;
 use crate::stdin_buffer::StdinBufferEvent;
@@ -737,6 +737,14 @@ impl Tui {
         // it on a previous run.
         let _ = self.shutdown_tx.send(false);
         let shutdown_rx = self.shutdown_tx.subscribe();
+        // Put the terminal into raw mode so individual keystrokes (Esc,
+        // arrows, function keys, modifier combos) arrive at our process
+        // instead of being buffered + echoed by the OS. Without this,
+        // pressing Esc would just print `^[` to the screen via terminal
+        // echo. Restored in shutdown_terminal on the way out.
+        if let Err(e) = self.terminal.enter_raw_mode() {
+            return Err(TuiError::Io(e));
+        }
         tokio::spawn(async move {
             let _ = crate::terminal::run_stdin_reader(event_tx, shutdown_rx).await;
         });
@@ -1028,6 +1036,9 @@ impl Tui {
         // shell could inherit the hidden state.
         self.terminal.show_cursor();
         self.terminal.clear_from_cursor();
+        // Restore cooked mode so the user's shell gets canonical input
+        // back. Ignore errors — we're shutting down anyway.
+        let _ = self.terminal.leave_raw_mode();
     }
 }
 

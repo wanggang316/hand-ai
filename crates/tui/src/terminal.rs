@@ -86,6 +86,23 @@ pub trait Terminal: Send {
     /// Default impl is a no-op — backends that don't cache size (e.g.
     /// in-memory test terminals) need do nothing.
     fn refresh_size(&mut self) {}
+
+    /// Switch the terminal into raw mode (no canonical input processing,
+    /// no echo). The TUI run loop calls this at startup so individual
+    /// keystrokes — including special keys like Esc and arrows — arrive
+    /// at our process instead of being buffered + echoed by the OS.
+    ///
+    /// Default impl is a no-op for non-tty backends (tests, pipes).
+    fn enter_raw_mode(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Restore canonical (cooked) mode. Paired with [`enter_raw_mode`];
+    /// called from the run loop's shutdown path so the user's shell
+    /// inherits a usable terminal.
+    fn leave_raw_mode(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Real terminal implementation using crossterm.
@@ -292,6 +309,14 @@ impl Terminal for ProcessTerminal {
             self.columns = cols;
             self.rows = rows;
         }
+    }
+
+    fn enter_raw_mode(&mut self) -> std::io::Result<()> {
+        ProcessTerminal::enter_raw_mode(self)
+    }
+
+    fn leave_raw_mode(&mut self) -> std::io::Result<()> {
+        ProcessTerminal::leave_raw_mode(self)
     }
 }
 
