@@ -230,10 +230,12 @@ impl SlashCommandTable {
                 SlashCommandAction::ModelByPattern(cmd.args.clone())
             }),
 
-            // Show keybinding hints inline. Mirrors the simple branch in the
-            // legacy line REPL until the dedicated overlay component is wired.
+            // Show keybinding hints inline. Reads the live KeybindingsManager
+            // so user overrides surface here; falls back to a short static
+            // crib of session-level shortcuts that aren't in the
+            // registry-driven Keybinding enum (Enter / Ctrl+C / Ctrl+D / Esc).
             "hotkeys" | "keybindings" => SlashCommandResult::Handled(SlashCommandAction::ShowText(
-                Self::hotkeys_text().to_string(),
+                Self::hotkeys_text(),
             )),
 
             // Show the active model + provider. Stop short of the rich
@@ -355,13 +357,76 @@ Commands:
   /diagnostics         Show diagnostics report"
     }
 
-    fn hotkeys_text() -> &'static str {
-        "\
-Keyboard shortcuts:
-  Enter      Send message
-  Ctrl+C     Cancel current operation / clear input
-  Ctrl+D     Exit the session
-  Esc        Close overlay (model selector etc.)"
+    /// Build the `/hotkeys` text by enumerating the live
+    /// [`KeybindingsManager`] so user overrides show up and additions to
+    /// the registry don't require updating this file. Returns a static
+    /// header (session-level shortcuts that aren't in the registry)
+    /// followed by the resolved bindings, grouped by category.
+    fn hotkeys_text() -> String {
+        use hand_tui::keybindings::{
+            Keybinding, KeybindingDefinition, TUI_KEYBINDINGS, get_keybindings,
+        };
+
+        // Group bindings by id-prefix (`tui.editor.*` etc.) so the output
+        // is readable. Order within each group follows `Keybinding::all()`
+        // declaration order.
+        let manager = get_keybindings();
+        let mut groups: std::collections::BTreeMap<&str, Vec<(Keybinding, Vec<String>, String)>> =
+            std::collections::BTreeMap::new();
+        for (binding, keys) in manager.all() {
+            let id = binding.id();
+            let category = id.splitn(3, '.').nth(1).unwrap_or("other");
+            let key_labels: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let description: String = TUI_KEYBINDINGS
+                .get(id)
+                .and_then(|d: &KeybindingDefinition| d.description.clone())
+                .unwrap_or_else(|| id.to_string());
+            groups
+                .entry(category)
+                .or_default()
+                .push((binding, key_labels, description));
+        }
+
+        let mut out = String::from(
+            "Keyboard shortcuts:\n\n\
+             Session\n  \
+             Enter      Send message\n  \
+             Shift+Enter  Insert newline\n  \
+             Up / Down  History navigation\n  \
+             Ctrl+C     Cancel current turn / clear input\n  \
+             Ctrl+D     Quit\n  \
+             Esc        Cancel running turn / close overlay\n",
+        );
+        for (category, entries) in groups {
+            let header = match category {
+                "editor" => "Editor",
+                "input" => "Input",
+                "select" => "Select",
+                other => other,
+            };
+            out.push_str("\n");
+            out.push_str(header);
+            out.push('\n');
+            let max_keys = entries
+                .iter()
+                .map(|(_, keys, _)| keys.join(", ").chars().count())
+                .max()
+                .unwrap_or(0);
+            for (_binding, keys, description) in entries {
+                let key_str = if keys.is_empty() {
+                    "(disabled)".to_string()
+                } else {
+                    keys.join(", ")
+                };
+                out.push_str(&format!(
+                    "  {:<width$}  {}\n",
+                    key_str,
+                    description,
+                    width = max_keys.max("(disabled)".len())
+                ));
+            }
+        }
+        out
     }
 }
 
@@ -680,6 +745,28 @@ mod tests {
             SlashCommandTable::dispatch(&parsed, &ctx()),
             SlashCommandResult::Handled(SlashCommandAction::Fork(None))
         ));
+    }
+
+    #[test]
+    fn dispatches_hotkeys_includes_registry_bindings() {
+        // /hotkeys reads the live KeybindingsManager so user overrides
+        // and additions to the registry surface here automatically.
+        let parsed = ParsedSlashCommand::parse("/hotkeys").unwrap();
+        let text = match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::ShowText(s)) => s,
+            other => panic!("expected ShowText, got {other:?}"),
+        };
+        // Session header + every category that has bindings registered.
+        assert!(text.contains("Keyboard shortcuts:"), "{text}");
+        assert!(text.contains("Editor"), "missing Editor section: {text}");
+        assert!(text.contains("Input"), "missing Input section: {text}");
+        assert!(text.contains("Select"), "missing Select section: {text}");
+        // Spot-check one editor binding's description — proves we're
+        // reading from TUI_KEYBINDINGS rather than a hand-written list.
+        assert!(
+            text.contains("Move cursor up"),
+            "expected editor cursorUp description, got: {text}"
+        );
     }
 
     #[test]
