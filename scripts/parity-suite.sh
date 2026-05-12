@@ -106,8 +106,9 @@ run_case() {
 mkdir -p /tmp/parity-fix
 echo "alpha" > /tmp/parity-fix/a.txt
 echo "beta" > /tmp/parity-fix/b.txt
+echo "gamma" > /tmp/parity-fix/c.txt
 
-echo "Running parity suite (8 cases, ~3min)…" >&2
+echo "Running parity suite (10 cases, ~4min)…" >&2
 
 # Case 1: trivial math, no tools, no thinking required.
 run_case "math-no-tools" "what is 2+2? answer in one number only."
@@ -132,6 +133,17 @@ run_case "bad-model-exit-1" "hi" </dev/null  # no tools so the runs are fast
 
 # Case 8: empty stdin.
 run_case "empty-stdin" ""
+
+# Case 9: parallel/sequential tool calls — exercises the consecutive
+# ToolResult handling path that previously double-emitted images.
+run_case "tool-three-files" \
+  "read /tmp/parity-fix/a.txt /tmp/parity-fix/b.txt /tmp/parity-fix/c.txt and concatenate the three words in order separated by hyphens" \
+  "read"
+
+# Case 10: bash + read combo — multiple tool kinds in one turn.
+run_case "tool-bash-then-read" \
+  "first run 'echo combo' then read /tmp/parity-fix/a.txt — report both outputs" \
+  "bash,read"
 
 echo
 echo "================ PARITY SUITE RESULTS ================"
