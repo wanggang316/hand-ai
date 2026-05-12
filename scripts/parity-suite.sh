@@ -74,20 +74,25 @@ run_case() {
     echo
   } >> "$logfile"
 
-  # Pass criteria: hand exits successfully AND produces non-empty output
-  # AND the exit codes match. Content matching is too noisy with LLMs;
-  # we only care about structural parity (both succeeded, or both failed).
+  # Pass criteria: exit codes match AND output volume is consistent with pi.
+  # Content matching is too noisy with LLMs; we only check structural parity:
+  #  - both succeeded → hand must be non-empty if pi was non-empty
+  #    (if pi also returned nothing, e.g. empty prompt, hand may match)
+  #  - both failed → structurally consistent
   local outcome="UNKNOWN"
+  local pi_nonempty hand_nonempty
+  pi_nonempty=$(echo "$pi_out" | tr -d '[:space:]')
+  hand_nonempty=$(echo "$hand_out" | tr -d '[:space:]')
   if [[ "$pi_exit" -eq "$hand_exit" ]]; then
     if [[ "$pi_exit" -eq 0 ]]; then
-      # Both succeeded — verify hand has non-empty output.
-      if [[ -n "$(echo "$hand_out" | tr -d '[:space:]')" ]]; then
+      if [[ -z "$pi_nonempty" && -z "$hand_nonempty" ]]; then
+        outcome="PASS (both-empty)"
+      elif [[ -n "$hand_nonempty" ]]; then
         outcome="PASS"
       else
         outcome="FAIL hand-empty"
       fi
     else
-      # Both failed — that's structurally consistent.
       outcome="PASS (both-error)"
     fi
   else
