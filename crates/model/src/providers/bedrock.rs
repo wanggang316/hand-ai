@@ -363,8 +363,19 @@ fn stream_bedrock(
                             }
                     }
                     "contentBlockStop" if !current_tool_name.is_empty() => {
-                        let args: Value = serde_json::from_str(&current_tool_input)
-                            .unwrap_or(Value::Object(Default::default()));
+                        // Repair pass mirrors the other streaming providers
+                        // — malformed tool input shouldn't silently drop the
+                        // whole call to `{}` (pi-mono #1022).
+                        let args: Value = if current_tool_input.is_empty() {
+                            Value::Object(Default::default())
+                        } else {
+                            serde_json::from_str(&current_tool_input)
+                                .ok()
+                                .or_else(|| {
+                                    crate::transform::parse_json_with_repair(&current_tool_input)
+                                })
+                                .unwrap_or(Value::Object(Default::default()))
+                        };
                         output.content.push(AssistantContentBlock::ToolCall(ToolCall {
                             content_type: "tool_call".to_string(),
                             id: current_tool_id.clone(),
