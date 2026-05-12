@@ -1065,7 +1065,7 @@ pub(crate) async fn apply_slash_action(
             }
         }
         SlashCommandAction::OpenResumePicker => {
-            mount_resume_picker(chat, cwd, mounter).await;
+            mount_resume_picker(chat, session, cwd, mounter).await;
         }
         SlashCommandAction::ClearChat => {
             if let Ok(mut list) = chat.lock() {
@@ -1229,10 +1229,24 @@ async fn mount_model_selector(
     let (tx, mut rx) = mpsc::unbounded_channel::<ModelOutcome>();
     let current_model = session.model().clone();
     let all_models: Vec<model::Model> = session.model_registry().all().to_vec();
-    // TODO(parity): scoped models are not yet plumbed through the session
-    // — pi-mono pulls these from the per-cwd settings file. The overlay
-    // works fine with an empty scoped list (scope toggle hidden).
-    let scoped_models: Vec<model::Model> = Vec::new();
+    // Scoped models: read patterns from `settings.enabled_models` and
+    // resolve them against the live model catalogue. Empty patterns ⇒
+    // empty scope (selector hides the toggle), matching pi-mono.
+    let patterns: Vec<String> = session
+        .settings()
+        .current()
+        .enabled_models
+        .clone()
+        .unwrap_or_default();
+    let scoped_models: Vec<model::Model> = if patterns.is_empty() {
+        Vec::new()
+    } else {
+        crate::core::model_resolver::resolve_model_scope(&patterns, &all_models)
+            .models
+            .into_iter()
+            .map(|s| s.model)
+            .collect()
+    };
     let component = ModelSelectorComponent::new(Some(current_model), all_models, scoped_models, tx);
     let handle = match mounter
         .show(Box::new(component), OverlayOptions::default())
@@ -1637,7 +1651,12 @@ fn any_provider_has_credentials(session: &AgentSession) -> bool {
     false
 }
 
-async fn mount_resume_picker(chat: &ChatList, cwd: &Path, mounter: Option<&OverlayMounter>) {
+async fn mount_resume_picker(
+    chat: &ChatList,
+    session: &mut AgentSession,
+    cwd: &Path,
+    mounter: Option<&OverlayMounter>,
+) {
     let Some(mounter) = mounter else {
         push_status(
             chat,
@@ -1667,15 +1686,34 @@ async fn mount_resume_picker(chat: &ChatList, cwd: &Path, mounter: Option<&Overl
     };
     match rx.recv().await {
         Some(SessionSelectorEvent::Selected(path)) => {
-            // TODO(parity): re-open the session in-place. The TS source
-            // calls `SessionManager.open(path)` and swaps the live session;
-            // the Rust port doesn't yet support hot-swap, so for now we
-            // surface the chosen path and let the user restart.
-            push_status(
-                chat,
-                format!("[would resume: {}]", path.display()),
-                Some(YELLOW_FG),
-            );
+            // Swap the AgentSession in-place via `switch_session`. After
+            // success the scrollback is stale (still shows the previous
+            // session's messages) — wipe it and replay the new session's
+            // history so the chat reflects what `session.messages()` now
+            // returns. Pi-mono does the same via `chatContainer.clear()`
+            // followed by `renderSessionContext`.
+            match session.switch_session(&path) {
+                Ok(()) => {
+                    {
+                        let mut list = chat.lock().expect("chat list mutex poisoned");
+                        list.clear();
+                    }
+                    push_welcome_header(chat, session.model());
+                    replay_messages_into(chat, session.messages());
+                    push_status(
+                        chat,
+                        format!("[resumed: {}]", path.display()),
+                        None,
+                    );
+                }
+                Err(e) => {
+                    push_status(
+                        chat,
+                        format!("[/resume failed: {e}]"),
+                        Some(RED_FG),
+                    );
+                }
+            }
         }
         Some(SessionSelectorEvent::Cancelled) | None => {
             push_status(chat, "[/resume cancelled]".to_string(), None);
