@@ -157,6 +157,16 @@ pub struct EditorComponent {
     /// `editor.onSubmit`. The editor buffer is cleared *before* the callback
     /// runs, so the callback can safely mutate UI state.
     on_submit: Option<SubmitCallback>,
+    /// Placeholder text shown when the buffer is empty. Rendered dim and
+    /// truncated to fit the available width. `None` disables the placeholder.
+    placeholder: Option<String>,
+    /// ANSI SGR prefix used for the border when the editor is unfocused.
+    /// `None` keeps the border uncoloured. Mirrors pi-mono's
+    /// `theme.borderColor`.
+    border_color: Option<String>,
+    /// ANSI SGR prefix used for the border when the editor is focused.
+    /// Falls back to [`Self::border_color`] when `None`.
+    focused_border_color: Option<String>,
 }
 
 /// Callback invoked when the user submits the editor (bare Enter). The string
@@ -186,7 +196,46 @@ impl EditorComponent {
             autocomplete_debounce_until: None,
             keybindings: KeybindingsManager::new(),
             on_submit: None,
+            placeholder: None,
+            border_color: None,
+            focused_border_color: None,
         }
+    }
+
+    /// Set the placeholder shown when the buffer is empty.
+    pub fn set_placeholder(&mut self, text: impl Into<String>) {
+        self.placeholder = Some(text.into());
+    }
+
+    /// Builder form of [`Self::set_placeholder`].
+    pub fn with_placeholder(mut self, text: impl Into<String>) -> Self {
+        self.set_placeholder(text);
+        self
+    }
+
+    /// Set the ANSI SGR prefix used to paint the border in the unfocused
+    /// state. The prefix is applied to every border glyph and reset is
+    /// emitted automatically at the end of each line.
+    pub fn set_border_color(&mut self, ansi_prefix: impl Into<String>) {
+        self.border_color = Some(ansi_prefix.into());
+    }
+
+    /// Builder form of [`Self::set_border_color`].
+    pub fn with_border_color(mut self, ansi_prefix: impl Into<String>) -> Self {
+        self.set_border_color(ansi_prefix);
+        self
+    }
+
+    /// Set the ANSI SGR prefix used to paint the border while focused.
+    /// Falls back to [`Self::set_border_color`] when not set.
+    pub fn set_focused_border_color(&mut self, ansi_prefix: impl Into<String>) {
+        self.focused_border_color = Some(ansi_prefix.into());
+    }
+
+    /// Builder form of [`Self::set_focused_border_color`].
+    pub fn with_focused_border_color(mut self, ansi_prefix: impl Into<String>) -> Self {
+        self.set_focused_border_color(ansi_prefix);
+        self
     }
 
     /// Install a callback invoked on bare Enter (no modifiers). The editor
@@ -1004,15 +1053,44 @@ impl Component for EditorComponent {
         }
         .max(1);
 
+        // Resolve the active border color: focused first, else fall back to
+        // the unfocused color, else no styling.
+        let active_border = if self.focused {
+            self.focused_border_color
+                .as_deref()
+                .or(self.border_color.as_deref())
+        } else {
+            self.border_color.as_deref()
+        };
+        let paint_border = |s: String| -> String {
+            match active_border {
+                Some(c) => format!("{c}{s}\x1b[0m"),
+                None => s,
+            }
+        };
+
         if self.border {
-            output.push(format!("┌{}┐", "─".repeat(total_width.saturating_sub(2))));
+            output.push(paint_border(format!(
+                "┌{}┐",
+                "─".repeat(total_width.saturating_sub(2))
+            )));
         }
+
+        // Empty-buffer placeholder: when the buffer is truly empty (one empty
+        // line) and a placeholder is configured, render the cursor marker +
+        // reverse-video block followed by a dim placeholder string.
+        let is_buffer_empty = self.lines.len() == 1 && self.lines[0].is_empty();
+        let render_placeholder = is_buffer_empty && self.placeholder.is_some();
 
         // Build visual rows with grapheme-aware wrapping.
         let mut visual: Vec<String> = Vec::new();
         for (i, raw_line) in self.lines.iter().enumerate() {
             let line_for_render = if i == self.cursor_line {
-                self.compose_line_for_render(raw_line)
+                if render_placeholder {
+                    self.compose_placeholder_line(self.placeholder.as_deref().unwrap_or(""))
+                } else {
+                    self.compose_line_for_render(raw_line)
+                }
             } else {
                 raw_line.clone()
             };
@@ -1020,6 +1098,8 @@ impl Component for EditorComponent {
                 visual.push(v);
             }
         }
+
+        let side = paint_border("│".to_string());
 
         // Apply viewport.
         let view_end = (self.viewport_top + self.viewport_height).min(visual.len());
@@ -1030,7 +1110,7 @@ impl Component for EditorComponent {
                 utils::pad_to_width(line, display_width)
             };
             if self.border {
-                output.push(format!("│ {} │", padded));
+                output.push(format!("{side} {padded} {side}"));
             } else {
                 output.push(padded);
             }
@@ -1038,7 +1118,7 @@ impl Component for EditorComponent {
         for _ in view_end..(self.viewport_top + self.viewport_height) {
             let empty = " ".repeat(display_width);
             if self.border {
-                output.push(format!("│ {} │", empty));
+                output.push(format!("{side} {empty} {side}"));
             } else {
                 output.push(empty);
             }
@@ -1047,11 +1127,11 @@ impl Component for EditorComponent {
         if self.border {
             let info = format!(" {}:{} ", self.cursor_line + 1, self.cursor_col + 1);
             let remaining = total_width.saturating_sub(2 + info.len());
-            output.push(format!(
+            output.push(paint_border(format!(
                 "└{}{info}{}┘",
                 "─".repeat(remaining / 2),
                 "─".repeat(remaining - remaining / 2)
-            ));
+            )));
         }
 
         output
@@ -1087,6 +1167,23 @@ impl EditorComponent {
     /// host [`crate::Tui`] can reposition the hardware cursor for IME
     /// candidate windows. The marker is zero-width and gets stripped by the
     /// Tui before the line hits the terminal.
+    /// Compose the cursor line when the buffer is empty and a placeholder
+    /// is set: the cursor marker + reverse-video cell sits at column 0,
+    /// followed by the dim placeholder text.
+    fn compose_placeholder_line(&self, placeholder: &str) -> String {
+        let marker = if self.focused {
+            crate::tui::CURSOR_MARKER
+        } else {
+            ""
+        };
+        let cursor_cell = if self.focused {
+            "\x1b[7m \x1b[0m"
+        } else {
+            " "
+        };
+        format!("{marker}{cursor_cell}\x1b[2m{placeholder}\x1b[0m")
+    }
+
     fn compose_line_for_render(&self, line: &str) -> String {
         // IME composition path: inline the in-progress string with an
         // underline. Composition handling already prevents a stray cursor
@@ -1610,6 +1707,41 @@ mod tests {
         assert!(lines[0].starts_with('┌'));
         assert!(lines[1].starts_with('│'));
         assert!(lines.last().unwrap().starts_with('└'));
+    }
+
+    #[test]
+    fn editor_placeholder_renders_when_empty_and_hides_when_typing() {
+        let editor = EditorComponent::new()
+            .with_viewport_height(3)
+            .with_border(true)
+            .with_placeholder("Type a message…");
+        let lines = editor.render(40);
+        // Some content row contains the placeholder text.
+        assert!(
+            lines.iter().any(|l| utils::strip_ansi(l).contains("Type a message…")),
+            "expected placeholder in {lines:?}"
+        );
+
+        let mut editor = editor;
+        editor.handle_input(&InputEvent::Raw("h".into()));
+        let lines = editor.render(40);
+        assert!(
+            lines.iter().all(|l| !utils::strip_ansi(l).contains("Type a message…")),
+            "expected placeholder to be hidden after typing"
+        );
+    }
+
+    #[test]
+    fn editor_focused_border_color_is_applied_to_border_glyphs() {
+        let editor = EditorComponent::new()
+            .with_viewport_height(2)
+            .with_border(true)
+            .with_focused_border_color("\x1b[36m");
+        let lines = editor.render(20);
+        // Top border carries the SGR prefix.
+        assert!(lines[0].contains("\x1b[36m"));
+        // Side borders carry it too.
+        assert!(lines[1].contains("\x1b[36m"));
     }
 
     #[test]

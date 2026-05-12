@@ -209,6 +209,9 @@ impl InteractiveMode {
         let editor = EditorComponent::new()
             .with_border(true)
             .with_viewport_height(4)
+            .with_placeholder(EDITOR_PLACEHOLDER)
+            .with_border_color(BORDER_DIM)
+            .with_focused_border_color(BORDER_FOCUS)
             .with_on_submit(move |text: String| {
                 if let Ok(mut p) = pending_for_submit.lock() {
                     p.text = Some(text);
@@ -222,6 +225,8 @@ impl InteractiveMode {
             list: Arc::clone(&chat),
         }));
         let editor_id = tui.root_mut().add_child_with_id(Box::new(editor));
+        tui.root_mut()
+            .add_child_with_id(Box::new(TextComponent::new(build_hint_line())));
         tui.root_mut()
             .add_child_with_id(Box::new(SharedFooterComponent {
                 view: Arc::clone(&footer),
@@ -416,6 +421,24 @@ const ORANGE_FG: &str = "\x1b[38;5;208m";
 const RED_FG: &str = "\x1b[31m";
 /// ANSI reset.
 const RESET: &str = "\x1b[0m";
+/// Dim border color used when the editor is not focused.
+const BORDER_DIM: &str = "\x1b[2;90m";
+/// Cyan border color used when the editor is focused.
+const BORDER_FOCUS: &str = "\x1b[36m";
+/// Placeholder text shown inside the editor while the buffer is empty.
+const EDITOR_PLACEHOLDER: &str = "Type your message — Enter to send, Shift+Enter for newline, / for commands";
+
+/// Build the single dim hint line rendered between the editor and the footer.
+fn build_hint_line() -> String {
+    use super::components::keybinding_hints::raw_key_hint;
+    let hints = [
+        raw_key_hint("↵", "send"),
+        raw_key_hint("⇧↵", "newline"),
+        raw_key_hint("/", "commands"),
+        raw_key_hint("^D", "quit"),
+    ];
+    hints.join("  ")
+}
 
 fn coloured_text(text: impl AsRef<str>, ansi_prefix: Option<&str>) -> TextComponent {
     let body = match ansi_prefix {
