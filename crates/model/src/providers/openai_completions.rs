@@ -682,7 +682,9 @@ pub fn convert_messages(
 
     let mut last_role: Option<String> = None;
 
-    for (i, msg) in context.messages.iter().enumerate() {
+    let mut i = 0;
+    while i < context.messages.len() {
+        let msg = &context.messages[i];
         if compat.requires_assistant_after_tool_result
             && last_role.as_deref() == Some("toolResult")
             && matches!(msg, Message::User(_))
@@ -926,6 +928,12 @@ pub fn convert_messages(
                     last_role = Some("toolResult".to_string());
                 }
 
+                // Skip past the consecutive ToolResults the inner loop just
+                // consumed. Without this the outer loop would re-enter the
+                // second tool result and emit it (with its image batch)
+                // twice — see pi-mono parity test
+                // openai-completions-tool-result-images.test.ts.
+                i = j;
                 continue;
             }
         }
@@ -935,6 +943,7 @@ pub fn convert_messages(
             Message::Assistant(_) => "assistant".to_string(),
             Message::ToolResult(_) => "toolResult".to_string(),
         });
+        i += 1;
     }
 
     params
@@ -1521,6 +1530,100 @@ mod tests {
         let msgs = convert_messages(&model, &context, &compat);
         assert_eq!(msgs.len(), 2);
         assert!(matches!(msgs[0].role, Role::System));
+    }
+
+    /// Parity with pi-mono openai-completions-tool-result-images.test.ts:
+    /// when an assistant turn produces multiple tool_use calls and each tool
+    /// result returns text + image, the converter must emit each result as
+    /// its own `tool` role message (text only) and then batch every image
+    /// into a single trailing synthetic `user` message with `image_url`
+    /// parts — OpenAI Completions rejects images inside `tool` role.
+    #[test]
+    fn convert_messages_batches_tool_result_images_after_consecutive_tools() {
+        use crate::types::{
+            AssistantContentBlock, ImageContent, TextContent, ToolCall, ToolResultContent,
+            ToolResultMessage,
+        };
+
+        let mut model = test_model(Provider::OpenAI);
+        model.input = vec![InputType::Text, InputType::Image];
+        let compat = detect_compat(&model);
+
+        let now = 1_000_000u64;
+        let assistant = AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![
+                AssistantContentBlock::ToolCall(ToolCall::new(
+                    "tool-1",
+                    "read",
+                    serde_json::json!({"path":"img-1.png"}),
+                )),
+                AssistantContentBlock::ToolCall(ToolCall::new(
+                    "tool-2",
+                    "read",
+                    serde_json::json!({"path":"img-2.png"}),
+                )),
+            ],
+            api: model.api,
+            provider: model.provider,
+            model: model.id.clone(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: now,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        };
+
+        let make_tool_result = |id: &str, ts: u64| ToolResultMessage {
+            role: "toolResult".to_string(),
+            tool_call_id: id.to_string(),
+            tool_name: "read".to_string(),
+            content: vec![
+                ToolResultContent::Text(TextContent::new(
+                    "Read image file [image/png]",
+                )),
+                ToolResultContent::Image(ImageContent::new("ZmFrZQ==", "image/png")),
+            ],
+            details: None,
+            is_error: false,
+            timestamp: ts,
+        };
+
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage::new_text("Read the images")),
+                Message::Assistant(assistant),
+                Message::ToolResult(make_tool_result("tool-1", now + 1)),
+                Message::ToolResult(make_tool_result("tool-2", now + 2)),
+            ],
+            tools: None,
+        };
+
+        let msgs = convert_messages(&model, &context, &compat);
+        let roles: Vec<&'static str> = msgs
+            .iter()
+            .map(|m| match m.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+                Role::System => "system",
+            })
+            .collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool", "tool", "user"]);
+
+        let trailing = msgs.last().expect("trailing user message");
+        let parts = match &trailing.content {
+            Content::Array(parts) => parts,
+            other => panic!("expected Array content, got {other:?}"),
+        };
+        let image_count = parts
+            .iter()
+            .filter(|p| matches!(p, ContentPart::ImageUrl { .. }))
+            .count();
+        assert_eq!(image_count, 2, "both images must be batched");
     }
 
     #[test]
