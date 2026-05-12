@@ -38,8 +38,14 @@ pub const DEFAULT_HIDDEN_THINKING_LABEL: &str = "Thinking...";
 /// Component that renders an [`AssistantMessage`].
 pub struct AssistantMessageComponent {
     /// When true, thinking blocks render as a static collapsed label rather
-    /// than their full body.
+    /// than their full body. Local override — only used when
+    /// `shared_hide_flag` is None.
     hide_thinking_block: bool,
+    /// Optional shared toggle. When set, takes precedence over
+    /// `hide_thinking_block` on each render, so a single `Ctrl+T` in the
+    /// driver flips collapsed/expanded across every assistant message in
+    /// the scrollback in one shot (M5.5).
+    shared_hide_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Label shown when a thinking block is collapsed.
     hidden_thinking_label: String,
     /// Latest message handed to the renderer; recomputed on every render so
@@ -53,6 +59,7 @@ impl AssistantMessageComponent {
     pub fn new() -> Self {
         Self {
             hide_thinking_block: false,
+            shared_hide_flag: None,
             hidden_thinking_label: DEFAULT_HIDDEN_THINKING_LABEL.to_string(),
             message: None,
         }
@@ -62,9 +69,31 @@ impl AssistantMessageComponent {
     pub fn with_message(message: AssistantMessage) -> Self {
         Self {
             hide_thinking_block: false,
+            shared_hide_flag: None,
             hidden_thinking_label: DEFAULT_HIDDEN_THINKING_LABEL.to_string(),
             message: Some(message),
         }
+    }
+
+    /// Subscribe to a shared collapse toggle. While set, the local
+    /// `hide_thinking_block` field is ignored — each render reads the
+    /// atomic so a global Ctrl+T in the driver flips every assistant
+    /// message at once.
+    pub fn with_shared_hide_flag(
+        mut self,
+        flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.shared_hide_flag = Some(flag);
+        self
+    }
+
+    /// Resolved collapse state — checks the shared flag when set,
+    /// otherwise the local field.
+    fn resolved_hide_thinking(&self) -> bool {
+        if let Some(flag) = &self.shared_hide_flag {
+            return flag.load(std::sync::atomic::Ordering::Relaxed);
+        }
+        self.hide_thinking_block
     }
 
     /// Toggle the collapsed-thinking state.
@@ -109,7 +138,7 @@ impl AssistantMessageComponent {
                 }
                 AssistantContentBlock::Thinking(t) if !t.thinking.trim().is_empty() => {
                     let has_visible_after = message.content.iter().skip(i + 1).any(visible_content);
-                    if self.hide_thinking_block {
+                    if self.resolved_hide_thinking() {
                         container.add_child(Box::new(TextComponent::new(format!(
                             "{}{}\x1b[0m",
                             italic_dim_prefix(),

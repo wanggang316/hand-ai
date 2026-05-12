@@ -37,10 +37,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use hand_tui::{
-    CombinedAutocompleteProvider, Component, EditorComponent, Focusable, InputEvent, KeyName,
-    ListenerResult, OverlayMounter, OverlayOptions, PathAutocompleteProvider, ProcessTerminal,
-    SettingEntry, SettingValue, SlashCommand as TuiSlashCommand, SlashCommandProvider,
-    TextComponent, Tui, TuiError,
+    CombinedAutocompleteProvider, Component, EditorComponent, Focusable, HandleResult, InputEvent,
+    KeyName, ListenerResult, OverlayMounter, OverlayOptions, PathAutocompleteProvider,
+    ProcessTerminal, SettingEntry, SettingValue, SlashCommand as TuiSlashCommand,
+    SlashCommandProvider, TextComponent, Tui, TuiError,
 };
 use tokio::sync::mpsc;
 
@@ -112,6 +112,42 @@ impl<T: Component + Send + 'static> Component for SharedRender<T> {
     fn render(&self, width: u16) -> Vec<String> {
         let inner = self.inner.lock().expect("shared component mutex poisoned");
         inner.render(width)
+    }
+}
+
+/// Like [`SharedRender`] but also forwards `handle_input` and the
+/// hide/invalidate hooks. Use for components that need to keep receiving
+/// input while the driver holds an out-of-tree mutable handle — namely
+/// the editor (Ctrl+T toggles, Ctrl+G external-edit, per-thinking-level
+/// border tinting).
+struct SharedComponent<T: Component + Send + 'static> {
+    inner: Arc<StdMutex<T>>,
+}
+
+impl<T: Component + Send + 'static> Component for SharedComponent<T> {
+    fn render(&self, width: u16) -> Vec<String> {
+        let inner = self.inner.lock().expect("shared component mutex poisoned");
+        inner.render(width)
+    }
+
+    fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
+        let mut inner = self.inner.lock().expect("shared component mutex poisoned");
+        inner.handle_input(event)
+    }
+
+    fn invalidate(&mut self) {
+        let mut inner = self.inner.lock().expect("shared component mutex poisoned");
+        inner.invalidate();
+    }
+
+    fn set_hidden(&mut self, hidden: bool) {
+        let mut inner = self.inner.lock().expect("shared component mutex poisoned");
+        inner.set_hidden(hidden);
+    }
+
+    fn is_hidden(&self) -> bool {
+        let inner = self.inner.lock().expect("shared component mutex poisoned");
+        inner.is_hidden()
     }
 }
 
@@ -240,6 +276,20 @@ impl InteractiveMode {
             TokenUsageSummary::default(),
         )));
         let pending = Arc::new(StdMutex::new(Pending::default()));
+        // Initialise the process-wide "hide thinking blocks" toggle (M5.5)
+        // from the settings default. The flag itself lives in a static
+        // (see `hide_thinking_flag()` below) so every code path that
+        // builds an `AssistantMessageComponent` can subscribe to it
+        // without threading an `Arc` argument through five layers of
+        // helpers.
+        hide_thinking_flag().store(
+            session
+                .settings()
+                .current()
+                .hide_thinking_block
+                .unwrap_or(false),
+            std::sync::atomic::Ordering::Relaxed,
+        );
 
         // Welcome header at the very top of the scrollback. Compact one-liner
         // with the product name, version, and the most-used keybindings —
@@ -296,6 +346,14 @@ impl InteractiveMode {
             editor.set_autocomplete_provider(Arc::new(combined));
         }
 
+        // Wrap the editor in Arc<Mutex<>> so out-of-tree code (slash
+        // dispatch, input listeners) can mutate it live — needed for
+        // per-thinking-level border color, Ctrl+G external editor, and
+        // Ctrl+T hide-thinking toggle's editor-side feedback. The driver
+        // keeps a handle, the Tui owns a `SharedComponent` wrapper that
+        // delegates render/input.
+        let editor: Arc<StdMutex<EditorComponent>> = Arc::new(StdMutex::new(editor));
+
         // Loader slot — appears between chat and editor while the agent
         // is working / compacting / retrying.
         let loader_slot: SharedLoaderSlot = Arc::new(StdMutex::new(None));
@@ -309,7 +367,9 @@ impl InteractiveMode {
         tui.root_mut().add_child_with_id(Box::new(LoaderSlot {
             slot: Arc::clone(&loader_slot),
         }));
-        let editor_id = tui.root_mut().add_child_with_id(Box::new(editor));
+        let editor_id = tui.root_mut().add_child_with_id(Box::new(SharedComponent {
+            inner: Arc::clone(&editor),
+        }));
         tui.root_mut()
             .add_child_with_id(Box::new(SharedFooterComponent {
                 view: Arc::clone(&footer),
@@ -326,6 +386,75 @@ impl InteractiveMode {
                 if let Ok(mut p) = pending_for_quit.lock() {
                     p.quit = true;
                 }
+                return ListenerResult {
+                    consume: true,
+                    data: None,
+                };
+            }
+            ListenerResult::pass()
+        }));
+
+        // Ctrl+T listener: toggle the process-wide "hide thinking blocks"
+        // flag (M5.5). Flipping the atomic mutates the visible state of
+        // every `AssistantMessageComponent` in scrollback on the next
+        // render because they all subscribe via
+        // `with_shared_hide_flag(hide_thinking_flag().clone())`.
+        let chat_for_hide = Arc::clone(&chat);
+        tui.add_input_listener(Box::new(move |event: &InputEvent| {
+            if let InputEvent::Key(key) = event
+                && matches!(&key.name, KeyName::Char('t'))
+                && key.modifiers.ctrl
+            {
+                use std::sync::atomic::Ordering;
+                let flag = hide_thinking_flag();
+                let now = !flag.load(Ordering::Relaxed);
+                flag.store(now, Ordering::Relaxed);
+                let label = if now {
+                    "[thinking blocks: hidden]"
+                } else {
+                    "[thinking blocks: visible]"
+                };
+                push_status(&chat_for_hide, label.to_string(), None);
+                return ListenerResult {
+                    consume: true,
+                    data: None,
+                };
+            }
+            ListenerResult::pass()
+        }));
+
+        // Ctrl+G listener: open the editor's current buffer in `$VISUAL`
+        // / `$EDITOR` and read the result back. Pi-mono parity item
+        // M4.1. The actual edit runs in a worker thread because we
+        // can't block the Tui input loop on `wait()`; the result is
+        // applied to the editor via its Arc handle.
+        let chat_for_ext = Arc::clone(&chat);
+        let editor_for_ext = Arc::clone(&editor);
+        tui.add_input_listener(Box::new(move |event: &InputEvent| {
+            if let InputEvent::Key(key) = event
+                && matches!(&key.name, KeyName::Char('g'))
+                && key.modifiers.ctrl
+            {
+                let current = editor_for_ext
+                    .lock()
+                    .map(|e| e.text())
+                    .unwrap_or_default();
+                let chat_clone = Arc::clone(&chat_for_ext);
+                let editor_clone = Arc::clone(&editor_for_ext);
+                std::thread::spawn(move || {
+                    match run_external_editor(&current) {
+                        Ok(new_text) => {
+                            if let Ok(mut e) = editor_clone.lock() {
+                                e.set_text(&new_text);
+                            }
+                        }
+                        Err(e) => push_status(
+                            &chat_clone,
+                            format!("[external editor failed: {e}]"),
+                            Some(RED_FG),
+                        ),
+                    }
+                });
                 return ListenerResult {
                     consume: true,
                     data: None,
@@ -490,6 +619,7 @@ impl InteractiveMode {
         let agent_footer = Arc::clone(&footer);
         let agent_pending = Arc::clone(&pending);
         let agent_usage = Arc::clone(&usage);
+        let agent_editor = Arc::clone(&editor);
         let stop_for_agent = Arc::clone(&stop);
         let stop_handle_for_agent = Arc::clone(&stop_handle);
         let agent_cwd = cwd.clone();
@@ -561,8 +691,11 @@ impl InteractiveMode {
                                 // Slash commands can mutate session state
                                 // (`/thinking`, `/model`, …) — refresh the
                                 // footer so the thinking-level / model
-                                // segments reflect the change immediately.
+                                // segments reflect the change immediately,
+                                // and re-tint the editor border with the
+                                // current thinking level (M3.3).
                                 refresh_footer(&session, &cwd, &agent_footer, &agent_usage);
+                                refresh_editor_border(&session, &agent_editor);
                                 if matches!(outcome, SlashOutcome::Quit) {
                                     unsafe { stop_handle_for_agent.stop() };
                                     break;
@@ -751,6 +884,59 @@ fn push_error(chat: &ChatList, msg: impl AsRef<str>) {
     list.push(Box::new(TextComponent::new(body)));
 }
 
+/// Open `initial` in `$VISUAL` / `$EDITOR` (falling back to `vi`) on a
+/// temp file, wait for the editor to exit, and return the resulting
+/// buffer. Used by the Ctrl+G external-edit hook (M4.1). The function
+/// blocks while the child editor runs, so callers MUST invoke it from a
+/// worker thread — the Tui input loop is single-threaded and would
+/// otherwise stall.
+fn run_external_editor(initial: &str) -> std::io::Result<String> {
+    use std::io::Write as _;
+    let editor_cmd = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".to_string());
+    let tmp = tempfile::Builder::new()
+        .prefix("hand-edit-")
+        .suffix(".md")
+        .tempfile()?;
+    let path = tmp.path().to_path_buf();
+    {
+        let mut f = std::fs::File::create(&path)?;
+        f.write_all(initial.as_bytes())?;
+    }
+    // Split the editor command to support `EDITOR="code -w"` style.
+    let mut parts = editor_cmd.split_whitespace();
+    let bin = parts
+        .next()
+        .ok_or_else(|| std::io::Error::other("empty $EDITOR"))?;
+    let args: Vec<&str> = parts.collect();
+    let status = std::process::Command::new(bin)
+        .args(args)
+        .arg(&path)
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "editor exited with {}",
+            status
+        )));
+    }
+    let new_text = std::fs::read_to_string(&path)?;
+    Ok(new_text)
+}
+
+/// Process-wide "hide thinking blocks" toggle (M5.5). Initialised lazily
+/// the first time it's read; the [`InteractiveMode::run`] entry point
+/// sets the bit from `settings.hide_thinking_block` at startup. Every
+/// `AssistantMessageComponent` subscribes via
+/// `with_shared_hide_flag(hide_thinking_flag().clone())`, so a single
+/// Ctrl+T in the driver flips the visual state of every assistant
+/// message in scrollback at once.
+fn hide_thinking_flag() -> &'static Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::OnceLock;
+    static FLAG: OnceLock<Arc<std::sync::atomic::AtomicBool>> = OnceLock::new();
+    FLAG.get_or_init(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+}
+
 fn replay_messages_into(chat: &ChatList, messages: &[model::Message]) {
     let mut list = chat.lock().expect("chat list mutex poisoned");
     for msg in messages {
@@ -770,7 +956,9 @@ fn replay_messages_into(chat: &ChatList, messages: &[model::Message]) {
                 list.push(Box::new(UserMessageComponent::new(text)));
             }
             model::Message::Assistant(a) => {
-                list.push(Box::new(AssistantMessageComponent::with_message(a.clone())));
+                let comp = AssistantMessageComponent::with_message(a.clone())
+                    .with_shared_hide_flag(Arc::clone(hide_thinking_flag()));
+                list.push(Box::new(comp));
             }
             model::Message::ToolResult(t) => {
                 let body: String = t
@@ -804,9 +992,9 @@ fn apply_updates_to_chat(
                 list.push(Box::new(UserMessageComponent::new(text)));
             }
             ChatUpdate::AppendAssistant { message } => {
-                let cell = Arc::new(StdMutex::new(AssistantMessageComponent::with_message(
-                    *message,
-                )));
+                let comp = AssistantMessageComponent::with_message(*message)
+                    .with_shared_hide_flag(Arc::clone(hide_thinking_flag()));
+                let cell = Arc::new(StdMutex::new(comp));
                 {
                     let mut handle = assistant.lock().expect("assistant handle mutex poisoned");
                     *handle = Some(Arc::clone(&cell));
@@ -827,9 +1015,9 @@ fn apply_updates_to_chat(
                     applied = true;
                 }
                 if !applied {
-                    let cell = Arc::new(StdMutex::new(AssistantMessageComponent::with_message(
-                        *message,
-                    )));
+                    let comp = AssistantMessageComponent::with_message(*message)
+                        .with_shared_hide_flag(Arc::clone(hide_thinking_flag()));
+                    let cell = Arc::new(StdMutex::new(comp));
                     {
                         let mut handle = assistant.lock().expect("assistant handle mutex poisoned");
                         *handle = Some(Arc::clone(&cell));
@@ -974,6 +1162,34 @@ fn refresh_footer(
     let snapshot = usage.lock().map(|u| *u).unwrap_or_default();
     if let Ok(mut f) = footer.lock() {
         *f = InteractiveMode::build_footer_view(session, cwd, snapshot);
+    }
+}
+
+/// Tint the editor's focused border with the active thinking level
+/// (M3.3). Pi-mono picks the colour from the `thinkingOff`/`Minimal`/
+/// `Low`/`Medium`/`High`/`Xhigh` theme slots; we mirror the same palette
+/// with truecolor literals so the change works under any terminal.
+fn refresh_editor_border(session: &AgentSession, editor: &Arc<StdMutex<EditorComponent>>) {
+    let colour = thinking_level_border_color(session.stream_options().reasoning);
+    if let Ok(mut e) = editor.lock() {
+        e.set_focused_border_color(colour);
+    }
+}
+
+/// Map a thinking level to the focused-border SGR. Mirrors the pi-mono
+/// dark theme palette (`thinkingOff`=#505050, `Minimal`=#6e6e6e,
+/// `Low`=#5f87af, `Medium`=#81a2be, `High`=#b294bb, `Xhigh`=#d183e8).
+/// `None` (reasoning off) returns the default `BORDER_FOCUS` cyan so the
+/// border stays consistent with the editor's idle state.
+fn thinking_level_border_color(level: Option<model::ThinkingLevel>) -> String {
+    use model::ThinkingLevel;
+    match level {
+        None => BORDER_FOCUS.to_string(),
+        Some(ThinkingLevel::Minimal) => "\x1b[38;2;110;110;110m".to_string(),
+        Some(ThinkingLevel::Low) => "\x1b[38;2;95;135;175m".to_string(),
+        Some(ThinkingLevel::Medium) => "\x1b[38;2;129;162;190m".to_string(),
+        Some(ThinkingLevel::High) => "\x1b[38;2;178;148;187m".to_string(),
+        Some(ThinkingLevel::Xhigh) => "\x1b[38;2;209;131;232m".to_string(),
     }
 }
 
@@ -2686,6 +2902,100 @@ mod tests {
 
     /// Unknown `/thinking <foo>` shouldn't mutate state — surface a
     /// yellow status pointing at the valid levels instead.
+    /// M3.3 — the editor's focused-border color tracks the active
+    /// thinking level. Each level maps to a distinct truecolor SGR;
+    /// `None` falls back to the default `BORDER_FOCUS` cyan.
+    #[test]
+    fn editor_border_color_tracks_thinking_level() {
+        use model::ThinkingLevel;
+        assert_eq!(thinking_level_border_color(None), BORDER_FOCUS);
+        // Distinct color per level. Spot-check that they differ.
+        let levels = [
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+        ];
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for l in levels {
+            let c = thinking_level_border_color(Some(l));
+            assert!(c.starts_with("\x1b[38;2;"), "level {l:?} → {c:?}");
+            assert!(seen.insert(c.clone()), "duplicate color for {l:?}: {c}");
+        }
+    }
+
+    /// M5.5 — Ctrl+T flips `hide_thinking_flag()`; each
+    /// `AssistantMessageComponent` constructed with
+    /// `with_shared_hide_flag(...)` reads it at render time so every
+    /// message in scrollback flips together.
+    #[test]
+    fn hide_thinking_flag_round_trips_through_shared_subscriber() {
+        use std::sync::atomic::Ordering;
+        let flag = hide_thinking_flag();
+        // Reset to a known state first — other tests in the same binary
+        // may have flipped it.
+        flag.store(false, Ordering::Relaxed);
+
+        // Build a component that subscribes to the shared flag, with a
+        // thinking block in its message.
+        let mut msg = make_assistant("hi");
+        msg.content.push(model::AssistantContentBlock::Thinking(
+            model::ThinkingContent::new("inner reasoning"),
+        ));
+        let comp = AssistantMessageComponent::with_message(msg)
+            .with_shared_hide_flag(Arc::clone(flag));
+        let visible = comp.render(80).join("\n");
+        assert!(
+            visible.contains("inner reasoning"),
+            "expected full thinking body when flag is false: {visible}"
+        );
+
+        // Flip the flag — same component, rendered again, should collapse.
+        flag.store(true, Ordering::Relaxed);
+        let collapsed = comp.render(80).join("\n");
+        assert!(
+            !collapsed.contains("inner reasoning"),
+            "expected collapsed thinking body when flag is true: {collapsed}"
+        );
+        assert!(
+            collapsed.contains("Thinking..."),
+            "expected DEFAULT_HIDDEN_THINKING_LABEL when collapsed: {collapsed}"
+        );
+
+        // Cleanup so we don't poison other tests.
+        flag.store(false, Ordering::Relaxed);
+    }
+
+    /// M4.1 — `run_external_editor` invokes the configured editor (we
+    /// hijack via `EDITOR=tee` so the command exists and is idempotent
+    /// on the temp file) and reads back the buffer. Tests just the
+    /// round-trip; the input listener wiring is structurally trivial.
+    #[test]
+    fn external_editor_round_trips_buffer_through_tempfile() {
+        // SAFETY: the unsafe blocks are required by edition-2024's
+        // `set_var`/`remove_var` signature on macOS. The test is
+        // single-threaded with respect to env mutation because
+        // `cargo test`'s default runner is multi-threaded but env
+        // mutations here are limited to two adjacent calls with no
+        // intervening reads from other threads.
+        let prev = std::env::var("EDITOR").ok();
+        // `true` succeeds and leaves the file untouched, so the read-back
+        // matches what we wrote in.
+        unsafe {
+            std::env::set_var("EDITOR", "true");
+        }
+        let original = "hello from hand";
+        let out = run_external_editor(original).expect("editor runs");
+        assert_eq!(out, original);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("EDITOR", v),
+                None => std::env::remove_var("EDITOR"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn thinking_unknown_level_does_not_mutate_session() {
         let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
