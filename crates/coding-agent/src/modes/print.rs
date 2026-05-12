@@ -84,16 +84,44 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         AgentSession::new(base_config, setup.agent_tools)?
     };
 
-    session.subscribe(|event| match event {
-        AgentSessionEvent::Agent(agent_event) => handle_agent_event(&agent_event),
+    let json_mode = args.mode == "json";
+
+    if json_mode {
+        // Emit pi-mono-style session header before any agent events fire.
+        emit_json_session(&cwd, session.session_id());
+    }
+
+    session.subscribe(move |event| match event {
+        AgentSessionEvent::Agent(agent_event) => {
+            if json_mode {
+                handle_agent_event_json(&agent_event);
+            } else {
+                handle_agent_event(&agent_event);
+            }
+        }
         AgentSessionEvent::CompactionStart => {
-            eprintln!("\x1b[33m[Compacting context...]\x1b[0m");
+            if !json_mode {
+                eprintln!("\x1b[33m[Compacting context...]\x1b[0m");
+            }
         }
         AgentSessionEvent::CompactionEnd { .. } => {
-            eprintln!("\x1b[33m[Compaction complete]\x1b[0m");
+            if !json_mode {
+                eprintln!("\x1b[33m[Compaction complete]\x1b[0m");
+            }
         }
         AgentSessionEvent::Error(err) => {
-            eprintln!("\x1b[31mError: {}\x1b[0m", err);
+            if json_mode {
+                // Emit as a JSON error event so JSONL consumers parse it
+                // uniformly with other events; still set SAW_ERROR so the
+                // process exits 1.
+                let val = serde_json::json!({
+                    "type": "error",
+                    "error": err.to_string(),
+                });
+                println!("{}", val);
+            } else {
+                eprintln!("\x1b[31mError: {}\x1b[0m", err);
+            }
             // Session-level errors (e.g. "No API key found", network
             // failures) must propagate to the exit code. Without this
             // hand exits 0 on a red error, masking failures from
@@ -193,6 +221,130 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
     }
 }
 
+// ============================================================================
+// JSON mode (pi-mono `--mode json` parity)
+// ============================================================================
+
+/// Print the per-run `session` JSONL header pi-mono emits before any events
+/// fire. Mirrors `{"type":"session","version":3,"id":<uuid>,
+/// "timestamp":<iso8601>,"cwd":<path>}`.
+fn emit_json_session(cwd: &std::path::Path, id: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    // Crude UTC ISO-8601 formatter — depends only on chrono via serde_json's
+    // ecosystem? No, just format manually to avoid pulling in chrono just
+    // for this one timestamp. Matches pi's "2026-05-12T20:41:22.791Z" shape
+    // closely enough for script consumption.
+    let dt = format_iso8601(secs, now.subsec_millis());
+    let val = serde_json::json!({
+        "type": "session",
+        "version": 3,
+        "id": id,
+        "timestamp": dt,
+        "cwd": cwd.display().to_string(),
+    });
+    println!("{}", val);
+}
+
+/// Minimal UTC ISO-8601 (`YYYY-MM-DDTHH:MM:SS.sssZ`) from a Unix-seconds
+/// value. Good enough for JSONL consumers; not calendar-correct beyond
+/// the proleptic Gregorian boundaries.
+fn format_iso8601(secs: u64, millis: u32) -> String {
+    let days = secs / 86400;
+    let rem = secs % 86400;
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+    let second = rem % 60;
+    // Convert days-since-epoch (1970-01-01) to civil date via Howard
+    // Hinnant's algorithm; integer arithmetic only.
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        y, m, d, hour, minute, second, millis
+    )
+}
+
+/// JSON-mode counterpart to [`handle_agent_event`]. Mirrors pi-mono's
+/// `--mode json` event types: `agent_start`, `turn_start`, `message_start`,
+/// `message_update` (with the inner streaming event), `message_end`,
+/// `turn_end`, `tool_execution_start`/`_end`, `agent_end`. The exact
+/// payload shapes are camelCased Message/AssistantMessageEvent JSON which
+/// matches the TS reference because both crates serialize the same
+/// underlying types with serde rename_all = "camelCase".
+fn handle_agent_event_json(event: &hand_agent::types::AgentEvent) {
+    use hand_agent::types::AgentEvent;
+    use std::sync::atomic::Ordering;
+
+    let payload = match event {
+        AgentEvent::AgentStart => serde_json::json!({"type": "agent_start"}),
+        AgentEvent::AgentEnd { messages } => {
+            serde_json::json!({"type": "agent_end", "messages": messages})
+        }
+        AgentEvent::TurnStart => serde_json::json!({"type": "turn_start"}),
+        AgentEvent::TurnEnd { message, tool_results } => serde_json::json!({
+            "type": "turn_end",
+            "message": message,
+            "toolResults": tool_results,
+        }),
+        AgentEvent::MessageStart { message } => {
+            serde_json::json!({"type": "message_start", "message": message})
+        }
+        AgentEvent::MessageUpdate { message, assistant_message_event } => serde_json::json!({
+            "type": "message_update",
+            "assistantMessageEvent": assistant_message_event,
+            "message": message,
+        }),
+        AgentEvent::MessageEnd { message } => {
+            // Mirror text-mode SAW_ERROR semantics so JSON consumers also
+            // get a non-zero exit when the model errored out.
+            use model::{Message as ModelMessage, StopReason};
+            if let ModelMessage::Assistant(a) = message
+                && matches!(a.stop_reason, StopReason::Error | StopReason::Aborted)
+            {
+                SAW_ERROR.store(true, Ordering::Relaxed);
+            }
+            serde_json::json!({"type": "message_end", "message": message})
+        }
+        AgentEvent::ToolExecutionStart { tool_call_id, tool_name, args } => serde_json::json!({
+            "type": "tool_execution_start",
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "args": args,
+        }),
+        AgentEvent::ToolExecutionUpdate { tool_call_id, tool_name, args, partial_result } => {
+            serde_json::json!({
+                "type": "tool_execution_update",
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "args": args,
+                "partialResult": partial_result,
+            })
+        }
+        AgentEvent::ToolExecutionEnd { tool_call_id, tool_name, result, is_error } => {
+            serde_json::json!({
+                "type": "tool_execution_end",
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "result": result,
+                "isError": is_error,
+            })
+        }
+    };
+    println!("{}", payload);
+    let _ = io::stdout().flush();
+}
+
 fn handle_export(
     session: &AgentSession,
     path: &std::path::Path,
@@ -214,6 +366,31 @@ fn handle_export(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso8601_formatter_round_trip_at_known_timestamps() {
+        // 1970-01-01T00:00:00.000Z (Unix epoch)
+        assert_eq!(format_iso8601(0, 0), "1970-01-01T00:00:00.000Z");
+        // 2024-01-01T00:00:00.000Z (post-leap-year)
+        assert_eq!(format_iso8601(1_704_067_200, 0), "2024-01-01T00:00:00.000Z");
+        // Mid-day check, with millis.
+        assert_eq!(
+            format_iso8601(1_704_067_200 + 12 * 3600 + 34 * 60 + 56, 789),
+            "2024-01-01T12:34:56.789Z"
+        );
+        // Pi sample used 2026-05-12T20:41:22.791Z — compute its epoch.
+        // 2026-05-12 is 56 years + leap days after 1970-01-01.
+        // We just verify the shape (YYYY-MM-DDTHH:MM:SS.sssZ) is right.
+        let s = format_iso8601(1_778_618_482, 791);
+        assert!(s.starts_with("2026-05-12T"));
+        assert!(s.ends_with("Z"));
+        assert_eq!(s.len(), 24);
+    }
 }
 
 fn resolve_session_path(cwd: &std::path::Path, source: &str) -> std::path::PathBuf {

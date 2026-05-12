@@ -83,6 +83,12 @@ pub struct Args {
     #[arg(long)]
     pub print: bool,
 
+    /// Output mode for --print: `text` (default, final assistant content
+    /// only) or `json` (JSONL event stream mirroring pi-mono's
+    /// `--mode json` shape). No effect without --print.
+    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+    pub mode: String,
+
     /// Run in headless RPC mode (JSONL on stdin/stdout). Mutually exclusive with --print.
     #[arg(long, conflicts_with = "print")]
     pub rpc: bool,
