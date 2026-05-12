@@ -121,10 +121,13 @@ pub fn dispatch_agent_event(event: &AgentEvent) -> Vec<ChatUpdate> {
             Message::Assistant(a) => vec![ChatUpdate::ReplaceLastAssistant {
                 message: Box::new(a.clone()),
             }],
-            Message::ToolResult(t) => {
-                let text = tool_result_summary(t);
-                vec![ChatUpdate::AppendToolResult { text }]
-            }
+            // Tool results are rendered inline with the matching tool-call
+            // bubble (see `ChatUpdate::ToolEnd`, driven from
+            // `AgentEvent::ToolExecutionEnd`). Don't emit a duplicate dim
+            // `[tool] [error] body` line below the bubble — pi-mono drops
+            // this branch and our previous behaviour left a white-gapped
+            // copy of the bubble's contents below every tool call.
+            Message::ToolResult(_) => vec![],
             Message::User(_) => vec![],
         },
         AgentEvent::ToolExecutionStart {
@@ -201,19 +204,6 @@ fn bash_exit_code(result: &ToolResult) -> Option<i32> {
         .map(|v| v as i32)
 }
 
-fn tool_result_summary(message: &model::ToolResultMessage) -> String {
-    let body: String = message
-        .content
-        .iter()
-        .filter_map(|c| match c {
-            model::ToolResultContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let prefix = if message.is_error { "[error] " } else { "" };
-    format!("[{}] {}{}", message.tool_name, prefix, body)
-}
 
 #[cfg(test)]
 mod tests {
