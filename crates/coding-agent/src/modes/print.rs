@@ -21,17 +21,22 @@ use std::io::{self, BufRead, Write};
 /// 4. Honour `--export` (early-return) before sending any prompt.
 /// 5. Send the prompt from `--prompt`, or stdin if none was given.
 pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    // Render config-resolution errors with pi-mono's exact `Error: <msg>`
-    // shape (single-line, no debug wrapping) so scripts can pattern-match
-    // on the message and exit non-zero. Without this hand emits
-    // `Error: Other("...")` because tokio's main prints via Debug.
-    let setup = match SessionSetup::resolve(&args) {
-        Ok(s) => s,
+    match run_inner(args).await {
+        Ok(()) => Ok(()),
         Err(e) => {
+            // Render setup-time errors with pi-mono's `Error: <msg>` shape
+            // (single-line, no Debug-wrapping). Without this we'd surface
+            // `Error: Other("...")` or `Error: Session("...")` from
+            // tokio main's default Debug formatter, which breaks the
+            // contract scripts pattern-match against.
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
-    };
+    }
+}
+
+async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    let setup = SessionSetup::resolve(&args)?;
     let cwd = setup.cwd.clone();
 
     // Determine the resume id, mirroring main.rs: --continue defers to
