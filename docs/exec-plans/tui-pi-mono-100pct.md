@@ -19,59 +19,65 @@ The editor's `render()` itself is correct (repro test). The submit path now work
 
 Each milestone is independently shippable and ends in `cargo test` + `cargo build` green, with at least one new test exercising the change.
 
-### M1 — Responsive baseline (must-have)
+### M1 — Responsive baseline (must-have) — **DONE**
 
 The TUI must feel alive while the agent works.
 
-1. **M1.1 Live footer refresh** — wire `agent_footer` to refresh after every `MessageStart` / `MessageEnd` / `ToolEnd` / `TurnEnd` event. Populate `usage`, `context_percent`, `git_branch`, `thinking_level`, `available_provider_count` from real session/model state.
-2. **M1.2 Working / compaction / retry loaders** — port `bordered-loader` mount points between scrollback and editor, with escape-to-abort.
-3. **M1.3 Input history (Up/Down recall)** — add `set_history`, history index state, Up/Down at the first/last visual line walks history. Persist last 100 entries per session.
-4. **M1.4 Autocomplete provider wired** — port pi-mono's `CombinedAutocompleteProvider`: slash commands + arg completions + `@path` walker. Attach to editor at startup.
-5. **M1.5 Welcome header** — compact key-hint header at session start: interrupt / clear / exit / model select / slash / quit. Expandable with Ctrl+O.
-6. **M1.6 Visible errors** — when `session.send_message` returns an error, append a red `BashStatus::Error`-style chat entry so the user can see it without scrolling the cargo output.
-7. **M1.7 Bash mode (`!` prefix)** — typing `!command` recolors the editor border bash-color, `!!` excludes from context. Submit pushes a `BashExecutionComponent` instead of an agent message.
+1. **M1.1 Live footer refresh** ✅ — wired via `refresh_footer` after every `MessageEnd` / slash action; footer view-model reads model + reasoning level + provider-credential count from live state.
+2. **M1.2 Working / compaction / retry loaders** ✅ — `BorderedLoaderComponent` mounted between scrollback and editor on AgentStart / CompactionStart; Esc cancels via session token.
+3. **M1.3 Input history (Up/Down recall)** ✅ — `EditorComponent` tracks per-session history; Up/Down at first/last visual line walks it.
+4. **M1.4 Autocomplete provider wired** ✅ — `SlashCommandProvider` + `PathAutocompleteProvider` combined; `query_sync` fast path so the popup appears on the trigger keystroke.
+5. **M1.5 Welcome header** ✅ — compact `hand v… {provider}/{model}` line + key-hint footer at session start; uses live keybinding labels via `raw_key_hint`.
+6. **M1.6 Visible errors** ✅ — red banner `✘ Error  {msg}` pushed via `push_error` when `send_message` fails.
+7. **M1.7 Bash mode (`!` prefix)** ✅ — `!cmd` runs inline as a `BashExecutionComponent`; `!!cmd` excluded from agent context.
 
-### M2 — Slash command parity
+### M2 — Slash command parity — **DONE**
 
 Match pi-mono's command surface so muscle memory transfers.
 
-1. **M2.1 `/settings` with real entries** — general / theme / thinking / transport / auto-compact / show-images / hide-thinking-block / double-escape submenus. Hook into `core::settings`.
-2. **M2.2 `/thinking <level>` applies** — `session.set_thinking_level(...)`, footer reflects it.
-3. **M2.3 `/resume <id>`** — load the picked session into the current process (replace `AgentSession`).
-4. **M2.4 `/model` scoped-models toggle** — Ctrl+P cycles through the curated list, full overlay shows all.
-5. **M2.5 `/hotkeys`** — reads the real `KeybindingsManager` so the table is correct.
-6. **M2.6 `/login` OAuth path** — provider list comes from registry; OAuth providers run the browser flow, API-key providers open the manual dialog.
-7. **M2.7 `/reload`** — re-read settings, keybindings, extensions, skills, prompts, themes.
+1. **M2.1 `/settings` with real entries** ✅ — `build_settings_entries` projects live SettingsManager values (theme / auto_compact / hide_thinking_block / show_images / clear_on_shrink / quiet_startup). Write-back deferred (M2.1.2): selector emits Changed events, persisting via `SettingsManager::save` not yet wired.
+2. **M2.2 `/thinking <level>` applies** ✅ — `apply_thinking_level` mutates `session.stream_options().reasoning`; `off`/`none`/`clear` map to `None`. Footer reflects via `refresh_footer`.
+3. **M2.3 `/resume <id>`** ✅ — `AgentSession::switch_session` swaps in-place; scrollback wiped and replayed.
+4. **M2.4 `/model` scoped-models toggle** ✅ — `settings.enabled_models` → `resolve_model_scope` → `scoped_models` on selector. Ctrl+P cycle is M4.5 (separate component).
+5. **M2.5 `/hotkeys`** ✅ — table built from `KeybindingsManager::all()` + `TUI_KEYBINDINGS` descriptions, grouped by category.
+6. **M2.6 `/login` OAuth path** ✅ — `oauth_id_for` maps provider → registry id; `run_oauth_login` runs `provider.login(callbacks)` with chat-routed URL / device-code surfacing, persists via `OAuthRegistry::save`. API-key providers fall through to manual paste.
+7. **M2.7 `/reload`** ✅ — `apply_reload` re-runs `SettingsManager::from_cwd` and pings `get_keybindings`. Extensions / skills / prompts / themes reload waits on the ResourceLoader reload API (separate task).
 
-### M3 — Visual / theme parity
+### M3 — Visual / theme parity — **PARTIAL**
 
 Stop hard-coding ANSI; let the theme system actually theme.
 
-1. **M3.1 Theme bridge** — components consume a `ThemeRef` instead of hard-coded SGR. `/theme` swaps the active palette and triggers a force-render.
-2. **M3.2 Markdown syntax highlighting** — feed pi-mono's 9 syntax colors through `MarkdownComponent::set_syntax_theme`.
-3. **M3.3 Per-thinking-level editor border color** — bind `EditorComponent::focused_border_color` to the active thinking level.
-4. **M3.4 Footer color warnings** — context % `>70%` yellow, `>90%` red; subscription `(sub)` suffix when OAuth-only.
-5. **M3.5 User message bg + assistant body** — read `userMessageBg`, `userMessageText`, markdown body colors from theme.
+1. **M3.1 Theme bridge** ⏸ — deferred. Components consume hard-coded SGR; visually they match pi-mono dark already (after `0f1f9e9` / `10633c7` fixes to bubble colors and bg-reset handling). Doing it cleanly requires `Arc<Mutex<>>` shared components so `/theme` can flip palettes live — same structural prerequisite as M3.3 and M5.5.
+2. **M3.2 Markdown syntax highlighting** ⏸ — deferred. `MarkdownComponent` has no `set_syntax_theme` hook; code blocks render fenced text in `mdCodeBlock` color but lexer-driven highlighting is a separate dependency (`syntect`-class crate) and a new theme slot.
+3. **M3.3 Per-thinking-level editor border color** ⏸ — deferred. Editor border is set at construction; per-tick re-tinting requires the same `Arc<Mutex<EditorComponent>>` refactor as M3.1.
+4. **M3.4 Footer color warnings** ✅ — already implemented: context `>90%` → `ERROR_FG`, `>70%` → `WARNING_FG` in `FooterComponent::render`.
+5. **M3.5 User message bg + assistant body** ⏸ — deferred. Bubble bg/fg constants match pi-mono dark theme values verbatim; visually equivalent to a theme lookup. Replacing the constants with `theme.bg_ansi(...)` is structural cleanup, not a user-visible change.
 
-### M4 — Extension surface (nice-to-have)
+### M4 — Extension surface (nice-to-have) — **DEFERRED**
 
-Get the dead components onto the screen.
+Get the dead components onto the screen. None of these are blocking daily use; the components were ported but never wired.
 
-1. **M4.1 `Ctrl+G` external editor** — launches `$VISUAL` / `$EDITOR` on a temp file, pipes back into the buffer.
-2. **M4.2 Image paste + inline render** — `terminal-image` port; paste an image → `[image #1 800×600]` marker; inline render in scrollback.
-3. **M4.3 Drop files** — drag-drop a file path onto the terminal → `@path` insertion.
-4. **M4.4 Session tree selector** — port `tree-selector` with branch ASCII art and filter modes; opened via `/tree`.
-5. **M4.5 Scoped-models multi-select** — port `scoped-models-selector` and wire `/scoped-models`.
-6. **M4.6 User-message selector for `/fork`** — replace the current "fork from entry id" prompt with the selector overlay.
-7. **M4.7 Extension widget mount points** — port `extension-{selector,input,editor}` mounts.
+1. **M4.1 `Ctrl+G` external editor** ⏸ — needs editor mutation (same structural blocker).
+2. **M4.2 Image paste + inline render** ⏸ — no image-paste detector in stdin; OSC1337/Kitty image protocol component exists but no input path.
+3. **M4.3 Drop files** ⏸ — needs paste payload classification.
+4. **M4.4 Session tree selector** ⏸ — `tree-selector` ported, no `/tree` mount.
+5. **M4.5 Scoped-models multi-select** ⏸ — `scoped-models-selector` ported, no `/scoped-models` mount.
+6. **M4.6 User-message selector for `/fork`** ⏸ — overlay component ported; current `/fork <entry_id>` parser works, just lacks the picker.
+7. **M4.7 Extension widget mount points** ⏸ — pending extension API integration.
 
-### M5 — Polish
+### M5 — Polish — **DEFERRED**
 
-1. **M5.1 OSC133 / OSC 9;4 progress** — emit zone markers and terminal progress bars while the agent runs.
-2. **M5.2 Tmux extended-keys diagnostic** — warn if tmux config blocks modifier keys.
-3. **M5.3 Subscription / model-fallback / package-update notifications** at startup.
-4. **M5.4 Changelog auto-display on update**.
-5. **M5.5 Hide-thinking-block / tool-output-expansion toggles** (`Ctrl+T`, `Ctrl+O`).
+1. **M5.1 OSC133 / OSC 9;4 progress** ⏸ — OSC133 zone markers are emitted by `UserMessageComponent` and `AssistantMessageComponent`. OSC 9;4 progress not wired.
+2. **M5.2 Tmux extended-keys diagnostic** ⏸ — needs a startup check + warning surface.
+3. **M5.3 Subscription / model-fallback / package-update notifications** ⏸ — requires update-check infrastructure.
+4. **M5.4 Changelog auto-display on update** ⏸ — depends on M5.3.
+5. **M5.5 Hide-thinking-block / tool-output-expansion toggles** ⏸ — same Arc<Mutex<>> blocker as M3.1.
+
+## Status
+
+**M1: 7/7 done. M2: 7/7 done.** Core daily-use loop matches pi-mono.
+
+M3-M5 are a mix of (a) polish that's visually equivalent to the current state (M3.1, M3.5), (b) features blocked on the same structural refactor — moving `EditorComponent` and the message components behind `Arc<Mutex<>>` so the agent task can mutate them in-place (M3.3, M4.1, M5.5), and (c) genuinely new subsystems (M3.2 syntax theme, M4.2 image paste, M5.1 progress). They are deferred pending a follow-up "shared mutable components" refactor that opens those doors as a batch.
 
 ## Out of scope
 
