@@ -162,18 +162,32 @@ impl InteractiveMode {
         Self { session, cwd }
     }
 
-    /// Build the footer view-model from current session state.
-    pub(crate) fn build_footer_view(session: &AgentSession, cwd: &Path) -> FooterViewModel {
+    /// Build the footer view-model from current session state. Pass the
+    /// running `usage` accumulator so the footer can show token totals
+    /// without re-walking the message history on every render.
+    pub(crate) fn build_footer_view(
+        session: &AgentSession,
+        cwd: &Path,
+        usage: TokenUsageSummary,
+    ) -> FooterViewModel {
+        let context_window = session.model().context_window;
+        let context_percent = if context_window > 0 {
+            let tokens =
+                crate::core::compaction::estimate_context_tokens(session.messages()) as f64;
+            Some(tokens / context_window as f64 * 100.0)
+        } else {
+            None
+        };
         FooterViewModel {
             cwd: cwd.display().to_string(),
             home_dir: dirs::home_dir().map(|p| p.display().to_string()),
-            git_branch: None, // TODO(parity): populate via git utility helper.
+            git_branch: detect_git_branch(cwd),
             session_name: session.label().map(|s| s.to_string()),
-            usage: TokenUsageSummary::default(),
+            usage,
             model_id: session.model().id.clone(),
             model_provider: session.model().provider.as_str().to_string(),
-            context_window: session.model().context_window,
-            context_percent: None,
+            context_window,
+            context_percent,
             auto_compact_enabled: session.auto_compaction_enabled(),
             has_reasoning: false, // TODO(parity): derive from model capabilities.
             thinking_level: String::new(),
@@ -188,7 +202,15 @@ impl InteractiveMode {
 
         // Shared state the TUI renders and the background task mutates.
         let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
-        let footer = Arc::new(StdMutex::new(Self::build_footer_view(&session, &cwd)));
+        // Running token-usage accumulator. Updated by the event pump on
+        // every MessageEnd; consumed by `refresh_footer` to populate the
+        // token segment of the footer view-model.
+        let usage = Arc::new(StdMutex::new(TokenUsageSummary::default()));
+        let footer = Arc::new(StdMutex::new(Self::build_footer_view(
+            &session,
+            &cwd,
+            TokenUsageSummary::default(),
+        )));
         let pending = Arc::new(StdMutex::new(Pending::default()));
 
         // Replay existing session messages.
@@ -254,18 +276,28 @@ impl InteractiveMode {
         // Stop signal for background tasks.
         let stop = Arc::new(AtomicBool::new(false));
 
-        // Background task: drains agent events into the chat list.
+        // Background task: drains agent events into the chat list AND
+        // accumulates token usage from `MessageEnd` events into the running
+        // usage counter so the footer reflects spend in real time.
         let chat_for_events = Arc::clone(&chat);
         let stop_for_events = Arc::clone(&stop);
         let tool_handles: ToolHandles = Arc::new(StdMutex::new(HashMap::new()));
         let tools_for_events = Arc::clone(&tool_handles);
         let assistant_handle: AssistantHandle = Arc::new(StdMutex::new(None));
         let assistant_for_events = Arc::clone(&assistant_handle);
+        let usage_for_events = Arc::clone(&usage);
         let event_pump = tokio::spawn(async move {
             let mut rx = event_rx;
             while !stop_for_events.load(Ordering::Relaxed) {
                 match rx.recv().await {
                     Some(ev) => {
+                        if let AgentSessionEvent::Agent(agent_ev) = &ev
+                            && let hand_agent::types::AgentEvent::MessageEnd { message } =
+                                agent_ev.as_ref()
+                            && let model::Message::Assistant(a) = message
+                        {
+                            accumulate_usage(&usage_for_events, &a.usage);
+                        }
                         let updates = dispatch_event(&ev);
                         apply_updates_to_chat(
                             &chat_for_events,
@@ -308,6 +340,7 @@ impl InteractiveMode {
         let agent_chat = Arc::clone(&chat);
         let agent_footer = Arc::clone(&footer);
         let agent_pending = Arc::clone(&pending);
+        let agent_usage = Arc::clone(&usage);
         let stop_for_agent = Arc::clone(&stop);
         let stop_handle_for_agent = Arc::clone(&stop_handle);
         let agent_cwd = cwd.clone();
@@ -394,7 +427,7 @@ impl InteractiveMode {
                     if let Err(e) = session.send_message(&trimmed).await {
                         push_error(&agent_chat, format!("send failed: {e}"));
                     }
-                    refresh_footer(&session, &cwd, &agent_footer);
+                    refresh_footer(&session, &cwd, &agent_footer, &agent_usage);
                 }
             }
         });
@@ -673,9 +706,45 @@ fn push_status(chat: &ChatList, text: String, color_prefix: Option<&str>) {
     list.push(Box::new(coloured_text(text, color_prefix)));
 }
 
-fn refresh_footer(session: &AgentSession, cwd: &Path, footer: &SharedFooter) {
+fn refresh_footer(
+    session: &AgentSession,
+    cwd: &Path,
+    footer: &SharedFooter,
+    usage: &Arc<StdMutex<TokenUsageSummary>>,
+) {
+    let snapshot = usage.lock().map(|u| *u).unwrap_or_default();
     if let Ok(mut f) = footer.lock() {
-        *f = InteractiveMode::build_footer_view(session, cwd);
+        *f = InteractiveMode::build_footer_view(session, cwd, snapshot);
+    }
+}
+
+/// Detect the current git branch by reading `.git/HEAD` in `cwd` or any
+/// ancestor. Returns `None` if not in a git repo or HEAD can't be parsed.
+fn detect_git_branch(cwd: &Path) -> Option<String> {
+    let mut dir = cwd;
+    loop {
+        let head = dir.join(".git").join("HEAD");
+        if head.exists() {
+            let text = std::fs::read_to_string(&head).ok()?;
+            let line = text.trim();
+            // Detached HEAD points to a commit SHA — show first 7 chars.
+            if let Some(rest) = line.strip_prefix("ref: refs/heads/") {
+                return Some(rest.to_string());
+            }
+            return Some(line.chars().take(7).collect());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Accumulate token usage from an assistant message into the running total.
+fn accumulate_usage(running: &Arc<StdMutex<TokenUsageSummary>>, usage: &model::Usage) {
+    if let Ok(mut acc) = running.lock() {
+        acc.input += usage.input;
+        acc.output += usage.output;
+        acc.cache_read += usage.cache_read;
+        acc.cache_write += usage.cache_write;
+        acc.cost_usd += usage.cost.total;
     }
 }
 
@@ -1636,7 +1705,11 @@ mod tests {
     #[test]
     fn footer_view_uses_session_state() {
         let session = make_session();
-        let view = InteractiveMode::build_footer_view(&session, &std::path::PathBuf::from("/tmp"));
+        let view = InteractiveMode::build_footer_view(
+            &session,
+            &std::path::PathBuf::from("/tmp"),
+            TokenUsageSummary::default(),
+        );
         assert_eq!(view.cwd, "/tmp");
         assert_eq!(view.model_id, "test-model");
         assert_eq!(view.model_provider, "anthropic");
