@@ -60,9 +60,12 @@ pub struct Args {
     #[arg(long)]
     pub system_prompt: Option<String>,
 
-    /// Append text to the system prompt
-    #[arg(long)]
-    pub append_system_prompt: Option<String>,
+    /// Append text or file contents to the system prompt. Can be used
+    /// multiple times; the values are concatenated in order, joined by
+    /// blank lines. Pi-mono parity: each value is auto-loaded from disk
+    /// when it resolves to an existing file path.
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub append_system_prompt: Vec<String>,
 
     /// Thinking level: off, minimal, low, medium, high, xhigh
     #[arg(long)]
@@ -146,7 +149,7 @@ mod tests {
         assert!(args.fork.is_none());
         assert!(args.cwd.is_none());
         assert!(args.system_prompt.is_none());
-        assert!(args.append_system_prompt.is_none());
+        assert!(args.append_system_prompt.is_empty());
         assert!(args.thinking.is_none());
         assert!(args.tools.is_none());
         assert!(!args.no_tools);

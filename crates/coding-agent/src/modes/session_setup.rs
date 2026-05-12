@@ -158,10 +158,28 @@ impl SessionSetup {
         // on read errors (with a stderr warning) so a transient FS issue
         // doesn't kill the run.
         let custom_system_prompt = args.system_prompt.as_deref().map(resolve_prompt_input);
-        let custom_guidelines = args
-            .append_system_prompt
-            .as_deref()
-            .map(resolve_prompt_input);
+        // --append-system-prompt can be supplied multiple times. Each
+        // value is resolved (literal-or-file), then the non-empty
+        // resolved sections are joined by blank lines so the model sees
+        // them as distinct paragraphs in the system prompt. None when
+        // the flag was never given so the builder skips the section
+        // entirely.
+        let custom_guidelines = if args.append_system_prompt.is_empty() {
+            None
+        } else {
+            let joined = args
+                .append_system_prompt
+                .iter()
+                .map(|s| resolve_prompt_input(s))
+                .filter(|s| !s.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if joined.is_empty() {
+                None
+            } else {
+                Some(joined)
+            }
+        };
 
         Ok(Self {
             cwd,
@@ -430,6 +448,61 @@ mod tests {
         // in that case rather than erroring.
         let got = resolve_prompt_input("/definitely/not/a/real/path/zz.md");
         assert_eq!(got, "/definitely/not/a/real/path/zz.md");
+    }
+
+    /// Pi-mono parity: --append-system-prompt is repeatable. Each
+    /// invocation's value gets concatenated into a single guidelines
+    /// section, separated by blank lines.
+    #[test]
+    fn multiple_append_system_prompts_concatenate() {
+        let args = Args::try_parse_from([
+            "hand",
+            "--append-system-prompt",
+            "first directive",
+            "--append-system-prompt",
+            "second directive",
+            "--append-system-prompt",
+            "third directive",
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let guidelines = setup.custom_guidelines.expect("guidelines must be Some");
+        assert!(
+            guidelines.contains("first directive"),
+            "must include first, got: {guidelines}"
+        );
+        assert!(guidelines.contains("second directive"));
+        assert!(guidelines.contains("third directive"));
+        // Ordering: first appears before second appears before third.
+        let p1 = guidelines.find("first").unwrap();
+        let p2 = guidelines.find("second").unwrap();
+        let p3 = guidelines.find("third").unwrap();
+        assert!(p1 < p2 && p2 < p3, "must preserve invocation order");
+    }
+
+    /// No --append-system-prompt invocations → None on SessionSetup
+    /// (system prompt builder skips the section entirely).
+    #[test]
+    fn no_append_system_prompt_produces_none() {
+        let args = Args::try_parse_from(["hand"]).expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(setup.custom_guidelines.is_none());
+    }
+
+    /// All empty append values collapse to None so the guidelines
+    /// section header isn't emitted with no body.
+    #[test]
+    fn all_empty_append_system_prompts_yield_none() {
+        let args = Args::try_parse_from([
+            "hand",
+            "--append-system-prompt",
+            "",
+            "--append-system-prompt",
+            "   ",
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(setup.custom_guidelines.is_none());
     }
 
     #[test]
