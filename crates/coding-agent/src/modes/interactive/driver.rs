@@ -464,6 +464,14 @@ impl InteractiveMode {
                     if trimmed.is_empty() {
                         continue;
                     }
+                    // Bash mode: `!cmd` runs cmd in a subprocess and shows the
+                    // output inline like a tool call. `!!cmd` does the same
+                    // but is excluded from agent context (pi-mono behaviour).
+                    if trimmed.starts_with('!') {
+                        run_bash_inline(&agent_chat, &session, &trimmed).await;
+                        refresh_footer(&session, &cwd, &agent_footer, &agent_usage);
+                        continue;
+                    }
                     if let Some(parsed) = ParsedSlashCommand::parse(&trimmed) {
                         let ctx = SlashCommandContext {
                             model_id: session.model().id.clone(),
@@ -557,6 +565,47 @@ fn install_loader(slot: &SharedLoaderSlot, message: impl Into<String>) {
 fn clear_loader(slot: &SharedLoaderSlot) {
     if let Ok(mut s) = slot.lock() {
         *s = None;
+    }
+}
+
+/// Execute a `!cmd` (or `!!cmd`) bash invocation submitted from the editor.
+/// Mounts a `BashExecutionComponent` into the chat scrollback, drives the
+/// subprocess through [`AgentSession::run_bash`], and finalises the
+/// component when the process exits or is aborted.
+async fn run_bash_inline(chat: &ChatList, session: &AgentSession, raw: &str) {
+    let (command, exclude_from_context) = if let Some(rest) = raw.strip_prefix("!!") {
+        (rest.trim().to_string(), true)
+    } else {
+        (
+            raw.strip_prefix('!')
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string(),
+            false,
+        )
+    };
+    if command.is_empty() {
+        push_status(chat, "[bash] empty command".to_string(), Some(YELLOW_FG));
+        return;
+    }
+    let cell = Arc::new(StdMutex::new(BashExecutionComponent::new(
+        command.clone(),
+        exclude_from_context,
+    )));
+    {
+        let mut list = chat.lock().expect("chat list mutex poisoned");
+        list.push(Box::new(SharedRender {
+            inner: Arc::clone(&cell),
+        }));
+    }
+    match session.run_bash(&command, 0).await {
+        Ok(outcome) => {
+            if let Ok(mut c) = cell.lock() {
+                c.append_output(&outcome.result.output);
+                c.set_complete(outcome.result.exit_code, outcome.aborted, None);
+            }
+        }
+        Err(e) => push_error(chat, format!("bash failed: {e}")),
     }
 }
 
