@@ -234,6 +234,20 @@ pub type AutocompleteFuture<'a> = Pin<Box<dyn Future<Output = Vec<AutocompleteIt
 /// Provider trait. Async to support filesystem / API lookups.
 pub trait AutocompleteProvider: Send + Sync {
     fn query<'a>(&'a self, ctx: &'a AutocompleteContext) -> AutocompleteFuture<'a>;
+
+    /// Synchronous fast path. Implementations that can answer the query
+    /// without awaiting (in-memory tables, bounded directory walks)
+    /// should return `Some(items)`; the editor delivers them inline
+    /// from `maybe_trigger_autocomplete` so suggestions appear on the
+    /// same keystroke they were triggered by, with no run-loop wiring.
+    ///
+    /// Returning `None` defers to the async path (`query`) which a
+    /// driver task is expected to drain via `pending_autocomplete_request`
+    /// → `deliver_autocomplete_results`. Until that wiring lands the
+    /// async-only providers stay silent — sync is the production path.
+    fn query_sync(&self, _ctx: &AutocompleteContext) -> Option<Vec<AutocompleteItem>> {
+        None
+    }
 }
 
 /// Combine multiple providers. Queries run sequentially in provider order and
@@ -280,6 +294,24 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
             all
         })
     }
+
+    fn query_sync(&self, ctx: &AutocompleteContext) -> Option<Vec<AutocompleteItem>> {
+        // Fan out to each provider's sync path. The first provider that
+        // returns `Some` wins — if it returns an empty `Vec`, that's
+        // still a definitive "I'm the one that handles this trigger but
+        // nothing matches", which is different from `None` (defer).
+        // Providers that don't claim the trigger return `None` and the
+        // loop continues. Matches pi-mono's combined provider semantics.
+        let mut produced = false;
+        let mut out = Vec::new();
+        for provider in &self.providers {
+            if let Some(items) = provider.query_sync(ctx) {
+                produced = true;
+                out.extend(items);
+            }
+        }
+        if produced { Some(out) } else { None }
+    }
 }
 
 /// Slash command definition (used by [`SlashCommandProvider`]).
@@ -321,31 +353,174 @@ impl SlashCommandProvider {
     }
 }
 
+impl SlashCommandProvider {
+    fn matches(&self, ctx: &AutocompleteContext) -> Vec<AutocompleteItem> {
+        // Pi-mono's filter is a prefix match against the command name —
+        // `/he` matches `help` and `hotkeys`. Args completion happens after
+        // a space (which we currently leave to extension providers).
+        let query = ctx.query.as_str();
+        self.commands
+            .iter()
+            .filter(|cmd| cmd.name.starts_with(query))
+            .map(|cmd| {
+                let detail = match &cmd.arguments {
+                    Some(args) if !cmd.description.is_empty() => {
+                        Some(format!("{} — {}", args, cmd.description))
+                    }
+                    Some(args) => Some(args.clone()),
+                    None if !cmd.description.is_empty() => Some(cmd.description.clone()),
+                    None => None,
+                };
+                AutocompleteItem {
+                    label: cmd.name.clone(),
+                    detail,
+                    insert_text: cmd.name.clone(),
+                    kind: AutocompleteItemKind::SlashCommand,
+                }
+            })
+            .collect()
+    }
+}
+
 impl AutocompleteProvider for SlashCommandProvider {
     fn query<'a>(&'a self, ctx: &'a AutocompleteContext) -> AutocompleteFuture<'a> {
-        Box::pin(async move {
-            let query = ctx.query.as_str();
-            self.commands
-                .iter()
-                .filter(|cmd| cmd.name.starts_with(query))
-                .map(|cmd| {
-                    let detail = match &cmd.arguments {
-                        Some(args) if !cmd.description.is_empty() => {
-                            Some(format!("{} — {}", args, cmd.description))
-                        }
-                        Some(args) => Some(args.clone()),
-                        None if !cmd.description.is_empty() => Some(cmd.description.clone()),
-                        None => None,
+        let items = self.matches(ctx);
+        Box::pin(async move { items })
+    }
+
+    fn query_sync(&self, ctx: &AutocompleteContext) -> Option<Vec<AutocompleteItem>> {
+        // Slash trigger only — `@path` queries are routed to the path
+        // provider in the combined chain. Returning `None` lets the
+        // combined provider fall through to its other members.
+        if !matches!(ctx.trigger, AutocompleteTrigger::Slash) {
+            return None;
+        }
+        Some(self.matches(ctx))
+    }
+}
+
+// ============================================================================
+// PathAutocompleteProvider — `@path` completion
+// ============================================================================
+
+/// Default max BFS depth from the project root. Pi-mono drives `fd
+/// --max-depth=∞` and lets fd's own gitignore handling do the pruning. We
+/// don't depend on fd, so cap a manual walk at 3 levels — enough to
+/// surface typical `src/...`, `crates/.../*` etc. paths without scanning
+/// node_modules / target / .git.
+const DEFAULT_PATH_MAX_DEPTH: usize = 3;
+
+/// Default cap on returned entries. Above this the popup becomes unusable
+/// anyway; 200 mirrors pi-mono's `walkDirectoryWithFd(..., 100, ...)` doubled
+/// to soften the ceiling for repos where the user prefixes with a directory.
+const DEFAULT_PATH_MAX_ENTRIES: usize = 200;
+
+/// Walks the project root looking for files / dirs whose path matches the
+/// user's `@<query>` prefix. Uses `std::fs::read_dir` synchronously — paths
+/// of interest sit on hot disk, the walk is bounded by depth and count, and
+/// the editor calls us inline from `maybe_trigger_autocomplete`, so a
+/// tokio runtime is not required.
+pub struct PathAutocompleteProvider {
+    root: std::path::PathBuf,
+    max_depth: usize,
+    max_entries: usize,
+}
+
+impl PathAutocompleteProvider {
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            max_depth: DEFAULT_PATH_MAX_DEPTH,
+            max_entries: DEFAULT_PATH_MAX_ENTRIES,
+        }
+    }
+
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth;
+        self
+    }
+
+    pub fn with_max_entries(mut self, n: usize) -> Self {
+        self.max_entries = n;
+        self
+    }
+
+    fn walk(&self, query_lower: &str) -> Vec<AutocompleteItem> {
+        // BFS from root. Depth 0 = direct children of root. Skip the usual
+        // suspects (`.git`, `target`, `node_modules`, `.venv`) — they
+        // dominate the entry budget without ever being something the user
+        // wants to `@`-attach.
+        let skip: &[&str] = &[".git", "target", "node_modules", ".venv", ".cache"];
+        let mut out = Vec::new();
+        let mut queue: std::collections::VecDeque<(std::path::PathBuf, usize)> =
+            std::collections::VecDeque::new();
+        queue.push_back((self.root.clone(), 0));
+
+        while let Some((dir, depth)) = queue.pop_front() {
+            if out.len() >= self.max_entries {
+                break;
+            }
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(it) => it,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                if out.len() >= self.max_entries {
+                    break;
+                }
+                let path = entry.path();
+                let file_name = match path.file_name().and_then(|s| s.to_str()) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                if skip.contains(&file_name.as_str()) {
+                    continue;
+                }
+                let display = match path.strip_prefix(&self.root) {
+                    Ok(rel) => rel.to_string_lossy().into_owned(),
+                    Err(_) => path.to_string_lossy().into_owned(),
+                };
+                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+
+                // Substring-match (case-insensitive) on the relative path —
+                // matches `src/main.rs` for queries `main`, `src`, `main.rs`,
+                // and `src/m`.
+                if query_lower.is_empty() || display.to_lowercase().contains(query_lower) {
+                    let label = if is_dir {
+                        format!("{display}/")
+                    } else {
+                        display.clone()
                     };
-                    AutocompleteItem {
-                        label: cmd.name.clone(),
-                        detail,
-                        insert_text: cmd.name.clone(),
-                        kind: AutocompleteItemKind::SlashCommand,
-                    }
-                })
-                .collect()
-        })
+                    let insert = format!("@{label}");
+                    out.push(AutocompleteItem {
+                        label,
+                        detail: None,
+                        insert_text: insert,
+                        kind: AutocompleteItemKind::File,
+                    });
+                }
+
+                if is_dir && depth + 1 < self.max_depth {
+                    queue.push_back((path, depth + 1));
+                }
+            }
+        }
+
+        out
+    }
+}
+
+impl AutocompleteProvider for PathAutocompleteProvider {
+    fn query<'a>(&'a self, ctx: &'a AutocompleteContext) -> AutocompleteFuture<'a> {
+        let items = self.query_sync(ctx).unwrap_or_default();
+        Box::pin(async move { items })
+    }
+
+    fn query_sync(&self, ctx: &AutocompleteContext) -> Option<Vec<AutocompleteItem>> {
+        if !matches!(ctx.trigger, AutocompleteTrigger::At) {
+            return None;
+        }
+        Some(self.walk(&ctx.query.to_lowercase()))
     }
 }
 
@@ -657,5 +832,100 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "user");
         assert_eq!(items[0].kind, AutocompleteItemKind::Custom);
+    }
+
+    // ====================================================================
+    // query_sync — sync fast path covered by SlashCommandProvider and
+    // PathAutocompleteProvider; combined provider fans out
+    // ====================================================================
+
+    #[test]
+    fn slash_provider_query_sync_only_matches_slash_trigger() {
+        let provider = SlashCommandProvider::new(vec![SlashCommand::new("help", "Show help")]);
+        // Slash trigger → Some(...) with the match.
+        let slash = ctx("he", AutocompleteTrigger::Slash);
+        let items = provider.query_sync(&slash).expect("slash returns Some");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "help");
+        // @ trigger → None (defer to other providers in a combined chain).
+        let at = ctx("he", AutocompleteTrigger::At);
+        assert!(provider.query_sync(&at).is_none());
+    }
+
+    #[test]
+    fn path_provider_query_sync_only_matches_at_trigger() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("hello.rs"), "// hi").unwrap();
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        // @ trigger → Some(...) with the match.
+        let at = ctx("hello", AutocompleteTrigger::At);
+        let items = provider.query_sync(&at).expect("at returns Some");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"hello.rs"), "got: {labels:?}");
+        // Slash trigger → None.
+        let slash = ctx("hello", AutocompleteTrigger::Slash);
+        assert!(provider.query_sync(&slash).is_none());
+    }
+
+    #[test]
+    fn path_provider_descends_into_subdirectories_up_to_max_depth() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src/inner")).unwrap();
+        std::fs::write(tmp.path().join("src/inner/deep.rs"), "").unwrap();
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let at = ctx("deep", AutocompleteTrigger::At);
+        let items = provider.query_sync(&at).expect("at returns Some");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| l.ends_with("deep.rs")),
+            "depth 2 file not found: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn path_provider_skips_well_known_noise_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        std::fs::write(tmp.path().join(".git/config"), "").unwrap();
+        std::fs::create_dir_all(tmp.path().join("target")).unwrap();
+        std::fs::write(tmp.path().join("target/debug-binary"), "").unwrap();
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let at = ctx("", AutocompleteTrigger::At);
+        let items = provider.query_sync(&at).expect("at returns Some");
+        let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+        // Neither `.git/config` nor `target/debug-binary` should leak.
+        for forbidden in [".git", "target", "config", "debug-binary"] {
+            assert!(
+                !labels.iter().any(|l| l.contains(forbidden)),
+                "noise dir leaked: {forbidden} in {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn combined_provider_sync_routes_by_trigger() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("alpha.txt"), "").unwrap();
+        let mut combined = CombinedAutocompleteProvider::new();
+        combined.add_provider(Arc::new(SlashCommandProvider::new(vec![
+            SlashCommand::new("alpha", "the alpha command"),
+        ])));
+        combined.add_provider(Arc::new(PathAutocompleteProvider::new(
+            tmp.path().to_path_buf(),
+        )));
+
+        // `/alpha` → slash provider answers, path provider deferred.
+        let slash_items = combined
+            .query_sync(&ctx("alpha", AutocompleteTrigger::Slash))
+            .expect("slash trigger yields Some");
+        let slash_labels: Vec<&str> = slash_items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(slash_labels, vec!["alpha"]);
+
+        // `@alpha` → path provider answers with the file, slash deferred.
+        let at_items = combined
+            .query_sync(&ctx("alpha", AutocompleteTrigger::At))
+            .expect("at trigger yields Some");
+        let at_labels: Vec<&str> = at_items.iter().map(|i| i.label.as_str()).collect();
+        assert!(at_labels.contains(&"alpha.txt"), "got: {at_labels:?}");
     }
 }

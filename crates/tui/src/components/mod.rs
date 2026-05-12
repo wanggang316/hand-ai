@@ -20,7 +20,7 @@ pub mod truncated_text;
 pub use autocomplete::{
     AutocompleteComponent, AutocompleteContext, AutocompleteFuture, AutocompleteItem,
     AutocompleteItemKind, AutocompleteProvider, AutocompleteTrigger, CombinedAutocompleteProvider,
-    SlashCommand, SlashCommandProvider, Suggestion,
+    PathAutocompleteProvider, SlashCommand, SlashCommandProvider, Suggestion,
 };
 pub use box_component::BoxComponent;
 pub use cancellable_loader::CancellableLoaderComponent;

@@ -37,8 +37,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use hand_tui::{
-    Component, EditorComponent, Focusable, InputEvent, KeyName, ListenerResult, OverlayMounter,
-    OverlayOptions, ProcessTerminal, TextComponent, Tui, TuiError,
+    CombinedAutocompleteProvider, Component, EditorComponent, Focusable, InputEvent, KeyName,
+    ListenerResult, OverlayMounter, OverlayOptions, PathAutocompleteProvider, ProcessTerminal,
+    SlashCommand as TuiSlashCommand, SlashCommandProvider, TextComponent, Tui, TuiError,
 };
 use tokio::sync::mpsc;
 
@@ -260,7 +261,7 @@ impl InteractiveMode {
         // placeholder collides with terminal IME composition (the IME draws
         // its preview at the cursor column, on top of the dim placeholder).
         let pending_for_submit = Arc::clone(&pending);
-        let editor = EditorComponent::new()
+        let mut editor = EditorComponent::new()
             .with_border(true)
             .with_border_style(hand_tui::components::editor::BorderStyle::Horizontal)
             .with_viewport_height(4)
@@ -271,6 +272,24 @@ impl InteractiveMode {
                     p.text = Some(text);
                 }
             });
+
+        // Autocomplete: combine slash-command suggestions (from the built-in
+        // command registry, source of truth for `/help`) with `@path`
+        // filesystem completion rooted at the session's cwd. Both providers
+        // answer synchronously via `query_sync`, so the popup appears on
+        // the same keystroke that triggers it — no separate driver task.
+        {
+            let slash_registry = crate::core::slash_commands::SlashCommandRegistry::new();
+            let slash_commands: Vec<TuiSlashCommand> = slash_registry
+                .commands()
+                .iter()
+                .map(|c| TuiSlashCommand::new(c.name.clone(), c.description.clone()))
+                .collect();
+            let mut combined = CombinedAutocompleteProvider::new();
+            combined.add_provider(Arc::new(SlashCommandProvider::new(slash_commands)));
+            combined.add_provider(Arc::new(PathAutocompleteProvider::new(cwd.clone())));
+            editor.set_autocomplete_provider(Arc::new(combined));
+        }
 
         // Loader slot — appears between chat and editor while the agent
         // is working / compacting / retrying.

@@ -169,20 +169,6 @@ pub fn dispatch_agent_event(event: &AgentEvent) -> Vec<ChatUpdate> {
     }
 }
 
-fn user_text_of(message: &model::UserMessage) -> String {
-    match &message.content {
-        model::UserContent::Text(s) => s.clone(),
-        model::UserContent::Blocks(blocks) => blocks
-            .iter()
-            .filter_map(|b| match b {
-                model::UserContentBlock::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    }
-}
-
 /// Concatenate text-typed content blocks of a [`ToolResult`]. Image blocks
 /// are dropped — the textual fallback path is what the chat-update consumer
 /// renders.

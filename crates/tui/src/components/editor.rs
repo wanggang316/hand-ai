@@ -1120,9 +1120,9 @@ impl EditorComponent {
     /// After the buffer mutates, decide whether autocomplete should activate.
     /// Recognises slash-command start and `@`-attachment context.
     fn maybe_trigger_autocomplete(&mut self) {
-        if self.autocomplete_provider.is_none() {
+        let Some(provider) = self.autocomplete_provider.clone() else {
             return;
-        }
+        };
         let line = self.current_line();
         let before: &str = &line[..self.cursor_col];
         let trigger = detect_trigger(before);
@@ -1135,14 +1135,37 @@ impl EditorComponent {
                     trigger: trig,
                     query,
                 };
-                self.autocomplete_state = Some(AutocompleteState {
-                    context: ctx,
-                    items: Vec::new(),
-                    selected: 0,
-                    delivered: false,
-                });
-                self.autocomplete_debounce_until =
-                    Some(Instant::now() + Duration::from_millis(AUTOCOMPLETE_DEBOUNCE_MS));
+                // Sync fast path. Providers that can answer in-memory
+                // (slash commands, prebuilt index, bounded `readdir`)
+                // populate the state here and the popup shows up on the
+                // SAME keystroke that triggered it — no run-loop wiring
+                // needed. Providers that need to await (LSP, network)
+                // return `None` and we fall through to the async path
+                // that a driver task is expected to drain.
+                if let Some(items) = provider.query_sync(&ctx) {
+                    if items.is_empty() {
+                        // Provider claimed the trigger but had nothing —
+                        // mirror TS behaviour: drop the popup.
+                        self.cancel_autocomplete();
+                    } else {
+                        self.autocomplete_state = Some(AutocompleteState {
+                            context: ctx,
+                            items,
+                            selected: 0,
+                            delivered: true,
+                        });
+                        self.autocomplete_debounce_until = None;
+                    }
+                } else {
+                    self.autocomplete_state = Some(AutocompleteState {
+                        context: ctx,
+                        items: Vec::new(),
+                        selected: 0,
+                        delivered: false,
+                    });
+                    self.autocomplete_debounce_until =
+                        Some(Instant::now() + Duration::from_millis(AUTOCOMPLETE_DEBOUNCE_MS));
+                }
             }
             None => self.cancel_autocomplete(),
         }
@@ -2172,6 +2195,54 @@ mod tests {
             let items = self.items.clone();
             Box::pin(async move { items })
         }
+    }
+
+    /// Provider that answers synchronously via `query_sync`. Models the
+    /// production providers — the editor should deliver items inline on
+    /// the trigger keystroke, with no debounce / pending state required.
+    struct SyncProvider {
+        items: Vec<AutocompleteItem>,
+    }
+    impl AutocompleteProvider for SyncProvider {
+        fn query<'a>(&'a self, _ctx: &'a AutocompleteContext) -> AutocompleteFuture<'a> {
+            let items = self.items.clone();
+            Box::pin(async move { items })
+        }
+        fn query_sync(&self, _ctx: &AutocompleteContext) -> Option<Vec<AutocompleteItem>> {
+            Some(self.items.clone())
+        }
+    }
+
+    #[test]
+    fn sync_provider_delivers_items_on_trigger_keystroke() {
+        let mut editor = EditorComponent::new();
+        editor.set_autocomplete_provider(Arc::new(SyncProvider {
+            items: vec![AutocompleteItem {
+                label: "help".to_string(),
+                detail: None,
+                insert_text: "help".to_string(),
+                kind: AutocompleteItemKind::SlashCommand,
+            }],
+        }));
+        editor.handle_input(&InputEvent::Raw("/".into()));
+        // No debounce: state is populated synchronously with delivered=true.
+        let state = editor.autocomplete_state().expect("state populated inline");
+        assert!(state.delivered);
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0].label, "help");
+        // And `pending_autocomplete_request` is None — nothing for an
+        // external driver to fulfill.
+        assert!(editor.pending_autocomplete_request().is_none());
+    }
+
+    #[test]
+    fn sync_provider_empty_match_cancels_popup() {
+        let mut editor = EditorComponent::new();
+        editor.set_autocomplete_provider(Arc::new(SyncProvider { items: vec![] }));
+        editor.handle_input(&InputEvent::Raw("/".into()));
+        // Sync path returned empty → popup should be dropped, NOT left
+        // hanging in a pending state.
+        assert!(editor.autocomplete_state().is_none());
     }
 
     #[test]
