@@ -29,6 +29,9 @@ pub struct SessionSetup {
     pub custom_system_prompt: Option<String>,
     /// Text appended to the system prompt.
     pub custom_guidelines: Option<String>,
+    /// `--no-session`: skip on-disk persistence and run with an in-memory
+    /// session. Mirrors pi-mono's flag of the same name.
+    pub no_session: bool,
 }
 
 impl SessionSetup {
@@ -139,6 +142,7 @@ impl SessionSetup {
             agent_tools,
             custom_system_prompt: args.system_prompt.clone(),
             custom_guidelines: args.append_system_prompt.clone(),
+            no_session: args.no_session,
         })
     }
 
@@ -156,6 +160,7 @@ impl SessionSetup {
             custom_system_prompt: self.custom_system_prompt.clone(),
             custom_guidelines: self.custom_guidelines.clone(),
             resume_session,
+            no_session: self.no_session,
         }
     }
 }
@@ -238,6 +243,29 @@ mod tests {
             msg.contains("--list-models"),
             "must hint at --list-models for discoverability, got: {msg}"
         );
+    }
+
+    /// Pi-mono `--no-session` parity: the flag must propagate from CLI
+    /// args through SessionSetup into AgentSessionConfig so the session
+    /// manager runs in-memory and no JSONL file is written under
+    /// `.hand/sessions/`. The default (flag absent) must keep persistence
+    /// on.
+    #[test]
+    fn no_session_flag_propagates_to_config() {
+        let args = Args::try_parse_from(["hand", "--no-session"]).expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(setup.no_session, "setup must carry the flag");
+        let cfg = setup.to_config(None);
+        assert!(cfg.no_session, "to_config must propagate the flag");
+    }
+
+    #[test]
+    fn default_args_persist_sessions() {
+        let args = Args::try_parse_from(["hand"]).expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(!setup.no_session);
+        let cfg = setup.to_config(None);
+        assert!(!cfg.no_session);
     }
 
     /// Known providers (in the registry) must still resolve.

@@ -95,6 +95,10 @@ pub struct AgentSessionConfig {
     pub custom_guidelines: Option<String>,
     /// Whether to resume an existing session.
     pub resume_session: Option<String>,
+    /// When `true`, run with an in-memory ephemeral session — no JSONL
+    /// file is written under `.hand/sessions/`. Mirrors pi-mono's
+    /// `--no-session` flag.
+    pub no_session: bool,
 }
 
 /// The main agent session coordinating all subsystems.
@@ -216,6 +220,10 @@ impl AgentSession {
             let session_dir = config.cwd.join(".hand").join("sessions");
             let path = session_dir.join(format!("{}.jsonl", session_id));
             SessionManager::open(&path)?
+        } else if config.no_session {
+            // --no-session: pure in-memory, no JSONL file under
+            // .hand/sessions. Pi-mono parity.
+            SessionManager::in_memory()
         } else {
             SessionManager::create(&config.cwd)?
         };
@@ -311,6 +319,7 @@ impl AgentSession {
                 custom_system_prompt: None,
                 custom_guidelines: None,
                 resume_session: None,
+                no_session: true,
             },
             session_manager: SessionManager::in_memory(),
             settings_manager: SettingsManager::in_memory(),
@@ -1409,6 +1418,7 @@ mod tests {
             custom_system_prompt: None,
             custom_guidelines: None,
             resume_session: None,
+            no_session: false,
         }
     }
 
