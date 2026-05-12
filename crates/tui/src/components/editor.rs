@@ -167,7 +167,18 @@ pub struct EditorComponent {
     /// ANSI SGR prefix used for the border when the editor is focused.
     /// Falls back to [`Self::border_color`] when `None`.
     focused_border_color: Option<String>,
+    /// Prompt history. Index 0 is the most-recent entry; older entries
+    /// follow. Capped at [`HISTORY_CAP`].
+    history: Vec<String>,
+    /// Current position in `history`. `-1` means "not browsing", `0` is
+    /// the most recent entry, `1` is the next-older, etc. Matches
+    /// pi-mono's `historyIndex` semantics so Up walks back (increments).
+    history_index: i32,
 }
+
+/// Maximum number of submitted prompts the editor retains for Up/Down recall.
+/// Matches pi-mono's `editor.ts` cap.
+const HISTORY_CAP: usize = 100;
 
 /// Callback invoked when the user submits the editor (bare Enter). The string
 /// passed is the expanded text — paste markers are substituted back to their
@@ -199,7 +210,78 @@ impl EditorComponent {
             placeholder: None,
             border_color: None,
             focused_border_color: None,
+            history: Vec::new(),
+            history_index: -1,
         }
+    }
+
+    /// Append a submitted prompt to the recall history. Consecutive
+    /// duplicates collapse; the list is capped at [`HISTORY_CAP`].
+    pub fn add_to_history(&mut self, text: impl AsRef<str>) {
+        let trimmed = text.as_ref().trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Some(first) = self.history.first()
+            && first == trimmed
+        {
+            return;
+        }
+        self.history.insert(0, trimmed.to_string());
+        if self.history.len() > HISTORY_CAP {
+            self.history.pop();
+        }
+        self.history_index = -1;
+    }
+
+    /// Replace the entire recall history (e.g. when restoring a saved
+    /// session). Most-recent entry first. Truncated to [`HISTORY_CAP`].
+    pub fn set_history(&mut self, items: Vec<String>) {
+        self.history = items;
+        self.history.truncate(HISTORY_CAP);
+        self.history_index = -1;
+    }
+
+    /// Read-only snapshot of the history (most-recent first).
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// Walk one step through history. `direction = -1` walks back (Up),
+    /// `direction = +1` walks forward (Down). When walking past the most-
+    /// recent entry the editor is restored to empty.
+    pub fn navigate_history(&mut self, direction: i32) {
+        if self.history.is_empty() {
+            return;
+        }
+        let new_index = self.history_index - direction;
+        if !(-1..self.history.len() as i32).contains(&new_index) {
+            return;
+        }
+        self.history_index = new_index;
+        if new_index == -1 {
+            self.set_text_internal("");
+        } else {
+            let text = self.history[new_index as usize].clone();
+            self.set_text_internal(&text);
+        }
+    }
+
+    /// Set the buffer without resetting `history_index` so the
+    /// browsing-history state persists across recall steps.
+    fn set_text_internal(&mut self, text: &str) {
+        self.lines = if text.is_empty() {
+            vec![String::new()]
+        } else {
+            text.split('\n').map(String::from).collect()
+        };
+        let last = self.lines.len() - 1;
+        self.cursor_line = last;
+        self.cursor_col = self.lines[last].len();
+        self.viewport_top = 0;
+        self.ensure_cursor_visible();
+        self.autocomplete_state = None;
+        self.autocomplete_debounce_until = None;
     }
 
     /// Set the placeholder shown when the buffer is empty.
@@ -1224,11 +1306,19 @@ impl EditorComponent {
         // First, try keybindings — they cover named editor actions.
         if !raw.is_empty() {
             if self.keybindings.matches(raw, Keybinding::EditorCursorUp) {
-                self.cursor_up();
+                if self.cursor_line == 0 {
+                    self.navigate_history(-1);
+                } else {
+                    self.cursor_up();
+                }
                 return HandleResult::Handled;
             }
             if self.keybindings.matches(raw, Keybinding::EditorCursorDown) {
-                self.cursor_down();
+                if self.cursor_line + 1 == self.lines.len() {
+                    self.navigate_history(1);
+                } else {
+                    self.cursor_down();
+                }
                 return HandleResult::Handled;
             }
             if self.keybindings.matches(raw, Keybinding::EditorCursorLeft) {
@@ -1334,11 +1424,19 @@ impl EditorComponent {
         // Fallback: structural keys not covered by the named bindings.
         match (&key.name, &key.modifiers) {
             (KeyName::Up, _) => {
-                self.cursor_up();
+                if self.cursor_line == 0 {
+                    self.navigate_history(-1);
+                } else {
+                    self.cursor_up();
+                }
                 HandleResult::Handled
             }
             (KeyName::Down, _) => {
-                self.cursor_down();
+                if self.cursor_line + 1 == self.lines.len() {
+                    self.navigate_history(1);
+                } else {
+                    self.cursor_down();
+                }
                 HandleResult::Handled
             }
             (KeyName::Left, _) => {
@@ -1372,6 +1470,7 @@ impl EditorComponent {
             (KeyName::Enter, _) => {
                 if self.on_submit.is_some() {
                     let text = self.submit_text();
+                    self.add_to_history(&text);
                     self.set_text("");
                     if let Some(cb) = self.on_submit.as_mut() {
                         cb(text);
@@ -1586,6 +1685,62 @@ mod tests {
         editor.handle_input(&InputEvent::Raw("b".into()));
         assert_eq!(editor.line_count(), 2);
         assert_eq!(editor.text(), "a\nb");
+    }
+
+    #[test]
+    fn editor_up_arrow_walks_history_when_on_first_line() {
+        let mut editor = EditorComponent::new();
+        editor.add_to_history("first");
+        editor.add_to_history("second");
+        editor.add_to_history("third");
+
+        // history is [third, second, first] (most-recent first).
+        editor.handle_input(&InputEvent::Raw("\x1b[A".into()));
+        assert_eq!(editor.text(), "third");
+        editor.handle_input(&InputEvent::Raw("\x1b[A".into()));
+        assert_eq!(editor.text(), "second");
+        editor.handle_input(&InputEvent::Raw("\x1b[A".into()));
+        assert_eq!(editor.text(), "first");
+        // Past the oldest: stays put.
+        editor.handle_input(&InputEvent::Raw("\x1b[A".into()));
+        assert_eq!(editor.text(), "first");
+
+        // Down walks forward; one more Down restores the empty buffer.
+        editor.handle_input(&InputEvent::Raw("\x1b[B".into()));
+        assert_eq!(editor.text(), "second");
+        editor.handle_input(&InputEvent::Raw("\x1b[B".into()));
+        assert_eq!(editor.text(), "third");
+        editor.handle_input(&InputEvent::Raw("\x1b[B".into()));
+        assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn editor_history_dedups_consecutive_duplicates_and_caps() {
+        let mut editor = EditorComponent::new();
+        editor.add_to_history("hi");
+        editor.add_to_history("hi");
+        editor.add_to_history("hi");
+        assert_eq!(editor.history().len(), 1);
+
+        for i in 0..150 {
+            editor.add_to_history(format!("entry-{i}"));
+        }
+        assert_eq!(editor.history().len(), 100);
+        assert_eq!(editor.history()[0], "entry-149");
+    }
+
+    #[test]
+    fn editor_submit_pushes_to_history() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        let mut editor = EditorComponent::new().with_on_submit(move |t| {
+            cap.lock().unwrap().push(t);
+        });
+        editor.handle_input(&InputEvent::Raw("h".into()));
+        editor.handle_input(&InputEvent::Raw("i".into()));
+        editor.handle_input(&InputEvent::Raw("\r".into()));
+        assert_eq!(editor.history(), &["hi".to_string()]);
     }
 
     #[test]
