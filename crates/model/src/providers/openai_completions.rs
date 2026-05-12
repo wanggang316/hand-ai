@@ -381,16 +381,26 @@ fn handle_delta(
     if let Some(tool_calls) = &delta.tool_calls {
         for tool_call in tool_calls {
             let tool_id = tool_call.id.clone().unwrap_or_default();
+            let tool_index = tool_call.index;
 
+            // A delta starts a new tool call when its `index` differs from
+            // the in-flight block's. `id` arrives only in the first chunk
+            // for any given tool call — subsequent argument deltas omit it
+            // — so comparing on `id` would (incorrectly) split a single
+            // streamed tool call across multiple blocks.
             let is_new_tool = match current_block {
-                Some(CurrentBlock::ToolCall(tc, _)) => tc.id != tool_id,
+                Some(CurrentBlock::ToolCall(_, _, idx)) => *idx != tool_index,
                 _ => true,
             };
 
             if is_new_tool {
                 events.extend(finish_current_block(current_block, output));
                 let tc = ToolCall::new(&tool_id, "", serde_json::json!({}));
-                *current_block = Some(CurrentBlock::ToolCall(tc.clone(), String::new()));
+                *current_block = Some(CurrentBlock::ToolCall(
+                    tc.clone(),
+                    String::new(),
+                    tool_index,
+                ));
                 output.content.push(AssistantContentBlock::ToolCall(tc));
                 let idx = (output.content.len() - 1) as u32;
                 events.push(AssistantMessageEvent::ToolCallStart {
@@ -405,9 +415,20 @@ fn handle_delta(
                 .and_then(|f| f.arguments.clone())
                 .unwrap_or_default();
 
-            if let Some(CurrentBlock::ToolCall(tc, partial_args)) = current_block
+            if let Some(CurrentBlock::ToolCall(tc, partial_args, _)) = current_block
                 && let Some(function) = &tool_call.function
             {
+                // `id` may arrive in a later chunk (rare but the protocol
+                // permits it). Adopt the first non-empty id we see so the
+                // final tool call carries the real provider-assigned id.
+                if tc.id.is_empty() && !tool_id.is_empty() {
+                    tc.id = tool_id.clone();
+                    if let Some(AssistantContentBlock::ToolCall(last_tc)) =
+                        output.content.last_mut()
+                    {
+                        last_tc.id = tool_id.clone();
+                    }
+                }
                 if let Some(name) = &function.name {
                     tc.name = name.clone();
                     if let Some(AssistantContentBlock::ToolCall(last_tc)) =
@@ -437,7 +458,13 @@ fn handle_delta(
 enum CurrentBlock {
     Text(TextContent),
     Thinking(ThinkingContent),
-    ToolCall(ToolCall, String),
+    /// (tool_call, accumulated_args_buffer, openai_protocol_index).
+    /// `openai_protocol_index` is the `DeltaToolCall.index` field — the
+    /// canonical OpenAI streaming protocol identifier for a tool call,
+    /// stable across chunks (unlike `id` which is only sent in the first
+    /// chunk). We compare on this when deciding whether subsequent
+    /// argument deltas extend the current block or start a new one.
+    ToolCall(ToolCall, String, u32),
 }
 
 /// Finalize the in-flight block (if any) and emit its terminating event.
@@ -476,7 +503,7 @@ fn finish_current_block(
                 partial: output.clone(),
             }]
         }
-        CurrentBlock::ToolCall(mut tc, partial_args) => {
+        CurrentBlock::ToolCall(mut tc, partial_args, _) => {
             tc.arguments = parse_streaming_json(&partial_args);
             if let Some(AssistantContentBlock::ToolCall(last_tc)) = output.content.last_mut() {
                 last_tc.arguments = tc.arguments.clone();
@@ -1571,6 +1598,141 @@ mod tests {
             })
             .collect();
         assert_eq!(deltas, vec!["Hi", "!", " 👋"]);
+    }
+
+    /// Build a `tool_calls` delta chunk that matches the wire format
+    /// emitted by OpenAI / OpenRouter / Deepseek / etc. Subsequent chunks
+    /// for the same tool call MUST share the same `index`; `id` is
+    /// typically only set on the first chunk.
+    fn tool_call_delta(
+        index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        args: Option<&str>,
+    ) -> openai_rust::types::Delta {
+        let mut tc = serde_json::Map::new();
+        tc.insert("index".into(), serde_json::json!(index));
+        if let Some(id) = id {
+            tc.insert("id".into(), serde_json::json!(id));
+        }
+        tc.insert("type".into(), serde_json::json!("function"));
+        let mut fn_obj = serde_json::Map::new();
+        if let Some(name) = name {
+            fn_obj.insert("name".into(), serde_json::json!(name));
+        }
+        if let Some(args) = args {
+            fn_obj.insert("arguments".into(), serde_json::json!(args));
+        }
+        tc.insert("function".into(), serde_json::Value::Object(fn_obj));
+        let json = serde_json::json!({
+            "tool_calls": [serde_json::Value::Object(tc)]
+        });
+        serde_json::from_value(json).expect("valid delta")
+    }
+
+    /// Regression for the issue where a streamed tool call was split into
+    /// multiple `AssistantContentBlock::ToolCall` blocks because subsequent
+    /// argument chunks omit `id` (per OpenAI protocol). The pre-fix logic
+    /// compared on `id` and treated every subsequent chunk as a NEW tool,
+    /// producing a final message with N ToolCall blocks (one per chunk)
+    /// where the trailing ones had empty `name` / `id`.
+    ///
+    /// Reproduces the live wire shape captured from openrouter:
+    ///   chunk 1: {index:0, id:"call_abc", function:{name:"read",arguments:""}}
+    ///   chunk 2: {index:0,               function:{arguments:"{\"pa"}}
+    ///   chunk 3: {index:0,               function:{arguments:"th\":\""}}
+    ///   chunk 4: {index:0,               function:{arguments:"/tmp/x\"}"}}
+    #[test]
+    fn streaming_tool_call_chunks_merge_into_single_block() {
+        let mut output = empty_output();
+        let mut current: Option<CurrentBlock> = None;
+        let mut events = Vec::new();
+        events.extend(handle_delta(
+            &tool_call_delta(0, Some("call_abc"), Some("read"), Some("")),
+            &mut current,
+            &mut output,
+        ));
+        events.extend(handle_delta(
+            &tool_call_delta(0, None, None, Some("{\"pa")),
+            &mut current,
+            &mut output,
+        ));
+        events.extend(handle_delta(
+            &tool_call_delta(0, None, None, Some("th\":\"")),
+            &mut current,
+            &mut output,
+        ));
+        events.extend(handle_delta(
+            &tool_call_delta(0, None, None, Some("/tmp/x\"}")),
+            &mut current,
+            &mut output,
+        ));
+        events.extend(finish_current_block(&mut current, &mut output));
+
+        // Exactly ONE tool-call block, name + id + parsed args all set.
+        assert_eq!(output.content.len(), 1, "should be a single ToolCall block");
+        match &output.content[0] {
+            AssistantContentBlock::ToolCall(tc) => {
+                assert_eq!(tc.id, "call_abc");
+                assert_eq!(tc.name, "read");
+                assert_eq!(tc.arguments, serde_json::json!({"path": "/tmp/x"}));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+
+        // Event tape: one Start, three Deltas (one per arg chunk that
+        // carried text), one End.
+        let starts = events
+            .iter()
+            .filter(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. }))
+            .count();
+        let ends = events
+            .iter()
+            .filter(|e| matches!(e, AssistantMessageEvent::ToolCallEnd { .. }))
+            .count();
+        assert_eq!(starts, 1);
+        assert_eq!(ends, 1);
+    }
+
+    /// When two tool calls arrive interleaved on different `index` slots
+    /// (rare but allowed — happens when a model parallel-calls), each
+    /// index must keep its own block. The pre-fix logic also got this
+    /// case wrong because the `id != tool_id` heuristic happened to work
+    /// for the first chunk of each — but the SECOND chunk for tool 0
+    /// would create a new block instead of extending the existing one.
+    #[test]
+    fn streaming_parallel_tool_calls_keep_separate_blocks_per_index() {
+        let mut output = empty_output();
+        let mut current: Option<CurrentBlock> = None;
+        let mut events = Vec::new();
+        // Tool 0 first chunk.
+        events.extend(handle_delta(
+            &tool_call_delta(0, Some("call_a"), Some("read"), Some("{\"p\":\"x\"}")),
+            &mut current,
+            &mut output,
+        ));
+        // Tool 1 first chunk.
+        events.extend(handle_delta(
+            &tool_call_delta(1, Some("call_b"), Some("write"), Some("{\"q\":\"y\"}")),
+            &mut current,
+            &mut output,
+        ));
+        events.extend(finish_current_block(&mut current, &mut output));
+
+        assert_eq!(output.content.len(), 2);
+        match (&output.content[0], &output.content[1]) {
+            (
+                AssistantContentBlock::ToolCall(a),
+                AssistantContentBlock::ToolCall(b),
+            ) => {
+                assert_eq!(a.name, "read");
+                assert_eq!(b.name, "write");
+                assert_eq!(a.id, "call_a");
+                assert_eq!(b.id, "call_b");
+            }
+            other => panic!("expected two ToolCalls, got {other:?}"),
+        }
+        let _ = events;
     }
 
     #[test]
