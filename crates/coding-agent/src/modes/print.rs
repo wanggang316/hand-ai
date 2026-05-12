@@ -136,13 +136,12 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    if let Some(export_path) = args.export {
-        return handle_export(&session, &export_path);
-    }
-
-    // Non-interactive: process a single prompt, either from --prompt or stdin.
-    if let Some(prompt) = args.prompt {
-        session.send_message(&prompt).await?;
+    // Non-interactive: process a single prompt, either from --prompt or
+    // stdin. The prompt MUST run before `--export` evaluates, otherwise
+    // we'd export an empty session and silently drop the user's prompt
+    // on the floor.
+    if let Some(prompt) = args.prompt.as_deref() {
+        session.send_message(prompt).await?;
     } else {
         let stdin = io::stdin();
         let input: String = stdin
@@ -154,6 +153,13 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         if !input.is_empty() {
             session.send_message(&input).await?;
         }
+    }
+
+    // After the prompt has run, honor `--export` by writing the now-
+    // populated session out to disk. Run before the SAW_ERROR exit so a
+    // partial transcript is still recoverable on error.
+    if let Some(export_path) = args.export.as_deref() {
+        handle_export(&session, export_path)?;
     }
 
     // Exit non-zero if any assistant message ended with Error/Aborted —
