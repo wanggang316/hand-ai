@@ -322,18 +322,22 @@ fn default_base_url_for(provider: model::types::Provider) -> String {
         if let Ok(url) = std::env::var(key)
             && !url.is_empty()
         {
-            return url;
+            // Trim trailing slashes — provider implementations append the
+            // route path (e.g. `/chat/completions`) and a doubled slash
+            // returns 404 on OpenRouter.
+            return url.trim_end_matches('/').to_string();
         }
     }
     // Public-endpoint fallbacks for providers that have a stable URL.
+    // Stored WITHOUT trailing slash to match the provider format strings.
     match provider {
-        Provider::Zai => "https://open.bigmodel.cn/api/paas/v4/".to_string(),
-        Provider::Deepseek => "https://api.deepseek.com/v1/".to_string(),
-        Provider::Openrouter => "https://openrouter.ai/api/v1/".to_string(),
-        Provider::Google => "https://generativelanguage.googleapis.com/v1beta/".to_string(),
-        Provider::OpenAI => "https://api.openai.com/v1/".to_string(),
-        Provider::Xai => "https://api.x.ai/v1/".to_string(),
-        Provider::Groq => "https://api.groq.com/openai/v1/".to_string(),
+        Provider::Zai => "https://open.bigmodel.cn/api/paas/v4".to_string(),
+        Provider::Deepseek => "https://api.deepseek.com/v1".to_string(),
+        Provider::Openrouter => "https://openrouter.ai/api/v1".to_string(),
+        Provider::Google => "https://generativelanguage.googleapis.com/v1beta".to_string(),
+        Provider::OpenAI => "https://api.openai.com/v1".to_string(),
+        Provider::Xai => "https://api.x.ai/v1".to_string(),
+        Provider::Groq => "https://api.groq.com/openai/v1".to_string(),
         _ => String::new(),
     }
 }
