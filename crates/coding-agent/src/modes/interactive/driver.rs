@@ -2089,6 +2089,38 @@ mod tests {
         );
     }
 
+    /// Regression for the double-bubble bug the user reported: the
+    /// submit handler immediately pushes a `UserMessageComponent`
+    /// (driver.rs:558) so the bubble appears the instant Enter is
+    /// pressed. Without intervention the subsequent
+    /// `AgentEvent::MessageStart{User}` event would push an identical
+    /// second component via `dispatch_agent_event` → `AppendUser`,
+    /// rendering the same "你好" twice. `dispatch_agent_event` now
+    /// returns an empty `ChatUpdate` list for user-message starts.
+    #[test]
+    fn user_submit_path_pushes_exactly_one_bubble() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let (_chat_unused, tools, asst) = fresh_state();
+
+        // (1) Driver-side immediate echo — same line as `driver.rs:558`.
+        {
+            let mut list = chat.lock().unwrap();
+            list.push(Box::new(UserMessageComponent::new("你好".to_string())));
+        }
+
+        // (2) AgentSession then emits MessageStart{User} on the channel.
+        let event = hand_agent::AgentEvent::MessageStart {
+            message: model::Message::User(model::UserMessage::new_text("你好")),
+        };
+        let updates = crate::modes::interactive::event_dispatch::dispatch_agent_event(&event);
+        apply_updates_to_chat(&chat, &tools, &asst, updates);
+
+        let list = chat.lock().unwrap();
+        assert_eq!(list.len(), 1, "expected exactly one bubble, got {}", list.len());
+        let joined = list[0].render(80).join("\n");
+        assert!(joined.contains("你好"), "expected the bubble to carry the text, got: {joined:?}");
+    }
+
     #[test]
     fn replace_last_without_prior_start_appends_a_new_component() {
         let (chat, tools, asst) = fresh_state();

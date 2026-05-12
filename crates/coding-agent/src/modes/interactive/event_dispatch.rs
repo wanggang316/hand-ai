@@ -101,9 +101,15 @@ pub fn dispatch(event: &AgentSessionEvent) -> Vec<ChatUpdate> {
 pub fn dispatch_agent_event(event: &AgentEvent) -> Vec<ChatUpdate> {
     match event {
         AgentEvent::MessageStart { message } => match message {
-            Message::User(u) => vec![ChatUpdate::AppendUser {
-                text: user_text_of(u),
-            }],
+            // User messages are pushed by the submit handler in the driver
+            // BEFORE `send_message` is awaited (see `driver.rs` immediate
+            // echo), and by `replay_messages_into` for history. Emitting an
+            // additional `AppendUser` from this event fires AFTER the
+            // immediate echo and renders a second identical bubble.
+            // pi-mono uses the event-driven path *exclusively*; we keep
+            // the immediate echo for input responsiveness, so we drop the
+            // event-driven path instead.
+            Message::User(_) => vec![],
             Message::Assistant(a) => vec![ChatUpdate::AppendAssistant {
                 message: Box::new(a.clone()),
             }],
@@ -231,17 +237,17 @@ mod tests {
     }
 
     #[test]
-    fn user_message_start_emits_append_user() {
+    fn user_message_start_does_not_emit_append_user() {
+        // Regression: `MessageStart{User}` USED to produce `AppendUser`,
+        // which combined with the driver's immediate echo to render every
+        // user message twice. The event-driven path is now intentionally
+        // a no-op for user messages — see [`dispatch_agent_event`].
         let user = UserMessage::new_text("hello");
         let event = AgentEvent::MessageStart {
             message: Message::User(user),
         };
         let updates = dispatch_agent_event(&event);
-        assert_eq!(updates.len(), 1);
-        match &updates[0] {
-            ChatUpdate::AppendUser { text } => assert_eq!(text, "hello"),
-            other => panic!("expected AppendUser, got {:?}", other),
-        }
+        assert!(updates.is_empty(), "expected no updates, got {updates:?}");
     }
 
     #[test]

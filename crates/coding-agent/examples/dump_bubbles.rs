@@ -29,6 +29,10 @@ fn main() {
     let bubble = UserMessageComponent::new("你好");
     dump("user 你好", &bubble.render(width));
 
+    let h = UserMessageComponent::new("hi");
+    dump("user hi @ width 80", &h.render(80));
+    dump("user hi @ width 30", &h.render(30));
+
     let mut tool = ToolExecutionComponent::new("ls", json!(""));
     tool.set_result(
         hand_agent::types::ToolResult::text("Invalid arguments for tool 'ls': \"\" is not of type \"object\" (path: )"),
