@@ -52,7 +52,15 @@ impl SessionSetup {
             .model
             .as_deref()
             .unwrap_or_else(|| model_resolver::default_model_for_provider(provider));
-        let resolved = model_resolver::resolve_model(Some(provider), model_pattern);
+        let mut resolved = model_resolver::resolve_model(Some(provider), model_pattern);
+        // `--base-url` overrides whatever default we picked. Useful for
+        // self-hosted proxies / vendor-compat endpoints (e.g. pointing
+        // anthropic at https://open.bigmodel.cn/api/anthropic).
+        if let Some(base) = args.base_url.as_deref()
+            && !base.is_empty()
+        {
+            resolved.model.base_url = base.to_string();
+        }
 
         let thinking_level = args
             .thinking

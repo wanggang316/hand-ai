@@ -224,56 +224,50 @@ fn has_date_suffix(id: &str) -> bool {
 }
 
 /// Build a fallback model for an unknown model ID.
+///
+/// Two-step resolution: parse the provider string into a [`Provider`] enum
+/// (handles aliases below), then pick the API protocol that provider uses.
+/// Defaults to Anthropic only when the provider string is genuinely
+/// unrecognised — *not* when it's a known provider we just hadn't enumerated
+/// here, which was the bug the user hit with `--provider zai`.
 fn build_fallback_model(provider: &str, model_id: &str) -> Model {
-    let (provider_enum, api) = match provider {
-        "anthropic" => (
-            model::types::Provider::Anthropic,
-            model::types::Api::AnthropicMessages,
-        ),
-        "openai" => (
-            model::types::Provider::OpenAI,
-            model::types::Api::OpenAICompletions,
-        ),
-        "google" => (
-            model::types::Provider::Google,
-            model::types::Api::GoogleGenerativeAi,
-        ),
-        "mistral" => (
-            model::types::Provider::Mistral,
-            model::types::Api::OpenAICompletions,
-        ),
-        "groq" => (
-            model::types::Provider::Groq,
-            model::types::Api::OpenAICompletions,
-        ),
-        "xai" => (
-            model::types::Provider::Xai,
-            model::types::Api::OpenAICompletions,
-        ),
-        "openrouter" => (
-            model::types::Provider::Openrouter,
-            model::types::Api::OpenAICompletions,
-        ),
-        "deepseek" | "together" | "fireworks" => (
-            model::types::Provider::Openrouter, // Route through OpenRouter for now
-            model::types::Api::OpenAICompletions,
-        ),
-        "azure" => (
-            model::types::Provider::AzureOpenAiResponses,
-            model::types::Api::OpenAICompletions,
-        ),
-        "bedrock" | "amazon-bedrock" => (
-            model::types::Provider::AmazonBedrock,
-            model::types::Api::BedrockConverseStream,
-        ),
-        "github-copilot" => (
-            model::types::Provider::GitHubCopilot,
-            model::types::Api::OpenAICompletions,
-        ),
-        _ => (
-            model::types::Provider::Anthropic,
-            model::types::Api::AnthropicMessages,
-        ),
+    use model::types::{Api, Provider};
+
+    // Common alias normalisation so `--provider zhipu` resolves to `zai`,
+    // `--provider gemini` resolves to `google`, etc.
+    let normalised: &str = match provider {
+        "zhipu" => "zai",
+        "gemini" => "google",
+        "kimi" => "moonshotai",
+        "claude" => "anthropic",
+        "deepseek-coder" => "deepseek",
+        "bedrock" => "amazon-bedrock",
+        "azure" => "azure-openai-responses",
+        other => other,
+    };
+
+    // Resolve to a Provider enum, defaulting to Anthropic only for genuinely
+    // unknown ids.
+    let provider_enum = Provider::from_str(normalised).unwrap_or(Provider::Anthropic);
+
+    // Pick the API protocol the provider speaks. Most OpenAI-compatible
+    // providers route through `OpenAICompletions`; the rest have bespoke
+    // protocols.
+    let api = match provider_enum {
+        Provider::Anthropic => Api::AnthropicMessages,
+        Provider::Google => Api::GoogleGenerativeAi,
+        Provider::GoogleGeminiCli => Api::GoogleGenerativeAi,
+        Provider::GoogleAntigravity => Api::GoogleGenerativeAi,
+        Provider::GoogleVertex => Api::GoogleGenerativeAi,
+        Provider::AmazonBedrock => Api::BedrockConverseStream,
+        Provider::AzureOpenAiResponses => Api::AzureOpenAiResponses,
+        Provider::OpenAICodex => Api::OpenAICodexResponses,
+        // Everything else uses OpenAI-compatible Completions: openai,
+        // openrouter, xai, groq, cerebras, vercel-ai-gateway, zai, mistral,
+        // minimax(-cn), huggingface, opencode(-go), kimi-coding,
+        // cloudflare-*, fireworks, moonshotai(-cn), xiaomi*, deepseek,
+        // github-copilot.
+        _ => Api::OpenAICompletions,
     };
 
     Model {
@@ -281,7 +275,7 @@ fn build_fallback_model(provider: &str, model_id: &str) -> Model {
         name: model_id.to_string(),
         api,
         provider: provider_enum,
-        base_url: String::new(),
+        base_url: default_base_url_for(provider_enum),
         reasoning: false,
         input: vec![model::InputType::Text],
         cost: model::Cost {
@@ -295,6 +289,52 @@ fn build_fallback_model(provider: &str, model_id: &str) -> Model {
         headers: None,
         compat: None,
         thinking_level_map: None,
+    }
+}
+
+/// Resolve a sensible default base URL for an unrecognised model.
+///
+/// Mirrors pi-mono's per-provider default endpoints. The OAI-compatible
+/// providers each pick a `<PROVIDER>_BASE_URL` env var (matching the
+/// secrets.env convention), falling back to the documented public endpoint.
+fn default_base_url_for(provider: model::types::Provider) -> String {
+    use model::types::Provider;
+    // Candidate env var names per provider. First non-empty wins. The
+    // aliases (ZHIPU_BASE_URL for zai etc.) match the conventions used in
+    // the user community's secrets.env files.
+    let env_keys: &[&str] = match provider {
+        Provider::Anthropic => &["ANTHROPIC_BASE_URL"],
+        Provider::Zai => &["ZAI_BASE_URL", "ZHIPU_BASE_URL"],
+        Provider::Deepseek => &["DEEPSEEK_BASE_URL"],
+        Provider::KimiCoding => &["KIMI_BASE_URL"],
+        Provider::Moonshotai => &["KIMI_BASE_URL"],
+        Provider::Minimax | Provider::MinimaxCn => &["MM_BASE_URL"],
+        Provider::Openrouter => &["OPENROUTER_BASE_URL"],
+        Provider::Google => &["GEMINI_BASE_URL"],
+        Provider::OpenAI => &["OPENAI_BASE_URL"],
+        Provider::Xai => &["XAI_BASE_URL"],
+        Provider::Groq => &["GROQ_BASE_URL"],
+        Provider::Cerebras => &["CEREBRAS_BASE_URL"],
+        Provider::Mistral => &["MISTRAL_BASE_URL"],
+        _ => return String::new(),
+    };
+    for key in env_keys {
+        if let Ok(url) = std::env::var(key)
+            && !url.is_empty()
+        {
+            return url;
+        }
+    }
+    // Public-endpoint fallbacks for providers that have a stable URL.
+    match provider {
+        Provider::Zai => "https://open.bigmodel.cn/api/paas/v4/".to_string(),
+        Provider::Deepseek => "https://api.deepseek.com/v1/".to_string(),
+        Provider::Openrouter => "https://openrouter.ai/api/v1/".to_string(),
+        Provider::Google => "https://generativelanguage.googleapis.com/v1beta/".to_string(),
+        Provider::OpenAI => "https://api.openai.com/v1/".to_string(),
+        Provider::Xai => "https://api.x.ai/v1/".to_string(),
+        Provider::Groq => "https://api.groq.com/openai/v1/".to_string(),
+        _ => String::new(),
     }
 }
 

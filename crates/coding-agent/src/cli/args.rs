@@ -32,6 +32,13 @@ pub struct Args {
     #[arg(long)]
     pub api_key: Option<String>,
 
+    /// Custom base URL for the provider (e.g.
+    /// `https://open.bigmodel.cn/api/anthropic`). Useful for self-hosted
+    /// proxies or alternative endpoints when the model isn't in the
+    /// catalogue. Not persisted.
+    #[arg(long)]
+    pub base_url: Option<String>,
+
     /// Resume a previous session by ID
     #[arg(short, long)]
     pub resume: Option<String>,

@@ -4,7 +4,6 @@
 //! e.g. OPENAI_API_KEY.
 
 use crate::types::Provider;
-use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -91,32 +90,33 @@ pub fn get_env_api_key(provider: &Provider) -> Option<String> {
             }
         }
         _ => {
-            // Map provider to environment variable name
-            let env_map: HashMap<String, String> = [
-                ("openai", "OPENAI_API_KEY"),
-                ("azure-openai-responses", "AZURE_OPENAI_API_KEY"),
-                ("google", "GEMINI_API_KEY"),
-                ("groq", "GROQ_API_KEY"),
-                ("cerebras", "CEREBRAS_API_KEY"),
-                ("xai", "XAI_API_KEY"),
-                ("openrouter", "OPENROUTER_API_KEY"),
-                ("vercel-ai-gateway", "AI_GATEWAY_API_KEY"),
-                ("zai", "ZAI_API_KEY"),
-                ("mistral", "MISTRAL_API_KEY"),
-                ("minimax", "MINIMAX_API_KEY"),
-                ("minimax-cn", "MINIMAX_CN_API_KEY"),
-                ("huggingface", "HF_TOKEN"),
-                ("opencode", "OPENCODE_API_KEY"),
-                ("kimi-coding", "KIMI_API_KEY"),
-            ]
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-
-            let provider_key = provider.as_str();
-            env_map
-                .get(provider_key)
-                .and_then(|var_name| env::var(var_name).ok())
+            // Per-provider env-var candidates. Each entry is tried in order;
+            // first non-empty value wins. The aliases (e.g. ZHIPU_API_KEY for
+            // zai, MM_API_KEY for minimax) match the conventions used by the
+            // pi-mono / hand-ai user community.
+            let candidates: &[&str] = match provider.as_str() {
+                "openai" => &["OPENAI_API_KEY"],
+                "azure-openai-responses" => &["AZURE_OPENAI_API_KEY"],
+                "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                "groq" => &["GROQ_API_KEY"],
+                "cerebras" => &["CEREBRAS_API_KEY"],
+                "xai" => &["XAI_API_KEY"],
+                "openrouter" => &["OPENROUTER_API_KEY"],
+                "vercel-ai-gateway" => &["AI_GATEWAY_API_KEY"],
+                "zai" => &["ZAI_API_KEY", "ZHIPU_API_KEY"],
+                "deepseek" => &["DEEPSEEK_API_KEY"],
+                "mistral" => &["MISTRAL_API_KEY"],
+                "minimax" => &["MINIMAX_API_KEY", "MM_API_KEY"],
+                "minimax-cn" => &["MINIMAX_CN_API_KEY", "MM_API_KEY"],
+                "huggingface" => &["HF_TOKEN"],
+                "opencode" => &["OPENCODE_API_KEY"],
+                "kimi-coding" => &["KIMI_API_KEY"],
+                "moonshotai" | "moonshotai-cn" => &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+                _ => &[],
+            };
+            candidates
+                .iter()
+                .find_map(|name| env::var(name).ok().filter(|s| !s.is_empty()))
         }
     };
 
@@ -130,34 +130,33 @@ pub fn get_env_api_key_by_str(provider: &str) -> Option<String> {
         return get_env_api_key(&provider);
     }
 
-    // Fallback to direct env var lookup
-    let env_map: HashMap<String, String> = [
-        ("github-copilot", "COPILOT_GITHUB_TOKEN"),
-        ("anthropic", "ANTHROPIC_API_KEY"),
-        ("openai", "OPENAI_API_KEY"),
-        ("azure-openai-responses", "AZURE_OPENAI_API_KEY"),
-        ("google", "GEMINI_API_KEY"),
-        ("groq", "GROQ_API_KEY"),
-        ("cerebras", "CEREBRAS_API_KEY"),
-        ("xai", "XAI_API_KEY"),
-        ("openrouter", "OPENROUTER_API_KEY"),
-        ("vercel-ai-gateway", "AI_GATEWAY_API_KEY"),
-        ("zai", "ZAI_API_KEY"),
-        ("mistral", "MISTRAL_API_KEY"),
-        ("minimax", "MINIMAX_API_KEY"),
-        ("minimax-cn", "MINIMAX_CN_API_KEY"),
-        ("huggingface", "HF_TOKEN"),
-        ("opencode", "OPENCODE_API_KEY"),
-        ("kimi-coding", "KIMI_API_KEY"),
-    ]
-    .iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect();
-
-    env_map
-        .get(provider)
-        .and_then(|var_name| env::var(var_name).ok())
-        .filter(|s| !s.is_empty())
+    // Fallback to direct env var lookup with aliases (mirrors the per-
+    // provider table in get_env_api_key for unknown / aliased provider ids).
+    let candidates: &[&str] = match provider {
+        "github-copilot" => &["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"],
+        "anthropic" => &["ANTHROPIC_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        "azure-openai-responses" => &["AZURE_OPENAI_API_KEY"],
+        "google" | "gemini" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "groq" => &["GROQ_API_KEY"],
+        "cerebras" => &["CEREBRAS_API_KEY"],
+        "xai" => &["XAI_API_KEY"],
+        "openrouter" => &["OPENROUTER_API_KEY"],
+        "vercel-ai-gateway" => &["AI_GATEWAY_API_KEY"],
+        "zai" | "zhipu" => &["ZAI_API_KEY", "ZHIPU_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "mistral" => &["MISTRAL_API_KEY"],
+        "minimax" => &["MINIMAX_API_KEY", "MM_API_KEY"],
+        "minimax-cn" => &["MINIMAX_CN_API_KEY", "MM_API_KEY"],
+        "huggingface" => &["HF_TOKEN"],
+        "opencode" => &["OPENCODE_API_KEY"],
+        "kimi-coding" | "kimi" => &["KIMI_API_KEY"],
+        "moonshotai" | "moonshotai-cn" => &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+        _ => &[],
+    };
+    candidates
+        .iter()
+        .find_map(|name| env::var(name).ok().filter(|s| !s.is_empty()))
 }
 
 /// Clear the Vertex ADC credentials cache (useful for testing).
@@ -273,10 +272,14 @@ mod tests {
     #[test]
     fn test_get_env_api_key_returns_none_when_not_set() {
         // Most CI environments won't have provider keys set
-        // This tests the fallback behavior
+        // This tests the fallback behavior.
         let result = get_env_api_key(&Provider::Zai);
-        // Zai is obscure enough that it's almost never set
-        if env::var("ZAI_API_KEY").is_err() {
+        // Zai accepts both ZAI_API_KEY (canonical) and ZHIPU_API_KEY
+        // (community alias). The result should be None only when *neither*
+        // is set.
+        let zai_set = env::var("ZAI_API_KEY").is_ok_and(|v| !v.is_empty());
+        let zhipu_set = env::var("ZHIPU_API_KEY").is_ok_and(|v| !v.is_empty());
+        if !zai_set && !zhipu_set {
             assert!(result.is_none());
         }
     }
