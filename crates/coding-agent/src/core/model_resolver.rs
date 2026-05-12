@@ -1305,6 +1305,17 @@ mod tests {
         assert_eq!(result.thinking_level, Some(ThinkingLevel::High));
     }
 
+    /// OpenRouter exposes OpenAI's GPT family under `openai/<id>`. Hand
+    /// must route `openai/gpt-3.5-turbo` to the OpenRouter model with that
+    /// id, not partial-match its way to a similarly-named OpenAI provider
+    /// model that wouldn't actually be served via OpenRouter credentials.
+    #[test]
+    fn resolve_model_routes_openai_slug_to_openrouter_when_provider_explicit() {
+        let result = resolve_model(Some("openrouter"), "openai/gpt-3.5-turbo");
+        assert_eq!(result.model.id, "openai/gpt-3.5-turbo");
+        assert_eq!(result.model.provider.as_str(), "openrouter");
+    }
+
     #[test]
     fn test_list_models_no_filter() {
         let models = list_models(None);
