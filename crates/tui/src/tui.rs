@@ -2235,6 +2235,21 @@ mod tests {
         }
     }
 
+    /// A paste payload containing wide CJK and multi-codepoint emoji must
+    /// round-trip byte-for-byte without being mis-segmented or transcoded.
+    #[test]
+    fn paste_preserves_unicode_payload() {
+        let mut tui = make_tui();
+        let payload = "Hello 世界 🎉";
+        let chunk = format!("\x1b[200~{payload}\x1b[201~");
+        let events = tui.split_paste_markers(&chunk);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            InputEvent::Paste(s) => assert_eq!(s, payload),
+            other => panic!("expected Paste, got {other:?}"),
+        }
+    }
+
     // ---------- CURSOR_MARKER multi-frame integration ----------
 
     /// Component that emits a CURSOR_MARKER on a specific line (simulates a
