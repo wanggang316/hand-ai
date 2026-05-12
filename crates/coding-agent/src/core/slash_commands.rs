@@ -152,6 +152,12 @@ impl SlashCommandRegistry {
             ("changelog", vec![], "Display version info", false),
             ("tree", vec![], "Show file tree of directory", true),
             ("reload", vec![], "Reload settings and keybindings", false),
+            (
+                "scoped-models",
+                vec![],
+                "Toggle which models the `/model` quick-cycle reaches",
+                false,
+            ),
         ];
 
         for (name, aliases, desc, accepts_args) in builtins {

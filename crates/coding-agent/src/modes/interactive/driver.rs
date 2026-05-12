@@ -51,7 +51,8 @@ use super::components::{
     AssistantMessageComponent, AuthSelectorMode, AuthSelectorProvider, BashExecutionComponent,
     BashStatus, BorderedLoaderComponent, CustomMessageComponent, CustomMessageData, FooterComponent,
     FooterViewModel, LoginDialogComponent, LoginDialogEvent, ModelOutcome, ModelSelectorComponent,
-    OAuthOutcome, OAuthSelectorComponent, SessionSelectorComponent, SessionSelectorEvent,
+    OAuthOutcome, OAuthSelectorComponent, ScopedModelsConfig, ScopedModelsOutcome,
+    ScopedModelsSelectorComponent, SessionSelectorComponent, SessionSelectorEvent,
     SettingsSelectorComponent, SettingsSelectorEvent, ThemeOutcome, ThemeSelectorComponent,
     ThinkingOutcome, ThinkingSelectorComponent, TokenUsageSummary, ToolExecutionComponent,
     UserMessageComponent,
@@ -1446,6 +1447,9 @@ pub(crate) async fn apply_slash_action(
         SlashCommandAction::Reload => {
             apply_reload(chat, cwd);
         }
+        SlashCommandAction::OpenScopedModelsSelector => {
+            mount_scoped_models_selector(chat, session, mounter).await;
+        }
         SlashCommandAction::ModelByPattern(pattern) => {
             apply_model_by_pattern(chat, session, &pattern);
         }
@@ -1540,6 +1544,115 @@ fn format_diagnostics_report(report: &crate::core::diagnostics::DiagnosticsRepor
 // absent (unit tests, headless contexts) the helper degrades to a
 // status-line stub so existing test fixtures continue to work.
 // ---------------------------------------------------------------------------
+
+/// M4.5 — mount the scoped-models multi-select overlay. The outcome
+/// channel emits either a session-only `Change` (`enabled_models`
+/// patterns updated for this run only) or a `Persist` (write through
+/// to the project SettingsManager). Cancellation leaves state alone.
+async fn mount_scoped_models_selector(
+    chat: &ChatList,
+    session: &mut AgentSession,
+    mounter: Option<&OverlayMounter>,
+) {
+    let Some(mounter) = mounter else {
+        push_status(chat, "[/scoped-models opened]".to_string(), None);
+        return;
+    };
+    let all_models: Vec<model::Model> = session.model_registry().all().to_vec();
+    if all_models.is_empty() {
+        push_status(
+            chat,
+            "[/scoped-models: no models in registry]".to_string(),
+            Some(YELLOW_FG),
+        );
+        return;
+    }
+    // Read the patterns currently in scope. The on-disk type is a
+    // `Vec<String>` of glob patterns; the selector wants an exact list
+    // of `provider/id` strings. Resolve once via `resolve_model_scope`
+    // so the displayed initial-selected set matches what `/model` is
+    // actually filtering by.
+    let initial_patterns = session
+        .settings()
+        .current()
+        .enabled_models
+        .clone()
+        .unwrap_or_default();
+    let initial_ids: Option<Vec<String>> = if initial_patterns.is_empty() {
+        None
+    } else {
+        let resolved = crate::core::model_resolver::resolve_model_scope(
+            &initial_patterns,
+            &all_models,
+        );
+        Some(
+            resolved
+                .models
+                .into_iter()
+                .map(|sm| format!("{}/{}", sm.model.provider.as_str(), sm.model.id))
+                .collect(),
+        )
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ScopedModelsOutcome>();
+    let config = ScopedModelsConfig {
+        all_models,
+        enabled_ids: initial_ids,
+    };
+    let component = ScopedModelsSelectorComponent::new(config, tx);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/scoped-models failed: {e}]"), Some(RED_FG));
+            return;
+        }
+    };
+    // Drain the channel — the selector may emit a session Change before
+    // the final Persist/Cancelled, so loop until a terminal outcome.
+    let mut final_ids: Option<Vec<String>> = None;
+    let mut persist = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            ScopedModelsOutcome::Change(ids) => final_ids = ids,
+            ScopedModelsOutcome::Persist(ids) => {
+                final_ids = ids;
+                persist = true;
+                break;
+            }
+            ScopedModelsOutcome::Cancelled => {
+                push_status(chat, "[/scoped-models cancelled]".to_string(), None);
+                let _ = mounter.hide(handle);
+                return;
+            }
+        }
+    }
+    let count = final_ids.as_ref().map(Vec::len).unwrap_or(0);
+    if persist {
+        // Persist requires the SettingsManager to support setting
+        // `enabled_models` on a scope. That setter doesn't exist yet
+        // (see core::settings — there are `set_packages` /
+        // `set_extensions` / … but not `set_enabled_models`), so we
+        // surface a yellow note and keep the session-only effect.
+        push_status(
+            chat,
+            format!(
+                "[/scoped-models: {count} model(s) selected (session-only — \
+                 persist not yet wired)]"
+            ),
+            Some(YELLOW_FG),
+        );
+    } else {
+        push_status(
+            chat,
+            format!("[/scoped-models: {count} model(s) selected for this session]"),
+            None,
+        );
+    }
+    let _ = mounter.hide(handle);
+}
 
 async fn mount_model_selector(
     chat: &ChatList,

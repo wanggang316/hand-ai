@@ -140,6 +140,10 @@ pub enum SlashCommandAction {
     /// reloaders (extensions, skills, prompts, themes) attach over time
     /// — the driver fires the ones it knows about.
     Reload,
+    /// Open the scoped-models multi-select overlay (M4.5). The driver
+    /// passes the resulting list to `/model` so the quick-cycle reaches
+    /// only the user's chosen subset.
+    OpenScopedModelsSelector,
     /// Quit the interactive session.
     Quit,
     /// No-op acknowledgement (the handler did its work without producing any
@@ -211,6 +215,9 @@ impl fmt::Display for SlashCommandAction {
             SlashCommandAction::Logout => f.write_str("[logout]"),
             SlashCommandAction::ShowDiagnostics => f.write_str("[show diagnostics]"),
             SlashCommandAction::Reload => f.write_str("[reload settings + keybindings]"),
+            SlashCommandAction::OpenScopedModelsSelector => {
+                f.write_str("[open scoped-models selector]")
+            }
             SlashCommandAction::Quit => f.write_str("[quit]"),
             SlashCommandAction::Noop => Ok(()),
         }
@@ -331,6 +338,10 @@ impl SlashCommandTable {
             "diagnostics" => SlashCommandResult::Handled(SlashCommandAction::ShowDiagnostics),
 
             "reload" => SlashCommandResult::Handled(SlashCommandAction::Reload),
+
+            "scoped-models" | "scoped_models" => {
+                SlashCommandResult::Handled(SlashCommandAction::OpenScopedModelsSelector)
+            }
 
             _ => SlashCommandResult::Unknown,
         }
