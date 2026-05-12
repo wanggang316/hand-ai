@@ -33,19 +33,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Handle --list-models
+    // Handle --list-models — mirror pi-mono's six-column layout
+    // (provider, model, context, max-out, thinking, images), filtered
+    // to providers that have credentials configured (env var or auth.json)
+    // so the table matches what `pi --list-models` shows on the same
+    // machine.
     if let Some(ref search) = cli.list_models {
-        let models = model_resolver::list_models(search.as_deref());
+        let models = list_models_for_cli(search.as_deref());
         if models.is_empty() {
-            println!("No models found.");
-        } else {
-            println!("{:<20} {:<40} NAME", "PROVIDER", "MODEL ID");
-            println!("{}", "-".repeat(80));
-            for m in &models {
-                println!("{:<20} {:<40} {}", m.provider.as_str(), m.id, m.name);
+            if let Some(pat) = search.as_deref().filter(|s| !s.is_empty()) {
+                println!("No models matching \"{pat}\"");
+            } else {
+                println!("No models found.");
             }
-            println!("\n{} models total", models.len());
+            return Ok(());
         }
+        print_models_table(&models);
         return Ok(());
     }
 
@@ -573,6 +576,142 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
             let _ = io::stderr().flush();
         }
         _ => {}
+    }
+}
+
+/// Resolve the model list shown by `--list-models`, filtered to providers
+/// whose credentials are configured (env var or auth.json). Mirrors
+/// pi-mono's `pi --list-models` which only surfaces models the user can
+/// actually call. Falls back to the unfiltered catalogue when auth.json
+/// is unreadable (so the command never returns a misleading "no models").
+fn list_models_for_cli(search: Option<&str>) -> Vec<model::Model> {
+    use hand_coding_agent::core::auth_storage::AuthStorage;
+    use hand_coding_agent::core::model_registry::ModelRegistry;
+    use hand_tui::fuzzy_filter;
+
+    let auth = match AuthStorage::new() {
+        Ok(a) => a,
+        Err(_) => return model_resolver::list_models(search),
+    };
+    let registry = ModelRegistry::create(auth);
+    let mut models = registry.available();
+    if let Some(pattern) = search.filter(|s| !s.is_empty()) {
+        let haystacks: Vec<String> = models
+            .iter()
+            .map(|m| format!("{} {}", m.provider.as_str(), m.id))
+            .collect();
+        let haystack_refs: Vec<&str> = haystacks.iter().map(String::as_str).collect();
+        let matches = fuzzy_filter(pattern, &haystack_refs);
+        let kept: Vec<model::Model> = matches.into_iter().map(|(i, _)| models[i].clone()).collect();
+        models = kept;
+    }
+    models.sort_by(|a, b| {
+        a.provider
+            .as_str()
+            .cmp(b.provider.as_str())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    models
+}
+
+/// Render the model catalog as pi-mono's six-column table
+/// (provider, model, context, max-out, thinking, images). Lowercase
+/// header labels match the TS reference's `cli/list-models.ts` output
+/// exactly, so the diff harness produces byte-identical results.
+fn print_models_table(models: &[model::Model]) {
+    use model::types::InputType;
+
+    fn fmt_tokens(n: u64) -> String {
+        if n >= 1_000_000 {
+            let m = n as f64 / 1_000_000.0;
+            if (m.fract()).abs() < f64::EPSILON {
+                format!("{}M", m as u64)
+            } else {
+                format!("{m:.1}M")
+            }
+        } else if n >= 1_000 {
+            let k = n as f64 / 1_000.0;
+            if (k.fract()).abs() < f64::EPSILON {
+                format!("{}K", k as u64)
+            } else {
+                format!("{k:.1}K")
+            }
+        } else {
+            n.to_string()
+        }
+    }
+
+    struct Row {
+        provider: String,
+        model: String,
+        context: String,
+        max_out: String,
+        thinking: String,
+        images: String,
+    }
+
+    let header = Row {
+        provider: "provider".into(),
+        model: "model".into(),
+        context: "context".into(),
+        max_out: "max-out".into(),
+        thinking: "thinking".into(),
+        images: "images".into(),
+    };
+
+    let rows: Vec<Row> = models
+        .iter()
+        .map(|m| Row {
+            provider: m.provider.as_str().to_string(),
+            model: m.id.clone(),
+            context: fmt_tokens(m.context_window),
+            max_out: fmt_tokens(m.max_tokens),
+            thinking: if m.reasoning { "yes" } else { "no" }.into(),
+            images: if m.input.contains(&InputType::Image) {
+                "yes"
+            } else {
+                "no"
+            }
+            .into(),
+        })
+        .collect();
+
+    let mut w = (
+        header.provider.len(),
+        header.model.len(),
+        header.context.len(),
+        header.max_out.len(),
+        header.thinking.len(),
+        header.images.len(),
+    );
+    for r in &rows {
+        w.0 = w.0.max(r.provider.len());
+        w.1 = w.1.max(r.model.len());
+        w.2 = w.2.max(r.context.len());
+        w.3 = w.3.max(r.max_out.len());
+        w.4 = w.4.max(r.thinking.len());
+        w.5 = w.5.max(r.images.len());
+    }
+    let print = |r: &Row| {
+        println!(
+            "{:<pw$}  {:<mw$}  {:<cw$}  {:<ow$}  {:<tw$}  {:<iw$}",
+            r.provider,
+            r.model,
+            r.context,
+            r.max_out,
+            r.thinking,
+            r.images,
+            pw = w.0,
+            mw = w.1,
+            cw = w.2,
+            ow = w.3,
+            tw = w.4,
+            iw = w.5,
+        );
+    };
+    print(&header);
+    for r in &rows {
+        print(r);
     }
 }
 
