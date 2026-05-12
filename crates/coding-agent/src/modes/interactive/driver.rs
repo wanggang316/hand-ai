@@ -213,6 +213,12 @@ impl InteractiveMode {
         )));
         let pending = Arc::new(StdMutex::new(Pending::default()));
 
+        // Welcome header at the very top of the scrollback. Compact one-liner
+        // with the product name, version, and the most-used keybindings —
+        // similar to pi-mono's expandable header but without the easter-egg
+        // logo. Stays in the scrollback (scrolls off as chat grows).
+        push_welcome_header(&chat, session.model());
+
         // Replay existing session messages.
         replay_messages_into(&chat, session.messages());
 
@@ -471,6 +477,33 @@ fn build_hint_line() -> String {
         raw_key_hint("^D", "quit"),
     ];
     hints.join("  ")
+}
+
+/// Push a welcome header into the chat. Two lines:
+/// 1. `hand v0.1.0  •  <provider>/<model>` in bright cyan
+/// 2. dim hint row with the same keybindings as the editor footer plus
+///    `^L model  ^P model cycle  ^C interrupt`
+fn push_welcome_header(chat: &ChatList, model: &model::Model) {
+    use super::components::keybinding_hints::raw_key_hint;
+    let version = env!("CARGO_PKG_VERSION");
+    let title = format!(
+        "\x1b[1;36mhand v{version}\x1b[0m  \x1b[2m•\x1b[0m  \x1b[36m{}/{}\x1b[0m",
+        model.provider.as_str(),
+        model.id,
+    );
+    let hints = [
+        raw_key_hint("↵", "send"),
+        raw_key_hint("⇧↵", "newline"),
+        raw_key_hint("/", "commands"),
+        raw_key_hint("^C", "interrupt"),
+        raw_key_hint("^D", "quit"),
+    ];
+    let mut list = chat.lock().expect("chat list mutex poisoned");
+    list.push(Box::new(TextComponent::new(title)));
+    list.push(Box::new(TextComponent::new(hints.join("  "))));
+    // One blank line so the header doesn't visually crowd the first chat
+    // entry.
+    list.push(Box::new(TextComponent::new(String::new())));
 }
 
 fn coloured_text(text: impl AsRef<str>, ansi_prefix: Option<&str>) -> TextComponent {
