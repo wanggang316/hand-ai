@@ -381,6 +381,11 @@ impl InteractiveMode {
         // Build the TUI tree.
         let terminal = Box::new(ProcessTerminal::new()?);
         let mut tui = Tui::new(terminal);
+        // Publish the render handle so `push_status` (and other shared-state
+        // mutators) can poke the main loop after a mutation — without this,
+        // background-thread updates only become visible the next time some
+        // other source (stdin, loader tick) triggers a render.
+        set_render_handle(tui.render_handle());
         tui.root_mut().add_child_with_id(Box::new(ChatScrollback {
             list: Arc::clone(&chat),
         }));
@@ -1437,8 +1442,40 @@ fn apply_updates_to_chat(
 }
 
 fn push_status(chat: &ChatList, text: String, color_prefix: Option<&str>) {
-    let mut list = chat.lock().expect("chat list mutex poisoned");
-    list.push(Box::new(coloured_text(text, color_prefix)));
+    {
+        let mut list = chat.lock().expect("chat list mutex poisoned");
+        list.push(Box::new(coloured_text(text, color_prefix)));
+    }
+    request_render();
+}
+
+/// Process-wide handle to the Tui's render-requested flag.
+///
+/// The Tui main loop polls this flag every `RENDER_TICK_MS` and only paints
+/// when it's set. Stdin input flips the flag automatically, but pure
+/// driver-side mutations (slash command output, hide-thinking toggle banner,
+/// background-task status banners) need an explicit poke — otherwise the
+/// chat list update is invisible until the user types something or a
+/// loader tick fires.
+///
+/// Set once from [`InteractiveMode::run`] via [`set_render_handle`], then
+/// any code path that mutates shared TUI state calls [`request_render`].
+static RENDER_HANDLE: std::sync::OnceLock<RenderFn> =
+    std::sync::OnceLock::new();
+
+type RenderFn = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+
+fn set_render_handle(handle: impl Fn() + Send + Sync + 'static) {
+    // First setter wins. Subsequent calls (e.g. another `run()` in the same
+    // process during tests) are silently ignored — the original handle is
+    // still valid because the Tui lives until the test ends.
+    let _ = RENDER_HANDLE.set(std::sync::Arc::new(handle));
+}
+
+fn request_render() {
+    if let Some(h) = RENDER_HANDLE.get() {
+        h();
+    }
 }
 
 fn refresh_footer(
