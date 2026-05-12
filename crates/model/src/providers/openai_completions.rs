@@ -189,21 +189,95 @@ pub fn stream_openai_completions(
 
         yield AssistantMessageEvent::Start { partial: output.clone() };
 
-        match run_stream(&model, &context, &options, &mut output).await {
-            Ok(()) => {
-                yield AssistantMessageEvent::Done {
-                    reason: output.stop_reason,
-                    message: output
-                };
-            }
+        // Drive the HTTP/SSE stream inline so we can `yield` intermediate
+        // `text_*`/`thinking_*`/`toolcall_*` events as deltas arrive. The
+        // previous extraction into `run_stream(...)` made this impossible —
+        // events were only emitted at Start/Done, and `current_block` was
+        // dropped without ever flushing accumulated text/thinking back into
+        // `output.content`, so any chunk past the first one was lost.
+        let api_key = options
+            .api_key()
+            .map(|s| s.to_string())
+            .or_else(|| env_api_keys::get_env_api_key(&model.provider))
+            .unwrap_or_default();
+
+        let client = match create_client(&model, &context, &api_key, options.headers()) {
+            Ok(c) => c,
             Err(e) => {
                 output.stop_reason = StopReason::Error;
                 output.error_message = Some(e);
                 yield AssistantMessageEvent::Error {
                     reason: StopReason::Error,
-                    error: output.clone()
+                    error: output,
                 };
+                return;
             }
+        };
+
+        let params = match build_params(&model, &context, &options) {
+            Ok(p) => p,
+            Err(e) => {
+                output.stop_reason = StopReason::Error;
+                output.error_message = Some(e);
+                yield AssistantMessageEvent::Error {
+                    reason: StopReason::Error,
+                    error: output,
+                };
+                return;
+            }
+        };
+
+        let completions = client.completions();
+        let stream_result = completions.create_stream(&params).await;
+        let mut chunk_stream = match stream_result {
+            Ok(s) => Box::pin(s),
+            Err(e) => {
+                output.stop_reason = StopReason::Error;
+                output.error_message = Some(e.to_string());
+                yield AssistantMessageEvent::Error {
+                    reason: StopReason::Error,
+                    error: output,
+                };
+                return;
+            }
+        };
+
+        let mut current_block: Option<CurrentBlock> = None;
+        let mut errored: Option<String> = None;
+
+        while let Some(chunk_result) = chunk_stream.next().await {
+            let chunk = match chunk_result {
+                Ok(c) => c,
+                Err(e) => { errored = Some(e.to_string()); break; }
+            };
+
+            let Some(choice) = chunk.choices.first() else { continue };
+
+            if let Some(finish_reason) = &choice.finish_reason {
+                output.stop_reason = map_stop_reason(finish_reason);
+            }
+
+            for ev in handle_delta(&choice.delta, &mut current_block, &mut output) {
+                yield ev;
+            }
+        }
+
+        for ev in finish_current_block(&mut current_block, &mut output) {
+            yield ev;
+        }
+
+        if let Some(e) = errored {
+            output.stop_reason = StopReason::Error;
+            output.error_message = Some(e);
+            yield AssistantMessageEvent::Error {
+                reason: StopReason::Error,
+                error: output,
+            };
+        } else {
+            yield AssistantMessageEvent::Done {
+                reason: output.stop_reason,
+                message: output,
+            };
         }
     })
 }
@@ -212,113 +286,98 @@ pub fn stream_openai_completions(
 // Stream Processing
 // =============================================================================
 
-async fn run_stream(
-    model: &Model,
-    context: &Context,
-    options: &OpenAICompletionsOptions,
-    output: &mut AssistantMessage,
-) -> Result<(), String> {
-    let api_key = options
-        .api_key()
-        .map(|s| s.to_string())
-        .or_else(|| env_api_keys::get_env_api_key(&model.provider))
-        .unwrap_or_default();
-
-    let client =
-        create_client(model, context, &api_key, options.headers()).map_err(|e| e.to_string())?;
-
-    let params = build_params(model, context, options).map_err(|e| e.to_string())?;
-
-    let completions = client.completions();
-    let stream_result = completions.create_stream(&params).await;
-    let mut stream = Box::pin(stream_result.map_err(|e| e.to_string())?);
-
-    let mut current_block: Option<CurrentBlock> = None;
-
-    while let Some(chunk_result) = stream.next().await {
-        match chunk_result {
-            Ok(chunk) => {
-                if let Some(choice) = chunk.choices.first() {
-                    if let Some(finish_reason) = &choice.finish_reason {
-                        output.stop_reason = map_stop_reason(finish_reason);
-                    }
-
-                    handle_delta(&choice.delta, &mut current_block, output).await?
-                }
-            }
-            Err(e) => {
-                return Err(e.to_string());
-            }
-        }
-    }
-
-    finish_current_block(&mut current_block, output).await;
-    Ok(())
-}
-
-async fn handle_delta(
+/// Apply a single SSE delta to `output`, returning the events to yield.
+///
+/// Mirrors pi-mono's `openai-completions.ts` streaming behaviour: on each
+/// delta we (1) start a content block if the modality changed (text /
+/// thinking / tool call), (2) append the delta to both the `current_block`
+/// scratch buffer **and** the corresponding entry in `output.content`, and
+/// (3) emit a `*_start` / `*_delta` event so subscribers can render the
+/// partial message live.
+fn handle_delta(
     delta: &openai_rust::types::Delta,
     current_block: &mut Option<CurrentBlock>,
     output: &mut AssistantMessage,
-) -> Result<(), String> {
-    // Handle content (text)
-    if let Some(content) = delta.content.as_ref() {
-        match content {
-            Content::Text(text) if !text.is_empty() => {
-                if !matches!(current_block, Some(CurrentBlock::Text(_))) {
-                    finish_current_block(current_block, output).await;
-                    *current_block = Some(CurrentBlock::Text(TextContent::new(text.clone())));
-                    output
-                        .content
-                        .push(AssistantContentBlock::Text(TextContent::new(text.clone())));
-                }
+) -> Vec<AssistantMessageEvent> {
+    let mut events = Vec::new();
 
-                if let Some(CurrentBlock::Text(text_block)) = current_block {
-                    text_block.text.push_str(text);
-                }
-            }
-            Content::Array(parts) => {
-                for part in parts {
-                    if let ContentPart::Text { text } = part
-                        && !text.is_empty()
-                    {
-                        if !matches!(current_block, Some(CurrentBlock::Text(_))) {
-                            finish_current_block(current_block, output).await;
-                            *current_block =
-                                Some(CurrentBlock::Text(TextContent::new(text.clone())));
-                            output
-                                .content
-                                .push(AssistantContentBlock::Text(TextContent::new(text.clone())));
-                        }
-                        if let Some(CurrentBlock::Text(text_block)) = current_block {
-                            text_block.text.push_str(text);
-                        }
-                    }
-                }
-            }
-            _ => {}
+    // Text content. OpenAI ships it under `delta.content`; for vendors that
+    // wrap text into an array (e.g. multipart with images) we flatten all
+    // text parts in order.
+    let text_parts: Vec<String> = match delta.content.as_ref() {
+        Some(Content::Text(text)) if !text.is_empty() => vec![text.clone()],
+        Some(Content::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    for piece in text_parts {
+        if !matches!(current_block, Some(CurrentBlock::Text(_))) {
+            events.extend(finish_current_block(current_block, output));
+            *current_block = Some(CurrentBlock::Text(TextContent::new(String::new())));
+            output
+                .content
+                .push(AssistantContentBlock::Text(TextContent::new(String::new())));
+            let idx = (output.content.len() - 1) as u32;
+            events.push(AssistantMessageEvent::TextStart {
+                content_index: idx,
+                partial: output.clone(),
+            });
         }
+
+        if let Some(CurrentBlock::Text(text_block)) = current_block {
+            text_block.text.push_str(&piece);
+        }
+        if let Some(AssistantContentBlock::Text(last)) = output.content.last_mut() {
+            last.text.push_str(&piece);
+        }
+        let idx = (output.content.len() - 1) as u32;
+        events.push(AssistantMessageEvent::TextDelta {
+            content_index: idx,
+            delta: piece,
+            partial: output.clone(),
+        });
     }
 
-    // Handle reasoning/thinking
+    // Reasoning / thinking content.
     if let Some(reasoning) = &delta.reasoning
         && !reasoning.is_empty()
     {
         if !matches!(current_block, Some(CurrentBlock::Thinking(_))) {
-            finish_current_block(current_block, output).await;
-            let thinking = ThinkingContent::new(reasoning);
-            *current_block = Some(CurrentBlock::Thinking(thinking.clone()));
+            events.extend(finish_current_block(current_block, output));
+            *current_block = Some(CurrentBlock::Thinking(ThinkingContent::new(String::new())));
             output
                 .content
-                .push(AssistantContentBlock::Thinking(thinking));
+                .push(AssistantContentBlock::Thinking(ThinkingContent::new(
+                    String::new(),
+                )));
+            let idx = (output.content.len() - 1) as u32;
+            events.push(AssistantMessageEvent::ThinkingStart {
+                content_index: idx,
+                partial: output.clone(),
+            });
         }
 
         if let Some(CurrentBlock::Thinking(thinking_block)) = current_block {
             thinking_block.thinking.push_str(reasoning);
         }
+        if let Some(AssistantContentBlock::Thinking(last)) = output.content.last_mut() {
+            last.thinking.push_str(reasoning);
+        }
+        let idx = (output.content.len() - 1) as u32;
+        events.push(AssistantMessageEvent::ThinkingDelta {
+            content_index: idx,
+            delta: reasoning.clone(),
+            partial: output.clone(),
+        });
     }
 
-    // Handle tool calls
+    // Tool calls.
     if let Some(tool_calls) = &delta.tool_calls {
         for tool_call in tool_calls {
             let tool_id = tool_call.id.clone().unwrap_or_default();
@@ -329,26 +388,49 @@ async fn handle_delta(
             };
 
             if is_new_tool {
-                finish_current_block(current_block, output).await;
+                events.extend(finish_current_block(current_block, output));
                 let tc = ToolCall::new(&tool_id, "", serde_json::json!({}));
                 *current_block = Some(CurrentBlock::ToolCall(tc.clone(), String::new()));
                 output.content.push(AssistantContentBlock::ToolCall(tc));
+                let idx = (output.content.len() - 1) as u32;
+                events.push(AssistantMessageEvent::ToolCallStart {
+                    content_index: idx,
+                    partial: output.clone(),
+                });
             }
+
+            let delta_str = tool_call
+                .function
+                .as_ref()
+                .and_then(|f| f.arguments.clone())
+                .unwrap_or_default();
 
             if let Some(CurrentBlock::ToolCall(tc, partial_args)) = current_block
                 && let Some(function) = &tool_call.function
             {
                 if let Some(name) = &function.name {
                     tc.name = name.clone();
+                    if let Some(AssistantContentBlock::ToolCall(last_tc)) =
+                        output.content.last_mut()
+                    {
+                        last_tc.name = name.clone();
+                    }
                 }
                 if let Some(args) = &function.arguments {
                     partial_args.push_str(args);
                 }
             }
+
+            let idx = (output.content.len() - 1) as u32;
+            events.push(AssistantMessageEvent::ToolCallDelta {
+                content_index: idx,
+                delta: delta_str,
+                partial: output.clone(),
+            });
         }
     }
 
-    Ok(())
+    events
 }
 
 #[derive(Clone)]
@@ -358,20 +440,52 @@ enum CurrentBlock {
     ToolCall(ToolCall, String),
 }
 
-async fn finish_current_block(
+/// Finalize the in-flight block (if any) and emit its terminating event.
+fn finish_current_block(
     current_block: &mut Option<CurrentBlock>,
     output: &mut AssistantMessage,
-) {
-    if let Some(block) = current_block.take() {
-        match block {
-            CurrentBlock::Text(_) => {}
-            CurrentBlock::Thinking(_) => {}
-            CurrentBlock::ToolCall(mut tc, partial_args) => {
-                tc.arguments = parse_streaming_json(&partial_args);
-                if let Some(AssistantContentBlock::ToolCall(last_tc)) = output.content.last_mut() {
-                    last_tc.arguments = tc.arguments;
-                }
+) -> Vec<AssistantMessageEvent> {
+    let Some(block) = current_block.take() else {
+        return Vec::new();
+    };
+    // The index of the block we're closing is always the last entry — we
+    // never start a new block without pushing into `output.content`.
+    let Some(content_index) = output.content.len().checked_sub(1).map(|i| i as u32) else {
+        return Vec::new();
+    };
+    match block {
+        CurrentBlock::Text(_) => {
+            let content = match output.content.last() {
+                Some(AssistantContentBlock::Text(t)) => t.text.clone(),
+                _ => String::new(),
+            };
+            vec![AssistantMessageEvent::TextEnd {
+                content_index,
+                content,
+                partial: output.clone(),
+            }]
+        }
+        CurrentBlock::Thinking(_) => {
+            let content = match output.content.last() {
+                Some(AssistantContentBlock::Thinking(t)) => t.thinking.clone(),
+                _ => String::new(),
+            };
+            vec![AssistantMessageEvent::ThinkingEnd {
+                content_index,
+                content,
+                partial: output.clone(),
+            }]
+        }
+        CurrentBlock::ToolCall(mut tc, partial_args) => {
+            tc.arguments = parse_streaming_json(&partial_args);
+            if let Some(AssistantContentBlock::ToolCall(last_tc)) = output.content.last_mut() {
+                last_tc.arguments = tc.arguments.clone();
             }
+            vec![AssistantMessageEvent::ToolCallEnd {
+                content_index,
+                tool_call: tc,
+                partial: output.clone(),
+            }]
         }
     }
 }
@@ -1339,5 +1453,139 @@ mod tests {
         let msgs = convert_messages(&model, &context, &compat);
         assert_eq!(msgs.len(), 1);
         assert!(matches!(msgs[0].role, Role::User));
+    }
+
+    // -------------------------------------------------------------------------
+    // Streaming-delta regression coverage
+    // -------------------------------------------------------------------------
+
+    fn empty_output() -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![],
+            api: Api::OpenAICompletions,
+            provider: Provider::OpenAI,
+            model: "test".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    fn text_delta(text: &str) -> openai_rust::types::Delta {
+        // The Delta type has private fields and a custom Deserialize impl, so
+        // we round-trip through JSON to construct one in tests. This mirrors
+        // what the SSE parser does at runtime.
+        let json = serde_json::json!({ "content": text });
+        serde_json::from_value(json).expect("valid delta")
+    }
+
+    fn reasoning_delta(text: &str) -> openai_rust::types::Delta {
+        let json = serde_json::json!({ "reasoning": text });
+        serde_json::from_value(json).expect("valid delta")
+    }
+
+    /// Regression guard: prior to this fix the provider only persisted the
+    /// FIRST `delta.content` chunk into `output.content` — all subsequent
+    /// chunks were accumulated in a local `CurrentBlock` buffer that was
+    /// dropped on flush. So `say hi briefly` -> "Hi" + "!" + " 👋" came back
+    /// as just "Hi" and the TUI rendered nothing because no `TextDelta`
+    /// events were ever yielded between Start and Done either.
+    #[test]
+    fn streaming_text_deltas_accumulate_into_output_and_emit_events() {
+        let mut output = empty_output();
+        let mut current: Option<CurrentBlock> = None;
+
+        let mut all_events = Vec::new();
+        for piece in ["Hi", "!", " 👋"] {
+            let d = text_delta(piece);
+            all_events.extend(handle_delta(&d, &mut current, &mut output));
+        }
+        all_events.extend(finish_current_block(&mut current, &mut output));
+
+        // Output buffer should hold the FULL concatenated text, not just the
+        // first chunk.
+        assert_eq!(output.content.len(), 1);
+        match &output.content[0] {
+            AssistantContentBlock::Text(t) => assert_eq!(t.text, "Hi! 👋"),
+            other => panic!("expected text block, got {other:?}"),
+        }
+
+        // Event tape should be: TextStart, TextDelta×3, TextEnd.
+        let tags: Vec<&'static str> = all_events
+            .iter()
+            .map(|e| match e {
+                AssistantMessageEvent::TextStart { .. } => "start",
+                AssistantMessageEvent::TextDelta { .. } => "delta",
+                AssistantMessageEvent::TextEnd { .. } => "end",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(tags, vec!["start", "delta", "delta", "delta", "end"]);
+
+        // The per-chunk delta strings must round-trip verbatim.
+        let deltas: Vec<&str> = all_events
+            .iter()
+            .filter_map(|e| match e {
+                AssistantMessageEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["Hi", "!", " 👋"]);
+    }
+
+    #[test]
+    fn streaming_reasoning_then_text_produces_two_blocks() {
+        let mut output = empty_output();
+        let mut current: Option<CurrentBlock> = None;
+
+        let mut events = Vec::new();
+        events.extend(handle_delta(&reasoning_delta("We"), &mut current, &mut output));
+        events.extend(handle_delta(
+            &reasoning_delta(" need to respond"),
+            &mut current,
+            &mut output,
+        ));
+        events.extend(handle_delta(&text_delta("hi"), &mut current, &mut output));
+        events.extend(finish_current_block(&mut current, &mut output));
+
+        assert_eq!(output.content.len(), 2);
+        match &output.content[0] {
+            AssistantContentBlock::Thinking(t) => assert_eq!(t.thinking, "We need to respond"),
+            other => panic!("expected thinking block, got {other:?}"),
+        }
+        match &output.content[1] {
+            AssistantContentBlock::Text(t) => assert_eq!(t.text, "hi"),
+            other => panic!("expected text block, got {other:?}"),
+        }
+
+        let tags: Vec<&'static str> = events
+            .iter()
+            .map(|e| match e {
+                AssistantMessageEvent::ThinkingStart { .. } => "ts",
+                AssistantMessageEvent::ThinkingDelta { .. } => "td",
+                AssistantMessageEvent::ThinkingEnd { .. } => "te",
+                AssistantMessageEvent::TextStart { .. } => "Ts",
+                AssistantMessageEvent::TextDelta { .. } => "Td",
+                AssistantMessageEvent::TextEnd { .. } => "Te",
+                _ => "?",
+            })
+            .collect();
+        // Modality switch from thinking -> text should close the thinking
+        // block (ThinkingEnd) before opening the text block (TextStart).
+        assert_eq!(tags, vec!["ts", "td", "td", "te", "Ts", "Td", "Te"]);
+    }
+
+    #[test]
+    fn finish_current_block_with_no_block_is_noop() {
+        let mut output = empty_output();
+        let mut current: Option<CurrentBlock> = None;
+        let events = finish_current_block(&mut current, &mut output);
+        assert!(events.is_empty());
+        assert!(output.content.is_empty());
     }
 }
