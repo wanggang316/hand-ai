@@ -262,6 +262,7 @@ impl InteractiveMode {
         let pending_for_submit = Arc::clone(&pending);
         let editor = EditorComponent::new()
             .with_border(true)
+            .with_border_style(hand_tui::components::editor::BorderStyle::Horizontal)
             .with_viewport_height(4)
             .with_border_color(BORDER_DIM)
             .with_focused_border_color(BORDER_FOCUS)

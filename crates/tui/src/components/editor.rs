@@ -1249,13 +1249,14 @@ impl Component for EditorComponent {
             output.push(format_row(&empty));
         }
 
-        // Bottom border with cursor-position indicator. The indicator is
-        // overlaid on the horizontal rule and shows visual column (not byte
-        // offset) so CJK / emoji content reads naturally.
+        // Bottom border. Box style keeps the `line:col` indicator (it's a
+        // long-standing debug aid for the Box variant). Horizontal style
+        // mirrors pi-mono and renders a plain rule with no indicator.
         if self.border {
-            let info = format!(" {}:{} ", self.cursor_line + 1, self.cursor_visual_col() + 1);
             output.push(match self.border_style {
                 BorderStyle::Box => {
+                    let info =
+                        format!(" {}:{} ", self.cursor_line + 1, self.cursor_visual_col() + 1);
                     let remaining = total_width.saturating_sub(2 + info.len());
                     paint_border(format!(
                         "└{}{info}{}┘",
@@ -1263,14 +1264,7 @@ impl Component for EditorComponent {
                         "─".repeat(remaining - remaining / 2)
                     ))
                 }
-                BorderStyle::Horizontal => {
-                    let remaining = total_width.saturating_sub(info.len());
-                    paint_border(format!(
-                        "{}{info}{}",
-                        "─".repeat(remaining / 2),
-                        "─".repeat(remaining - remaining / 2)
-                    ))
-                }
+                BorderStyle::Horizontal => paint_border("─".repeat(total_width)),
             });
         }
 
