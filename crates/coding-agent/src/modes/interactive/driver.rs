@@ -1061,7 +1061,15 @@ pub(crate) async fn apply_slash_action(
                 None => mount_login_provider_picker(chat, session, mounter).await,
             };
             if let Some(provider_id) = chosen {
-                mount_login_key_input(chat, &provider_id, mounter).await;
+                // Branch on OAuth support: anthropic, openai-codex, and
+                // github-copilot have browser/device OAuth flows; everything
+                // else (openrouter, deepseek, zai, …) is API-key auth and
+                // falls through to the manual paste dialog.
+                if let Some(oauth_id) = oauth_id_for(&provider_id) {
+                    run_oauth_login(chat, oauth_id).await;
+                } else {
+                    mount_login_key_input(chat, &provider_id, mounter).await;
+                }
             }
         }
         SlashCommandAction::OpenResumePicker => {
@@ -1632,6 +1640,106 @@ async fn mount_login_key_input(
         }
     }
     let _ = mounter.hide(handle);
+}
+
+/// Map a string provider id to its OAuth registry entry, if one exists.
+/// Returns `Some(OAuthProviderId)` for providers with a browser/device
+/// OAuth flow (anthropic, openai-codex, github-copilot) and `None`
+/// otherwise (API-key providers like openrouter, deepseek, zai, …).
+fn oauth_id_for(provider_id: &str) -> Option<model::OAuthProviderId> {
+    match provider_id {
+        "anthropic" => Some(model::OAuthProviderId::Anthropic),
+        "openai-codex" => Some(model::OAuthProviderId::OpenAICodex),
+        "github-copilot" => Some(model::OAuthProviderId::GithubCopilot),
+        _ => None,
+    }
+}
+
+/// Run the OAuth login flow for `oauth_id`. Streams status to the chat
+/// as the URL / device-code callbacks fire; persists the resulting
+/// credentials via `OAuthRegistry::save` so subsequent runs find them.
+async fn run_oauth_login(chat: &ChatList, oauth_id: model::OAuthProviderId) {
+    use model::{OAuthAuthInfo, OAuthLoginCallbacks, OAuthRegistry};
+
+    let registry = OAuthRegistry::new();
+    let Some(provider) = registry.get(oauth_id) else {
+        push_status(
+            chat,
+            format!("[/login: no OAuth implementation for {}]", oauth_id.as_str()),
+            Some(RED_FG),
+        );
+        return;
+    };
+
+    // Surface the auth URL / device code to the user via the chat so they
+    // can act on them — the default callbacks would print to stderr,
+    // which the TUI swallows.
+    let chat_for_url = Arc::clone(chat);
+    let chat_for_code = Arc::clone(chat);
+    let callbacks = OAuthLoginCallbacks {
+        on_open_url: Box::new(move |url| {
+            push_status(
+                &chat_for_url,
+                format!("[oauth: open in browser → {url}]"),
+                None,
+            );
+            // Best-effort `open` on macOS / `xdg-open` on Linux. Failure
+            // here is non-fatal — the URL is also visible above.
+            let _ = open_url_in_browser(url);
+        }),
+        on_device_code: Box::new(move |code, url| {
+            push_status(
+                &chat_for_code,
+                format!("[oauth: visit {url} and enter code {code}]"),
+                None,
+            );
+        }),
+    };
+
+    push_status(
+        chat,
+        format!("[oauth: starting login for {}…]", oauth_id.as_str()),
+        None,
+    );
+    match provider.login(&callbacks).await {
+        Ok(credentials) => {
+            let info = OAuthAuthInfo {
+                provider_id: oauth_id,
+                credentials,
+                created_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            };
+            match registry.save(&info).await {
+                Ok(()) => push_status(
+                    chat,
+                    format!("[oauth: logged in as {}]", oauth_id.as_str()),
+                    None,
+                ),
+                Err(e) => push_status(
+                    chat,
+                    format!("[oauth: login succeeded but save failed: {e}]"),
+                    Some(RED_FG),
+                ),
+            }
+        }
+        Err(e) => push_status(chat, format!("[oauth: login failed: {e}]"), Some(RED_FG)),
+    }
+}
+
+/// Best-effort cross-platform browser launcher. Falls back to a no-op
+/// when the underlying command is missing — the URL is already visible
+/// in the chat status line.
+fn open_url_in_browser(url: &str) -> std::io::Result<()> {
+    let cmd = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(cmd).arg(url).spawn().map(|_| ())
 }
 
 /// Whether any provider in the active session's catalog has a usable
