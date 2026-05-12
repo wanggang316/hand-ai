@@ -536,9 +536,11 @@ impl InteractiveMode {
                             AgentSessionEvent::Agent(agent_ev) => match agent_ev.as_ref() {
                                 hand_agent::types::AgentEvent::AgentStart => {
                                     install_loader(&loader_for_events, "Working…");
+                                    emit_terminal_progress(ProgressState::Indeterminate);
                                 }
                                 hand_agent::types::AgentEvent::AgentEnd { .. } => {
                                     clear_loader(&loader_for_events);
+                                    emit_terminal_progress(ProgressState::Clear);
                                 }
                                 hand_agent::types::AgentEvent::MessageEnd { message } => {
                                     if let model::Message::Assistant(a) = message {
@@ -549,12 +551,15 @@ impl InteractiveMode {
                             },
                             AgentSessionEvent::CompactionStart => {
                                 install_loader(&loader_for_events, "Compacting context…");
+                                emit_terminal_progress(ProgressState::Indeterminate);
                             }
                             AgentSessionEvent::CompactionEnd { .. } => {
                                 clear_loader(&loader_for_events);
+                                emit_terminal_progress(ProgressState::Clear);
                             }
                             AgentSessionEvent::Error(msg) => {
                                 clear_loader(&loader_for_events);
+                                emit_terminal_progress(ProgressState::Error);
                                 push_error(&chat_for_events, msg.as_str());
                             }
                         }
@@ -888,6 +893,37 @@ fn push_error(chat: &ChatList, msg: impl AsRef<str>) {
     let body = format!("\x1b[1;97;41m ✘ Error  \x1b[0m \x1b[1;91m{}{RESET}", msg.as_ref());
     let mut list = chat.lock().expect("chat list mutex poisoned");
     list.push(Box::new(TextComponent::new(body)));
+}
+
+/// M5.1 — emit an OSC 9;4 terminal-progress escape sequence so
+/// supporting terminals (ConEmu / WezTerm / iTerm2 / Windows Terminal)
+/// show a task-bar / titlebar progress indicator while the agent
+/// works. No-op when stdout isn't a tty.
+#[derive(Copy, Clone)]
+enum ProgressState {
+    /// Reset: hide the indicator.
+    Clear,
+    /// Indeterminate spinner — used when we don't have a percentage.
+    Indeterminate,
+    /// Error / failure state — red bar.
+    Error,
+}
+
+fn emit_terminal_progress(state: ProgressState) {
+    use std::io::IsTerminal as _;
+    use std::io::Write as _;
+    // OSC 9;4 format: ESC]9;4;<state>;<progress>BEL
+    //   state 0: hide, 1: normal (with %), 2: error, 3: indeterminate, 4: paused.
+    let sequence = match state {
+        ProgressState::Clear => "\x1b]9;4;0;0\x07",
+        ProgressState::Indeterminate => "\x1b]9;4;3;0\x07",
+        ProgressState::Error => "\x1b]9;4;2;0\x07",
+    };
+    let stdout = std::io::stdout();
+    if !stdout.is_terminal() {
+        return;
+    }
+    let _ = stdout.lock().write_all(sequence.as_bytes());
 }
 
 /// M5.2 — return a one-line warning if the user is running inside a
