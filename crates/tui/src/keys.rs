@@ -1441,7 +1441,12 @@ pub fn parse_key(data: &str) -> Key {
 
 fn parse_single_byte(byte: u8) -> Key {
     match byte {
-        0x0d => key_simple(KeyName::Enter, KeyModifiers::none()),
+        // Both CR (\r, 0x0d) and LF (\n, 0x0a) are treated as Enter. Real
+        // ttys in raw mode emit CR; piped / multiplexer (tmux, touch-code,
+        // tc pane send) input typically emits LF. Pi-mono treats both as
+        // Enter in its key parser — match that behaviour or LF-only input
+        // sources silently accumulate text without ever submitting.
+        0x0d | 0x0a => key_simple(KeyName::Enter, KeyModifiers::none()),
         0x09 => key_simple(KeyName::Tab, KeyModifiers::none()),
         0x7f => key_simple(KeyName::Backspace, KeyModifiers::none()),
         0x1b => key_simple(KeyName::Escape, KeyModifiers::none()),

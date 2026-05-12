@@ -255,11 +255,14 @@ impl InteractiveMode {
         // The callback runs from inside the Tui's input dispatch (same task
         // as the run loop), so it just hands the submitted text off to the
         // shared `Pending` slot which the agent task polls.
+        //
+        // No placeholder: pi-mono renders an empty editor box and a
+        // placeholder collides with terminal IME composition (the IME draws
+        // its preview at the cursor column, on top of the dim placeholder).
         let pending_for_submit = Arc::clone(&pending);
         let editor = EditorComponent::new()
             .with_border(true)
             .with_viewport_height(4)
-            .with_placeholder(EDITOR_PLACEHOLDER)
             .with_border_color(BORDER_DIM)
             .with_focused_border_color(BORDER_FOCUS)
             .with_on_submit(move |text: String| {
@@ -282,8 +285,6 @@ impl InteractiveMode {
             slot: Arc::clone(&loader_slot),
         }));
         let editor_id = tui.root_mut().add_child_with_id(Box::new(editor));
-        tui.root_mut()
-            .add_child_with_id(Box::new(TextComponent::new(build_hint_line())));
         tui.root_mut()
             .add_child_with_id(Box::new(SharedFooterComponent {
                 view: Arc::clone(&footer),
@@ -350,7 +351,10 @@ impl InteractiveMode {
                             AgentSessionEvent::CompactionEnd { .. } => {
                                 clear_loader(&loader_for_events);
                             }
-                            _ => {}
+                            AgentSessionEvent::Error(msg) => {
+                                clear_loader(&loader_for_events);
+                                push_error(&chat_for_events, msg.as_str());
+                            }
                         }
                         let updates = dispatch_event(&ev);
                         apply_updates_to_chat(
@@ -545,8 +549,6 @@ const RESET: &str = "\x1b[0m";
 const BORDER_DIM: &str = "\x1b[2;90m";
 /// Cyan border color used when the editor is focused.
 const BORDER_FOCUS: &str = "\x1b[36m";
-/// Placeholder text shown inside the editor while the buffer is empty.
-const EDITOR_PLACEHOLDER: &str = "Type your message — Enter to send, Shift+Enter for newline, / for commands";
 /// Interval (ms) between loader-spinner ticks. ~10 fps so the animation is
 /// visibly moving without burning the render loop.
 const LOADER_TICK_MS: u64 = 100;
@@ -609,42 +611,31 @@ async fn run_bash_inline(chat: &ChatList, session: &AgentSession, raw: &str) {
     }
 }
 
-/// Build the single dim hint line rendered between the editor and the footer.
-fn build_hint_line() -> String {
-    use super::components::keybinding_hints::raw_key_hint;
-    let hints = [
-        raw_key_hint("↵", "send"),
-        raw_key_hint("⇧↵", "newline"),
-        raw_key_hint("/", "commands"),
-        raw_key_hint("^D", "quit"),
-    ];
-    hints.join("  ")
-}
-
-/// Push a welcome header into the chat. Two lines:
-/// 1. `hand v0.1.0  •  <provider>/<model>` in bright cyan
-/// 2. dim hint row with the same keybindings as the editor footer plus
-///    `^L model  ^P model cycle  ^C interrupt`
+/// Push a welcome header into the chat. Two lines mirroring pi-mono's
+/// compact startup header: bold logo + version on line 1, dim keybinding
+/// hints separated by ` · ` on line 2.
 fn push_welcome_header(chat: &ChatList, model: &model::Model) {
     use super::components::keybinding_hints::raw_key_hint;
     let version = env!("CARGO_PKG_VERSION");
     let title = format!(
-        "\x1b[1;36mhand v{version}\x1b[0m  \x1b[2m•\x1b[0m  \x1b[36m{}/{}\x1b[0m",
+        "\x1b[1;36mhand\x1b[0m \x1b[2mv{version}\x1b[0m   \x1b[2m{}/{}\x1b[0m",
         model.provider.as_str(),
         model.id,
     );
+    let separator = "\x1b[90m · \x1b[0m";
     let hints = [
         raw_key_hint("↵", "send"),
         raw_key_hint("⇧↵", "newline"),
+        raw_key_hint("↑↓", "history"),
         raw_key_hint("/", "commands"),
+        raw_key_hint("!", "bash"),
         raw_key_hint("^C", "interrupt"),
         raw_key_hint("^D", "quit"),
     ];
     let mut list = chat.lock().expect("chat list mutex poisoned");
     list.push(Box::new(TextComponent::new(title)));
-    list.push(Box::new(TextComponent::new(hints.join("  "))));
-    // One blank line so the header doesn't visually crowd the first chat
-    // entry.
+    list.push(Box::new(TextComponent::new(hints.join(separator))));
+    // Blank line so the header doesn't visually crowd the first chat entry.
     list.push(Box::new(TextComponent::new(String::new())));
 }
 

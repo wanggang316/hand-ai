@@ -85,9 +85,10 @@ pub fn dispatch(event: &AgentSessionEvent) -> Vec<ChatUpdate> {
         AgentSessionEvent::CompactionEnd { .. } => vec![ChatUpdate::AppendStatus {
             text: "[Compaction complete]".to_string(),
         }],
-        AgentSessionEvent::Error(err) => vec![ChatUpdate::AppendStatus {
-            text: format!("Error: {err}"),
-        }],
+        // Errors are handled in the driver's event pump via push_error so
+        // they render as the unmissable red banner instead of a dim yellow
+        // status line.
+        AgentSessionEvent::Error(_) => Vec::new(),
     }
 }
 
@@ -419,11 +420,11 @@ mod tests {
     }
 
     #[test]
-    fn error_event_emits_status_with_message() {
+    fn error_event_yields_no_chat_updates() {
+        // Errors are routed through the driver's push_error helper (red
+        // banner) instead of an AppendStatus line; dispatch() no longer
+        // emits anything for the Error variant.
         let updates = dispatch(&AgentSessionEvent::Error("boom".to_string()));
-        match &updates[0] {
-            ChatUpdate::AppendStatus { text } => assert!(text.contains("boom")),
-            other => panic!("expected AppendStatus, got {:?}", other),
-        }
+        assert!(updates.is_empty(), "expected no chat updates, got {updates:?}");
     }
 }

@@ -174,6 +174,20 @@ pub struct EditorComponent {
     /// the most recent entry, `1` is the next-older, etc. Matches
     /// pi-mono's `historyIndex` semantics so Up walks back (increments).
     history_index: i32,
+    /// Border style when [`Self::border`] is true. `Box` draws full
+    /// `┌─┐│└─┘` chrome (legacy default). `Horizontal` draws top/bottom
+    /// horizontal rules only with no side glyphs — matches pi-mono's
+    /// `EditorComponent` rendering.
+    border_style: BorderStyle,
+}
+
+/// Border rendering style for [`EditorComponent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderStyle {
+    /// Full box with corners and side rails (`┌─┐ │ └─┘`).
+    Box,
+    /// Top and bottom horizontal rules only (matches pi-mono).
+    Horizontal,
 }
 
 /// Maximum number of submitted prompts the editor retains for Up/Down recall.
@@ -212,7 +226,19 @@ impl EditorComponent {
             focused_border_color: None,
             history: Vec::new(),
             history_index: -1,
+            border_style: BorderStyle::Box,
         }
+    }
+
+    /// Set the border style. Defaults to [`BorderStyle::Box`].
+    pub fn set_border_style(&mut self, style: BorderStyle) {
+        self.border_style = style;
+    }
+
+    /// Builder form of [`Self::set_border_style`].
+    pub fn with_border_style(mut self, style: BorderStyle) -> Self {
+        self.set_border_style(style);
+        self
     }
 
     /// Append a submitted prompt to the recall history. Consecutive
@@ -560,6 +586,15 @@ impl EditorComponent {
 
     fn current_line_byte_len(&self) -> usize {
         self.lines[self.cursor_line].len()
+    }
+
+    /// Visual column of the cursor on its current line (counts grapheme
+    /// width, not bytes). Used for the `line:col` indicator so CJK / emoji
+    /// content reads as the user would expect.
+    fn cursor_visual_col(&self) -> usize {
+        let line = self.current_line();
+        let prefix = &line[..self.cursor_col.min(line.len())];
+        utils::visible_width(prefix)
     }
 
     /// Flatten (line, byte_col) into a single byte offset over the joined
@@ -1128,10 +1163,14 @@ impl Component for EditorComponent {
     fn render(&self, width: u16) -> Vec<String> {
         let mut output = Vec::new();
         let total_width = width as usize;
-        let display_width = if self.border {
-            total_width.saturating_sub(4)
-        } else {
-            total_width
+        // `display_width` is the writable cell count between the borders.
+        // Box style reserves 4 cells for `│ ` and ` │`. Horizontal style
+        // reserves no horizontal cells — content lines span the full width
+        // with a one-cell left-padding for breathing room.
+        let display_width = match (self.border, self.border_style) {
+            (true, BorderStyle::Box) => total_width.saturating_sub(4),
+            (true, BorderStyle::Horizontal) => total_width.saturating_sub(2),
+            (false, _) => total_width,
         }
         .max(1);
 
@@ -1151,11 +1190,15 @@ impl Component for EditorComponent {
             }
         };
 
+        // Render the top border, if any.
         if self.border {
-            output.push(paint_border(format!(
-                "┌{}┐",
-                "─".repeat(total_width.saturating_sub(2))
-            )));
+            output.push(match self.border_style {
+                BorderStyle::Box => paint_border(format!(
+                    "┌{}┐",
+                    "─".repeat(total_width.saturating_sub(2))
+                )),
+                BorderStyle::Horizontal => paint_border("─".repeat(total_width)),
+            });
         }
 
         // Empty-buffer placeholder: when the buffer is truly empty (one empty
@@ -1183,37 +1226,52 @@ impl Component for EditorComponent {
 
         let side = paint_border("│".to_string());
 
+        let format_row = |content: &str| -> String {
+            let padded = if utils::visible_width(content) >= display_width {
+                utils::truncate_to_width(content, display_width)
+            } else {
+                utils::pad_to_width(content, display_width)
+            };
+            match (self.border, self.border_style) {
+                (true, BorderStyle::Box) => format!("{side} {padded} {side}"),
+                (true, BorderStyle::Horizontal) => format!(" {padded} "),
+                (false, _) => padded,
+            }
+        };
+
         // Apply viewport.
         let view_end = (self.viewport_top + self.viewport_height).min(visual.len());
         for line in visual.iter().take(view_end).skip(self.viewport_top) {
-            let padded = if utils::visible_width(line) >= display_width {
-                utils::truncate_to_width(line, display_width)
-            } else {
-                utils::pad_to_width(line, display_width)
-            };
-            if self.border {
-                output.push(format!("{side} {padded} {side}"));
-            } else {
-                output.push(padded);
-            }
+            output.push(format_row(line));
         }
+        let empty = " ".repeat(display_width);
         for _ in view_end..(self.viewport_top + self.viewport_height) {
-            let empty = " ".repeat(display_width);
-            if self.border {
-                output.push(format!("{side} {empty} {side}"));
-            } else {
-                output.push(empty);
-            }
+            output.push(format_row(&empty));
         }
 
+        // Bottom border with cursor-position indicator. The indicator is
+        // overlaid on the horizontal rule and shows visual column (not byte
+        // offset) so CJK / emoji content reads naturally.
         if self.border {
-            let info = format!(" {}:{} ", self.cursor_line + 1, self.cursor_col + 1);
-            let remaining = total_width.saturating_sub(2 + info.len());
-            output.push(paint_border(format!(
-                "└{}{info}{}┘",
-                "─".repeat(remaining / 2),
-                "─".repeat(remaining - remaining / 2)
-            )));
+            let info = format!(" {}:{} ", self.cursor_line + 1, self.cursor_visual_col() + 1);
+            output.push(match self.border_style {
+                BorderStyle::Box => {
+                    let remaining = total_width.saturating_sub(2 + info.len());
+                    paint_border(format!(
+                        "└{}{info}{}┘",
+                        "─".repeat(remaining / 2),
+                        "─".repeat(remaining - remaining / 2)
+                    ))
+                }
+                BorderStyle::Horizontal => {
+                    let remaining = total_width.saturating_sub(info.len());
+                    paint_border(format!(
+                        "{}{info}{}",
+                        "─".repeat(remaining / 2),
+                        "─".repeat(remaining - remaining / 2)
+                    ))
+                }
+            });
         }
 
         output
