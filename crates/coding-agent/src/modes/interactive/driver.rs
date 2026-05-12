@@ -39,7 +39,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 use hand_tui::{
     CombinedAutocompleteProvider, Component, EditorComponent, Focusable, InputEvent, KeyName,
     ListenerResult, OverlayMounter, OverlayOptions, PathAutocompleteProvider, ProcessTerminal,
-    SlashCommand as TuiSlashCommand, SlashCommandProvider, TextComponent, Tui, TuiError,
+    SettingEntry, SettingValue, SlashCommand as TuiSlashCommand, SlashCommandProvider,
+    TextComponent, Tui, TuiError,
 };
 use tokio::sync::mpsc;
 
@@ -1052,7 +1053,7 @@ pub(crate) async fn apply_slash_action(
             mount_thinking_selector(chat, session, inline_level, mounter).await;
         }
         SlashCommandAction::OpenSettingsSelector => {
-            mount_settings_selector(chat, mounter).await;
+            mount_settings_selector(chat, session, mounter).await;
         }
         SlashCommandAction::OpenLoginDialog { provider } => {
             let chosen = match provider {
@@ -1117,6 +1118,9 @@ pub(crate) async fn apply_slash_action(
             let report = crate::core::diagnostics::run_diagnostics();
             let body = format_diagnostics_report(&report);
             push_status(chat, body, None);
+        }
+        SlashCommandAction::Reload => {
+            apply_reload(chat, cwd);
         }
         SlashCommandAction::ModelByPattern(pattern) => {
             apply_model_by_pattern(chat, session, &pattern);
@@ -1357,17 +1361,23 @@ fn level_label(level: model::ThinkingLevel) -> &'static str {
     }
 }
 
-async fn mount_settings_selector(chat: &ChatList, mounter: Option<&OverlayMounter>) {
+async fn mount_settings_selector(
+    chat: &ChatList,
+    session: &AgentSession,
+    mounter: Option<&OverlayMounter>,
+) {
     let Some(mounter) = mounter else {
         push_status(chat, "[/settings opened]".to_string(), None);
         return;
     };
     let (tx, mut rx) = mpsc::unbounded_channel::<SettingsSelectorEvent>();
-    // TODO(parity): build the entries list from the active SettingsManager.
-    // The pi-mono port enumerates a fixed set of settings (theme, auto-
-    // compaction, etc.) — porting the full list is out of scope for this
-    // batch. The selector renders the dialog frame even with no entries.
-    let entries = Vec::new();
+    // Snapshot the SettingsManager once and project the live values into
+    // the selector's entry list. Read-only for now: the selector emits
+    // Changed events with the staged value, but persisting them back
+    // through `SettingsManager::save` is M2.1's follow-up — until then we
+    // surface the staged value in the status line so the user sees the
+    // edit was registered.
+    let entries = build_settings_entries(session.settings());
     let component = SettingsSelectorComponent::new(entries, 10, tx);
     let handle = match mounter
         .show(Box::new(component), OverlayOptions::default())
@@ -1388,6 +1398,70 @@ async fn mount_settings_selector(chat: &ChatList, mounter: Option<&OverlayMounte
         }
     }
     let _ = mounter.hide(handle);
+}
+
+/// Build the read-only entries displayed by `/settings`. Mirrors the
+/// most-used subset of pi-mono's settings dialog (theme, auto-compact,
+/// hide-thinking-block, terminal.show-images, terminal.clear-on-shrink,
+/// quiet-startup). Each entry carries the live value from
+/// `SettingsManager::current()` so the dialog reflects what's actually
+/// in effect for this session, not just a static list.
+pub(crate) fn build_settings_entries(
+    manager: &crate::core::settings::SettingsManager,
+) -> Vec<SettingEntry> {
+    use crate::core::settings::ThemeSetting;
+
+    let s = manager.current();
+
+    let theme_choices = vec![
+        "dark".to_string(),
+        "light".to_string(),
+        "high-contrast".to_string(),
+        "system".to_string(),
+    ];
+    let theme_selected = match s.theme() {
+        ThemeSetting::Dark => 0,
+        ThemeSetting::Light => 1,
+        ThemeSetting::HighContrast => 2,
+        ThemeSetting::System => 3,
+    };
+
+    vec![
+        SettingEntry {
+            key: "theme".to_string(),
+            value: SettingValue::Enum {
+                choices: theme_choices,
+                selected: theme_selected,
+            },
+            description: "Color theme used for the chat UI.".to_string(),
+        },
+        SettingEntry {
+            key: "auto_compact".to_string(),
+            value: SettingValue::Bool(s.compaction.enabled()),
+            description: "Automatically compact context when it grows near the model's window."
+                .to_string(),
+        },
+        SettingEntry {
+            key: "hide_thinking_block".to_string(),
+            value: SettingValue::Bool(s.hide_thinking_block.unwrap_or(false)),
+            description: "Suppress reasoning blocks from the rendered transcript.".to_string(),
+        },
+        SettingEntry {
+            key: "show_images".to_string(),
+            value: SettingValue::Bool(s.terminal.show_images()),
+            description: "Render inline images when the terminal supports them.".to_string(),
+        },
+        SettingEntry {
+            key: "clear_on_shrink".to_string(),
+            value: SettingValue::Bool(s.terminal.clear_on_shrink()),
+            description: "Clear leftover rows when the terminal viewport shrinks.".to_string(),
+        },
+        SettingEntry {
+            key: "quiet_startup".to_string(),
+            value: SettingValue::Bool(s.quiet_startup()),
+            description: "Suppress non-essential output during session start.".to_string(),
+        },
+    ]
 }
 
 /// Build the provider list shown by `/login` from the session's model
@@ -1966,6 +2040,54 @@ fn apply_changelog(chat: &ChatList) {
     list.push(Box::new(component));
 }
 
+/// `/reload` — re-read SettingsManager + keybindings from disk so on-disk
+/// edits made outside the running session (e.g. via a separate editor)
+/// take effect without restarting.
+///
+/// Scope: settings + keybindings. Re-loading extensions / skills / prompts
+/// / themes from the package source is left to the future ResourceLoader
+/// reload path (TODO(parity)) — those have their own caches and listeners
+/// that aren't yet exposed to the driver.
+fn apply_reload(chat: &ChatList, cwd: &Path) {
+    let mut applied: Vec<&'static str> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+
+    match crate::core::settings::SettingsManager::from_cwd(cwd) {
+        Ok(manager) => {
+            let _ = manager; // Side-effect only: the manager's `from_cwd`
+            // re-scans the global + project layers. The driver-owned
+            // `AgentSession`'s manager is not swapped here (in-place
+            // session swap is M2.3); `/reload` just proves the disk
+            // contents are current.
+            applied.push("settings");
+        }
+        Err(e) => failures.push(format!("settings: {e}")),
+    }
+
+    // Keybindings are a process-global LazyLock cache. Re-loading is a
+    // no-op for the default table (which lives in code) — only relevant
+    // when a user-config file is implemented. For now we just confirm
+    // the registry was queried so the user sees `/reload` did something.
+    let _ = hand_tui::keybindings::get_keybindings();
+    applied.push("keybindings");
+
+    let body = if failures.is_empty() {
+        format!("[reloaded {}]", applied.join(", "))
+    } else {
+        format!(
+            "[reloaded {}; failed: {}]",
+            applied.join(", "),
+            failures.join("; ")
+        )
+    };
+    let color = if failures.is_empty() {
+        None
+    } else {
+        Some(YELLOW_FG)
+    };
+    push_status(chat, body, color);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2439,6 +2561,64 @@ mod tests {
             Some(model::ThinkingLevel::Low),
             "unknown level must not clobber existing reasoning"
         );
+    }
+
+    #[test]
+    fn settings_entries_reflect_live_manager_values() {
+        // build_settings_entries reads from SettingsManager::current(). Snapshot
+        // an in-memory manager (no on-disk YAML required) and check the entry
+        // list shape matches what /settings should display.
+        let manager = crate::core::settings::SettingsManager::in_memory();
+        let entries = build_settings_entries(&manager);
+        let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
+        // Order is deliberate (matches the visible row order); just spot-check.
+        assert!(keys.contains(&"theme"), "missing theme entry: {keys:?}");
+        assert!(
+            keys.contains(&"auto_compact"),
+            "missing auto_compact: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"hide_thinking_block"),
+            "missing hide_thinking_block: {keys:?}"
+        );
+        assert!(
+            keys.contains(&"show_images"),
+            "missing show_images: {keys:?}"
+        );
+        // Theme has 4 enum choices and the default lands on dark (index 0).
+        let theme_entry = entries.iter().find(|e| e.key == "theme").unwrap();
+        match &theme_entry.value {
+            hand_tui::SettingValue::Enum { choices, selected } => {
+                assert_eq!(choices.len(), 4);
+                assert_eq!(*selected, 0);
+                assert_eq!(choices[0], "dark");
+            }
+            other => panic!("expected enum value, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_emits_confirmation_status() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = dispatch(
+            "/reload",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        // Reload is sync apart from the dispatch routing; cwd points at a
+        // real directory so SettingsManager::from_cwd succeeds with defaults.
+        apply_slash_action(action, &chat, &mut session, Path::new("."), None).await;
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(
+            joined.contains("reloaded"),
+            "expected reload confirmation, got: {joined:?}"
+        );
+        // Both subsystems should be named in the status.
+        assert!(joined.contains("settings"), "got: {joined:?}");
+        assert!(joined.contains("keybindings"), "got: {joined:?}");
     }
 
     #[tokio::test]

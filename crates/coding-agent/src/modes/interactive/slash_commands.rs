@@ -135,6 +135,11 @@ pub enum SlashCommandAction {
     Logout,
     /// Run diagnostics and dump the report into the chat.
     ShowDiagnostics,
+    /// Re-read SettingsManager + keybindings from disk and surface a
+    /// confirmation status. Mirrors pi-mono's `/reload`. Per-subsystem
+    /// reloaders (extensions, skills, prompts, themes) attach over time
+    /// — the driver fires the ones it knows about.
+    Reload,
     /// Quit the interactive session.
     Quit,
     /// No-op acknowledgement (the handler did its work without producing any
@@ -205,6 +210,7 @@ impl fmt::Display for SlashCommandAction {
             SlashCommandAction::Changelog => f.write_str("[changelog]"),
             SlashCommandAction::Logout => f.write_str("[logout]"),
             SlashCommandAction::ShowDiagnostics => f.write_str("[show diagnostics]"),
+            SlashCommandAction::Reload => f.write_str("[reload settings + keybindings]"),
             SlashCommandAction::Quit => f.write_str("[quit]"),
             SlashCommandAction::Noop => Ok(()),
         }
@@ -323,6 +329,8 @@ impl SlashCommandTable {
             "logout" => SlashCommandResult::Handled(SlashCommandAction::Logout),
 
             "diagnostics" => SlashCommandResult::Handled(SlashCommandAction::ShowDiagnostics),
+
+            "reload" => SlashCommandResult::Handled(SlashCommandAction::Reload),
 
             _ => SlashCommandResult::Unknown,
         }
@@ -600,6 +608,7 @@ mod tests {
             ("/settings", "OpenSettingsSelector"),
             ("/resume", "OpenResumePicker"),
             ("/copy", "CopyLastAssistant"),
+            ("/reload", "Reload"),
         ] {
             let parsed = ParsedSlashCommand::parse(input).unwrap();
             match SlashCommandTable::dispatch(&parsed, &ctx()) {
