@@ -332,12 +332,16 @@ impl InteractiveMode {
         // placeholder collides with terminal IME composition (the IME draws
         // its preview at the cursor column, on top of the dim placeholder).
         let pending_for_submit = Arc::clone(&pending);
+        let cwd_for_paste = cwd.clone();
+        let paste_transform: hand_tui::components::PasteTransform =
+            Arc::new(move |raw: &str| transform_dropped_file_paste(raw, &cwd_for_paste));
         let mut editor = EditorComponent::new()
             .with_border(true)
             .with_border_style(hand_tui::components::editor::BorderStyle::Horizontal)
             .with_viewport_height(4)
             .with_border_color(BORDER_DIM)
             .with_focused_border_color(BORDER_FOCUS)
+            .with_paste_transform(paste_transform)
             .with_on_submit(move |text: String| {
                 if let Ok(mut p) = pending_for_submit.lock() {
                     p.text = Some(text);
@@ -941,6 +945,86 @@ enum ProgressState {
     Indeterminate,
     /// Error / failure state — red bar.
     Error,
+}
+
+/// M4.3 — paste-transform: when a terminal pastes a file-drop payload
+/// (single line, optionally quoted, optionally `file://`-prefixed) and the
+/// result resolves to an existing path on disk, rewrite it to an `@path`
+/// mention so the agent's @ resolver picks it up.
+///
+/// Returns `None` when the paste is not a drop-like payload — the editor
+/// then inserts the original text verbatim.
+fn transform_dropped_file_paste(raw: &str, cwd: &Path) -> Option<String> {
+    // Drop-like pastes are single-line; multi-line pastes are bracketed
+    // and never come from drag-drop.
+    if raw.contains('\n') {
+        return None;
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Strip matching outer quotes (iTerm2 and several other terminals
+    // single-quote the dropped path).
+    let stripped = strip_matching_quotes(trimmed);
+    // Strip `file://` scheme prefix (some terminals percent-encode the
+    // body too — best-effort decode below).
+    let no_scheme = stripped.strip_prefix("file://").unwrap_or(stripped);
+    let decoded = percent_decode(no_scheme);
+    // Verify it looks like a path and actually exists.
+    let candidate = std::path::PathBuf::from(decoded.as_ref());
+    let exists = if candidate.is_absolute() {
+        candidate.exists()
+    } else {
+        cwd.join(&candidate).exists()
+    };
+    if !exists {
+        return None;
+    }
+    // Prefer the relative form when the path is inside cwd — that's what
+    // the @ resolver consumes in the agent prompt. Fall back to absolute.
+    let mention = if let Ok(rel) = candidate.strip_prefix(cwd) {
+        rel.to_string_lossy().to_string()
+    } else if candidate.is_absolute() {
+        candidate.to_string_lossy().to_string()
+    } else {
+        decoded.into_owned()
+    };
+    Some(format!("@{mention}"))
+}
+
+fn strip_matching_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+fn percent_decode(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('%') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &s[i + 1..i + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 fn emit_terminal_progress(state: ProgressState) {
@@ -3524,6 +3608,59 @@ mod tests {
             }
             other => panic!("expected Display, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn drop_paste_strips_quotes_and_prepends_at_for_existing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("dropped.txt");
+        std::fs::write(&file, "x").unwrap();
+        // Absolute path inside cwd (cwd == tmp.path()) — comes back as @relative.
+        let abs = file.to_string_lossy().to_string();
+        let payload = format!("'{abs}'");
+        let out = transform_dropped_file_paste(&payload, tmp.path()).unwrap();
+        assert_eq!(out, "@dropped.txt");
+    }
+
+    #[test]
+    fn drop_paste_strips_file_scheme_and_percent_decodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("with space.txt");
+        std::fs::write(&file, "x").unwrap();
+        let abs = file.to_string_lossy().to_string().replace(' ', "%20");
+        let payload = format!("file://{abs}");
+        let out = transform_dropped_file_paste(&payload, tmp.path()).unwrap();
+        assert_eq!(out, "@with space.txt");
+    }
+
+    #[test]
+    fn drop_paste_ignores_multiline_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.txt");
+        std::fs::write(&file, "x").unwrap();
+        let payload = format!("{}\nextra line", file.display());
+        assert!(transform_dropped_file_paste(&payload, tmp.path()).is_none());
+    }
+
+    #[test]
+    fn drop_paste_returns_none_when_path_does_not_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = format!("'{}/missing.txt'", tmp.path().display());
+        assert!(transform_dropped_file_paste(&payload, tmp.path()).is_none());
+    }
+
+    #[test]
+    fn drop_paste_keeps_absolute_when_outside_cwd() {
+        let tmp1 = tempfile::tempdir().unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        let file = tmp2.path().join("outside.txt");
+        std::fs::write(&file, "x").unwrap();
+        let payload = format!("{}", file.display());
+        let out = transform_dropped_file_paste(&payload, tmp1.path()).unwrap();
+        assert!(out.starts_with('@'));
+        assert!(out.contains("outside.txt"));
+        // Path is absolute since it's outside cwd.
+        assert!(out[1..].starts_with('/') || out[1..].contains(":\\"));
     }
 
     #[test]

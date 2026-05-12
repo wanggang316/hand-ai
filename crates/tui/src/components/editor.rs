@@ -179,6 +179,10 @@ pub struct EditorComponent {
     /// horizontal rules only with no side glyphs — matches pi-mono's
     /// `EditorComponent` rendering.
     border_style: BorderStyle,
+    /// Optional paste-payload transformer. Run in [`Self::paste`] before
+    /// the marker / insert decision so a transformed text follows the
+    /// same path as a directly-pasted one.
+    paste_transform: Option<PasteTransform>,
 }
 
 /// Border rendering style for [`EditorComponent`].
@@ -198,6 +202,14 @@ const HISTORY_CAP: usize = 100;
 /// passed is the expanded text — paste markers are substituted back to their
 /// original payload before the callback runs.
 pub type SubmitCallback = Box<dyn FnMut(String) + Send + 'static>;
+
+/// Transform applied to paste payloads before they reach the buffer.
+/// Returning `None` keeps the original text; returning `Some(new)` substitutes
+/// it. Drivers use this to rewrite terminal file-drop pastes (which arrive as
+/// quoted absolute paths) into a form the agent understands — e.g. prefixing
+/// with `@` so the @path resolver picks them up.
+pub type PasteTransform =
+    Arc<dyn Fn(&str) -> Option<String> + Send + Sync + 'static>;
 
 impl EditorComponent {
     /// Construct a new empty editor.
@@ -227,7 +239,24 @@ impl EditorComponent {
             history: Vec::new(),
             history_index: -1,
             border_style: BorderStyle::Box,
+            paste_transform: None,
         }
+    }
+
+    /// Install a paste-payload transformer. The callback runs every time a
+    /// `InputEvent::Paste` lands in the editor; returning `Some(new)`
+    /// replaces the payload before marker / insert handling. Returning
+    /// `None` keeps the original. Used by drivers to rewrite terminal
+    /// file-drop pastes (e.g. prepend `@` so dropped files become path
+    /// mentions).
+    pub fn set_paste_transform(&mut self, transform: PasteTransform) {
+        self.paste_transform = Some(transform);
+    }
+
+    /// Builder form of [`Self::set_paste_transform`].
+    pub fn with_paste_transform(mut self, transform: PasteTransform) -> Self {
+        self.set_paste_transform(transform);
+        self
     }
 
     /// Set the border style. Defaults to [`BorderStyle::Box`].
@@ -505,6 +534,17 @@ impl EditorComponent {
     /// Insert `text` at the cursor. If the text exceeds the marker
     /// threshold, store it out-of-band and insert a placeholder instead.
     pub fn paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let transformed = self
+            .paste_transform
+            .as_ref()
+            .and_then(|t| t(text));
+        let text: &str = match transformed.as_deref() {
+            Some(t) => t,
+            None => text,
+        };
         if text.is_empty() {
             return;
         }
