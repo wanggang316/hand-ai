@@ -305,6 +305,14 @@ impl InteractiveMode {
             push_status(&chat, msg, Some(YELLOW_FG));
         }
 
+        // M5.4 — auto-display CHANGELOG entries that were added since
+        // `last_changelog_version`. Runs BEFORE the replay so resumed
+        // sessions (with non-empty messages) skip the banner. On a fresh
+        // install (`last_changelog_version` not yet set) we only record
+        // the current version and stay quiet — there's nothing to "catch
+        // up on".
+        maybe_show_changelog_on_update(&chat, &mut session);
+
         // Replay existing session messages.
         replay_messages_into(&chat, session.messages());
 
@@ -2813,23 +2821,117 @@ fn apply_list_extensions(chat: &ChatList, session: &AgentSession) {
     list.push(Box::new(component));
 }
 
-/// `/changelog` — render the agent's CHANGELOG.md (if present) as a custom
-/// message.
-fn apply_changelog(chat: &ChatList) {
-    use crate::utils::changelog::parse_changelog_file;
+/// Locate the on-disk CHANGELOG.md, trying the conventional in-repo
+/// candidates. Returns the first existing path or `None`.
+fn locate_changelog_file() -> Option<PathBuf> {
     let candidates = [
         PathBuf::from("CHANGELOG.md"),
         PathBuf::from("crates/coding-agent/CHANGELOG.md"),
     ];
-    let mut entries: Vec<crate::utils::changelog::ChangelogEntry> = Vec::new();
-    for path in &candidates {
-        if let Ok(parsed) = parse_changelog_file(path)
-            && !parsed.is_empty()
-        {
-            entries = parsed;
-            break;
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// Pure decision function for the M5.4 startup auto-display: given the
+/// state of the session and the parsed CHANGELOG, decide whether to
+/// stay quiet, silently record the current version, or display a body
+/// of new entries. Extracted as a pure function so it can be unit-
+/// tested without a SettingsManager or filesystem.
+#[derive(Debug, PartialEq, Eq)]
+enum ChangelogStartupAction {
+    /// Do nothing — resumed session or empty changelog.
+    Skip,
+    /// Record current version as last-seen, no display (fresh install).
+    RecordOnly,
+    /// Mount the supplied body in scrollback, then record current version.
+    Display(String),
+}
+
+fn decide_changelog_startup(
+    messages_empty: bool,
+    last_version: Option<&str>,
+    entries: &[crate::utils::changelog::ChangelogEntry],
+) -> ChangelogStartupAction {
+    if !messages_empty {
+        return ChangelogStartupAction::Skip;
+    }
+    match last_version {
+        None => ChangelogStartupAction::RecordOnly,
+        Some(last) => {
+            let new_entries = crate::utils::changelog::get_new_entries(entries, last);
+            if new_entries.is_empty() {
+                ChangelogStartupAction::Skip
+            } else {
+                let body = new_entries
+                    .iter()
+                    .map(|e| e.content.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                ChangelogStartupAction::Display(body)
+            }
         }
     }
+}
+
+/// M5.4 — on startup, if the running version is newer than the
+/// `last_changelog_version` recorded in settings, mount a custom
+/// "Changelog" message in scrollback showing the new entries. For fresh
+/// installs (no recorded version), just records the current version and
+/// stays quiet. For resumed sessions (non-empty messages), skips the
+/// banner — those users already saw the changelog when they first
+/// upgraded.
+///
+/// Both the display and the version-bump are best-effort: any I/O or
+/// settings-save failure is swallowed so startup never blocks.
+fn maybe_show_changelog_on_update(chat: &ChatList, session: &mut AgentSession) {
+    let current_version = env!("CARGO_PKG_VERSION");
+    let messages_empty = session.messages().is_empty();
+    let last_version = session
+        .settings()
+        .current()
+        .last_changelog_version
+        .clone();
+
+    let path = match locate_changelog_file() {
+        Some(p) => p,
+        None => return,
+    };
+    let entries = match crate::utils::changelog::parse_changelog_file(&path) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let action = decide_changelog_startup(messages_empty, last_version.as_deref(), &entries);
+    let scope = crate::core::settings::SettingsScope::Global;
+    match action {
+        ChangelogStartupAction::Skip => {}
+        ChangelogStartupAction::RecordOnly => {
+            session
+                .settings_mut()
+                .set_last_changelog_version(scope, Some(current_version.to_string()));
+            let _ = session.settings().save(scope);
+        }
+        ChangelogStartupAction::Display(body) => {
+            let component =
+                CustomMessageComponent::new(CustomMessageData::new("changelog", body));
+            {
+                let mut list = chat.lock().expect("chat list mutex poisoned");
+                list.push(Box::new(component));
+            }
+            session
+                .settings_mut()
+                .set_last_changelog_version(scope, Some(current_version.to_string()));
+            let _ = session.settings().save(scope);
+        }
+    }
+}
+
+/// `/changelog` — render the agent's CHANGELOG.md (if present) as a custom
+/// message.
+fn apply_changelog(chat: &ChatList) {
+    use crate::utils::changelog::parse_changelog_file;
+    let entries: Vec<crate::utils::changelog::ChangelogEntry> = locate_changelog_file()
+        .and_then(|p| parse_changelog_file(p).ok())
+        .unwrap_or_default();
 
     let body = if entries.is_empty() {
         "_(no changelog entries found)_".to_string()
@@ -3379,6 +3481,49 @@ mod tests {
             "rel id: {}",
             main_row.id
         );
+    }
+
+    #[test]
+    fn changelog_startup_skips_when_session_has_replayed_messages() {
+        let entries = crate::utils::changelog::parse_changelog(
+            "## [0.2.0] 2026-05-01\n- second\n\n## [0.1.0] 2026-04-01\n- first",
+        );
+        let action = decide_changelog_startup(false, Some("0.1.0"), &entries);
+        assert_eq!(action, ChangelogStartupAction::Skip);
+    }
+
+    #[test]
+    fn changelog_startup_records_only_on_fresh_install() {
+        let entries = crate::utils::changelog::parse_changelog(
+            "## [0.1.0] 2026-04-01\n- first",
+        );
+        let action = decide_changelog_startup(true, None, &entries);
+        assert_eq!(action, ChangelogStartupAction::RecordOnly);
+    }
+
+    #[test]
+    fn changelog_startup_skips_when_up_to_date() {
+        let entries = crate::utils::changelog::parse_changelog(
+            "## [0.1.0] 2026-04-01\n- first",
+        );
+        let action = decide_changelog_startup(true, Some("0.1.0"), &entries);
+        assert_eq!(action, ChangelogStartupAction::Skip);
+    }
+
+    #[test]
+    fn changelog_startup_displays_strictly_newer_entries_only() {
+        let entries = crate::utils::changelog::parse_changelog(
+            "## [0.3.0] 2026-06-01\n- third\n\n## [0.2.0] 2026-05-01\n- second\n\n## [0.1.0] 2026-04-01\n- first",
+        );
+        let action = decide_changelog_startup(true, Some("0.1.0"), &entries);
+        match action {
+            ChangelogStartupAction::Display(body) => {
+                assert!(body.contains("third"), "body: {body}");
+                assert!(body.contains("second"), "body: {body}");
+                assert!(!body.contains("first"), "body must exclude 0.1.0: {body}");
+            }
+            other => panic!("expected Display, got {other:?}"),
+        }
     }
 
     #[test]

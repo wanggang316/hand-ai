@@ -1201,6 +1201,14 @@ impl SettingsManager {
         self.recompute_merged();
     }
 
+    /// Replace `last_changelog_version` for one layer in memory. Used by
+    /// the M5.4 startup auto-display flow to record which CHANGELOG entries
+    /// the user has already been shown. `None` clears the field.
+    pub fn set_last_changelog_version(&mut self, scope: SettingsScope, value: Option<String>) {
+        self.layer_mut(scope).last_changelog_version = value;
+        self.recompute_merged();
+    }
+
     /// Persist the in-memory state of `scope` to its YAML path.
     ///
     /// Atomic write semantics: the new content is staged to a sibling

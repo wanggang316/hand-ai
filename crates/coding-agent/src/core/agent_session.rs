@@ -735,6 +735,14 @@ impl AgentSession {
         &self.settings_manager
     }
 
+    /// Mutable settings access. Required by the M5.4 startup flow to
+    /// record `last_changelog_version` after auto-displaying entries.
+    /// Callers that mutate must invoke `save(scope)` themselves to
+    /// persist the change.
+    pub fn settings_mut(&mut self) -> &mut SettingsManager {
+        &mut self.settings_manager
+    }
+
     /// Manually trigger compaction unconditionally — bypasses both the
     /// `auto_compaction_enabled` toggle and the
     /// `compaction::should_compact` token-threshold gate. Returns the
