@@ -201,50 +201,47 @@ impl InteractiveMode {
             let _ = forward.send(event);
         });
 
+        // Build the editor and wire its submit callback to the pending slot.
+        // The callback runs from inside the Tui's input dispatch (same task
+        // as the run loop), so it just hands the submitted text off to the
+        // shared `Pending` slot which the agent task polls.
+        let pending_for_submit = Arc::clone(&pending);
+        let editor = EditorComponent::new()
+            .with_border(true)
+            .with_viewport_height(4)
+            .with_on_submit(move |text: String| {
+                if let Ok(mut p) = pending_for_submit.lock() {
+                    p.text = Some(text);
+                }
+            });
+
         // Build the TUI tree.
         let terminal = Box::new(ProcessTerminal::new()?);
         let mut tui = Tui::new(terminal);
         tui.root_mut().add_child_with_id(Box::new(ChatScrollback {
             list: Arc::clone(&chat),
         }));
-        let editor_id = tui.root_mut().add_child_with_id(Box::new(
-            EditorComponent::new()
-                .with_border(true)
-                .with_viewport_height(4),
-        ));
+        let editor_id = tui.root_mut().add_child_with_id(Box::new(editor));
         tui.root_mut()
             .add_child_with_id(Box::new(SharedFooterComponent {
                 view: Arc::clone(&footer),
             }));
         tui.set_focus(Some(editor_id));
 
-        // Input listener: bare Enter submits, Ctrl+D quits.
-        let pending_for_listener = Arc::clone(&pending);
+        // Ctrl+D listener: requests shutdown via the pending slot.
+        let pending_for_quit = Arc::clone(&pending);
         tui.add_input_listener(Box::new(move |event: &InputEvent| {
-            if let InputEvent::Key(key) = event {
-                match &key.name {
-                    KeyName::Enter if !key.modifiers.shift && !key.modifiers.alt => {
-                        if let Ok(mut p) = pending_for_listener.lock() {
-                            // Mark a submission; actual text drained by the
-                            // background task once it observes the marker.
-                            p.text = Some(String::new());
-                        }
-                        return ListenerResult {
-                            consume: true,
-                            data: None,
-                        };
-                    }
-                    KeyName::Char('d') if key.modifiers.ctrl => {
-                        if let Ok(mut p) = pending_for_listener.lock() {
-                            p.quit = true;
-                        }
-                        return ListenerResult {
-                            consume: true,
-                            data: None,
-                        };
-                    }
-                    _ => {}
+            if let InputEvent::Key(key) = event
+                && matches!(&key.name, KeyName::Char('d'))
+                && key.modifiers.ctrl
+            {
+                if let Ok(mut p) = pending_for_quit.lock() {
+                    p.quit = true;
                 }
+                return ListenerResult {
+                    consume: true,
+                    data: None,
+                };
             }
             ListenerResult::pass()
         }));
@@ -296,68 +293,16 @@ impl InteractiveMode {
         }
         let stop_handle = Arc::new(StopHandle(&tui as *const _));
 
-        // Background task: polls `pending`. On submit, runs the agent for
-        // the current editor text. On quit, calls `tui.stop()`.
+        // Background driver task: polls `pending`. On submit, runs the agent
+        // for the submitted text. On quit, calls `tui.stop()`.
         //
-        // The editor lives inside `tui.root_mut()` so we cannot read it from
-        // here. Instead, we rely on a different mechanism: the input
-        // listener stages a marker, but draining the editor must happen
-        // while we hold `&mut Tui`. Since the run-future borrows `&mut Tui`,
-        // we cannot reach in.
-        //
-        // Workaround for the skeleton: keep the editor's text in a *shared*
-        // mirror that the input listener updates on every keystroke. The
-        // background task reads from that mirror when a submission is staged.
-        //
-        // TODO(parity): proper editor-borrow access. The pi-mono port uses a
-        // CustomEditor that publishes its text into a shared store; we should
-        // mirror that once the editor abstraction allows it.
-        //
-        // For this batch we read the editor by reaching into the Tui from
-        // *another* StopHandle-style raw pointer that points to the Tui's
-        // root. This is unsound under aliasing rules — instead, we side-step
-        // by capturing keystrokes ourselves into a shared string and feeding
-        // them into the editor via a wrapper component.
-
-        // Side-step: shadow the editor with a `SharedEditor` that exposes
-        // its text via Arc<Mutex<String>>. The TUI still gets the real
-        // EditorComponent for rendering — we just *also* maintain a mirror.
-        // This mirror is updated by the input listener on every keystroke.
-        let editor_mirror = Arc::new(StdMutex::new(String::new()));
-        let editor_mirror_for_listener = Arc::clone(&editor_mirror);
-        tui.add_input_listener(Box::new(move |event: &InputEvent| {
-            // This listener runs AFTER the previous listener (which consumes
-            // bare Enter). We see all other events. Tracking the editor
-            // buffer perfectly is hard — but for the skeleton we approximate
-            // with a simple mirror that appends/erases on Char/Backspace.
-            if let InputEvent::Key(key) = event {
-                match &key.name {
-                    KeyName::Char(c) if !key.modifiers.ctrl && !key.modifiers.alt => {
-                        if let Ok(mut s) = editor_mirror_for_listener.lock() {
-                            s.push(*c);
-                        }
-                    }
-                    KeyName::Backspace => {
-                        if let Ok(mut s) = editor_mirror_for_listener.lock() {
-                            s.pop();
-                        }
-                    }
-                    KeyName::Enter if key.modifiers.shift || key.modifiers.alt => {
-                        if let Ok(mut s) = editor_mirror_for_listener.lock() {
-                            s.push('\n');
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            ListenerResult::pass()
-        }));
-
-        // Build agent driver task.
+        // The submitted text is published into `pending.text` by the editor's
+        // `on_submit` callback (installed above), which fires on bare Enter
+        // from inside the Tui run loop. This replaces the earlier listener-
+        // based "mirror" hack and keeps the editor's own buffer authoritative.
         let agent_chat = Arc::clone(&chat);
         let agent_footer = Arc::clone(&footer);
         let agent_pending = Arc::clone(&pending);
-        let agent_mirror = Arc::clone(&editor_mirror);
         let stop_for_agent = Arc::clone(&stop);
         let stop_handle_for_agent = Arc::clone(&stop_handle);
         let agent_cwd = cwd.clone();
@@ -390,7 +335,7 @@ impl InteractiveMode {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while !stop_for_agent.load(Ordering::Relaxed) {
                 interval.tick().await;
-                let (text_marker, quit) = {
+                let (submitted, quit) = {
                     let mut p = agent_pending.lock().unwrap();
                     (p.text.take(), std::mem::take(&mut p.quit))
                 };
@@ -398,13 +343,7 @@ impl InteractiveMode {
                     unsafe { stop_handle_for_agent.stop() };
                     break;
                 }
-                if text_marker.is_some() {
-                    let text = {
-                        let mut s = agent_mirror.lock().unwrap();
-                        let t = s.clone();
-                        s.clear();
-                        t
-                    };
+                if let Some(text) = submitted {
                     let trimmed = text.trim().to_string();
                     if trimmed.is_empty() {
                         continue;

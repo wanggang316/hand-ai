@@ -153,7 +153,16 @@ pub struct EditorComponent {
     autocomplete_debounce_until: Option<Instant>,
     /// Cached keybindings manager (for key dispatch).
     keybindings: KeybindingsManager,
+    /// Submit callback, invoked on bare Enter. Mirrors pi-mono's
+    /// `editor.onSubmit`. The editor buffer is cleared *before* the callback
+    /// runs, so the callback can safely mutate UI state.
+    on_submit: Option<SubmitCallback>,
 }
+
+/// Callback invoked when the user submits the editor (bare Enter). The string
+/// passed is the expanded text — paste markers are substituted back to their
+/// original payload before the callback runs.
+pub type SubmitCallback = Box<dyn FnMut(String) + Send + 'static>;
 
 impl EditorComponent {
     /// Construct a new empty editor.
@@ -176,7 +185,26 @@ impl EditorComponent {
             autocomplete_state: None,
             autocomplete_debounce_until: None,
             keybindings: KeybindingsManager::new(),
+            on_submit: None,
         }
+    }
+
+    /// Install a callback invoked on bare Enter (no modifiers). The editor
+    /// buffer is cleared before the callback runs.
+    pub fn set_on_submit<F>(&mut self, cb: F)
+    where
+        F: FnMut(String) + Send + 'static,
+    {
+        self.on_submit = Some(Box::new(cb));
+    }
+
+    /// Builder form of [`Self::set_on_submit`].
+    pub fn with_on_submit<F>(mut self, cb: F) -> Self
+    where
+        F: FnMut(String) + Send + 'static,
+    {
+        self.set_on_submit(cb);
+        self
     }
 
     pub fn with_viewport_height(mut self, height: usize) -> Self {
@@ -1240,8 +1268,20 @@ impl EditorComponent {
                 self.page_down();
                 HandleResult::Handled
             }
-            (KeyName::Enter, _) => {
+            (KeyName::Enter, m) if m.shift || m.alt => {
                 self.insert_newline();
+                HandleResult::Handled
+            }
+            (KeyName::Enter, _) => {
+                if self.on_submit.is_some() {
+                    let text = self.submit_text();
+                    self.set_text("");
+                    if let Some(cb) = self.on_submit.as_mut() {
+                        cb(text);
+                    }
+                } else {
+                    self.insert_newline();
+                }
                 HandleResult::Handled
             }
             (KeyName::Backspace, _) => {
@@ -1449,6 +1489,24 @@ mod tests {
         editor.handle_input(&InputEvent::Raw("b".into()));
         assert_eq!(editor.line_count(), 2);
         assert_eq!(editor.text(), "a\nb");
+    }
+
+    #[test]
+    fn editor_enter_invokes_on_submit_and_clears_buffer() {
+        use std::sync::{Arc, Mutex};
+
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        let mut editor = EditorComponent::new().with_on_submit(move |text| {
+            cap.lock().unwrap().push(text);
+        });
+        editor.handle_input(&InputEvent::Raw("h".into()));
+        editor.handle_input(&InputEvent::Raw("i".into()));
+        editor.handle_input(&InputEvent::Raw("\r".into()));
+
+        assert_eq!(captured.lock().unwrap().as_slice(), &["hi".to_string()]);
+        assert_eq!(editor.text(), "");
+        assert_eq!(editor.cursor(), (0, 0));
     }
 
     #[test]
