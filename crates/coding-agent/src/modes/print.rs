@@ -102,8 +102,19 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Exit non-zero if any assistant message ended with Error/Aborted —
+    // matches pi-mono's `pi --print` exit-code contract (1 on failure)
+    // so callers can pipe / `&&` against the binary reliably.
+    if SAW_ERROR.load(std::sync::atomic::Ordering::Relaxed) {
+        std::process::exit(1);
+    }
     Ok(())
 }
+
+/// Process-wide flag set when any assistant message ended with an Error
+/// or Aborted stop_reason. Read by `run` after the prompt completes so
+/// the process exits non-zero — matching pi's `pi --print` contract.
+static SAW_ERROR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
     use hand_agent::types::AgentEvent;
@@ -140,7 +151,21 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
                 _ => {}
             }
         }
-        AgentEvent::MessageEnd { .. } => {
+        AgentEvent::MessageEnd { message } => {
+            // Surface API-level errors to stderr the same way `pi --print`
+            // does — otherwise an invalid model id / 400 / 401 silently
+            // exits with code 0 and an empty stdout.
+            use model::{Message as ModelMessage, StopReason};
+            if let ModelMessage::Assistant(a) = message
+                && matches!(a.stop_reason, StopReason::Error | StopReason::Aborted)
+            {
+                let msg = a
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| format!("Request {:?}", a.stop_reason));
+                eprintln!("\x1b[31m{}\x1b[0m", msg);
+                SAW_ERROR.store(true, Ordering::Relaxed);
+            }
             // Only terminate with a newline when this message actually
             // wrote text — thinking-only messages (e.g. an intermediate
             // assistant turn that emits a tool call after reasoning) would
