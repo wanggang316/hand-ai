@@ -37,6 +37,9 @@ pub struct SessionSetup {
     /// `--session-dir <dir>`: override the default `<cwd>/.hand/sessions`
     /// storage directory. Pi-mono parity.
     pub session_dir: Option<PathBuf>,
+    /// `--no-skills`: skip skill discovery for a reproducible system
+    /// prompt. Pi-mono parity.
+    pub no_skills: bool,
 }
 
 impl SessionSetup {
@@ -158,6 +161,7 @@ impl SessionSetup {
             no_session: args.no_session,
             no_context_files: args.no_context_files,
             session_dir: args.session_dir.clone(),
+            no_skills: args.no_skills,
         })
     }
 
@@ -178,6 +182,7 @@ impl SessionSetup {
             no_session: self.no_session,
             no_context_files: self.no_context_files,
             session_dir: self.session_dir.clone(),
+            no_skills: self.no_skills,
         }
     }
 }
@@ -357,6 +362,27 @@ mod tests {
     fn session_alias_is_accepted_for_resume() {
         let args = Args::try_parse_from(["hand", "--session", "abc123"]).expect("parse");
         assert_eq!(args.resume.as_deref(), Some("abc123"));
+    }
+
+    /// Pi-mono `--no-skills` parity: the flag must propagate so that
+    /// AgentSession skips skill discovery entirely. Default keeps the
+    /// auto-discover behavior.
+    #[test]
+    fn no_skills_flag_propagates() {
+        let args = Args::try_parse_from(["hand", "--no-skills"]).expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(setup.no_skills);
+        let cfg = setup.to_config(None);
+        assert!(cfg.no_skills);
+    }
+
+    #[test]
+    fn default_discovers_skills() {
+        let args = Args::try_parse_from(["hand"]).expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(!setup.no_skills);
+        let cfg = setup.to_config(None);
+        assert!(!cfg.no_skills);
     }
 
     #[test]

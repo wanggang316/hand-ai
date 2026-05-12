@@ -93,6 +93,12 @@ pub struct Args {
     #[arg(long)]
     pub session_dir: Option<PathBuf>,
 
+    /// Disable skill discovery (project, user, and builtin). Pi-mono
+    /// parity. Useful when scripts need a baseline system prompt that
+    /// doesn't pick up auto-discovered skill files from user dotfiles.
+    #[arg(long)]
+    pub no_skills: bool,
+
     /// Non-interactive print mode
     #[arg(long)]
     pub print: bool,

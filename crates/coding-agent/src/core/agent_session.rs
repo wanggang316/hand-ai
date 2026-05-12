@@ -106,6 +106,9 @@ pub struct AgentSessionConfig {
     /// sessions land under `<cwd>/.hand/sessions`. Mirrors pi-mono's
     /// `--session-dir <dir>`.
     pub session_dir: Option<PathBuf>,
+    /// When `true`, skip skill discovery entirely. Mirrors pi-mono's
+    /// `--no-skills` flag.
+    pub no_skills: bool,
 }
 
 /// The main agent session coordinating all subsystems.
@@ -250,9 +253,14 @@ impl AgentSession {
             system_prompt::load_context_files(&config.cwd)
         };
 
-        // Discover skills (project + user + optional builtin).
-        let (skills_discovered, skill_errors) =
-            skills::discover_skills(&config.cwd, user_dir, builtin_dir);
+        // Discover skills (project + user + optional builtin). Skipped
+        // entirely when --no-skills is set so the system prompt stays
+        // reproducible across machines with different dotfile contents.
+        let (skills_discovered, skill_errors): (Vec<Skill>, Vec<SkillError>) = if config.no_skills {
+            (Vec::new(), Vec::new())
+        } else {
+            skills::discover_skills(&config.cwd, user_dir, builtin_dir)
+        };
 
         // Build system prompt
         let system_prompt = system_prompt::build_system_prompt(BuildSystemPromptOptions {
@@ -338,6 +346,7 @@ impl AgentSession {
                 no_session: true,
                 no_context_files: true,
                 session_dir: None,
+                no_skills: true,
             },
             session_manager: SessionManager::in_memory(),
             settings_manager: SettingsManager::in_memory(),
@@ -1439,6 +1448,7 @@ mod tests {
             no_session: false,
             no_context_files: false,
             session_dir: None,
+            no_skills: false,
         }
     }
 
