@@ -79,6 +79,13 @@ pub struct Args {
     #[arg(long)]
     pub no_session: bool,
 
+    /// Disable auto-loading of project context files (HAND.md,
+    /// .hand/context.md). Pi-mono parity. Useful when scripts need a
+    /// reproducible system prompt that doesn't pick up uncommitted
+    /// local files.
+    #[arg(long)]
+    pub no_context_files: bool,
+
     /// Non-interactive print mode
     #[arg(long)]
     pub print: bool,

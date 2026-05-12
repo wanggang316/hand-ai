@@ -32,6 +32,8 @@ pub struct SessionSetup {
     /// `--no-session`: skip on-disk persistence and run with an in-memory
     /// session. Mirrors pi-mono's flag of the same name.
     pub no_session: bool,
+    /// `--no-context-files`: skip auto-loading project context files.
+    pub no_context_files: bool,
 }
 
 impl SessionSetup {
@@ -151,6 +153,7 @@ impl SessionSetup {
             custom_system_prompt: args.system_prompt.clone(),
             custom_guidelines: args.append_system_prompt.clone(),
             no_session: args.no_session,
+            no_context_files: args.no_context_files,
         })
     }
 
@@ -169,6 +172,7 @@ impl SessionSetup {
             custom_guidelines: self.custom_guidelines.clone(),
             resume_session,
             no_session: self.no_session,
+            no_context_files: self.no_context_files,
         }
     }
 }
@@ -294,6 +298,27 @@ mod tests {
         assert!(!setup.no_session);
         let cfg = setup.to_config(None);
         assert!(!cfg.no_session);
+    }
+
+    /// Pi-mono `--no-context-files` parity: the flag must propagate so
+    /// that AgentSession skips HAND.md / .hand/context.md loading at
+    /// system-prompt build time. Default keeps the load-everything behavior.
+    #[test]
+    fn no_context_files_flag_propagates() {
+        let args = Args::try_parse_from(["hand", "--no-context-files"]).expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(setup.no_context_files);
+        let cfg = setup.to_config(None);
+        assert!(cfg.no_context_files);
+    }
+
+    #[test]
+    fn default_loads_context_files() {
+        let args = Args::try_parse_from(["hand"]).expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(!setup.no_context_files);
+        let cfg = setup.to_config(None);
+        assert!(!cfg.no_context_files);
     }
 
     /// Known providers (in the registry) must still resolve.

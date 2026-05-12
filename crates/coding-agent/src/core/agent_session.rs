@@ -99,6 +99,9 @@ pub struct AgentSessionConfig {
     /// file is written under `.hand/sessions/`. Mirrors pi-mono's
     /// `--no-session` flag.
     pub no_session: bool,
+    /// When `true`, skip auto-loading project context files (HAND.md,
+    /// .hand/context.md). Mirrors pi-mono's `--no-context-files`.
+    pub no_context_files: bool,
 }
 
 /// The main agent session coordinating all subsystems.
@@ -232,7 +235,11 @@ impl AgentSession {
         let tool_names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
 
         // Load context files
-        let context_files = system_prompt::load_context_files(&config.cwd);
+        let context_files = if config.no_context_files {
+            Vec::new()
+        } else {
+            system_prompt::load_context_files(&config.cwd)
+        };
 
         // Discover skills (project + user + optional builtin).
         let (skills_discovered, skill_errors) =
@@ -320,6 +327,7 @@ impl AgentSession {
                 custom_guidelines: None,
                 resume_session: None,
                 no_session: true,
+                no_context_files: true,
             },
             session_manager: SessionManager::in_memory(),
             settings_manager: SettingsManager::in_memory(),
@@ -1419,6 +1427,7 @@ mod tests {
             custom_guidelines: None,
             resume_session: None,
             no_session: false,
+            no_context_files: false,
         }
     }
 
