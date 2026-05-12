@@ -602,6 +602,30 @@ impl InteractiveMode {
             }
         });
 
+        // M5.3 — async best-effort version probe. Runs once at startup. When
+        // crates.io reports a newer published version, mount an "Update
+        // Available" banner in scrollback. Failure (network, malformed
+        // payload, `HAND_OFFLINE` set) is silent so startup never blocks on
+        // it.
+        let chat_for_ver = Arc::clone(&chat);
+        let ver_render = tui.render_handle();
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        tokio::spawn(async move {
+            let fetcher = crate::utils::version_check::HttpVersionFetcher::new();
+            if let Some(latest) =
+                crate::utils::version_check::check_for_new_version(&fetcher, &current_version)
+                    .await
+            {
+                let banner = format!(
+                    "[update available] hand-coding-agent {latest} is newer than {current_version}. \
+Run `cargo install --git https://github.com/badlogic/hand-ai hand-coding-agent` to upgrade. \
+Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHANGELOG.md",
+                );
+                push_status(&chat_for_ver, banner, Some(YELLOW_FG));
+                ver_render();
+            }
+        });
+
         // We need to call `tui.stop()` from outside the run-loop when the
         // user submits or quits. The Tui's `stop()` is `&self` and only
         // touches Send + Sync atomics, so we can use a raw pointer wrapped
