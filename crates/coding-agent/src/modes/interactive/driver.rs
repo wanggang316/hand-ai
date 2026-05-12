@@ -212,8 +212,12 @@ impl InteractiveMode {
             context_window,
             context_percent,
             auto_compact_enabled: session.auto_compaction_enabled(),
-            has_reasoning: false, // TODO(parity): derive from model capabilities.
-            thinking_level: String::new(),
+            has_reasoning: session.model().reasoning,
+            thinking_level: session
+                .stream_options()
+                .reasoning
+                .map(|l| level_label(l).to_string())
+                .unwrap_or_default(),
             available_provider_count: 1, // TODO(parity): derive from credentials registry.
             extension_statuses: Vec::new(),
         }
@@ -553,6 +557,11 @@ impl InteractiveMode {
                                     Some(&mounter),
                                 )
                                 .await;
+                                // Slash commands can mutate session state
+                                // (`/thinking`, `/model`, …) — refresh the
+                                // footer so the thinking-level / model
+                                // segments reflect the change immediately.
+                                refresh_footer(&session, &cwd, &agent_footer, &agent_usage);
                                 if matches!(outcome, SlashOutcome::Quit) {
                                     unsafe { stop_handle_for_agent.stop() };
                                     break;
@@ -1235,18 +1244,44 @@ async fn mount_model_selector(
 
 async fn mount_thinking_selector(
     chat: &ChatList,
-    _session: &mut AgentSession,
+    session: &mut AgentSession,
     inline_level: Option<String>,
     mounter: Option<&OverlayMounter>,
 ) {
     use model::ThinkingLevel;
 
     // Inline form (`/thinking high`) bypasses the picker.
-    if let Some(level) = inline_level {
-        // TODO(parity): apply the parsed level to the active session once
-        // AgentSession exposes a thinking-level setter. For now, surface
-        // the choice in the status line so the user sees it took effect.
-        push_status(chat, format!("[thinking level: {level}]"), None);
+    if let Some(arg) = inline_level {
+        let trimmed = arg.trim();
+        // Explicit off / none / clear maps to `reasoning = None` — the
+        // model is asked to skip reasoning entirely. Any recognised level
+        // is forwarded as `Some(level)`. Anything else surfaces an error.
+        let normalised = trimmed.to_lowercase();
+        let parsed: Result<Option<ThinkingLevel>, ()> = match normalised.as_str() {
+            "off" | "none" | "clear" => Ok(None),
+            other => crate::core::model_resolver::parse_thinking_level(other)
+                .map(Some)
+                .ok_or(()),
+        };
+        match parsed {
+            Ok(level) => {
+                apply_thinking_level(session, level);
+                let label = match level {
+                    Some(l) => level_label(l).to_string(),
+                    None => "off".to_string(),
+                };
+                push_status(chat, format!("[thinking: {label}]"), None);
+            }
+            Err(()) => {
+                push_status(
+                    chat,
+                    format!(
+                        "[/thinking: unknown level '{trimmed}' — try off/minimal/low/medium/high/xhigh]"
+                    ),
+                    Some(YELLOW_FG),
+                );
+            }
+        }
         return;
     }
 
@@ -1263,10 +1298,9 @@ async fn mount_thinking_selector(
         Some(ThinkingLevel::High),
         Some(ThinkingLevel::Xhigh),
     ];
-    // TODO(parity): read the current thinking level from the session once
-    // exposed; for now we default to "off" so the cursor lands on the
-    // first row.
-    let component = ThinkingSelectorComponent::new(None, available_levels, tx);
+    // Seed the selector with the active level so the cursor lands on it.
+    let current = session.stream_options().reasoning;
+    let component = ThinkingSelectorComponent::new(current, available_levels, tx);
     let handle = match mounter
         .show(Box::new(component), OverlayOptions::default())
         .await
@@ -1278,21 +1312,27 @@ async fn mount_thinking_selector(
         }
     };
     match rx.recv().await {
-        Some(ThinkingOutcome::Selected(Some(level))) => {
-            push_status(
-                chat,
-                format!("[thinking level: {}]", level_label(level)),
-                None,
-            );
-        }
-        Some(ThinkingOutcome::Selected(None)) => {
-            push_status(chat, "[thinking off]".to_string(), None);
+        Some(ThinkingOutcome::Selected(level)) => {
+            apply_thinking_level(session, level);
+            let label = match level {
+                Some(l) => level_label(l).to_string(),
+                None => "off".to_string(),
+            };
+            push_status(chat, format!("[thinking: {label}]"), None);
         }
         Some(ThinkingOutcome::Cancelled) | None => {
             push_status(chat, "[/thinking cancelled]".to_string(), None);
         }
     }
     let _ = mounter.hide(handle);
+}
+
+/// Patch the session's stream options with a new thinking level. `None`
+/// clears the reasoning request entirely; `Some(level)` overrides it.
+fn apply_thinking_level(session: &mut AgentSession, level: Option<model::ThinkingLevel>) {
+    let mut opts = session.stream_options().clone();
+    opts.reasoning = level;
+    session.set_stream_options(opts);
 }
 
 fn level_label(level: model::ThinkingLevel) -> &'static str {
@@ -2327,9 +2367,67 @@ mod tests {
             }
             other => panic!("expected OpenThinkingSelector, got {:?}", other),
         }
+        // The session starts with no reasoning level.
+        assert_eq!(session.stream_options().reasoning, None);
         apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        // The status line confirms the new level and the session state
+        // actually mutates — the next agent turn will request reasoning.
         let joined = chat.lock().unwrap()[0].render(80).join("\n");
         assert!(joined.contains("high"), "{joined:?}");
+        assert_eq!(
+            session.stream_options().reasoning,
+            Some(model::ThinkingLevel::High)
+        );
+    }
+
+    /// `/thinking off` (or `none` / `clear`) explicitly resets the
+    /// reasoning request to `None` — the next turn will be a plain
+    /// non-reasoning completion.
+    #[tokio::test]
+    async fn thinking_off_clears_session_reasoning() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        // Plant a reasoning level first.
+        let mut opts = session.stream_options().clone();
+        opts.reasoning = Some(model::ThinkingLevel::Medium);
+        session.set_stream_options(opts);
+
+        let action = dispatch(
+            "/thinking off",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        assert_eq!(session.stream_options().reasoning, None);
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("off"), "{joined:?}");
+    }
+
+    /// Unknown `/thinking <foo>` shouldn't mutate state — surface a
+    /// yellow status pointing at the valid levels instead.
+    #[tokio::test]
+    async fn thinking_unknown_level_does_not_mutate_session() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let mut opts = session.stream_options().clone();
+        opts.reasoning = Some(model::ThinkingLevel::Low);
+        session.set_stream_options(opts);
+
+        let action = dispatch(
+            "/thinking bogus",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        assert_eq!(
+            session.stream_options().reasoning,
+            Some(model::ThinkingLevel::Low),
+            "unknown level must not clobber existing reasoning"
+        );
     }
 
     #[tokio::test]
