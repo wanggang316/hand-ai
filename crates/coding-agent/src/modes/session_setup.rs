@@ -45,6 +45,19 @@ impl SessionSetup {
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+        // Reject typo'd `--provider` values up-front with pi-mono's exact
+        // error text. Without this we'd silently fall back to the default
+        // (anthropic) and surface a confusing "No API key found for
+        // Anthropic" message at stream time, making it look like an auth
+        // problem rather than a typo.
+        if let Some(p) = args.provider.as_deref()
+            && model::types::Provider::from_str(p).is_none()
+        {
+            return Err(CodingAgentError::Other(format!(
+                "Unknown provider \"{p}\". Use --list-models to see available providers/models."
+            )));
+        }
+
         // Model: provider-default unless `--model` is explicit; thinking-level
         // CLI flag wins over the suffix embedded in the model pattern.
         //
@@ -194,5 +207,52 @@ mod tests {
         let args = Args::try_parse_from(["hand", "--no-tools"]).expect("parse");
         let setup = SessionSetup::resolve(&args).expect("resolve");
         assert!(setup.agent_tools.is_empty());
+    }
+
+    /// Parity with pi-mono: a typo'd `--provider` must surface a clean
+    /// "Unknown provider" error rather than silently falling back to the
+    /// default provider and then erroring on a missing API key further
+    /// downstream. Mirrors pi-mono's exact message text so scripts can
+    /// pattern-match on it.
+    #[test]
+    fn unknown_provider_returns_descriptive_error() {
+        let args = Args::try_parse_from([
+            "hand",
+            "--provider",
+            "nonexistent",
+            "--model",
+            "fake",
+        ])
+        .expect("parse");
+        let result = SessionSetup::resolve(&args);
+        let err = match result {
+            Ok(_) => panic!("must reject unknown provider"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unknown provider \"nonexistent\""),
+            "expected pi-style message, got: {msg}"
+        );
+        assert!(
+            msg.contains("--list-models"),
+            "must hint at --list-models for discoverability, got: {msg}"
+        );
+    }
+
+    /// Known providers (in the registry) must still resolve. Sanity check
+    /// so the validator doesn't accidentally over-reject.
+    #[test]
+    fn known_provider_does_not_error() {
+        let args = Args::try_parse_from([
+            "hand",
+            "--provider",
+            "openrouter",
+            "--model",
+            "deepseek/deepseek-v4-flash",
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve known provider");
+        assert_eq!(setup.model.provider.as_str(), "openrouter");
     }
 }

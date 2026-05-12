@@ -93,7 +93,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Legacy line-REPL interactive flow (used when stdin is not a tty, or
     // when `--prompt` / `--export` requires the older subscriber semantics).
-    let setup = SessionSetup::resolve(&cli)?;
+    let setup = match SessionSetup::resolve(&cli) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
     timings::time("session_setup");
     let cwd = setup.cwd.clone();
 
@@ -206,7 +212,13 @@ async fn run_rpc(cli: Args) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let setup = SessionSetup::resolve(&cli)?;
+    let setup = match SessionSetup::resolve(&cli) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Build the session: persisted to disk by default, in-memory under --no-session.
     let session = if cli.no_session {
