@@ -296,6 +296,12 @@ impl InteractiveMode {
         // similar to pi-mono's expandable header but without the easter-egg
         // logo. Stays in the scrollback (scrolls off as chat grows).
         push_welcome_header(&chat, session.model());
+        // M5.2 — surface a tmux-keyboard warning at startup so the user
+        // knows extended-keys (Modified Enter, Alt+letter, etc.) won't
+        // round-trip correctly through their multiplexer.
+        if let Some(msg) = check_tmux_keyboard_setup() {
+            push_status(&chat, msg, Some(YELLOW_FG));
+        }
 
         // Replay existing session messages.
         replay_messages_into(&chat, session.messages());
@@ -884,6 +890,64 @@ fn push_error(chat: &ChatList, msg: impl AsRef<str>) {
     list.push(Box::new(TextComponent::new(body)));
 }
 
+/// M5.2 — return a one-line warning if the user is running inside a
+/// tmux session whose keyboard plumbing will eat modified Enter / Alt
+/// keys. `None` outside tmux or when the relevant options are
+/// configured correctly. Times out the `tmux show` call at 2s so a
+/// hung tmux server can't delay startup.
+fn check_tmux_keyboard_setup() -> Option<String> {
+    if std::env::var("TMUX").is_err() {
+        return None;
+    }
+    fn tmux_show(opt: &str) -> Option<String> {
+        let mut child = std::process::Command::new("tmux")
+            .args(["show", "-gv", opt])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(2);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => {
+                    let mut stdout = String::new();
+                    use std::io::Read as _;
+                    let _ = child.stdout.as_mut()?.read_to_string(&mut stdout);
+                    return Some(stdout.trim().to_string());
+                }
+                Ok(Some(_)) => return None,
+                Ok(None) => {
+                    if start.elapsed() >= timeout {
+                        let _ = child.kill();
+                        return None;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+    let extended_keys = tmux_show("extended-keys")?;
+    if extended_keys != "on" && extended_keys != "always" {
+        return Some(
+            "tmux extended-keys is off. Modified Enter keys may not work. \
+             Add `set -g extended-keys on` to ~/.tmux.conf and reload tmux."
+                .to_string(),
+        );
+    }
+    let extended_keys_format = tmux_show("extended-keys-format");
+    if extended_keys_format.as_deref() == Some("xterm") {
+        return Some(
+            "tmux extended-keys-format is xterm. hand-ai works best with csi-u. \
+             Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and reload tmux."
+                .to_string(),
+        );
+    }
+    None
+}
+
 /// Open `initial` in `$VISUAL` / `$EDITOR` (falling back to `vi`) on a
 /// temp file, wait for the editor to exit, and return the resulting
 /// buffer. Used by the Ctrl+G external-edit hook (M4.1). The function
@@ -1359,7 +1423,7 @@ pub(crate) async fn apply_slash_action(
             apply_import(chat, session, &path);
         }
         SlashCommandAction::Fork(entry_id) => {
-            apply_fork(chat, session, entry_id.as_deref());
+            apply_fork(chat, session, entry_id.as_deref(), mounter).await;
         }
         SlashCommandAction::Clone => {
             apply_clone(chat, session);
@@ -2208,21 +2272,35 @@ fn apply_import(chat: &ChatList, session: &mut AgentSession, path: &Path) {
 
 /// `/fork [<entry-id>]` — branch the session at the chosen user entry, or
 /// the most recent user message when no id was supplied.
-fn apply_fork(chat: &ChatList, session: &mut AgentSession, entry_id: Option<&str>) {
+async fn apply_fork(
+    chat: &ChatList,
+    session: &mut AgentSession,
+    entry_id: Option<&str>,
+    mounter: Option<&OverlayMounter>,
+) {
     let target = match entry_id {
         Some(id) => id.to_string(),
         None => {
             let entries = session.fork_messages();
-            match entries.last() {
-                Some(entry) => entry.entry_id.clone(),
-                None => {
-                    push_status(
-                        chat,
-                        "[/fork: no user messages to fork from]".to_string(),
-                        Some(YELLOW_FG),
-                    );
-                    return;
-                }
+            if entries.is_empty() {
+                push_status(
+                    chat,
+                    "[/fork: no user messages to fork from]".to_string(),
+                    Some(YELLOW_FG),
+                );
+                return;
+            }
+            // M4.6 — open the user-message picker so the user can fork at
+            // an explicit entry rather than always the last one. When no
+            // overlay mounter is available (headless / unit-test contexts)
+            // fall back to the previous "last entry" behaviour so existing
+            // fixtures keep passing.
+            match mounter {
+                Some(m) => match mount_user_message_picker_for_fork(chat, &entries, m).await {
+                    Some(id) => id,
+                    None => return, // cancelled or mount failed; status already pushed
+                },
+                None => entries.last().expect("entries non-empty").entry_id.clone(),
             }
         }
     };
@@ -2233,6 +2311,57 @@ fn apply_fork(chat: &ChatList, session: &mut AgentSession, entry_id: Option<&str
         }
         Err(e) => push_status(chat, format!("[/fork failed: {e}]"), Some(RED_FG)),
     }
+}
+
+/// Mount the user-message picker for `/fork`. Returns the chosen
+/// `entry_id` or `None` if the user cancelled / the mount failed.
+async fn mount_user_message_picker_for_fork(
+    chat: &ChatList,
+    entries: &[crate::rpc::types::ForkMessageEntry],
+    mounter: &OverlayMounter,
+) -> Option<String> {
+    use crate::modes::interactive::components::{
+        UserMessageItem, UserMessageSelectorComponent, UserMessageSelectorEvent,
+    };
+
+    let items: Vec<UserMessageItem> = entries
+        .iter()
+        .map(|e| UserMessageItem {
+            id: e.entry_id.clone(),
+            text: e.text.clone(),
+            timestamp: None,
+        })
+        .collect();
+    let initial = entries.last().map(|e| e.entry_id.as_str());
+    let (std_tx, std_rx) = std::sync::mpsc::channel::<UserMessageSelectorEvent>();
+    let (tokio_tx, mut tokio_rx) = mpsc::unbounded_channel::<UserMessageSelectorEvent>();
+    std::thread::spawn(move || {
+        while let Ok(event) = std_rx.recv() {
+            if tokio_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+    let component = UserMessageSelectorComponent::new(items, initial, std_tx, None);
+    let handle = match mounter
+        .show(Box::new(component), OverlayOptions::default())
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            push_status(chat, format!("[/fork picker failed: {e}]"), Some(RED_FG));
+            return None;
+        }
+    };
+    let chosen = match tokio_rx.recv().await {
+        Some(UserMessageSelectorEvent::Select { entry_id }) => Some(entry_id),
+        Some(UserMessageSelectorEvent::Cancel) | None => {
+            push_status(chat, "[/fork cancelled]".to_string(), None);
+            None
+        }
+    };
+    let _ = mounter.hide(handle);
+    chosen
 }
 
 /// `/clone` — duplicate the current session under a fresh id.
