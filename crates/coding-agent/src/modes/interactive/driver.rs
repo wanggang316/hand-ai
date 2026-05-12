@@ -47,9 +47,9 @@ use crate::core::error::CodingAgentError;
 
 use super::components::{
     AssistantMessageComponent, AuthSelectorMode, AuthSelectorProvider, BashExecutionComponent,
-    BashStatus, CustomMessageComponent, CustomMessageData, FooterComponent, FooterViewModel,
-    LoginDialogComponent, LoginDialogEvent, ModelOutcome, ModelSelectorComponent, OAuthOutcome,
-    OAuthSelectorComponent, SessionSelectorComponent, SessionSelectorEvent,
+    BashStatus, BorderedLoaderComponent, CustomMessageComponent, CustomMessageData, FooterComponent,
+    FooterViewModel, LoginDialogComponent, LoginDialogEvent, ModelOutcome, ModelSelectorComponent,
+    OAuthOutcome, OAuthSelectorComponent, SessionSelectorComponent, SessionSelectorEvent,
     SettingsSelectorComponent, SettingsSelectorEvent, ThemeOutcome, ThemeSelectorComponent,
     ThinkingOutcome, ThinkingSelectorComponent, TokenUsageSummary, ToolExecutionComponent,
     UserMessageComponent,
@@ -139,6 +139,28 @@ impl Component for SharedFooterComponent {
         let view = self.view.lock().expect("footer view-model mutex poisoned");
         let footer = FooterComponent::new(view.clone());
         footer.render(width)
+    }
+}
+
+/// Loader slot rendered between the chat scrollback and the editor. The
+/// driver swaps the inner component on agent / compaction lifecycle events
+/// so the user always knows when the agent is actively working.
+type SharedLoaderSlot = Arc<StdMutex<Option<Arc<StdMutex<BorderedLoaderComponent>>>>>;
+
+struct LoaderSlot {
+    slot: SharedLoaderSlot,
+}
+
+impl Component for LoaderSlot {
+    fn render(&self, width: u16) -> Vec<String> {
+        let slot = self.slot.lock().expect("loader slot mutex poisoned");
+        match slot.as_ref() {
+            Some(cell) => {
+                let inner = cell.lock().expect("loader cell mutex poisoned");
+                inner.render(width)
+            }
+            None => Vec::new(),
+        }
     }
 }
 
@@ -246,11 +268,18 @@ impl InteractiveMode {
                 }
             });
 
+        // Loader slot — appears between chat and editor while the agent
+        // is working / compacting / retrying.
+        let loader_slot: SharedLoaderSlot = Arc::new(StdMutex::new(None));
+
         // Build the TUI tree.
         let terminal = Box::new(ProcessTerminal::new()?);
         let mut tui = Tui::new(terminal);
         tui.root_mut().add_child_with_id(Box::new(ChatScrollback {
             list: Arc::clone(&chat),
+        }));
+        tui.root_mut().add_child_with_id(Box::new(LoaderSlot {
+            slot: Arc::clone(&loader_slot),
         }));
         let editor_id = tui.root_mut().add_child_with_id(Box::new(editor));
         tui.root_mut()
@@ -284,7 +313,9 @@ impl InteractiveMode {
 
         // Background task: drains agent events into the chat list AND
         // accumulates token usage from `MessageEnd` events into the running
-        // usage counter so the footer reflects spend in real time.
+        // usage counter so the footer reflects spend in real time. Also
+        // installs / removes the loader slot on agent + compaction lifecycle
+        // events so the user sees a "Working…" / "Compacting…" indicator.
         let chat_for_events = Arc::clone(&chat);
         let stop_for_events = Arc::clone(&stop);
         let tool_handles: ToolHandles = Arc::new(StdMutex::new(HashMap::new()));
@@ -292,17 +323,34 @@ impl InteractiveMode {
         let assistant_handle: AssistantHandle = Arc::new(StdMutex::new(None));
         let assistant_for_events = Arc::clone(&assistant_handle);
         let usage_for_events = Arc::clone(&usage);
+        let loader_for_events = Arc::clone(&loader_slot);
         let event_pump = tokio::spawn(async move {
             let mut rx = event_rx;
             while !stop_for_events.load(Ordering::Relaxed) {
                 match rx.recv().await {
                     Some(ev) => {
-                        if let AgentSessionEvent::Agent(agent_ev) = &ev
-                            && let hand_agent::types::AgentEvent::MessageEnd { message } =
-                                agent_ev.as_ref()
-                            && let model::Message::Assistant(a) = message
-                        {
-                            accumulate_usage(&usage_for_events, &a.usage);
+                        match &ev {
+                            AgentSessionEvent::Agent(agent_ev) => match agent_ev.as_ref() {
+                                hand_agent::types::AgentEvent::AgentStart => {
+                                    install_loader(&loader_for_events, "Working…");
+                                }
+                                hand_agent::types::AgentEvent::AgentEnd { .. } => {
+                                    clear_loader(&loader_for_events);
+                                }
+                                hand_agent::types::AgentEvent::MessageEnd { message } => {
+                                    if let model::Message::Assistant(a) = message {
+                                        accumulate_usage(&usage_for_events, &a.usage);
+                                    }
+                                }
+                                _ => {}
+                            },
+                            AgentSessionEvent::CompactionStart => {
+                                install_loader(&loader_for_events, "Compacting context…");
+                            }
+                            AgentSessionEvent::CompactionEnd { .. } => {
+                                clear_loader(&loader_for_events);
+                            }
+                            _ => {}
                         }
                         let updates = dispatch_event(&ev);
                         apply_updates_to_chat(
@@ -313,6 +361,30 @@ impl InteractiveMode {
                         );
                     }
                     None => break,
+                }
+            }
+        });
+
+        // Spinner-tick task: while a loader is mounted, advance its animation
+        // ~10 times a second so the user gets feedback that things are moving.
+        let loader_for_tick = Arc::clone(&loader_slot);
+        let stop_for_tick = Arc::clone(&stop);
+        let tick_render = tui.render_handle();
+        let tick_task = tokio::spawn(async move {
+            let mut tick =
+                tokio::time::interval(std::time::Duration::from_millis(LOADER_TICK_MS));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            while !stop_for_tick.load(Ordering::Relaxed) {
+                tick.tick().await;
+                let mounted = {
+                    let slot = loader_for_tick.lock().unwrap();
+                    slot.as_ref().map(Arc::clone)
+                };
+                if let Some(cell) = mounted {
+                    if let Ok(mut c) = cell.lock() {
+                        c.tick();
+                    }
+                    tick_render();
                 }
             }
         });
@@ -446,6 +518,7 @@ impl InteractiveMode {
         stop.store(true, Ordering::Relaxed);
         let _ = agent_task.await;
         let _ = event_pump.await;
+        let _ = tick_task.await;
         Ok(())
     }
 }
@@ -466,6 +539,26 @@ const BORDER_DIM: &str = "\x1b[2;90m";
 const BORDER_FOCUS: &str = "\x1b[36m";
 /// Placeholder text shown inside the editor while the buffer is empty.
 const EDITOR_PLACEHOLDER: &str = "Type your message — Enter to send, Shift+Enter for newline, / for commands";
+/// Interval (ms) between loader-spinner ticks. ~10 fps so the animation is
+/// visibly moving without burning the render loop.
+const LOADER_TICK_MS: u64 = 100;
+
+/// Mount a cancellable bordered loader into the shared slot. Replaces any
+/// existing loader.
+fn install_loader(slot: &SharedLoaderSlot, message: impl Into<String>) {
+    let loader = BorderedLoaderComponent::new_cancellable(message);
+    let cell = Arc::new(StdMutex::new(loader));
+    if let Ok(mut s) = slot.lock() {
+        *s = Some(cell);
+    }
+}
+
+/// Remove the mounted loader, if any.
+fn clear_loader(slot: &SharedLoaderSlot) {
+    if let Ok(mut s) = slot.lock() {
+        *s = None;
+    }
+}
 
 /// Build the single dim hint line rendered between the editor and the footer.
 fn build_hint_line() -> String {

@@ -576,6 +576,14 @@ impl Tui {
         self.render_requested.store(true, Ordering::Relaxed);
     }
 
+    /// Return a `Send + Sync` closure that schedules a render on the next
+    /// tick. Use this from background tasks that cannot hold `&Tui` directly
+    /// (e.g. spinner tick loops, status pollers).
+    pub fn render_handle(&self) -> impl Fn() + Send + Sync + 'static {
+        let flag = Arc::clone(&self.render_requested);
+        move || flag.store(true, Ordering::Relaxed)
+    }
+
     /// Schedule a render on the next tick, bypassing the diff cache (full
     /// re-render). Useful after operations that may have invalidated terminal
     /// state outside the renderer's knowledge (e.g. external `stty`).
