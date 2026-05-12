@@ -1583,7 +1583,20 @@ impl EditorComponent {
                 HandleResult::Handled
             }
             (KeyName::Enter, _) => {
-                if self.on_submit.is_some() {
+                // Backslash-as-newline workaround: terminals that can't emit
+                // Shift+Enter let users insert a soft line break by typing
+                // `\` immediately before Enter. The trailing `\` is consumed
+                // and replaced with a newline; submission is suppressed.
+                if self.cursor_col > 0
+                    && self
+                        .current_line()
+                        .as_bytes()
+                        .get(self.cursor_col - 1)
+                        == Some(&b'\\')
+                {
+                    self.delete_back();
+                    self.insert_newline();
+                } else if self.on_submit.is_some() {
                     let text = self.submit_text();
                     self.add_to_history(&text);
                     self.set_text("");
@@ -2413,5 +2426,57 @@ mod tests {
     #[test]
     fn detect_trigger_none() {
         assert_eq!(detect_trigger("plain text"), None);
+    }
+
+    // --- Backslash-as-newline workaround (terminals without Shift+Enter) ---
+
+    #[test]
+    fn backslash_inserts_immediately_without_buffering() {
+        let mut editor = EditorComponent::new();
+        editor.handle_input(&InputEvent::Raw("\\".into()));
+        assert_eq!(editor.text(), "\\");
+    }
+
+    #[test]
+    fn standalone_backslash_then_enter_inserts_newline() {
+        let mut editor = EditorComponent::new()
+            .with_on_submit(|_| panic!("must not submit when backslash precedes Enter"));
+        editor.handle_input(&InputEvent::Raw("\\".into()));
+        editor.handle_input(&InputEvent::Raw("\r".into()));
+        assert_eq!(editor.text(), "\n");
+    }
+
+    #[test]
+    fn backslash_followed_by_char_inserts_literally() {
+        let mut editor = EditorComponent::new();
+        editor.handle_input(&InputEvent::Raw("\\".into()));
+        editor.handle_input(&InputEvent::Raw("x".into()));
+        assert_eq!(editor.text(), "\\x");
+    }
+
+    #[test]
+    fn backslash_not_before_cursor_does_not_block_submit() {
+        use std::sync::{Arc, Mutex};
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = Arc::clone(&captured);
+        let mut editor = EditorComponent::new().with_on_submit(move |t| {
+            cap.lock().unwrap().push(t);
+        });
+        editor.handle_input(&InputEvent::Raw("\\".into()));
+        editor.handle_input(&InputEvent::Raw("x".into()));
+        editor.handle_input(&InputEvent::Raw("\r".into()));
+        assert_eq!(captured.lock().unwrap().as_slice(), &["\\x".to_string()]);
+    }
+
+    #[test]
+    fn multiple_backslashes_only_consume_last_on_enter() {
+        let mut editor = EditorComponent::new()
+            .with_on_submit(|_| panic!("trailing backslash must trigger newline, not submit"));
+        editor.handle_input(&InputEvent::Raw("\\".into()));
+        editor.handle_input(&InputEvent::Raw("\\".into()));
+        editor.handle_input(&InputEvent::Raw("\\".into()));
+        assert_eq!(editor.text(), "\\\\\\");
+        editor.handle_input(&InputEvent::Raw("\r".into()));
+        assert_eq!(editor.text(), "\\\\\n");
     }
 }
