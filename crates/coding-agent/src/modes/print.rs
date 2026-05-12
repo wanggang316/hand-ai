@@ -75,9 +75,15 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 drop(sm);
                 AgentSession::new(config, setup.agent_tools)?
             }
-            Err(e) => {
-                eprintln!("Failed to fork session: {}. Starting new session.", e);
-                AgentSession::new(base_config, setup.agent_tools)?
+            Err(_) => {
+                // Pi-mono parity: an explicit --fork <id> that can't be
+                // resolved must fail with a clear error and exit 1, not
+                // silently fall through to a new session that scripts
+                // wouldn't notice was empty.
+                return Err(format!(
+                    "No session found matching '{fork_source}'"
+                )
+                .into());
             }
         }
     } else {

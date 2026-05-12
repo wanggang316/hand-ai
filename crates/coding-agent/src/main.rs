@@ -143,9 +143,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 drop(sm);
                 AgentSession::new(config, agent_tools)?
             }
-            Err(e) => {
-                eprintln!("Failed to fork session: {}. Starting new session.", e);
-                AgentSession::new(base_config, agent_tools)?
+            Err(_) => {
+                // Pi-mono parity: an explicit --fork <id> that can't be
+                // resolved must surface a clear error and exit 1, not
+                // silently start a fresh session.
+                eprintln!("Error: No session found matching '{fork_source}'");
+                std::process::exit(1);
             }
         }
     } else {
