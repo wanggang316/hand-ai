@@ -144,7 +144,12 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         let expanded = expand_at_mentions(prompt, &cwd).map_err(|e| -> Box<dyn std::error::Error> {
             e.into()
         })?;
-        session.send_message(&expanded).await?;
+        // Match pi-mono: an empty (or whitespace-only) --prompt is a
+        // no-op, not an empty turn sent to the model. Without this guard
+        // hand sends "" to the upstream which hallucinates wildly.
+        if !expanded.trim().is_empty() {
+            session.send_message(&expanded).await?;
+        }
     } else {
         let stdin = io::stdin();
         let input: String = stdin
@@ -493,18 +498,32 @@ mod tests {
     }
 
     fn write_tmp(contents: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "hand-at-mention-{}-{}",
+            "hand-at-mention-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_nanos()
+                .as_nanos(),
+            seq,
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("attach.txt");
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    /// Pi-mono parity: an empty / whitespace-only --prompt is a no-op
+    /// at expansion time too. The function returns an empty (or all-
+    /// whitespace) string that the call site treats as no-message.
+    #[test]
+    fn at_mentions_passthrough_preserves_empty_input() {
+        let cwd = std::env::temp_dir();
+        assert_eq!(expand_at_mentions("", &cwd).unwrap(), "");
+        assert_eq!(expand_at_mentions("   ", &cwd).unwrap().trim(), "");
     }
 
     #[test]
