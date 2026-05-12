@@ -102,6 +102,10 @@ pub struct AgentSessionConfig {
     /// When `true`, skip auto-loading project context files (HAND.md,
     /// .hand/context.md). Mirrors pi-mono's `--no-context-files`.
     pub no_context_files: bool,
+    /// Optional override for the session storage directory. When `None`,
+    /// sessions land under `<cwd>/.hand/sessions`. Mirrors pi-mono's
+    /// `--session-dir <dir>`.
+    pub session_dir: Option<PathBuf>,
 }
 
 /// The main agent session coordinating all subsystems.
@@ -220,13 +224,18 @@ impl AgentSession {
 
         // Create or resume session
         let session_manager = if let Some(session_id) = &config.resume_session {
-            let session_dir = config.cwd.join(".hand").join("sessions");
+            let session_dir = config
+                .session_dir
+                .clone()
+                .unwrap_or_else(|| config.cwd.join(".hand").join("sessions"));
             let path = session_dir.join(format!("{}.jsonl", session_id));
             SessionManager::open(&path)?
         } else if config.no_session {
             // --no-session: pure in-memory, no JSONL file under
             // .hand/sessions. Pi-mono parity.
             SessionManager::in_memory()
+        } else if let Some(dir) = &config.session_dir {
+            SessionManager::create_in(&config.cwd, dir)?
         } else {
             SessionManager::create(&config.cwd)?
         };
@@ -328,6 +337,7 @@ impl AgentSession {
                 resume_session: None,
                 no_session: true,
                 no_context_files: true,
+                session_dir: None,
             },
             session_manager: SessionManager::in_memory(),
             settings_manager: SettingsManager::in_memory(),
@@ -1428,6 +1438,7 @@ mod tests {
             resume_session: None,
             no_session: false,
             no_context_files: false,
+            session_dir: None,
         }
     }
 

@@ -86,6 +86,12 @@ pub struct Args {
     #[arg(long)]
     pub no_context_files: bool,
 
+    /// Override the directory used for session storage. Defaults to
+    /// `<cwd>/.hand/sessions`. Pi-mono parity. Useful for CI runs that
+    /// want sessions written to a tmpfs / artifact directory.
+    #[arg(long)]
+    pub session_dir: Option<PathBuf>,
+
     /// Non-interactive print mode
     #[arg(long)]
     pub print: bool,

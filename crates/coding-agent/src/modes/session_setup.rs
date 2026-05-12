@@ -34,6 +34,9 @@ pub struct SessionSetup {
     pub no_session: bool,
     /// `--no-context-files`: skip auto-loading project context files.
     pub no_context_files: bool,
+    /// `--session-dir <dir>`: override the default `<cwd>/.hand/sessions`
+    /// storage directory. Pi-mono parity.
+    pub session_dir: Option<PathBuf>,
 }
 
 impl SessionSetup {
@@ -154,6 +157,7 @@ impl SessionSetup {
             custom_guidelines: args.append_system_prompt.clone(),
             no_session: args.no_session,
             no_context_files: args.no_context_files,
+            session_dir: args.session_dir.clone(),
         })
     }
 
@@ -173,6 +177,7 @@ impl SessionSetup {
             resume_session,
             no_session: self.no_session,
             no_context_files: self.no_context_files,
+            session_dir: self.session_dir.clone(),
         }
     }
 }
@@ -319,6 +324,37 @@ mod tests {
         assert!(!setup.no_context_files);
         let cfg = setup.to_config(None);
         assert!(!cfg.no_context_files);
+    }
+
+    /// Pi-mono `--session-dir <dir>` parity: an explicit override must
+    /// flow into AgentSessionConfig.session_dir so SessionManager
+    /// writes/reads under the override path instead of the default
+    /// `<cwd>/.hand/sessions`.
+    #[test]
+    fn session_dir_flag_propagates() {
+        let args = Args::try_parse_from([
+            "hand",
+            "--session-dir",
+            "/tmp/custom-sessions",
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert_eq!(
+            setup.session_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/custom-sessions")),
+        );
+        let cfg = setup.to_config(None);
+        assert_eq!(
+            cfg.session_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/custom-sessions")),
+        );
+    }
+
+    #[test]
+    fn default_session_dir_is_none() {
+        let args = Args::try_parse_from(["hand"]).expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(setup.session_dir.is_none());
     }
 
     /// Known providers (in the registry) must still resolve.

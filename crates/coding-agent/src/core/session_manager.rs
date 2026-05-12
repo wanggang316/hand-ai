@@ -527,9 +527,17 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    /// Create a new session file.
+    /// Create a new session file under the default
+    /// `<cwd>/.hand/sessions` directory.
     pub fn create(cwd: &Path) -> Result<Self, CodingAgentError> {
-        let session_dir = Self::default_session_dir(cwd);
+        Self::create_in(cwd, &Self::default_session_dir(cwd))
+    }
+
+    /// Create a new session file under an explicit session directory.
+    /// Mirrors pi-mono's `--session-dir` override path. The directory is
+    /// created if it doesn't exist.
+    pub fn create_in(cwd: &Path, session_dir: &Path) -> Result<Self, CodingAgentError> {
+        let session_dir = session_dir.to_path_buf();
         std::fs::create_dir_all(&session_dir)?;
 
         let id = generate_session_id();
