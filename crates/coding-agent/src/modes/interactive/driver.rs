@@ -218,7 +218,7 @@ impl InteractiveMode {
                 .reasoning
                 .map(|l| level_label(l).to_string())
                 .unwrap_or_default(),
-            available_provider_count: 1, // TODO(parity): derive from credentials registry.
+            available_provider_count: count_providers_with_credentials(),
             extension_statuses: Vec::new(),
         }
     }
@@ -974,6 +974,17 @@ fn refresh_footer(
     if let Ok(mut f) = footer.lock() {
         *f = InteractiveMode::build_footer_view(session, cwd, snapshot);
     }
+}
+
+/// Count providers that currently have a credential (API key, OAuth
+/// token, or Vertex/Bedrock identity) the host can use. Driven from
+/// `model::get_providers()` so adding a new provider to the catalogue
+/// automatically widens the footer count.
+fn count_providers_with_credentials() -> usize {
+    model::get_providers()
+        .into_iter()
+        .filter(|p| model::get_env_api_key(p).is_some())
+        .count()
 }
 
 /// Detect the current git branch by reading `.git/HEAD` in `cwd` or any
