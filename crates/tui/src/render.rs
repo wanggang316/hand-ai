@@ -99,12 +99,13 @@ impl DiffRenderer {
         .min(new_len);
 
         // Repaint rows [first_changed .. render_end). Each line emits a
-        // clear + carriage-return + content + newline, leaving the cursor at
-        // column 0 of the row immediately below.
+        // clear + carriage-return + content + CRLF, leaving the cursor at
+        // column 0 of the row immediately below. The trailing CRLF (vs a
+        // bare LF) keeps the next line correctly anchored in raw mode.
         for line in new_lines.iter().take(render_end).skip(first_changed) {
             commands.push_str("\x1b[2K\r");
             commands.push_str(line);
-            commands.push('\n');
+            commands.push_str("\r\n");
         }
 
         // Cursor is now at column 0 of row `render_end`.
@@ -146,11 +147,15 @@ impl DiffRenderer {
         let mut commands = String::new();
         commands.push_str("\x1b[?2026h");
 
-        // Each line: write content, newline. Trailing newline preserves the
-        // invariant (cursor lands on the row past the last line).
+        // Start each line at column 0 (`\r`), clear it (`\x1b[2K`), write the
+        // content, then drop to the next row with `\r\n`. The leading reset
+        // is required in raw mode where `\n` is a line-feed only — without
+        // `\r` each subsequent line would start wherever the previous line
+        // ended, producing a stair-step rendering.
         for line in lines {
+            commands.push_str("\x1b[2K\r");
             commands.push_str(line);
-            commands.push('\n');
+            commands.push_str("\r\n");
         }
 
         commands.push_str("\x1b[?2026l");

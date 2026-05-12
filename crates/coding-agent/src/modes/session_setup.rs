@@ -53,6 +53,24 @@ impl SessionSetup {
             .as_deref()
             .unwrap_or_else(|| model_resolver::default_model_for_provider(provider));
         let mut resolved = model_resolver::resolve_model(Some(provider), model_pattern);
+        // When the user passes BOTH `--provider P -m a/b`, treat `a/b` as
+        // the literal model id under P (e.g. `--provider openrouter -m
+        // deepseek/deepseek-v4-flash`). resolve_model would otherwise split
+        // the slash and resolve `b` under provider `a`, losing the `a/`
+        // namespace that openrouter etc. require.
+        if args.provider.is_some()
+            && let Some(m) = args.model.as_deref()
+            && m.contains('/')
+            && !resolved.model.id.contains('/')
+        {
+            resolved.model.id = m
+                .rsplit_once(':')
+                .map(|(left, _)| left.to_string())
+                .unwrap_or_else(|| m.to_string());
+            if resolved.model.name.is_empty() || !resolved.model.name.contains('/') {
+                resolved.model.name = resolved.model.id.clone();
+            }
+        }
         // `--base-url` overrides whatever default we picked. Useful for
         // self-hosted proxies / vendor-compat endpoints (e.g. pointing
         // anthropic at https://open.bigmodel.cn/api/anthropic).
