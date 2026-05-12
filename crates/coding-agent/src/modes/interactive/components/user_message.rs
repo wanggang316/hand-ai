@@ -23,9 +23,18 @@ const OSC133_ZONE_END: &str = "\x1b]133;B\x07";
 /// OSC 133 command-finished marker (`C`).
 const OSC133_ZONE_FINAL: &str = "\x1b]133;C\x07";
 
-/// Default user-message background — a muted indigo (256-color index 17).
-/// Mirrors the dark-theme `userMessageBg` slot in pi-mono's `dark.json`.
-const DEFAULT_BG_ANSI: &str = "\x1b[48;5;17m";
+/// Default user-message background. Mirrors pi-mono dark theme's
+/// `userMessageBg = #343541` (a muted gray, not the hard indigo we shipped
+/// initially). Truecolor bg with a 256-color fallback (`\x1b[48;5;238m`,
+/// roughly the same hue) for terminals that don't support RGB.
+const DEFAULT_BG_ANSI: &str = "\x1b[48;2;52;53;65m";
+/// Hex equivalent of [`DEFAULT_BG_ANSI`] — consumed by the markdown renderer
+/// so wrapped lines get tinted edge-to-edge.
+const DEFAULT_BG_HEX: &str = "#343541";
+/// Default foreground for user-message text. Light gray with good contrast
+/// against [`DEFAULT_BG_HEX`]. Mirrors pi-mono behaviour where the terminal
+/// foreground default is light on the dark theme.
+const DEFAULT_FG_HEX: &str = "#e6e6e6";
 
 /// Component that renders a user message.
 pub struct UserMessageComponent {
@@ -43,10 +52,13 @@ impl UserMessageComponent {
     pub fn with_background(text: impl Into<String>, bg_ansi: impl Into<String>) -> Self {
         let bg_ansi = bg_ansi.into();
         let mut markdown = MarkdownComponent::new(text);
-        // Pass the background through to the markdown renderer so wrapped
-        // lines get tinted edge-to-edge instead of leaving a gap on the right.
+        // Pass background and a contrasting foreground through to the
+        // markdown renderer so the entire row tints edge-to-edge AND text
+        // stays readable (terminals don't always set a useful default fg
+        // inside SGR-painted regions — without an explicit fg the user
+        // ends up with a blue block of "invisible" text).
         markdown.set_default_style(DefaultTextStyle {
-            fg: None,
+            fg: Some(Color::Hex(DEFAULT_FG_HEX.to_string())),
             bg: Some(Color::Hex(bg_to_hex(&bg_ansi))),
             italic: false,
         });
@@ -83,9 +95,11 @@ impl Component for UserMessageComponent {
 /// recognised 256/RGB form — the visible result is identical because the
 /// surrounding box already paints the background.
 fn bg_to_hex(_bg: &str) -> String {
-    // Conservative default; real theme port will replace this with the slot
-    // value resolved from JSON.
-    "#1a1a3a".to_string()
+    // The bg ansi is opaque (256-color or truecolor); rather than parse it,
+    // return the same hex the default constants advertise so the markdown
+    // background matches the box background. Callers that pass a custom
+    // ANSI bg should also use a custom hex — see [`Self::with_background`].
+    DEFAULT_BG_HEX.to_string()
 }
 
 #[cfg(test)]
