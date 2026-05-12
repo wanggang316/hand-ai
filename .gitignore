@@ -25,3 +25,6 @@ Cargo.lock
 
 # Claude Code agent worktrees (created on-demand by the harness)
 .claude/worktrees/
+
+# Scheduled-tasks runtime lock (per-session)
+.claude/scheduled_tasks.lock
