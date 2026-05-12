@@ -1131,6 +1131,12 @@ pub struct ResolvedCompat {
     pub supports_strict_mode: bool,
     /// `true` when the model exposes Z.ai's incremental tool-stream protocol.
     pub zai_tool_stream: bool,
+    /// `true` when the upstream rejects assistant messages on replay that
+    /// omit a `reasoning_content` field (deepseek native API). When set,
+    /// `convert_messages` injects an empty `reasoning_content: ""` on any
+    /// assistant turn that doesn't already carry one. Mirrors pi-mono's
+    /// `requiresReasoningContentOnAssistantMessages`.
+    pub requires_reasoning_content_on_assistant_messages: bool,
 }
 
 fn detect_compat(model: &Model) -> ResolvedCompat {
@@ -1208,6 +1214,7 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
         vercel_gateway_routing: None,
         supports_strict_mode: !is_cloudflare_workers_ai,
         zai_tool_stream: is_zai,
+        requires_reasoning_content_on_assistant_messages: is_deepseek,
     }
 }
 
@@ -1262,6 +1269,9 @@ fn get_compat(model: &Model) -> ResolvedCompat {
             zai_tool_stream: compat_settings
                 .zai_tool_stream
                 .unwrap_or(detected.zai_tool_stream),
+            requires_reasoning_content_on_assistant_messages: compat_settings
+                .requires_reasoning_content_on_assistant_messages
+                .unwrap_or(detected.requires_reasoning_content_on_assistant_messages),
         };
     }
 

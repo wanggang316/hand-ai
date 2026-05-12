@@ -240,8 +240,7 @@ mod tests {
         );
     }
 
-    /// Known providers (in the registry) must still resolve. Sanity check
-    /// so the validator doesn't accidentally over-reject.
+    /// Known providers (in the registry) must still resolve.
     #[test]
     fn known_provider_does_not_error() {
         let args = Args::try_parse_from([
@@ -253,6 +252,10 @@ mod tests {
         ])
         .expect("parse");
         let setup = SessionSetup::resolve(&args).expect("resolve known provider");
-        assert_eq!(setup.model.provider.as_str(), "openrouter");
+        assert_eq!(
+            setup.model.provider.as_str(),
+            "openrouter",
+            "explicit --provider must NOT cross over to native deepseek even when openrouter lacks the model"
+        );
     }
 }

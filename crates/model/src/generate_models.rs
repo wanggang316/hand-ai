@@ -1376,6 +1376,62 @@ fn static_vertex_models() -> Vec<Model> {
     ]
 }
 
+fn static_deepseek_models() -> Vec<Model> {
+    // Native DeepSeek API. Pi-mono maintains these as first-party entries
+    // because they predate (and outlive) any single models.dev snapshot.
+    // Single-turn use works out of the box; multi-turn replay requires the
+    // `requiresReasoningContentOnAssistantMessages` compat path (encoded
+    // here but not yet enforced on the request side — see
+    // ResolvedCompat::requires_reasoning_content_on_assistant_messages).
+    const BASE_URL: &str = "https://api.deepseek.com";
+
+    let mut thinking_map = std::collections::HashMap::new();
+    thinking_map.insert("minimal".to_string(), None);
+    thinking_map.insert("low".to_string(), None);
+    thinking_map.insert("medium".to_string(), None);
+    thinking_map.insert("high".to_string(), Some("high".to_string()));
+    thinking_map.insert("xhigh".to_string(), Some("max".to_string()));
+
+    let compat = Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
+        thinking_format: Some("deepseek".to_string()),
+        requires_reasoning_content_on_assistant_messages: Some(true),
+        ..Default::default()
+    }));
+
+    vec![
+        Model {
+            id: "deepseek-v4-flash".to_string(),
+            name: "DeepSeek V4 Flash".to_string(),
+            api: Api::OpenAICompletions,
+            provider: Provider::Deepseek,
+            base_url: BASE_URL.to_string(),
+            reasoning: true,
+            input: input_text(),
+            cost: cost(0.14, 0.28, 0.0028, 0.0),
+            context_window: 1_000_000,
+            max_tokens: 384_000,
+            headers: None,
+            compat: Some(compat.clone()),
+            thinking_level_map: Some(thinking_map.clone()),
+        },
+        Model {
+            id: "deepseek-v4-pro".to_string(),
+            name: "DeepSeek V4 Pro".to_string(),
+            api: Api::OpenAICompletions,
+            provider: Provider::Deepseek,
+            base_url: BASE_URL.to_string(),
+            reasoning: true,
+            input: input_text(),
+            cost: cost(0.435, 0.87, 0.003625, 0.0),
+            context_window: 1_000_000,
+            max_tokens: 384_000,
+            headers: None,
+            compat: Some(compat),
+            thinking_level_map: Some(thinking_map),
+        },
+    ]
+}
+
 fn static_kimi_coding_models() -> Vec<Model> {
     // Kimi For Coding models (Moonshot AI's Anthropic-compatible coding API)
     // Static fallback in case models.dev doesn't have them yet
@@ -1589,6 +1645,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !all
             .iter()
             .any(|m| m.provider == Provider::KimiCoding && m.id == model.id)
+        {
+            all.push(model);
+        }
+    }
+
+    // Add native DeepSeek models (fallback - models.dev doesn't currently
+    // include them under the `deepseek` provider key; pi-mono maintains
+    // them as first-party entries).
+    for model in static_deepseek_models() {
+        if !all
+            .iter()
+            .any(|m| m.provider == Provider::Deepseek && m.id == model.id)
         {
             all.push(model);
         }

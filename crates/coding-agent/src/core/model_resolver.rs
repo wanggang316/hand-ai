@@ -219,14 +219,21 @@ pub fn resolve_model(provider: Option<&str>, model_id: &str) -> ResolvedModel {
         }
     }
 
-    // 4. Try all providers for a fuzzy match
-    for prov_key in model::get_provider_keys() {
-        let models = model::get_models(&prov_key);
-        if let Some(m) = find_best_match(&pattern, &models) {
-            return ResolvedModel {
-                model: m,
-                thinking_level: thinking,
-            };
+    // 4. Cross-provider fuzzy fallback — only when no explicit --provider
+    //    was given. With an explicit provider, drop straight to the
+    //    build_fallback_model path so we don't silently route to a
+    //    different provider the user has no credentials configured for.
+    //    Mirrors pi-mono's resolveCliModel which filters candidates by
+    //    the explicit provider and never crosses providers.
+    if provider.is_none() {
+        for prov_key in model::get_provider_keys() {
+            let models = model::get_models(&prov_key);
+            if let Some(m) = find_best_match(&pattern, &models) {
+                return ResolvedModel {
+                    model: m,
+                    thinking_level: thinking,
+                };
+            }
         }
     }
 
@@ -1342,6 +1349,25 @@ mod tests {
         let result = resolve_model(Some("openrouter"), "openai/gpt-3.5-turbo");
         assert_eq!(result.model.id, "openai/gpt-3.5-turbo");
         assert_eq!(result.model.provider.as_str(), "openrouter");
+    }
+
+    /// Native deepseek provider (`https://api.deepseek.com`) must resolve
+    /// when requested explicitly. Lock the registration so a future
+    /// `models.json` regeneration doesn't accidentally drop the entries.
+    #[test]
+    fn resolve_model_finds_native_deepseek_v4_flash() {
+        let result = resolve_model(Some("deepseek"), "deepseek-v4-flash");
+        assert_eq!(result.model.id, "deepseek-v4-flash");
+        assert_eq!(result.model.provider.as_str(), "deepseek");
+        assert_eq!(result.model.base_url, "https://api.deepseek.com");
+        assert!(result.model.reasoning);
+    }
+
+    #[test]
+    fn resolve_model_finds_native_deepseek_v4_pro() {
+        let result = resolve_model(Some("deepseek"), "deepseek-v4-pro");
+        assert_eq!(result.model.id, "deepseek-v4-pro");
+        assert_eq!(result.model.provider.as_str(), "deepseek");
     }
 
     /// Regression: when no --provider is given and the model pattern contains

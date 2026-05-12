@@ -311,6 +311,15 @@ pub struct OpenAICompletionsCompat {
     pub supports_long_cache_retention: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "zaiToolStream")]
     pub zai_tool_stream: Option<bool>,
+    /// When `true`, the upstream requires every assistant message in
+    /// replayed context to carry a `reasoning_content` field. Native
+    /// deepseek API enforces this; mirrors pi-mono's
+    /// `requiresReasoningContentOnAssistantMessages`.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "requiresReasoningContentOnAssistantMessages"
+    )]
+    pub requires_reasoning_content_on_assistant_messages: Option<bool>,
 }
 
 /// Compatibility overrides for OpenAI Responses API.
