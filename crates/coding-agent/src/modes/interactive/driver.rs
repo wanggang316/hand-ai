@@ -310,6 +310,48 @@ impl InteractiveMode {
             ListenerResult::pass()
         }));
 
+        // Escape listener: cancel the in-flight agent turn (HTTP call,
+        // tool execution, retry, etc). Only fires when a loader is mounted
+        // — otherwise Escape falls through so the editor can use it for
+        // autocomplete dismiss / etc.
+        let cancel_for_esc = session.cancel_handle();
+        let loader_for_esc = Arc::clone(&loader_slot);
+        let chat_for_esc = Arc::clone(&chat);
+        tui.add_input_listener(Box::new(move |event: &InputEvent| {
+            if let InputEvent::Key(key) = event
+                && matches!(&key.name, KeyName::Escape)
+                && !key.modifiers.shift
+                && !key.modifiers.ctrl
+                && !key.modifiers.alt
+            {
+                let loader_active = loader_for_esc
+                    .lock()
+                    .map(|s| s.is_some())
+                    .unwrap_or(false);
+                if loader_active {
+                    if let Ok(token) = cancel_for_esc.lock() {
+                        token.cancel();
+                    }
+                    // Clear the loader immediately so the user sees a
+                    // response — the agent task will also clear it when
+                    // AgentEnd fires, but cancellation can take a moment.
+                    if let Ok(mut s) = loader_for_esc.lock() {
+                        *s = None;
+                    }
+                    push_status(
+                        &chat_for_esc,
+                        "[cancelled by Esc]".to_string(),
+                        Some(YELLOW_FG),
+                    );
+                    return ListenerResult {
+                        consume: true,
+                        data: None,
+                    };
+                }
+            }
+            ListenerResult::pass()
+        }));
+
         // Stop signal for background tasks.
         let stop = Arc::new(AtomicBool::new(false));
 
@@ -515,8 +557,29 @@ impl InteractiveMode {
                         let mut list = agent_chat.lock().unwrap();
                         list.push(Box::new(UserMessageComponent::new(trimmed.clone())));
                     }
-                    if let Err(e) = session.send_message(&trimmed).await {
-                        push_error(&agent_chat, format!("send failed: {e}"));
+                    // 5-minute ceiling on a single turn so a hung HTTP
+                    // request can't pin the loader spinner forever. Real
+                    // long-running turns won't normally exceed this; if
+                    // they do, escape-cancel and resubmit. (No timeout for
+                    // tool execution time inside the turn — only the
+                    // overall wall clock.)
+                    let send = session.send_message(&trimmed);
+                    let send_timeout = tokio::time::Duration::from_secs(300);
+                    match tokio::time::timeout(send_timeout, send).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => push_error(&agent_chat, format!("send failed: {e}")),
+                        Err(_) => {
+                            // Timeout fired — cancel the session token so
+                            // the agent loop drops its in-flight future
+                            // and the loader clears on the next event tick.
+                            if let Ok(token) = session.cancel_handle().lock() {
+                                token.cancel();
+                            }
+                            push_error(
+                                &agent_chat,
+                                "request timed out after 5 minutes; cancelled".to_string(),
+                            );
+                        }
                     }
                     refresh_footer(&session, &cwd, &agent_footer, &agent_usage);
                 }

@@ -409,7 +409,20 @@ where
         return Ok(());
     }
 
+    // Timer that fires `ESC_FLUSH_MS` after a read leaves the buffer holding
+    // an incomplete escape sequence. If no follow-up bytes arrive in that
+    // window, flush the held bytes (typically a lone `\x1b` press) so the
+    // Tui dispatches Escape promptly instead of stalling forever.
+    const ESC_FLUSH_MS: u64 = 50;
+    let mut flush_deadline: Option<tokio::time::Instant> = None;
+
     loop {
+        let flush_sleep = match flush_deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline),
+            None => tokio::time::sleep(std::time::Duration::from_secs(3600)),
+        };
+        tokio::pin!(flush_sleep);
+
         tokio::select! {
             biased;
             res = shutdown.changed() => {
@@ -426,6 +439,22 @@ where
                 for event in buffer.push(&buf[..n]) {
                     if sender.send(event).is_err() {
                         return Ok(()); // receiver dropped
+                    }
+                }
+                // Arm / disarm the flush timer based on whether the buffer
+                // is still holding a partial escape sequence.
+                flush_deadline = if buffer.remainder_len() > 0 {
+                    Some(tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(ESC_FLUSH_MS))
+                } else {
+                    None
+                };
+            }
+            _ = &mut flush_sleep, if flush_deadline.is_some() => {
+                flush_deadline = None;
+                for event in buffer.flush() {
+                    if sender.send(event).is_err() {
+                        return Ok(());
                     }
                 }
             }
