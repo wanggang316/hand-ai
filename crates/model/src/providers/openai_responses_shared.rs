@@ -246,8 +246,22 @@ pub(crate) fn drive_sse_stream(
                             let item_type =
                                 item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                             if item_type == "function_call" {
-                                let args: Value = serde_json::from_str(&current_tool_args)
-                                    .unwrap_or(Value::Object(Default::default()));
+                                // Apply the same control-byte / invalid-escape
+                                // repair the other streaming providers use,
+                                // so a malformed argument payload doesn't
+                                // silently drop the entire tool call to `{}`.
+                                let args: Value = if current_tool_args.is_empty() {
+                                    Value::Object(Default::default())
+                                } else {
+                                    serde_json::from_str(&current_tool_args)
+                                        .ok()
+                                        .or_else(|| {
+                                            crate::transform::parse_json_with_repair(
+                                                &current_tool_args,
+                                            )
+                                        })
+                                        .unwrap_or(Value::Object(Default::default()))
+                                };
                                 output
                                     .content
                                     .push(AssistantContentBlock::ToolCall(ToolCall {
