@@ -141,7 +141,10 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // we'd export an empty session and silently drop the user's prompt
     // on the floor.
     if let Some(prompt) = args.prompt.as_deref() {
-        session.send_message(prompt).await?;
+        let expanded = expand_at_mentions(prompt, &cwd).map_err(|e| -> Box<dyn std::error::Error> {
+            e.into()
+        })?;
+        session.send_message(&expanded).await?;
     } else {
         let stdin = io::stdin();
         let input: String = stdin
@@ -151,7 +154,10 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
             .join("\n");
         if !input.is_empty() {
-            session.send_message(&input).await?;
+            let expanded = expand_at_mentions(&input, &cwd).map_err(
+                |e| -> Box<dyn std::error::Error> { e.into() },
+            )?;
+            session.send_message(&expanded).await?;
         }
     }
 
@@ -380,6 +386,88 @@ fn handle_export(
     Ok(())
 }
 
+/// Pi-mono parity: leading whitespace-separated `@<path>` tokens in the
+/// prompt are treated as file attachments. Each one is expanded inline as
+///
+///     <file name="<absolute_path>">
+///     <file content>
+///     </file>
+///
+/// before the remaining prompt text. Non-existent paths return an error
+/// matching pi's `Error: File not found: <path>` text so script consumers
+/// can pattern-match on it. Empty files are silently skipped (pi's
+/// behavior). This intentionally only handles TEXT files for now —
+/// image attachments require the ImageContent path and resizing logic
+/// that hand's --prompt single-string interface doesn't yet expose.
+fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, String> {
+    // Collect leading `@<path>` tokens, stop at the first non-@ token.
+    // We keep splitting on whitespace conservatively — quoted paths
+    // containing spaces aren't supported (matches pi's positional shell
+    // behavior where the shell already split them).
+    let mut iter = prompt.split_whitespace();
+    let mut attachments: Vec<String> = Vec::new();
+    let mut rest_start = 0usize;
+    let mut cursor = 0usize;
+    for tok in &mut iter {
+        let tok_start = prompt[cursor..]
+            .find(tok)
+            .map(|i| cursor + i)
+            .unwrap_or(cursor);
+        let tok_end = tok_start + tok.len();
+        if let Some(path) = tok.strip_prefix('@') {
+            attachments.push(path.to_string());
+            rest_start = tok_end;
+            cursor = tok_end;
+        } else {
+            break;
+        }
+    }
+    if attachments.is_empty() {
+        return Ok(prompt.to_string());
+    }
+
+    let mut prefix = String::new();
+    for path_str in &attachments {
+        let path = std::path::PathBuf::from(path_str);
+        let abs = if path.is_absolute() {
+            path.clone()
+        } else {
+            cwd.join(&path)
+        };
+        // Skip empty files silently — pi's behavior.
+        match std::fs::metadata(&abs) {
+            Ok(m) if m.len() == 0 => continue,
+            Ok(_) => {}
+            Err(_) => {
+                return Err(format!("File not found: {}", abs.display()));
+            }
+        }
+        match std::fs::read_to_string(&abs) {
+            Ok(content) => {
+                use std::fmt::Write;
+                let _ = write!(
+                    &mut prefix,
+                    "<file name=\"{}\">\n{}\n</file>\n",
+                    abs.display(),
+                    content,
+                );
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Could not read file {}: {e}",
+                    abs.display()
+                ));
+            }
+        }
+    }
+    let rest = prompt[rest_start..].trim_start();
+    if rest.is_empty() {
+        Ok(prefix.trim_end().to_string())
+    } else {
+        Ok(format!("{prefix}{rest}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +490,84 @@ mod tests {
         assert!(s.starts_with("2026-05-12T"));
         assert!(s.ends_with("Z"));
         assert_eq!(s.len(), 24);
+    }
+
+    fn write_tmp(contents: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hand-at-mention-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("attach.txt");
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[test]
+    fn at_mentions_passthrough_when_absent() {
+        let cwd = std::env::temp_dir();
+        let out = expand_at_mentions("plain prompt", &cwd).unwrap();
+        assert_eq!(out, "plain prompt");
+    }
+
+    #[test]
+    fn at_mentions_expand_single_absolute_path() {
+        let path = write_tmp("file body line 1\nfile body line 2\n");
+        let prompt = format!("@{} please summarize", path.display());
+        let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
+        let expected = format!(
+            "<file name=\"{}\">\nfile body line 1\nfile body line 2\n\n</file>\nplease summarize",
+            path.display()
+        );
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn at_mentions_expand_multiple_paths_in_order() {
+        let p1 = write_tmp("first");
+        let p2 = write_tmp("second");
+        let prompt = format!("@{} @{} compare them", p1.display(), p2.display());
+        let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
+        assert!(out.contains(&format!("<file name=\"{}\">\nfirst\n</file>", p1.display())));
+        assert!(out.contains(&format!("<file name=\"{}\">\nsecond\n</file>", p2.display())));
+        assert!(out.contains("compare them"));
+        // Ordering: first file appears before second.
+        assert!(out.find("first").unwrap() < out.find("second").unwrap());
+    }
+
+    #[test]
+    fn at_mentions_only_consume_leading_tokens() {
+        // A `@` in the middle of the prompt should NOT be expanded — only
+        // leading tokens are file attachments, matching pi's positional
+        // shell semantics.
+        let path = write_tmp("body");
+        let prompt = format!("preamble @{} trailing", path.display());
+        let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
+        assert_eq!(out, prompt, "no leading @, prompt must pass through verbatim");
+    }
+
+    #[test]
+    fn at_mentions_missing_file_errors_with_pi_text() {
+        let prompt = "@/tmp/definitely-not-a-real-path-xyz-12345 hi";
+        let err = expand_at_mentions(prompt, &std::env::temp_dir()).unwrap_err();
+        assert!(
+            err.starts_with("File not found:"),
+            "expected pi-mono-style error, got: {err}"
+        );
+        assert!(err.contains("definitely-not-a-real-path-xyz-12345"));
+    }
+
+    #[test]
+    fn at_mentions_empty_file_silently_skipped() {
+        let path = write_tmp("");
+        let prompt = format!("@{} hi", path.display());
+        let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
+        // Empty file produces no <file> block; rest of prompt remains.
+        assert_eq!(out, "hi");
     }
 }
 
