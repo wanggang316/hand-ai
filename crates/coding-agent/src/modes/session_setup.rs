@@ -47,12 +47,24 @@ impl SessionSetup {
 
         // Model: provider-default unless `--model` is explicit; thinking-level
         // CLI flag wins over the suffix embedded in the model pattern.
-        let provider = args.provider.as_deref().unwrap_or("anthropic");
+        //
+        // When `--model` carries a gateway-style slashed id and no explicit
+        // `--provider` was given, defer provider selection to the resolver
+        // so the slash can drive routing (e.g. `--model deepseek/deepseek-r1`
+        // resolves to openrouter without us pre-pinning anthropic).
+        let explicit_provider = args.provider.as_deref();
         let model_pattern = args
             .model
             .as_deref()
-            .unwrap_or_else(|| model_resolver::default_model_for_provider(provider));
-        let mut resolved = model_resolver::resolve_model(Some(provider), model_pattern);
+            .unwrap_or_else(|| model_resolver::default_model_for_provider(
+                explicit_provider.unwrap_or("anthropic"),
+            ));
+        let mut resolved = if explicit_provider.is_none() && model_pattern.contains('/') {
+            model_resolver::resolve_model(None, model_pattern)
+        } else {
+            let provider = explicit_provider.unwrap_or("anthropic");
+            model_resolver::resolve_model(Some(provider), model_pattern)
+        };
         // When the user passes BOTH `--provider P -m a/b`, treat `a/b` as
         // the literal model id under P (e.g. `--provider openrouter -m
         // deepseek/deepseek-v4-flash`). resolve_model would otherwise split

@@ -191,7 +191,35 @@ pub fn resolve_model(provider: Option<&str>, model_id: &str) -> ResolvedModel {
         };
     }
 
-    // 3. Try all providers for a match
+    // 3. If the provider was INFERRED from a slash and we didn't find the
+    //    model under that inferred provider, the slash may actually be part
+    //    of a gateway-style id (e.g. `deepseek/deepseek-r1` registered under
+    //    openrouter, not under `deepseek`). Try the raw input as an exact id
+    //    across every provider before falling back to fuzzy contains-match,
+    //    so we never silently divert to an unrelated provider. Strips a
+    //    trailing `:thinking` suffix the same way step 0 does.
+    if provider.is_none() && pattern_provider.is_some() {
+        let raw_no_thinking: &str = if let Some(idx) = model_id.rfind(':') {
+            let suffix = &model_id[idx + 1..];
+            if parse_thinking_level(suffix).is_some() {
+                &model_id[..idx]
+            } else {
+                model_id
+            }
+        } else {
+            model_id
+        };
+        for prov_key in model::get_provider_keys() {
+            if let Some(m) = model::get_model(&prov_key, raw_no_thinking) {
+                return ResolvedModel {
+                    model: m,
+                    thinking_level: thinking,
+                };
+            }
+        }
+    }
+
+    // 4. Try all providers for a fuzzy match
     for prov_key in model::get_provider_keys() {
         let models = model::get_models(&prov_key);
         if let Some(m) = find_best_match(&pattern, &models) {
@@ -1314,6 +1342,28 @@ mod tests {
         let result = resolve_model(Some("openrouter"), "openai/gpt-3.5-turbo");
         assert_eq!(result.model.id, "openai/gpt-3.5-turbo");
         assert_eq!(result.model.provider.as_str(), "openrouter");
+    }
+
+    /// Regression: when no --provider is given and the model pattern contains
+    /// a slash that looks like a provider prefix (e.g. `deepseek/deepseek-r1`),
+    /// the inferred-provider lookup may not have the model registered under
+    /// that key. Hand previously fell through to a fuzzy `contains` match
+    /// across ALL providers — including ones the user has no credentials for
+    /// (Bedrock, Vertex) — and silently picked one.
+    ///
+    /// Pi-mono falls back to matching the full slashed input as an id across
+    /// every provider in the registry, finding e.g. openrouter's
+    /// `deepseek/deepseek-r1` and routing there.
+    #[test]
+    fn resolve_model_no_provider_with_slashed_id_finds_openrouter_match() {
+        let result = resolve_model(None, "deepseek/deepseek-r1");
+        assert_eq!(result.model.id, "deepseek/deepseek-r1");
+        assert_eq!(
+            result.model.provider.as_str(),
+            "openrouter",
+            "expected openrouter, got {}",
+            result.model.provider.as_str()
+        );
     }
 
     #[test]
