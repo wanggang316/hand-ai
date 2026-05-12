@@ -39,8 +39,9 @@ pub struct Args {
     #[arg(long)]
     pub base_url: Option<String>,
 
-    /// Resume a previous session by ID
-    #[arg(short, long)]
+    /// Resume a previous session by ID (or path). `--session` is a
+    /// pi-mono-compat alias for the same behavior.
+    #[arg(short, long, alias = "session")]
     pub resume: Option<String>,
 
     /// Continue the most recent session

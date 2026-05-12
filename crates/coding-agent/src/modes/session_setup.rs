@@ -350,6 +350,15 @@ mod tests {
         );
     }
 
+    /// `--session <id>` must be accepted as a pi-mono-compat alias for
+    /// `--resume <id>` so scripts written against pi work against hand
+    /// unchanged.
+    #[test]
+    fn session_alias_is_accepted_for_resume() {
+        let args = Args::try_parse_from(["hand", "--session", "abc123"]).expect("parse");
+        assert_eq!(args.resume.as_deref(), Some("abc123"));
+    }
+
     #[test]
     fn default_session_dir_is_none() {
         let args = Args::try_parse_from(["hand"]).expect("parse");
