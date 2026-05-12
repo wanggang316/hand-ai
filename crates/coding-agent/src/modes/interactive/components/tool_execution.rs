@@ -38,16 +38,25 @@ use hand_tui::{BoxComponent, Color, Component, NamedColor, TextComponent};
 use model::ToolResultContent;
 use serde_json::Value;
 
-/// Background ANSI for an in-flight tool call (muted gray-blue).
-const PENDING_BG: &str = "\x1b[48;5;236m";
-/// Background ANSI for a failed tool call (muted dark red).
-const ERROR_BG: &str = "\x1b[48;5;52m";
-/// Background ANSI for a successful tool call (muted dark green).
-const SUCCESS_BG: &str = "\x1b[48;5;22m";
-/// Bold + bright cyan title color.
+// Backgrounds — pi-mono dark-theme truecolor values. The 256-color
+// `\x1b[48;5;52m` (saturated dark red) shipped initially was unreadable
+// against terminals whose default foreground is dark; pi-mono's
+// `#3c2828` is intentionally muted so explicit-fg body text always wins
+// on contrast.
+/// Background ANSI for an in-flight tool call.
+const PENDING_BG: &str = "\x1b[48;2;40;40;50m"; // #282832
+/// Background ANSI for a failed tool call.
+const ERROR_BG: &str = "\x1b[48;2;60;40;40m"; // #3c2828
+/// Background ANSI for a successful tool call.
+const SUCCESS_BG: &str = "\x1b[48;2;40;50;40m"; // #283228
+/// Bold + bright cyan title color (matches pi-mono `theme.bold(toolName)`
+/// in dark mode where `toolTitle` falls back to terminal default).
 const TITLE_FG: &str = "\x1b[1m\x1b[96m";
-/// Reset.
-const RESET: &str = "\x1b[0m";
+/// Body foreground. Explicit light grey so the JSON args and result text
+/// stay readable on any of the three tinted backgrounds above — without
+/// this the body inherits the terminal's default fg, which on light
+/// themes is near-black and disappears against #3c2828 / #282832.
+const BODY_FG: &str = "\x1b[38;2;220;220;220m"; // ~#dcdcdc
 
 /// Lifecycle status of the tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -160,14 +169,23 @@ impl Component for ToolExecutionComponent {
         };
         let output_text = self.text_output();
 
-        let mut body = format!("{TITLE_FG}{}{RESET}", self.tool_name);
+        // Wrap the title with TITLE_FG, then everything afterwards with
+        // BODY_FG so the args JSON and output text have readable contrast
+        // against the bubble bg. Both spans terminate with `\x1b[39m`
+        // (foreground-only reset) rather than `\x1b[0m` so the bubble's
+        // outer bg keeps painting until the line's natural close.
+        let mut body = format!("{TITLE_FG}{}\x1b[39m\x1b[22m", self.tool_name);
         if !args_text.is_empty() {
             body.push_str("\n\n");
+            body.push_str(BODY_FG);
             body.push_str(&args_text);
+            body.push_str("\x1b[39m");
         }
         if !output_text.is_empty() {
             body.push('\n');
+            body.push_str(BODY_FG);
             body.push_str(&output_text);
+            body.push_str("\x1b[39m");
         }
 
         let bg = self.background_ansi();
