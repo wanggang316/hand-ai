@@ -937,8 +937,10 @@ impl Tui {
         let (width, height) = (self.terminal.columns(), self.terminal.rows());
 
         // Width changes invalidate the cached diff lines because wrapping
-        // shifts; force a full repaint.
-        if width != self.previous_width {
+        // shifts; force a full repaint. We also need to wipe the previously
+        // painted rows — see the dedicated resize branch below.
+        let width_changed = width != self.previous_width;
+        if width_changed {
             force = true;
         }
 
@@ -967,6 +969,18 @@ impl Tui {
                 self.terminal.write(&format!("\x1b[{prev}A"));
             }
             self.cursor_offset_above_bottom = 0;
+            // On a width change the terminal silently reflows any line
+            // wider than the new viewport, so the actual on-screen footprint
+            // of our previous frame is no longer `prev` rows — it might be
+            // `prev * 2` if every line wrapped. The diff renderer's row
+            // arithmetic is now wrong; the only safe move is to wipe from
+            // the cursor down to the bottom of the visible viewport so the
+            // about-to-be-written full re-render lands on a clean slate.
+            // Scrollback above the cursor stays intact.
+            if width_changed {
+                self.terminal.clear_from_cursor();
+                self.max_lines_rendered = 0;
+            }
             self.renderer.reset();
         }
 
