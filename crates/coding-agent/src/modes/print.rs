@@ -107,6 +107,16 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
 fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
     use hand_agent::types::AgentEvent;
+    // Track whether the CURRENT assistant message has emitted any text
+    // to stdout. The agent may produce multiple assistant messages per
+    // turn (e.g. a thinking-only message followed by a text-bearing one),
+    // and emitting a trailing newline at MessageEnd for the empty / dropped
+    // ones produces gratuitous blank lines that diverge from pi-mono's
+    // text-only print contract (the TS impl emits ONLY the final assistant
+    // message's text blocks).
+    static TEXT_EMITTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::Ordering;
     match event {
         AgentEvent::MessageUpdate {
             assistant_message_event,
@@ -117,16 +127,27 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
                 AssistantMessageEvent::TextDelta { delta, .. } => {
                     print!("{}", delta);
                     let _ = io::stdout().flush();
+                    TEXT_EMITTED.store(true, Ordering::Relaxed);
                 }
-                AssistantMessageEvent::ThinkingDelta { delta, .. } => {
-                    print!("\x1b[2m{}\x1b[0m", delta);
-                    let _ = io::stdout().flush();
+                AssistantMessageEvent::ThinkingDelta { .. } => {
+                    // Pi-mono's `--print` / `-p` text mode emits only the
+                    // final assistant text content blocks — thinking is
+                    // deliberately suppressed so the output is scriptable.
+                    // Match that contract here: drop thinking deltas
+                    // entirely from stdout. (The interactive TUI still
+                    // renders thinking; this branch is print-only.)
                 }
                 _ => {}
             }
         }
         AgentEvent::MessageEnd { .. } => {
-            println!();
+            // Only terminate with a newline when this message actually
+            // wrote text — thinking-only messages (e.g. an intermediate
+            // assistant turn that emits a tool call after reasoning) would
+            // otherwise inject a blank line.
+            if TEXT_EMITTED.swap(false, Ordering::Relaxed) {
+                println!();
+            }
         }
         AgentEvent::ToolExecutionStart { tool_name, .. } => {
             eprintln!("\x1b[36m[{}]\x1b[0m", tool_name);
