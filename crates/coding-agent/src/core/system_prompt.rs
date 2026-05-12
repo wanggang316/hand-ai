@@ -22,9 +22,20 @@ pub struct BuildSystemPromptOptions<'a> {
 
 /// Build the system prompt for the coding agent.
 pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
-    // If custom prompt provided, use it directly
+    // If a custom prompt is provided, use it as the base — but still
+    // append project guidelines from --append-system-prompt so the two
+    // flags compose. Pi-mono concatenates both; hand previously short-
+    // circuited here and silently dropped --append-system-prompt when
+    // --system-prompt was set.
     if let Some(custom) = options.custom_prompt {
-        return custom.to_string();
+        let mut out = custom.to_string();
+        if let Some(guidelines) = options.custom_guidelines
+            && !guidelines.trim().is_empty()
+        {
+            out.push_str("\n\n# Project Guidelines\n\n");
+            out.push_str(guidelines);
+        }
+        return out;
     }
 
     let mut sections = Vec::new();
@@ -241,6 +252,49 @@ mod tests {
             custom_prompt: Some("You are a custom bot."),
         });
         assert_eq!(prompt, "You are a custom bot.");
+    }
+
+    /// Pi-mono parity: `--system-prompt X --append-system-prompt Y`
+    /// must produce a prompt containing BOTH. Previously the custom
+    /// prompt short-circuited the builder before guidelines were
+    /// appended, silently dropping --append-system-prompt.
+    #[test]
+    fn test_custom_prompt_composes_with_guidelines() {
+        let prompt = build_system_prompt(BuildSystemPromptOptions {
+            cwd: &PathBuf::from("/tmp"),
+            tools: &[],
+            skills: &[],
+            custom_guidelines: Some("Always include M_TOKEN."),
+            context_files: vec![],
+            custom_prompt: Some("You are CORE."),
+        });
+        assert!(
+            prompt.contains("You are CORE."),
+            "must keep custom prompt body, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("Always include M_TOKEN."),
+            "must also append guidelines when both flags present, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("# Project Guidelines"),
+            "must label the appended section, got: {prompt}"
+        );
+    }
+
+    /// When --system-prompt is set but --append-system-prompt is NOT,
+    /// the output is the custom prompt verbatim (no trailing section).
+    #[test]
+    fn test_custom_prompt_alone_is_verbatim() {
+        let prompt = build_system_prompt(BuildSystemPromptOptions {
+            cwd: &PathBuf::from("/tmp"),
+            tools: &[],
+            skills: &[],
+            custom_guidelines: None,
+            context_files: vec![],
+            custom_prompt: Some("Solo prompt."),
+        });
+        assert_eq!(prompt, "Solo prompt.");
     }
 
     #[test]
