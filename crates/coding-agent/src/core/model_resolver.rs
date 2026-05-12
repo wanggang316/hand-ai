@@ -146,8 +146,33 @@ pub fn resolve_model(provider: Option<&str>, model_id: &str) -> ResolvedModel {
     // Effective provider: explicit > pattern > default
     let effective_provider = provider
         .map(String::from)
-        .or(pattern_provider)
+        .or(pattern_provider.clone())
         .unwrap_or_else(|| "anthropic".to_string());
+
+    // 0. OpenRouter-style ids naturally contain slashes (e.g.
+    //    `deepseek/deepseek-r1`). If an explicit provider was given AND the
+    //    raw model_id contained a slash, the model registry key on the
+    //    explicit provider may be the full slashed id verbatim. Try that
+    //    first so we don't downgrade to a fuzzy `contains` match. Strip a
+    //    trailing `:thinking` suffix before the lookup.
+    if provider.is_some() && pattern_provider.is_some() {
+        let raw_no_thinking: &str = if let Some(idx) = model_id.rfind(':') {
+            let suffix = &model_id[idx + 1..];
+            if parse_thinking_level(suffix).is_some() {
+                &model_id[..idx]
+            } else {
+                model_id
+            }
+        } else {
+            model_id
+        };
+        if let Some(m) = model::get_model(&effective_provider, raw_no_thinking) {
+            return ResolvedModel {
+                model: m,
+                thinking_level: thinking,
+            };
+        }
+    }
 
     // 1. Try exact match with provider
     if let Some(m) = model::get_model(&effective_provider, &pattern) {
@@ -1251,6 +1276,32 @@ mod tests {
     fn test_resolve_model_with_thinking_suffix() {
         let result = resolve_model(None, "nonexistent:high");
         assert_eq!(result.model.id, "nonexistent");
+        assert_eq!(result.thinking_level, Some(ThinkingLevel::High));
+    }
+
+    /// Regression: OpenRouter-style model IDs naturally contain slashes
+    /// (e.g. `deepseek/deepseek-r1`). Hand previously stripped the segment
+    /// before the slash and looked the pattern up as `deepseek-r1`, which
+    /// fell through to a fuzzy `contains` match that returned the wrong
+    /// model — e.g. `tngtech/deepseek-r1t2-chimera`. Pi-mono matches the
+    /// full slashed id first; we mirror that.
+    #[test]
+    fn resolve_model_preserves_slashed_id_under_explicit_provider() {
+        let result = resolve_model(Some("openrouter"), "deepseek/deepseek-r1");
+        assert_eq!(
+            result.model.id, "deepseek/deepseek-r1",
+            "must match the exact slashed id on openrouter, got {}",
+            result.model.id
+        );
+    }
+
+    /// Same shape but with a thinking suffix: `deepseek/deepseek-r1:high`
+    /// must still resolve to the exact `deepseek/deepseek-r1` model and
+    /// surface `ThinkingLevel::High`.
+    #[test]
+    fn resolve_model_preserves_slashed_id_with_thinking_suffix() {
+        let result = resolve_model(Some("openrouter"), "deepseek/deepseek-r1:high");
+        assert_eq!(result.model.id, "deepseek/deepseek-r1");
         assert_eq!(result.thinking_level, Some(ThinkingLevel::High));
     }
 
