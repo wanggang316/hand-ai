@@ -624,6 +624,67 @@ mod tests {
         assert_eq!(result.len(), 64);
     }
 
+    /// Regression test for pi-mono issue #1022 — OpenAI Responses API generates
+    /// 450+ character pipe-separated tool-call IDs that crash Anthropic's
+    /// validator (which caps IDs at 64 chars matching `^[a-zA-Z0-9_-]+$`).
+    /// The exact failing ID is copied verbatim from the pi-mono test fixture.
+    #[test]
+    fn normalize_handles_pi_mono_issue_1022_failing_id() {
+        let failing_id = "call_pAYbIr76hXIjncD9UE4eGfnS|t5nnb2qYMFWGSsr13fhCd1CaCu3t3qONEPuOudu4HSVEtA8YJSL6FAZUxvoOoD792VIJWl91g87EdqsCWp9krVsdBysQoDaf9lMCLb8BS4EYi4gQd5kBQBYLlgD71PYwvf+TbMD9J9/5OMD42oxSRj8H+vRf78/l2Xla33LWz4nOgsddBlbvabICRs8GHt5C9PK5keFtzyi3lsyVKNlfduK3iphsZqs4MLv4zyGJnvZo/+QzShyk5xnMSQX/f98+aEoNflEApCdEOXipipgeiNWnpFSHbcwmMkZoJhURNu+JEz3xCh1mrXeYoN5o+trLL3IXJacSsLYXDrYTipZZbJFRPAucgbnjYBC+/ZzJOfkwCs+Gkw7EoZR7ZQgJ8ma+9586n4tT4cI8DEhBSZsWMjrCt8dxKg==";
+        let result = normalize_tool_call_id_for_anthropic(failing_id);
+        // Length cap.
+        assert_eq!(
+            result.len(),
+            64,
+            "truncated to fit Anthropic's 64-char limit"
+        );
+        // No special characters survive the normalization (only [a-zA-Z0-9_-]).
+        assert!(
+            result.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "unexpected chars in {result:?}"
+        );
+        // Prefix preserved so the truncated ID is still recognisable as
+        // originating from a `call_*` ID (deterministic mapping).
+        assert!(result.starts_with("call_"), "got: {result:?}");
+    }
+
+    /// Pipe characters are not legal in Anthropic IDs — verify the canonical
+    /// substitution char is `_` (not `-` or anything else) so cross-provider
+    /// handoff stays deterministic and round-trip stable.
+    #[test]
+    fn normalize_replaces_pipes_with_underscores() {
+        let id = "call_abc|def|ghi";
+        let result = normalize_tool_call_id_for_anthropic(id);
+        assert_eq!(result, "call_abc_def_ghi");
+    }
+
+    /// `=` / `+` / `/` (base64 alphabet) all collapse to `_`. This is what
+    /// breaks naive ID round-tripping when OpenAI Responses sends a base64
+    /// blob through Anthropic.
+    #[test]
+    fn normalize_replaces_base64_alphabet_with_underscores() {
+        let id = "call_a+b/c=d";
+        let result = normalize_tool_call_id_for_anthropic(id);
+        assert_eq!(result, "call_a_b_c_d");
+    }
+
+    /// Empty input returns empty output rather than panicking. This is a
+    /// defensive contract for malformed provider responses.
+    #[test]
+    fn normalize_empty_id_returns_empty() {
+        let result = normalize_tool_call_id_for_anthropic("");
+        assert_eq!(result, "");
+    }
+
+    /// Already-clean IDs pass through unchanged. Important for the common
+    /// case so we don't accidentally regress short Anthropic-shaped IDs.
+    #[test]
+    fn normalize_passes_clean_ids_through_unchanged() {
+        let id = "toolu_01abc-DEF_ghi";
+        let result = normalize_tool_call_id_for_anthropic(id);
+        assert_eq!(result, id);
+    }
+
     #[test]
     fn test_cross_model_strips_thought_signature() {
         let model = test_model();
