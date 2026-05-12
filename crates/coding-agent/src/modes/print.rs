@@ -118,84 +118,57 @@ static SAW_ERROR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 
 fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
     use hand_agent::types::AgentEvent;
-    // Track whether the CURRENT assistant message has emitted any text
-    // to stdout. The agent may produce multiple assistant messages per
-    // turn (e.g. a thinking-only message followed by a text-bearing one),
-    // and emitting a trailing newline at MessageEnd for the empty / dropped
-    // ones produces gratuitous blank lines that diverge from pi-mono's
-    // text-only print contract (the TS impl emits ONLY the final assistant
-    // message's text blocks).
-    static TEXT_EMITTED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
     use std::sync::atomic::Ordering;
+    // Pi-mono's `pi --print` text mode emits ONLY the final assistant
+    // message's text content blocks after the turn completes — NOT a
+    // streaming dump. Multi-step tool loops therefore stay silent until
+    // the model produces a `stop_reason: Stop` message with actual text;
+    // intermediate tool-call rounds are invisible to scripts.
+    //
+    // Approach: drop MessageUpdate / streaming events entirely. At
+    // MessageEnd with `StopReason::Stop`, walk the message's text content
+    // blocks and write each one to stdout terminated by `\n`. Error /
+    // Aborted messages surface their error_message on stderr.
     match event {
-        AgentEvent::MessageUpdate {
-            assistant_message_event,
-            ..
-        } => {
-            use model::AssistantMessageEvent;
-            match assistant_message_event.as_ref() {
-                AssistantMessageEvent::TextDelta { delta, .. } => {
-                    print!("{}", delta);
-                    let _ = io::stdout().flush();
-                    TEXT_EMITTED.store(true, Ordering::Relaxed);
-                }
-                AssistantMessageEvent::ThinkingDelta { .. } => {
-                    // Pi-mono's `--print` / `-p` text mode emits only the
-                    // final assistant text content blocks — thinking is
-                    // deliberately suppressed so the output is scriptable.
-                    // Match that contract here: drop thinking deltas
-                    // entirely from stdout. (The interactive TUI still
-                    // renders thinking; this branch is print-only.)
-                }
-                _ => {}
-            }
+        AgentEvent::MessageUpdate { .. } => {
+            // Suppressed — see contract above.
         }
         AgentEvent::MessageEnd { message } => {
-            // Surface API-level errors to stderr the same way `pi --print`
-            // does — otherwise an invalid model id / 400 / 401 silently
-            // exits with code 0 and an empty stdout.
-            use model::{Message as ModelMessage, StopReason};
-            if let ModelMessage::Assistant(a) = message
-                && matches!(a.stop_reason, StopReason::Error | StopReason::Aborted)
-            {
-                let msg = a
-                    .error_message
-                    .clone()
-                    .unwrap_or_else(|| format!("Request {:?}", a.stop_reason));
-                eprintln!("\x1b[31m{}\x1b[0m", msg);
-                SAW_ERROR.store(true, Ordering::Relaxed);
-            }
-            // Only terminate with a newline when this message actually
-            // wrote text — thinking-only messages (e.g. an intermediate
-            // assistant turn that emits a tool call after reasoning) would
-            // otherwise inject a blank line.
-            if TEXT_EMITTED.swap(false, Ordering::Relaxed) {
-                println!();
-            }
-        }
-        AgentEvent::ToolExecutionStart { tool_name, .. } => {
-            eprintln!("\x1b[36m[{}]\x1b[0m", tool_name);
-        }
-        AgentEvent::ToolExecutionEnd {
-            tool_name,
-            is_error: true,
-            ..
-        } => {
-            eprintln!("\x1b[31m[{} failed]\x1b[0m", tool_name);
-        }
-        AgentEvent::ToolExecutionEnd { .. } => {}
-        AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
-            // Origin renamed `update: serde_json::Value` to a typed
-            // `partial_result: ToolResult`. Render any text content
-            // blocks as dim output to keep the prior progress UX.
-            for block in &partial_result.content {
-                if let model::ToolResultContent::Text(t) = block {
-                    eprint!("\x1b[2m{}\x1b[0m", t.text);
+            use model::{AssistantContentBlock, Message as ModelMessage, StopReason};
+            if let ModelMessage::Assistant(a) = message {
+                match a.stop_reason {
+                    StopReason::Error | StopReason::Aborted => {
+                        let msg = a
+                            .error_message
+                            .clone()
+                            .unwrap_or_else(|| format!("Request {:?}", a.stop_reason));
+                        eprintln!("\x1b[31m{}\x1b[0m", msg);
+                        SAW_ERROR.store(true, Ordering::Relaxed);
+                    }
+                    StopReason::Stop => {
+                        // Final assistant turn: emit only the text content
+                        // blocks. Skips thinking / tool_call blocks so the
+                        // output stays grep-friendly.
+                        for block in &a.content {
+                            if let AssistantContentBlock::Text(t) = block {
+                                println!("{}", t.text);
+                            }
+                        }
+                        let _ = io::stdout().flush();
+                    }
+                    _ => {
+                        // ToolUse / Continue / other intermediate stops:
+                        // silent. The agent loop will keep going and
+                        // eventually produce a Stop or Error message.
+                    }
                 }
             }
-            let _ = io::stderr().flush();
         }
+        // Tool execution events are silent in text mode — reserved for
+        // `pi --mode json` upstream; hand has no JSON mode wired yet.
+        AgentEvent::ToolExecutionStart { .. } => {}
+        AgentEvent::ToolExecutionEnd { .. } => {}
+        AgentEvent::ToolExecutionUpdate { .. } => {}
         _ => {}
     }
 }

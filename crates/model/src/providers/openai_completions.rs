@@ -996,10 +996,25 @@ fn normalize_tool_call_id(id: &str, compat: &ResolvedCompat, model: &Model) -> S
 }
 
 fn parse_streaming_json(input: &str) -> Value {
+    let trimmed = input.trim();
+    // Empty stream (model emitted a tool call without any input deltas)
+    // is the no-args case — return an empty object, NOT a string. Returning
+    // `Value::String("")` here breaks JSON-schema validation downstream
+    // ("" is not of type "object") and produces silent tool-call failures
+    // for any tool whose schema requires `type: object`, even if all
+    // properties are optional.
+    if trimmed.is_empty() {
+        return serde_json::json!({});
+    }
     serde_json::from_str(input).unwrap_or_else(|_| {
-        if input.trim().starts_with('{') {
+        if trimmed.starts_with('{') {
+            // Truncated mid-stream object — degrade to empty object rather
+            // than passing fragmentary JSON downstream.
             serde_json::json!({})
         } else {
+            // Genuinely non-JSON payload (e.g. some providers send the
+            // arguments as a bare string for single-arg tools). Preserve
+            // as a JSON string so the agent can still see what was sent.
             Value::String(input.to_string())
         }
     })
@@ -1297,6 +1312,26 @@ mod tests {
     fn test_parse_streaming_json_non_object() {
         let result = parse_streaming_json("hello");
         assert_eq!(result, serde_json::json!("hello"));
+    }
+
+    /// Regression: an empty arguments stream (model emitted a tool call
+    /// without any input deltas — common for zero-arg tools) must produce
+    /// `{}`, not `""`. Returning a JSON string here breaks downstream
+    /// schema validation ("" is not of type "object") and surfaces as a
+    /// silent tool-call failure with a confusing "Invalid arguments"
+    /// error message.
+    #[test]
+    fn parse_streaming_json_empty_input_returns_empty_object() {
+        let result = parse_streaming_json("");
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    /// Whitespace-only input is treated the same as empty — the model
+    /// flushed a no-op buffer with only " " / "\n" between deltas.
+    #[test]
+    fn parse_streaming_json_whitespace_only_returns_empty_object() {
+        assert_eq!(parse_streaming_json("   "), serde_json::json!({}));
+        assert_eq!(parse_streaming_json("\n\t  "), serde_json::json!({}));
     }
 
     #[test]
