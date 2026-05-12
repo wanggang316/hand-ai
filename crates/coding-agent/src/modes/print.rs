@@ -94,6 +94,11 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         AgentSessionEvent::Error(err) => {
             eprintln!("\x1b[31mError: {}\x1b[0m", err);
+            // Session-level errors (e.g. "No API key found", network
+            // failures) must propagate to the exit code. Without this
+            // hand exits 0 on a red error, masking failures from
+            // scripts that `&&`-chain it.
+            SAW_ERROR.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     });
 
