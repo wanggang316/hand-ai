@@ -7,6 +7,44 @@ use std::process::Command;
 
 /// Default max matches.
 const DEFAULT_MAX_MATCHES: usize = 100;
+/// Pi-mono parity: cap each match line to this many characters so a single
+/// minified-bundle line cannot dump megabytes into the model context.
+const GREP_MAX_LINE_LENGTH: usize = 500;
+
+/// Truncate each line in `output` to `GREP_MAX_LINE_LENGTH` chars, appending
+/// `... [truncated]` to lines that exceed the cap. Returns the modified
+/// output and a `truncated` flag indicating whether any line was clipped.
+fn truncate_long_lines(output: &str) -> (String, bool) {
+    let mut any_truncated = false;
+    let mut result = String::with_capacity(output.len());
+    for (i, line) in output.split('\n').enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        if line.chars().count() > GREP_MAX_LINE_LENGTH {
+            // Slice at a char boundary, not a byte boundary, so we never
+            // emit invalid UTF-8 when a multi-byte codepoint straddles
+            // the cutoff.
+            let mut end = 0;
+            for (idx, _) in line.char_indices().take(GREP_MAX_LINE_LENGTH) {
+                end = idx;
+            }
+            // `end` points at the start of the 500th char; we want to keep
+            // it, so advance to the byte after it.
+            if let Some((next, _)) = line[end..].char_indices().nth(1) {
+                end += next;
+            } else {
+                end = line.len();
+            }
+            result.push_str(&line[..end]);
+            result.push_str("... [truncated]");
+            any_truncated = true;
+        } else {
+            result.push_str(line);
+        }
+    }
+    (result, any_truncated)
+}
 
 /// Create the grep tool.
 pub fn create_grep_tool(cwd: PathBuf) -> AgentTool {
@@ -103,7 +141,14 @@ fn execute_grep(cwd: &Path, args: serde_json::Value) -> ToolResult {
             if output.is_empty() {
                 ToolResult::text("No matches found.")
             } else {
-                ToolResult::text(output)
+                let (mut clipped, any_truncated) = truncate_long_lines(&output);
+                if any_truncated {
+                    clipped.push_str(&format!(
+                        "\n[Some lines truncated to {} chars. Use read tool to see full lines.]",
+                        GREP_MAX_LINE_LENGTH
+                    ));
+                }
+                ToolResult::text(clipped)
             }
         }
         None => ToolResult::error("Neither rg nor grep is available"),
@@ -240,6 +285,72 @@ mod tests {
         let result = execute_grep(dir.path(), json!({}));
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
+    }
+
+    /// Pi-mono parity: each match line is capped at GREP_MAX_LINE_LENGTH
+    /// chars so a minified JS file containing the pattern cannot dump a
+    /// 50KB single line into the LLM context. The trailing
+    /// `... [truncated]` suffix mirrors pi-mono's wording.
+    #[test]
+    fn test_grep_clips_long_match_lines() {
+        let dir = TempDir::new().unwrap();
+        // A line with MATCHME early (so it survives clipping), followed by
+        // a huge padding tail that should be replaced with the truncation
+        // marker. Without the per-line cap the whole 5000-char line ends
+        // up in the result.
+        let big_line = format!("prefix MATCHME more text {}", "y".repeat(5000));
+        std::fs::write(dir.path().join("bundle.min.js"), &big_line).unwrap();
+
+        let result = execute_grep(dir.path(), json!({"pattern": "MATCHME"}));
+        let text = get_text(&result);
+        assert!(
+            text.contains("MATCHME"),
+            "match content must still appear, got len={}",
+            text.len()
+        );
+        assert!(
+            text.contains("... [truncated]"),
+            "expected truncation marker, got: {}...",
+            &text[..text.len().min(200)]
+        );
+        // Whole output should be well under the original 5KB+ line.
+        assert!(
+            text.len() < 2000,
+            "expected clipped output, got {} bytes",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn test_truncate_long_lines_short_lines_passthrough() {
+        let input = "short line\nanother short line\n";
+        let (out, truncated) = truncate_long_lines(input);
+        assert_eq!(out, input);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn test_truncate_long_lines_clips_long_line() {
+        let long = "a".repeat(GREP_MAX_LINE_LENGTH + 200);
+        let (out, truncated) = truncate_long_lines(&long);
+        assert!(truncated);
+        assert!(out.starts_with(&"a".repeat(GREP_MAX_LINE_LENGTH)));
+        assert!(out.ends_with("... [truncated]"));
+    }
+
+    /// UTF-8 boundary safety: clipping a long line at the 500-char mark
+    /// must not slice mid-codepoint. Use a 4-byte emoji repeated past the
+    /// cap so a naive byte-slice would land mid-sequence.
+    #[test]
+    fn test_truncate_long_lines_respects_utf8_boundary() {
+        let line: String = "😀".repeat(GREP_MAX_LINE_LENGTH + 10);
+        let (out, truncated) = truncate_long_lines(&line);
+        assert!(truncated);
+        // Round-trip through String parsing — if any codepoint got chopped,
+        // String::from_utf8 would catch it (String already enforces this,
+        // but we run a chars() count to double-check no garbage emojis).
+        let kept_emojis = out.chars().filter(|&c| c == '😀').count();
+        assert_eq!(kept_emojis, GREP_MAX_LINE_LENGTH);
     }
 
     /// Pi-mono test: a `--pre=…` pattern must not let ripgrep execute
