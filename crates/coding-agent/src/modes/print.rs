@@ -10,7 +10,7 @@ use crate::cli::Args;
 use crate::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 use crate::core::export;
 use crate::modes::session_setup::SessionSetup;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 
 /// Run the agent in non-interactive print mode.
 ///
@@ -141,34 +141,27 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Non-interactive: process a single prompt, either from --prompt or
-    // stdin. The prompt MUST run before `--export` evaluates, otherwise
-    // we'd export an empty session and silently drop the user's prompt
-    // on the floor.
-    if let Some(prompt) = args.prompt.as_deref() {
-        let expanded = expand_at_mentions(prompt, &cwd).map_err(|e| -> Box<dyn std::error::Error> {
-            e.into()
-        })?;
-        // Match pi-mono: an empty (or whitespace-only) --prompt is a
-        // no-op, not an empty turn sent to the model. Without this guard
-        // hand sends "" to the upstream which hallucinates wildly.
-        if !expanded.trim().is_empty() {
-            session.send_message(&expanded).await?;
-        }
-    } else {
-        let stdin = io::stdin();
-        let input: String = stdin
-            .lock()
-            .lines()
-            .map_while(Result::ok)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !input.is_empty() {
-            let expanded = expand_at_mentions(&input, &cwd).map_err(
-                |e| -> Box<dyn std::error::Error> { e.into() },
-            )?;
-            session.send_message(&expanded).await?;
-        }
+    // Non-interactive: build a single initial message from piped-stdin
+    // and `--prompt`, concatenating in that order to match pi-mono's
+    // `buildInitialMessage` contract. Use cases the concat unblocks:
+    //
+    //   cat data.csv | hand --print --prompt "summarize this CSV"
+    //
+    // Without the concat the model only sees "summarize this CSV" and
+    // has no CSV to summarize.
+    //
+    // Stdin is only consumed when it's piped — an interactive terminal
+    // (IsTerminal) would otherwise hang waiting for Ctrl-D.
+    //
+    // The combined message MUST be sent before `--export` evaluates,
+    // otherwise we'd export an empty session and drop the prompt.
+    let piped_stdin = read_piped_stdin();
+    if let Some(initial) = build_initial_message(piped_stdin.as_deref(), args.prompt.as_deref())
+        && !initial.trim().is_empty()
+    {
+        let expanded = expand_at_mentions(&initial, &cwd)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        session.send_message(&expanded).await?;
     }
 
     // After the prompt has run, honor `--export` by writing the now-
@@ -572,6 +565,52 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
     }
 }
 
+/// Read stdin to EOF when it's been piped (not a TTY). Returns `None`
+/// when stdin is interactive — reading it would block on Ctrl-D and
+/// the user almost certainly meant the prompt to come from `--prompt`.
+/// Mirrors pi-mono's `process.stdin.isTTY` guard.
+fn read_piped_stdin() -> Option<String> {
+    use std::io::{IsTerminal, Read};
+    let stdin = io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+    let mut buf = String::new();
+    if stdin.lock().read_to_string(&mut buf).is_err() {
+        return None;
+    }
+    if buf.is_empty() { None } else { Some(buf) }
+}
+
+/// Combine piped-stdin and `--prompt` into a single initial message.
+/// Pi-mono's `buildInitialMessage` concatenates `stdin + fileText + prompt`
+/// (file-text is the `--prompt @file` path that already lands in
+/// `prompt`). Order matters: stdin comes FIRST so the user prompt has
+/// final framing — e.g. `cat data | hand --print -p "summarize the
+/// preceding data"`.
+///
+/// Returns `None` when neither source contributes content so the caller
+/// can skip the agent send entirely. An empty `--prompt` is treated as
+/// missing.
+fn build_initial_message(stdin: Option<&str>, prompt: Option<&str>) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    if let Some(s) = stdin {
+        parts.push(s);
+    }
+    if let Some(p) = prompt
+        && !p.is_empty()
+    {
+        parts.push(p);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        // Join with a blank line so the two sources read as separate
+        // turns rather than one run-on string.
+        Some(parts.join("\n\n"))
+    }
+}
+
 /// Format an assistant-message error for stderr emission. Pi-mono's
 /// `print-mode` does `console.error(errorMessage || `Request ${stopReason}`)`
 /// — plain text, no ANSI. We mirror that exactly so scripts that pipe or
@@ -589,6 +628,40 @@ fn format_assistant_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pi-mono parity: piped stdin and `--prompt` concatenate into a
+    /// single initial message. The stdin payload comes FIRST so the
+    /// user's prompt (typically framing instructions) appears last.
+    /// Without this, `cat data.csv | hand --print -p "summarize"` would
+    /// silently drop the CSV.
+    #[test]
+    fn build_initial_message_concatenates_stdin_and_prompt() {
+        let combined = build_initial_message(Some("piped data"), Some("summarize"));
+        assert_eq!(combined.as_deref(), Some("piped data\n\nsummarize"));
+    }
+
+    /// Stdin alone — common with `echo "..." | hand --print` patterns
+    /// where no `--prompt` is provided.
+    #[test]
+    fn build_initial_message_returns_stdin_alone() {
+        let combined = build_initial_message(Some("just from stdin"), None);
+        assert_eq!(combined.as_deref(), Some("just from stdin"));
+    }
+
+    /// Prompt alone — `hand --print -p "hello"`. No stdin pipe.
+    #[test]
+    fn build_initial_message_returns_prompt_alone() {
+        let combined = build_initial_message(None, Some("hello"));
+        assert_eq!(combined.as_deref(), Some("hello"));
+    }
+
+    /// Neither source — caller should skip the agent send entirely.
+    /// `Some("")` for prompt is treated as missing per pi semantics.
+    #[test]
+    fn build_initial_message_returns_none_when_both_empty() {
+        assert_eq!(build_initial_message(None, None), None);
+        assert_eq!(build_initial_message(None, Some("")), None);
+    }
 
     /// Pi-mono parity: error rendering for `--print` mode emits plain
     /// stderr text, no ANSI escapes. Scripts that pipe `hand --print
