@@ -33,6 +33,7 @@ use crate::types::{
     AssistantMessage, AssistantMessageEvent, Context, Model, Provider, SimpleStreamOptions,
     StopReason, StreamOptions, Transport, Usage,
 };
+use serde_json::Value;
 
 // =============================================================================
 // Constants
@@ -248,6 +249,36 @@ impl ApiProvider for OpenAICodexResponsesProvider {
 ///   appends `/codex/responses`.
 /// - A `.../codex` path → appends `/responses`.
 /// - A fully-qualified `.../codex/responses` URL → returns as-is.
+/// Build the request body for the Codex `/codex/responses` endpoint.
+///
+/// Codex requires two fields that the shared Responses builder does not
+/// emit:
+///
+/// * `store: false` — the ChatGPT Codex backend rejects `store: true`
+///   ("Store must be set to false"). The shared builder omits the field
+///   entirely; codex must always pin it to `false`.
+/// * `instructions` — codex rejects requests with an empty or missing
+///   `instructions` string. The shared builder skips the field when
+///   `system_prompt` is empty; codex needs an explicit fallback of
+///   `"You are a helpful assistant."`.
+fn build_codex_request_body(model: &Model, context: &Context, options: &StreamOptions) -> Value {
+    let mut body = build_request_body(model, context, options);
+
+    // store: false is mandatory for Codex Responses.
+    body["store"] = Value::Bool(false);
+
+    // Always emit `instructions` for codex — backend rejects empty/missing.
+    let has_instructions = body
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    if !has_instructions {
+        body["instructions"] = Value::String("You are a helpful assistant.".to_string());
+    }
+
+    body
+}
+
 fn resolve_codex_url(base: &str) -> String {
     let raw = if base.trim().is_empty() {
         DEFAULT_CODEX_BASE_URL
@@ -509,7 +540,7 @@ fn stream_openai_codex_responses(
         }
 
         let url = resolve_codex_url(base);
-        let body = build_request_body(&model, &context, &options);
+        let body = build_codex_request_body(&model, &context, &options);
 
         let builder = client
             .post(&url)
@@ -671,5 +702,94 @@ mod tests {
         let _ = OpenAICodexResponsesProvider::new();
         let _ = OpenAICodexResponsesProvider::default();
         let _ = OpenAICodexResponsesProvider::with_client(reqwest::Client::new());
+    }
+
+    fn codex_test_model() -> Model {
+        use crate::types::{Api, Cost, InputType};
+        Model {
+            id: "gpt-5-codex".to_string(),
+            name: "gpt-5-codex".to_string(),
+            api: Api::OpenAICodexResponses,
+            provider: Provider::OpenAICodex,
+            base_url: String::new(),
+            reasoning: true,
+            input: vec![InputType::Text],
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 200_000,
+            max_tokens: 100_000,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        }
+    }
+
+    fn codex_user_context(system_prompt: Option<&str>) -> Context {
+        use crate::types::{Message, UserMessage};
+        Context {
+            system_prompt: system_prompt.map(|s| s.to_string()),
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        }
+    }
+
+    /// Codex Responses rejects requests when `instructions` is empty or
+    /// missing. The body builder must inject the default
+    /// "You are a helpful assistant." whenever the caller's `system_prompt`
+    /// is `None` or empty.
+    #[test]
+    fn codex_body_uses_default_instructions_when_system_prompt_missing() {
+        let body = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(None),
+            &StreamOptions::default(),
+        );
+        assert_eq!(
+            body["instructions"].as_str(),
+            Some("You are a helpful assistant.")
+        );
+    }
+
+    #[test]
+    fn codex_body_uses_default_instructions_when_system_prompt_empty() {
+        let body = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(Some("")),
+            &StreamOptions::default(),
+        );
+        assert_eq!(
+            body["instructions"].as_str(),
+            Some("You are a helpful assistant.")
+        );
+    }
+
+    /// When the caller already supplied a non-empty system prompt, the
+    /// builder must keep it verbatim — the default is a fallback, not a
+    /// clobber.
+    #[test]
+    fn codex_body_preserves_explicit_system_prompt() {
+        let body = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(Some("You are pi.")),
+            &StreamOptions::default(),
+        );
+        assert_eq!(body["instructions"].as_str(), Some("You are pi."));
+    }
+
+    /// ChatGPT Codex Responses rejects `store: true` ("Store must be set
+    /// to false"). The codex body must always pin `store: false`, even
+    /// though the shared Responses builder omits the field entirely.
+    #[test]
+    fn codex_body_pins_store_false() {
+        let body = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(Some("You are pi.")),
+            &StreamOptions::default(),
+        );
+        assert_eq!(body["store"], serde_json::Value::Bool(false));
     }
 }
