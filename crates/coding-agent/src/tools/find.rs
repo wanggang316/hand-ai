@@ -155,4 +155,22 @@ mod tests {
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
     }
+
+    /// Pi-mono test: a flag-shaped pattern (`--help`) must be treated as
+    /// a literal glob, not as a subprocess flag. Hand's find uses
+    /// pure-Rust glob (no subprocess), so a `--`-prefixed pattern
+    /// simply doesn't match any normal filename. This test pins that
+    /// the surface stays glob-only and never silently shells out.
+    #[test]
+    fn test_find_flag_pattern_treated_as_glob_literal() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("normal.txt"), "x").unwrap();
+        let result = execute_find(dir.path(), json!({"pattern": "--help"}));
+        let text = get_text(&result);
+        // No files match — same outcome pi-mono asserts.
+        assert!(
+            text.contains("No files found") || text.contains("no files"),
+            "expected no-match for --help glob, got: {text}"
+        );
+    }
 }

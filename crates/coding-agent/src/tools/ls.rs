@@ -168,6 +168,30 @@ mod tests {
         assert!(dir_pos < file_pos, "Directories should come first");
     }
 
+    /// Pi-mono parity: ls must include dotfiles AND dot-directories.
+    /// Hidden entries are content the LLM legitimately needs to see
+    /// (e.g., .gitignore, .hand/, .env.local), and Unix `ls -a` is the
+    /// expected default for tool surfaces.
+    #[test]
+    fn test_ls_lists_dotfiles_and_dotdirs() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".hidden-file"), "secret").unwrap();
+        std::fs::create_dir(dir.path().join(".hidden-dir")).unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "v").unwrap();
+
+        let result = execute_ls(dir.path(), json!({}));
+        let text = get_text(&result);
+        assert!(
+            text.contains(".hidden-file"),
+            "dotfile must appear, got: {text}"
+        );
+        assert!(
+            text.contains(".hidden-dir/"),
+            "dot-dir must appear with trailing slash, got: {text}"
+        );
+        assert!(text.contains("visible.txt"));
+    }
+
     #[test]
     fn test_format_size() {
         assert_eq!(format_size(100), "100 B");
