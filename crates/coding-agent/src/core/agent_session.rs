@@ -559,8 +559,29 @@ impl AgentSession {
     }
 
     /// Set the model.
+    ///
+    /// Persists a `ModelChange` entry to the session journal so a
+    /// resume picks up the user's switch instead of replaying with the
+    /// session's original model. Pi-mono parity: `setModel` calls
+    /// `appendModelChange` for the same reason — without it, switching
+    /// from `claude-haiku` to `gpt-4o` mid-session would silently
+    /// revert to claude on every `--continue`.
+    ///
+    /// Errors from the journal append are intentionally swallowed
+    /// (with a tracing warn) so a write failure doesn't prevent the
+    /// in-memory model from being updated — the user's next prompt
+    /// still goes to the new model, just without an audit trail.
     pub fn set_model(&mut self, model: model::Model) {
+        let provider = model.provider.as_str().to_string();
+        let model_id = model.id.clone();
         self.config.model = model;
+        if let Err(err) = self
+            .session_manager
+            .append_model_change(&provider, &model_id)
+        {
+            tracing::warn!(error = %err, provider = %provider, model = %model_id,
+                "failed to append model_change entry; in-memory switch still applied");
+        }
     }
 
     /// Borrow the underlying `model::Client`. Used by the RPC dispatcher
@@ -1629,6 +1650,44 @@ mod tests {
         new_model.id = "new-model".into();
         session.set_model(new_model);
         assert_eq!(session.model().id, "new-model");
+    }
+
+    /// Pi-mono parity: set_model must append a ModelChange entry to the
+    /// session journal so a resume picks up the user's switch. Without
+    /// it, `hand --model claude --continue` after the user had switched
+    /// to `gpt-4o` mid-session would silently revert.
+    #[test]
+    fn set_model_appends_model_change_to_journal() {
+        let mut session = AgentSession::in_memory(test_model(), vec![]);
+        // Before switch: no ModelChange entries (only the Session header).
+        let pre = session
+            .session_manager
+            .entries()
+            .iter()
+            .filter(|e| matches!(e, SessionEntry::ModelChange { .. }))
+            .count();
+        assert_eq!(pre, 0);
+
+        let mut new_model = test_model();
+        new_model.id = "gpt-4o".into();
+        new_model.provider = model::types::Provider::OpenAI;
+        session.set_model(new_model);
+
+        let entries = session.session_manager.entries();
+        let model_changes: Vec<_> = entries
+            .iter()
+            .filter_map(|e| match e {
+                SessionEntry::ModelChange {
+                    provider, model_id, ..
+                } => Some((provider.as_str(), model_id.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            model_changes,
+            vec![("openai", "gpt-4o")],
+            "expected one ModelChange entry with the new model, got: {model_changes:?}"
+        );
     }
 
     fn test_config(cwd: PathBuf) -> AgentSessionConfig {
