@@ -66,6 +66,37 @@ fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
         Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
     };
 
+    // Pi-mono parity: tolerate LF-vs-CRLF mismatches between the
+    // model-supplied old_string and the file on disk. Try the literal
+    // match first; if that fails AND the line endings of the two
+    // strings differ, normalize the old_string to the file's line
+    // ending style and retry. Same for new_string so the replacement
+    // doesn't introduce mixed endings. See pi-mono edit tool CRLF
+    // tests.
+    let file_has_crlf = content.contains("\r\n");
+    let old_string_owned: String;
+    let new_string_owned: String;
+    let (old_string, new_string): (&str, &str) = {
+        if content.contains(old_string) {
+            (old_string, new_string)
+        } else if file_has_crlf && !old_string.contains("\r\n") && old_string.contains('\n') {
+            // File is CRLF, old_string is LF — normalize old_string and
+            // new_string to CRLF so the replacement preserves the file's
+            // existing line endings.
+            old_string_owned = old_string.replace('\n', "\r\n");
+            new_string_owned = new_string.replace('\n', "\r\n");
+            (old_string_owned.as_str(), new_string_owned.as_str())
+        } else if !file_has_crlf && old_string.contains("\r\n") {
+            // File is LF, old_string is CRLF — strip the \r so it
+            // matches and the replacement stays LF.
+            old_string_owned = old_string.replace("\r\n", "\n");
+            new_string_owned = new_string.replace("\r\n", "\n");
+            (old_string_owned.as_str(), new_string_owned.as_str())
+        } else {
+            (old_string, new_string)
+        }
+    };
+
     // Check for old_string in content
     let match_count = content.matches(old_string).count();
     if match_count == 0 {
@@ -237,5 +268,84 @@ mod tests {
         );
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(content.contains("goodbye"));
+    }
+
+    /// Pi-mono CRLF parity: a multi-line `old_string` supplied with LF
+    /// separators must still match a CRLF-ended file. The replacement
+    /// preserves the file's existing CRLF endings (no mixed line
+    /// endings introduced).
+    #[test]
+    fn test_edit_lf_old_string_matches_crlf_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("crlf.txt");
+        std::fs::write(&file, "line1\r\nold_a\r\nold_b\r\nline4\r\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "old_a\nold_b",
+                "new_string": "new_a\nnew_b",
+            }),
+        );
+        let text = get_text(&result);
+        assert!(
+            !text.starts_with("Error: old_string not found"),
+            "LF old_string should match CRLF file via line-ending normalization, got: {text}"
+        );
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("new_a\r\nnew_b"), "result preserves CRLF: {after:?}");
+        assert!(
+            !after.contains("new_a\nnew_b\r\n") || after.matches("\n").count() == after.matches("\r\n").count(),
+            "no mixed line endings introduced: {after:?}"
+        );
+    }
+
+    /// Inverse case: file is LF, model supplies CRLF in old_string.
+    /// Match must succeed and result must stay LF.
+    #[test]
+    fn test_edit_crlf_old_string_matches_lf_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("lf.txt");
+        std::fs::write(&file, "line1\nold_a\nold_b\nline4\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "old_a\r\nold_b",
+                "new_string": "new_a\r\nnew_b",
+            }),
+        );
+        let text = get_text(&result);
+        assert!(
+            !text.starts_with("Error: old_string not found"),
+            "CRLF old_string should match LF file via line-ending normalization, got: {text}"
+        );
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("new_a\nnew_b"));
+        assert!(!after.contains("\r\n"), "result stays LF: {after:?}");
+    }
+
+    /// Single-line edits with no `\n` in either string must continue
+    /// to work the same way they did before the CRLF support landed.
+    #[test]
+    fn test_edit_crlf_normalization_does_not_affect_single_line() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("simple.txt");
+        std::fs::write(&file, "hello world\r\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "world",
+                "new_string": "rust",
+            }),
+        );
+        let text = get_text(&result);
+        assert!(!text.starts_with("Error:"));
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(after, "hello rust\r\n");
     }
 }
