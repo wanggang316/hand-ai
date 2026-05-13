@@ -372,12 +372,31 @@ fn handle_export(
     session: &AgentSession,
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // `.json` aliases to the JSONL form — pi-mono has no separate JSON
+    // exporter and a JSONL stream parses as a sequence of JSON values,
+    // which is what most consumers want.
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("html");
 
     match ext {
-        "jsonl" => {
-            export::export_to_jsonl(&SessionManager::in_memory(), path)
-                .map_err(|e| format!("JSONL export not available for active session: {}", e))?;
+        "jsonl" | "json" => {
+            // Pi-mono parity: copy the live session file verbatim.
+            // We previously passed a fresh `SessionManager::in_memory()`
+            // to `export_to_jsonl`, which had no path and so always
+            // failed with "Cannot export an in-memory session" — the
+            // jsonl export path of `--print --export out.jsonl` was
+            // completely broken. Mirror the interactive `/export`
+            // dispatcher: read the session file path from the live
+            // AgentSession, re-open a SessionManager rooted at that
+            // path, then copy.
+            let Some(file_path) = session.session_file() else {
+                return Err(
+                    "Cannot export an in-memory session as JSONL (use --print without --no-session)"
+                        .into(),
+                );
+            };
+            let manager = SessionManager::open(file_path)
+                .map_err(|e| format!("Failed to open session for export: {e}"))?;
+            export::export_to_jsonl(&manager, path)?;
         }
         _ => {
             export::export_to_html(
@@ -628,6 +647,97 @@ fn format_assistant_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pi-mono parity & bug regression: `handle_export` with a `.jsonl`
+    /// target must copy the live session file. The previous
+    /// implementation passed `&SessionManager::in_memory()` (which has
+    /// no underlying file) to `export_to_jsonl`, so the path ALWAYS
+    /// errored out with "Cannot export an in-memory session." Fixed by
+    /// resolving `session.session_file()` and re-opening the manager
+    /// from there, matching the interactive `/export` dispatcher.
+    /// Build a minimal on-disk AgentSession for the export tests.
+    /// Lives in the test module so its dependency on the `cfg(test)`
+    /// `session_manager_mut` accessor is OK.
+    fn make_session_with_file(tmp: &tempfile::TempDir) -> crate::core::agent_session::AgentSession {
+        use crate::core::agent_session::{AgentSession, AgentSessionConfig};
+        let model = model::Model {
+            id: "test-model".into(),
+            name: "Test".into(),
+            api: model::types::Api::AnthropicMessages,
+            provider: model::types::Provider::Anthropic,
+            base_url: String::new(),
+            reasoning: false,
+            input: vec![model::InputType::Text],
+            cost: model::Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 200_000,
+            max_tokens: 4096,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        };
+        let cfg = AgentSessionConfig {
+            cwd: tmp.path().to_path_buf(),
+            model,
+            stream_options: model::SimpleStreamOptions::default(),
+            custom_system_prompt: None,
+            custom_guidelines: None,
+            resume_session: None,
+            no_session: false,
+            no_context_files: true,
+            session_dir: Some(tmp.path().join(".hand").join("sessions")),
+            no_skills: true,
+        };
+        let mut session = AgentSession::new(cfg, vec![]).expect("session new");
+        session
+            .session_manager_mut()
+            .append_message(model::Message::User(model::UserMessage::new_text("export me")))
+            .expect("append");
+        session
+    }
+
+    /// Pi-mono parity & bug regression: `handle_export` with a `.jsonl`
+    /// target must copy the live session file. The previous
+    /// implementation passed `&SessionManager::in_memory()` (which has
+    /// no underlying file) to `export_to_jsonl`, so the path ALWAYS
+    /// errored out with "Cannot export an in-memory session." Fixed by
+    /// resolving `session.session_file()` and re-opening the manager
+    /// from there, matching the interactive `/export` dispatcher.
+    #[tokio::test]
+    async fn handle_export_jsonl_copies_live_session_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session_with_file(&tmp);
+
+        let out = tmp.path().join("dumped.jsonl");
+        handle_export(&session, &out).expect("export ok");
+
+        let exported = std::fs::read_to_string(&out).expect("exported file readable");
+        assert!(
+            exported.contains("\"type\":\"session\""),
+            "exported jsonl must contain the session header, got: {exported}"
+        );
+        assert!(
+            exported.contains("export me"),
+            "exported jsonl must contain the appended message, got: {exported}"
+        );
+    }
+
+    /// `.json` extension aliases to the JSONL exporter — pi-mono has no
+    /// separate JSON export and the JSONL stream parses as a sequence
+    /// of JSON values, which is what most consumers want.
+    #[tokio::test]
+    async fn handle_export_json_extension_aliases_to_jsonl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session_with_file(&tmp);
+        let out = tmp.path().join("dumped.json");
+        handle_export(&session, &out).expect("export ok");
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.contains("\"type\":\"session\""));
+    }
 
     /// Pi-mono parity: piped stdin and `--prompt` concatenate into a
     /// single initial message. The stdin payload comes FIRST so the
