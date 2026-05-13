@@ -16,17 +16,13 @@
 //!   text-only, image blocks are summarised with [`hand_tui::image_fallback`]
 //!   placeholders rather than dropped silently.
 //!
-//! ## TODO(parity-M6)
-//!
-//! The TS implementation passes the raw text blocks through
-//! `sanitizeBinaryOutput()` (defined in `pi-mono/coding-agent/utils/shell.ts`)
-//! before stripping ANSI. That helper rejects control chars, lone surrogates,
-//! and Unicode Format characters that crash `string-width`. Rust's
-//! `unicode-width` does not crash on those inputs, so the immediate display
-//! risk is lower, but for byte-for-byte parity with pi-mono we still want a
-//! `sanitize_binary_output` helper. Tracked as a follow-up; for now we only
-//! strip ANSI + CR which matches the visible-behaviour subset most tools rely
-//! on.
+//! Mirrors pi-mono's `sanitizeBinaryOutput`: drops C0 control characters
+//! (everything below 0x20 except `\t \n \r`) and the U+FFF9..U+FFFB
+//! Unicode format characters that crash terminal-width libraries. Bash
+//! tool output can carry BEL, VT, FF, or other binary garbage from
+//! poorly-behaved processes; we sanitise it in [`get_text_output`] so
+//! the TUI scrollback never has to render it (and so an attacker
+//! cannot smuggle terminal-control sequences into the chat log).
 
 use hand_tui::utils::strip_ansi;
 use hand_tui::{
@@ -62,6 +58,32 @@ pub fn normalize_display_text(text: &str) -> String {
     text.replace('\r', "")
 }
 
+/// Pi-mono parity: drop C0 control characters (except `\t \n \r`) and
+/// Unicode format characters U+FFF9..U+FFFB. These come from
+/// poorly-behaved subprocesses and either crash terminal-width
+/// libraries or smuggle terminal-control sequences into the chat log.
+///
+/// Centralised here because both the bash executor and the tool-result
+/// renderer need the same filter; pi calls the equivalent
+/// `sanitizeBinaryOutput` from both paths.
+pub fn sanitize_binary_output(text: &str) -> String {
+    text.chars()
+        .filter(|&c| {
+            let code = c as u32;
+            if code == 0x09 || code == 0x0A || code == 0x0D {
+                return true;
+            }
+            if code <= 0x1F {
+                return false;
+            }
+            if (0xFFF9..=0xFFFB).contains(&code) {
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
 /// Decide whether an image block should be rendered inline or replaced
 /// with a textual placeholder.
 fn images_should_render(caps: &TerminalImageCapabilities, show_images: bool) -> bool {
@@ -91,7 +113,10 @@ pub fn get_text_output(
     for block in content {
         match block {
             ToolResultContent::Text(t) => {
-                let cleaned = strip_ansi(&t.text).replace('\r', "");
+                // Pi parity: sanitize_binary_output → strip ANSI → drop \r.
+                // Order matches pi's `sanitizeBinaryOutput(stripAnsi(text)).replace(/\r/g, "")`.
+                let cleaned =
+                    sanitize_binary_output(&strip_ansi(&t.text)).replace('\r', "");
                 text_parts.push(cleaned);
             }
             ToolResultContent::Image(img) => image_blocks.push(img),
@@ -220,6 +245,36 @@ mod tests {
         let caps = fallback_caps();
         let result = get_text_output(&blocks, false, &caps);
         assert_eq!(result, "red text");
+    }
+
+    /// Pi-mono parity: tool result rendering must also strip C0 control
+    /// chars (BEL etc.) and Unicode format chars from text blocks. Before
+    /// this fix the TUI scrollback could render raw 0x07 or 0xFFF9, which
+    /// a misbehaving tool could exploit to corrupt the user's terminal
+    /// or embed prompt-injection sequences in the model's view.
+    #[test]
+    fn get_text_output_strips_c0_controls_and_format_chars() {
+        let blocks = vec![ToolResultContent::Text(TextContent::new(
+            "pre\x07\x0B\x0C\u{FFF9}\u{FFFB}mid\tpost",
+        ))];
+        let caps = fallback_caps();
+        let result = get_text_output(&blocks, false, &caps);
+        // Tab survives (whitespace); BEL/VT/FF and format chars are gone.
+        assert_eq!(result, "premid\tpost");
+    }
+
+    #[test]
+    fn sanitize_binary_output_pure_helper() {
+        // Whitespace passes through, other C0 controls dropped.
+        assert_eq!(sanitize_binary_output("a\tb\nc\rd"), "a\tb\nc\rd");
+        assert_eq!(sanitize_binary_output("\x01\x02hello\x1F"), "hello");
+        // Unicode format chars dropped; adjacent code points preserved.
+        assert_eq!(
+            sanitize_binary_output("x\u{FFF8}y\u{FFF9}z\u{FFFB}w\u{FFFC}"),
+            "x\u{FFF8}yzw\u{FFFC}"
+        );
+        // DEL (0x7F) is not in the C0 range — keep it (pi parity).
+        assert_eq!(sanitize_binary_output("a\x7Fb"), "a\x7Fb");
     }
 
     #[test]
