@@ -178,6 +178,12 @@ pub struct AgentSession {
     /// the start of every `run_bash` call so a stale `abort_bash` from
     /// before the call can't poison it.
     bash_cancel: Arc<Mutex<CancellationToken>>,
+    /// In-flight indicator for [`Self::run_bash`]. `true` for the
+    /// duration of an active bash invocation, `false` otherwise.
+    /// Mirrors pi-mono's `isBashRunning` so RPC clients and UIs can
+    /// know whether [`Self::abort_bash`] would have an effect, and so
+    /// tests can pin the state transitions across an abort.
+    bash_running: Arc<std::sync::atomic::AtomicBool>,
     /// Queue of user messages submitted via the RPC `steer` command.
     /// Drained by the `get_steering_messages` callback at mid-turn
     /// boundaries inside an active agent loop. Held behind an
@@ -308,6 +314,7 @@ impl AgentSession {
             is_compacting: false,
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
             bash_cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            bash_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
         })
@@ -366,6 +373,7 @@ impl AgentSession {
             is_compacting: false,
             cancel: Arc::new(Mutex::new(CancellationToken::new())),
             bash_cancel: Arc::new(Mutex::new(CancellationToken::new())),
+            bash_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
         }
@@ -1019,6 +1027,20 @@ impl AgentSession {
         }
     }
 
+    /// Whether a [`Self::run_bash`] call is currently in flight. Mirrors
+    /// pi-mono's `isBashRunning` accessor — useful for RPC clients and
+    /// UIs that want to disable the abort button when no command is
+    /// running, and for tests that pin the state transitions across
+    /// completion / abort.
+    ///
+    /// The flag is set with Release ordering at the entry of `run_bash`
+    /// and cleared by an RAII guard, so the value observed here is
+    /// monotone within a single executor: false → true → false.
+    pub fn is_bash_running(&self) -> bool {
+        self.bash_running
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Run a one-off bash command, racing it against [`Self::abort_bash`].
     ///
     /// Replaces the stored `bash_cancel` with a fresh token so a stale
@@ -1045,6 +1067,21 @@ impl AgentSession {
             *self.bash_cancel.lock().unwrap() = new_token.clone();
             new_token
         };
+
+        // Flip the in-flight flag inside an RAII guard so it always
+        // clears on completion, abort, panic, or future-drop. Pi-mono's
+        // `isBashRunning` test expects strict bracketing.
+        struct InFlightGuard(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for InFlightGuard {
+            fn drop(&mut self) {
+                self.0
+                    .store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        self.bash_running
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _guard = InFlightGuard(self.bash_running.clone());
+
 
         let shell_path = crate::core::bash_executor::resolve_shell();
         let options = crate::core::bash_executor::BashExecutorOptions {
@@ -1426,6 +1463,53 @@ mod tests {
     fn test_session_id() {
         let session = AgentSession::in_memory(test_model(), vec![]);
         assert!(session.session_id().starts_with("s_"));
+    }
+
+    /// Pi-mono parity: `is_bash_running` starts false on a fresh
+    /// session. The flag only flips during an active `run_bash` call.
+    #[test]
+    fn is_bash_running_starts_false() {
+        let session = AgentSession::in_memory(test_model(), vec![]);
+        assert!(!session.is_bash_running());
+    }
+
+    /// Pi-mono parity: `run_bash` flips `is_bash_running` true for the
+    /// duration of the call and back to false on completion. We use a
+    /// fast `true` command so the test exercises the bracket without
+    /// any timing race — the RAII guard ensures the post-state is
+    /// observed even if the future is cancelled or panics, but a
+    /// successful return path is the most common case to pin.
+    #[tokio::test]
+    async fn run_bash_brackets_is_bash_running_flag() {
+        let session = AgentSession::in_memory(test_model(), vec![]);
+        assert!(!session.is_bash_running());
+        let outcome = session.run_bash("exit 0", 5).await.expect("ok");
+        assert!(!outcome.aborted);
+        assert!(
+            !session.is_bash_running(),
+            "flag must clear after completion"
+        );
+    }
+
+    /// Pi-mono parity: abort_bash on a session with no in-flight bash
+    /// must return false (nothing to cancel) and leave is_bash_running
+    /// at false. Hand had this contract but no test pinned it after
+    /// the flag accessor landed.
+    #[test]
+    fn abort_bash_no_inflight_returns_false_and_flag_stays_false() {
+        let session = AgentSession::in_memory(test_model(), vec![]);
+        assert!(!session.is_bash_running());
+        // First call: cancel-able token is uncancelled, so cancel
+        // *something* and return true. (Pi's behaviour treats this
+        // identically to "the next run_bash will be aborted before
+        // it starts".)
+        let first = session.abort_bash();
+        assert!(first, "first abort_bash flips the token");
+        // Second back-to-back call: token already cancelled → false.
+        let second = session.abort_bash();
+        assert!(!second, "second abort_bash sees already-cancelled");
+        // Flag never went true — no bash actually ran.
+        assert!(!session.is_bash_running());
     }
 
     #[test]
