@@ -1504,6 +1504,66 @@ mod tests {
         );
     }
 
+    /// Pi-mono parity: `drain_queue` in `OneAtATime` mode pops exactly
+    /// one message from the front of the queue, preserving insertion
+    /// order for subsequent drains. Used by the steer/follow-up
+    /// dispatcher mid-turn to deliver one queued message per agent loop
+    /// iteration without stalling on a big batch.
+    #[test]
+    fn drain_queue_one_at_a_time_pops_front_only() {
+        let queue = Mutex::new(vec![
+            Message::User(model::UserMessage::new_text("first")),
+            Message::User(model::UserMessage::new_text("second")),
+            Message::User(model::UserMessage::new_text("third")),
+        ]);
+        let drained = drain_queue(&queue, crate::rpc::types::QueueMode::OneAtATime);
+        assert_eq!(drained.len(), 1, "OneAtATime drains exactly one");
+        // Order: drained = ["first"], queue retains ["second", "third"].
+        match &drained[0] {
+            Message::User(u) => match &u.content {
+                model::UserContent::Text(t) => assert_eq!(t, "first"),
+                _ => panic!("expected text content"),
+            },
+            _ => panic!("expected user message"),
+        }
+        assert_eq!(queue.lock().unwrap().len(), 2);
+    }
+
+    /// Pi-mono parity: `drain_queue` in `All` mode drains everything in
+    /// one shot — used when the consumer wants to bulk-deliver every
+    /// queued message at the next turn boundary.
+    #[test]
+    fn drain_queue_all_takes_full_queue_in_order() {
+        let queue = Mutex::new(vec![
+            Message::User(model::UserMessage::new_text("first")),
+            Message::User(model::UserMessage::new_text("second")),
+            Message::User(model::UserMessage::new_text("third")),
+        ]);
+        let drained = drain_queue(&queue, crate::rpc::types::QueueMode::All);
+        assert_eq!(drained.len(), 3, "All drains everything");
+        let texts: Vec<&str> = drained
+            .iter()
+            .filter_map(|m| match m {
+                Message::User(u) => match &u.content {
+                    model::UserContent::Text(t) => Some(t.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["first", "second", "third"]);
+        assert!(queue.lock().unwrap().is_empty(), "queue must be empty");
+    }
+
+    /// Empty queue is a no-op for both modes — no panic, no spurious
+    /// allocations beyond the empty Vec sentinel.
+    #[test]
+    fn drain_queue_empty_returns_empty() {
+        let queue: Mutex<Vec<Message>> = Mutex::new(Vec::new());
+        assert!(drain_queue(&queue, crate::rpc::types::QueueMode::All).is_empty());
+        assert!(drain_queue(&queue, crate::rpc::types::QueueMode::OneAtATime).is_empty());
+    }
+
     /// Pi-mono parity (issue #3686): `set_label` must emit a
     /// `SessionInfoChanged` event so subscribers see the new name
     /// without polling. Hand previously only persisted the label entry
