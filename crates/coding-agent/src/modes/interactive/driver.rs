@@ -620,6 +620,11 @@ impl InteractiveMode {
                                 emit_terminal_progress(ProgressState::Error);
                                 push_error(&chat_for_events, msg.as_str());
                             }
+                            AgentSessionEvent::SessionInfoChanged { .. } => {
+                                // The TUI rebuilds its session-info footer
+                                // on the next render tick from `session.label()`.
+                                // No event-time action required.
+                            }
                         }
                         let updates = dispatch_event(&ev);
                         apply_updates_to_chat(

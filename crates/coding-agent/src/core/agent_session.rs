@@ -62,6 +62,11 @@ pub enum AgentSessionEvent {
     CompactionStart,
     /// Compaction completed.
     CompactionEnd { summary: String },
+    /// Session metadata changed — currently just the display name (label).
+    /// Mirrors pi-mono's `session_info_changed` event so subscribers
+    /// (extensions, UI) get notified when [`AgentSession::set_label`]
+    /// runs, without having to poll [`AgentSession::label`].
+    SessionInfoChanged { name: Option<String> },
     /// Session error.
     Error(String),
 }
@@ -880,8 +885,16 @@ impl AgentSession {
     }
 
     /// Set the session label (name).
+    ///
+    /// Persists the new label as a `Label` entry in the session JSONL
+    /// and emits [`AgentSessionEvent::SessionInfoChanged`] so
+    /// subscribers (extensions, UI, RPC clients) see the change
+    /// immediately without polling. Pi-mono parity: see issue #3686.
     pub fn set_label(&mut self, label: &str) -> Result<(), CodingAgentError> {
-        self.session_manager.append_label(label)
+        self.session_manager.append_label(label)?;
+        let new_name = self.session_manager.label().map(|s| s.to_string());
+        self.emit(AgentSessionEvent::SessionInfoChanged { name: new_name });
+        Ok(())
     }
 
     /// Get message count.
@@ -1489,6 +1502,43 @@ mod tests {
             !session.is_bash_running(),
             "flag must clear after completion"
         );
+    }
+
+    /// Pi-mono parity (issue #3686): `set_label` must emit a
+    /// `SessionInfoChanged` event so subscribers see the new name
+    /// without polling. Hand previously only persisted the label entry
+    /// to disk; extensions and UI components had no signal that the
+    /// display name had changed.
+    #[test]
+    fn set_label_emits_session_info_changed() {
+        let dir = TempDir::new().unwrap();
+        let mut session = AgentSession::new(test_config(dir.path().to_path_buf()), vec![])
+            .expect("new session");
+        // Capture all events that pass through. Use a Mutex<Vec> so the
+        // subscribe closure can append from any thread.
+        let captured: Arc<Mutex<Vec<AgentSessionEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_cb = captured.clone();
+        session.subscribe(move |ev| {
+            captured_cb.lock().unwrap().push(ev);
+        });
+
+        session.set_label("hello world").expect("set_label ok");
+
+        let events = captured.lock().unwrap();
+        let names: Vec<Option<String>> = events
+            .iter()
+            .filter_map(|ev| match ev {
+                AgentSessionEvent::SessionInfoChanged { name } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![Some("hello world".to_string())],
+            "expected exactly one session_info_changed with the new name, got: {names:?}"
+        );
+        // Persisted state matches.
+        assert_eq!(session.label(), Some("hello world"));
     }
 
     /// Pi-mono parity: abort_bash on a session with no in-flight bash

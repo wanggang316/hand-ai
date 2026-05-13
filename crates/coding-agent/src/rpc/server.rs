@@ -110,6 +110,10 @@ enum WireSessionEvent {
     CompactionStart,
     CompactionEnd { summary: String },
     Error { message: String },
+    /// Pi-mono parity: session metadata changed (currently the display
+    /// name). RPC clients listen on this so a UI rendering the session
+    /// list can refresh after a `/name` command without polling.
+    SessionInfoChanged { name: Option<String> },
 }
 
 impl From<AgentSessionEvent> for WireSessionEvent {
@@ -121,6 +125,9 @@ impl From<AgentSessionEvent> for WireSessionEvent {
                 WireSessionEvent::CompactionEnd { summary }
             }
             AgentSessionEvent::Error(message) => WireSessionEvent::Error { message },
+            AgentSessionEvent::SessionInfoChanged { name } => {
+                WireSessionEvent::SessionInfoChanged { name }
+            }
         }
     }
 }
@@ -1687,10 +1694,26 @@ mod tests {
         drop(in_tx);
 
         let frames = drain_frames(out_rx).await;
-        assert_eq!(frames.len(), 2, "frames: {frames:#?}");
-        assert_eq!(frames[0]["command"], "set_session_name");
-        assert_eq!(frames[0]["success"], true);
-        assert_eq!(frames[1]["data"]["sessionName"], "my session");
+        // Three frames: set_session_name response, the
+        // SessionInfoChanged event (pi-mono #3686 parity), then the
+        // get_state response. Order between the event and the second
+        // response can race, so we identify by type instead of index.
+        assert_eq!(frames.len(), 3, "frames: {frames:#?}");
+        let response_frames: Vec<_> = frames
+            .iter()
+            .filter(|f| f["type"] == "response")
+            .collect();
+        let event_frames: Vec<_> = frames.iter().filter(|f| f["type"] == "event").collect();
+        assert_eq!(response_frames.len(), 2, "expected 2 responses");
+        assert_eq!(event_frames.len(), 1, "expected 1 session_info_changed");
+        assert_eq!(response_frames[0]["command"], "set_session_name");
+        assert_eq!(response_frames[0]["success"], true);
+        assert_eq!(response_frames[1]["data"]["sessionName"], "my session");
+        // The event carries the new name. WireSessionEvent uses `kind`
+        // as the serde tag (not `type`), so the inner discriminator is
+        // `kind: "session_info_changed"`.
+        assert_eq!(event_frames[0]["event"]["kind"], "session_info_changed");
+        assert_eq!(event_frames[0]["event"]["name"], "my session");
 
         handle.await.unwrap().unwrap();
     }

@@ -184,6 +184,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         AgentSessionEvent::Error(err) => {
             eprintln!("\x1b[31mError: {}\x1b[0m", err);
         }
+        // SessionInfoChanged is consumed by the interactive driver's
+        // footer refresh. main()'s ad-hoc subscriber here is only for
+        // the legacy interactive loop's progress notifications, so
+        // we silently drop it — the next render tick picks up the
+        // new name from session.label().
+        AgentSessionEvent::SessionInfoChanged { .. } => {}
     });
 
     // Handle --export

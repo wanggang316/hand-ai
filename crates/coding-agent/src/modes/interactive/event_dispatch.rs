@@ -89,6 +89,10 @@ pub fn dispatch(event: &AgentSessionEvent) -> Vec<ChatUpdate> {
         // they render as the unmissable red banner instead of a dim yellow
         // status line.
         AgentSessionEvent::Error(_) => Vec::new(),
+        // SessionInfoChanged is consumed by the driver's footer refresh
+        // (it re-reads session.label() on the next render tick) — no
+        // chat-list update needed.
+        AgentSessionEvent::SessionInfoChanged { .. } => Vec::new(),
     }
 }
 

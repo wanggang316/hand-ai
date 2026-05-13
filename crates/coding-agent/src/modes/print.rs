@@ -139,6 +139,19 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             // scripts that `&&`-chain it.
             SAW_ERROR.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        AgentSessionEvent::SessionInfoChanged { name } => {
+            // Pi-mono JSON mode emits a `session_info_changed` line so
+            // JSONL consumers see name updates. Text mode is silent —
+            // print mode is one-shot and the user already supplied the
+            // label by issuing `/name`.
+            if json_mode {
+                let val = serde_json::json!({
+                    "type": "session_info_changed",
+                    "name": name,
+                });
+                println!("{}", val);
+            }
+        }
     });
 
     // Non-interactive: build a single initial message from piped-stdin
