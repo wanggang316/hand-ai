@@ -214,11 +214,13 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
             if let ModelMessage::Assistant(a) = message {
                 match a.stop_reason {
                     StopReason::Error | StopReason::Aborted => {
-                        let msg = a
-                            .error_message
-                            .clone()
-                            .unwrap_or_else(|| format!("Request {:?}", a.stop_reason));
-                        eprintln!("\x1b[31m{}\x1b[0m", msg);
+                        // Pi-mono parity: write the error to stderr verbatim,
+                        // no ANSI color wrap. Scripts that pipe stderr to a
+                        // file or grep would otherwise see escape sequences
+                        // and have to strip them. Pi's print-mode contract
+                        // is plain stderr; we match it.
+                        let msg = format_assistant_error(&a.error_message, a.stop_reason);
+                        eprintln!("{}", msg);
                         SAW_ERROR.store(true, Ordering::Relaxed);
                     }
                     StopReason::Stop => {
@@ -570,9 +572,52 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
     }
 }
 
+/// Format an assistant-message error for stderr emission. Pi-mono's
+/// `print-mode` does `console.error(errorMessage || `Request ${stopReason}`)`
+/// — plain text, no ANSI. We mirror that exactly so scripts that pipe or
+/// redirect hand's stderr see the same bytes as pi's.
+fn format_assistant_error(
+    error_message: &Option<String>,
+    stop_reason: model::StopReason,
+) -> String {
+    match error_message {
+        Some(m) if !m.is_empty() => m.clone(),
+        _ => format!("Request {:?}", stop_reason),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pi-mono parity: error rendering for `--print` mode emits plain
+    /// stderr text, no ANSI escapes. Scripts that pipe `hand --print
+    /// 2>error.log` should see the raw message, not the `\x1b[31m...`
+    /// wrap.
+    #[test]
+    fn format_assistant_error_uses_message_verbatim_with_no_ansi() {
+        let msg = format_assistant_error(
+            &Some("provider returned 429: rate limit exceeded".to_string()),
+            model::StopReason::Error,
+        );
+        assert_eq!(msg, "provider returned 429: rate limit exceeded");
+        assert!(!msg.contains('\x1b'), "must not embed ANSI escapes");
+    }
+
+    /// When the assistant provides no error_message, fall back to
+    /// `Request <Reason>` — pi's exact wording.
+    #[test]
+    fn format_assistant_error_falls_back_to_request_label() {
+        assert_eq!(
+            format_assistant_error(&None, model::StopReason::Aborted),
+            "Request Aborted"
+        );
+        assert_eq!(
+            format_assistant_error(&Some(String::new()), model::StopReason::Error),
+            "Request Error",
+            "empty string is treated the same as missing — pi's `m || `Request …``"
+        );
+    }
 
     #[test]
     fn iso8601_formatter_round_trip_at_known_timestamps() {
