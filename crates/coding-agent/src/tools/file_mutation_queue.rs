@@ -177,4 +177,62 @@ mod tests {
         let v = with_file_mutation_queue(&path, async { "ok" }).await;
         assert_eq!(v, "ok");
     }
+
+    /// Pi-mono parity: two paths that resolve to the same on-disk file
+    /// through a symlink MUST share the queue. Without canonical-path
+    /// keying, `link.txt` and `real.txt` would land in two different
+    /// `Mutex` cells and race.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn same_path_via_symlink_shares_queue() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let real = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&real, b"x").unwrap();
+        symlink(&real, &link).unwrap();
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+
+        let in_flight_a = Arc::clone(&in_flight);
+        let max_seen_a = Arc::clone(&max_seen);
+        let real_c = real.clone();
+        let h1 = tokio::spawn(async move {
+            with_file_mutation_queue(&real_c, async {
+                let now = in_flight_a.fetch_add(1, Ordering::SeqCst) + 1;
+                let prev_max = max_seen_a.load(Ordering::SeqCst);
+                if now > prev_max {
+                    max_seen_a.store(now, Ordering::SeqCst);
+                }
+                sleep(Duration::from_millis(50)).await;
+                in_flight_a.fetch_sub(1, Ordering::SeqCst);
+            })
+            .await;
+        });
+
+        let in_flight_b = Arc::clone(&in_flight);
+        let max_seen_b = Arc::clone(&max_seen);
+        let link_c = link.clone();
+        let h2 = tokio::spawn(async move {
+            with_file_mutation_queue(&link_c, async {
+                let now = in_flight_b.fetch_add(1, Ordering::SeqCst) + 1;
+                let prev_max = max_seen_b.load(Ordering::SeqCst);
+                if now > prev_max {
+                    max_seen_b.store(now, Ordering::SeqCst);
+                }
+                sleep(Duration::from_millis(50)).await;
+                in_flight_b.fetch_sub(1, Ordering::SeqCst);
+            })
+            .await;
+        });
+
+        let _ = tokio::join!(h1, h2);
+        assert_eq!(
+            max_seen.load(Ordering::SeqCst),
+            1,
+            "symlink alias must share the queue with real path"
+        );
+    }
 }

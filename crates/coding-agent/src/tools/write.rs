@@ -76,6 +76,21 @@ async fn execute_write(cwd: &Path, args: serde_json::Value) -> ToolResult {
     .await
 }
 
+/// Internal cross-module test surface. The edit-and-write mutation-queue
+/// integration test in `tools::edit` needs to call into write's executor;
+/// expose it under a hidden `__test_only` module so the path stays opt-in
+/// and doesn't leak into the public API.
+#[doc(hidden)]
+pub mod __test_only {
+    use super::execute_write;
+    use hand_agent::types::ToolResult;
+    use std::path::Path;
+
+    pub async fn execute_write_for_test(cwd: &Path, args: serde_json::Value) -> ToolResult {
+        execute_write(cwd, args).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

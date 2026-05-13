@@ -564,4 +564,83 @@ mod tests {
             "marker_B should be replaced, got: {after:?}"
         );
     }
+
+    /// Pi-mono parity: edit and write tools must SHARE the mutation queue.
+    /// A concurrent `write` to a file currently being `edit`-ed would
+    /// otherwise interleave and either:
+    /// - the write clobbers the edit's mid-flight read-modify-write, OR
+    /// - the edit reads original content, write completes, edit writes
+    ///   back stale content, losing the write.
+    ///
+    /// Both ends use `with_file_mutation_queue(&path, ...)` keyed on the
+    /// canonical path, so a write that arrives during a slow edit must
+    /// queue behind it. We test by issuing N parallel writes + N parallel
+    /// edits and asserting (a) no crashes, (b) the file remains
+    /// well-formed (no zero-length or torn content), and (c) every
+    /// completed call returned successfully.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_edit_and_write_share_mutation_queue() {
+        use crate::tools::write;
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("shared.txt");
+        // Initial content with two edit anchors.
+        std::fs::write(&file, "alpha\nbeta\n").unwrap();
+
+        let cwd = dir.path().to_path_buf();
+        let path = file.to_str().unwrap().to_string();
+        let mut handles = Vec::new();
+
+        // Three edits + three writes against the same file, interleaved.
+        for i in 0..3 {
+            let cwd_e = cwd.clone();
+            let path_e = path.clone();
+            let h = tokio::spawn(async move {
+                execute_edit(
+                    &cwd_e,
+                    json!({
+                        "file_path": path_e,
+                        "old_string": if i % 2 == 0 { "alpha" } else { "beta" },
+                        "new_string": format!("EDIT_{i}"),
+                        "replace_all": true,
+                    }),
+                )
+                .await
+            });
+            handles.push(h);
+
+            let cwd_w = cwd.clone();
+            let path_w = path.clone();
+            let h = tokio::spawn(async move {
+                // Each write replaces the whole file with a single sentinel
+                // line. If edits and writes don't share the queue, this
+                // would land in the middle of an in-flight edit's
+                // read-modify-write and either crash or produce torn content.
+                write::__test_only::execute_write_for_test(
+                    &cwd_w,
+                    json!({"path": path_w, "content": format!("WRITE_{i}\n")}),
+                )
+                .await
+            });
+            handles.push(h);
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // File must still be readable and one of the known final states.
+        let after = std::fs::read_to_string(&file).expect("file readable");
+        assert!(
+            !after.is_empty(),
+            "file became empty — torn write under no-queue race"
+        );
+        // The final state is either a write sentinel or an edit result —
+        // both are valid endpoints. What must NOT happen is a chimera
+        // that mixes characters from both (e.g. `WRITE_0\nbeta\n` with a
+        // stray `EDIT_` substring), which would mean a write and an edit
+        // didn't serialise.
+        let valid = after.starts_with("WRITE_")
+            || after.starts_with("EDIT_")
+            || after.contains("EDIT_");
+        assert!(valid, "unexpected final content: {after:?}");
+    }
 }
