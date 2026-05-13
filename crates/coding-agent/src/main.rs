@@ -910,29 +910,73 @@ fn execute_shell_capture(cmd: &str) -> String {
     }
 }
 
+/// Ordered list of external commands used to write text to the system
+/// clipboard. The first one that successfully spawns and accepts the
+/// payload on stdin wins.
+///
+/// Order matters:
+/// 1. `pbcopy` — macOS native.
+/// 2. `wl-copy` — Wayland (Hyprland, Niri, GNOME on Wayland). Must be
+///    tried before `xclip`: on Wayland-only compositors `xclip` either
+///    isn't present or silently fails because there is no X server to
+///    own the selection.
+/// 3. `xclip` — X11 / XWayland. Common on traditional Linux desktops.
+/// 4. `xsel` — alternate X11 tool, used on systems that ship xsel
+///    instead of xclip (some Arch / minimal setups).
+fn clipboard_writers() -> &'static [(&'static str, &'static [&'static str])] {
+    &[
+        ("pbcopy", &[]),
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+    ]
+}
+
 fn copy_to_clipboard(text: &str) -> bool {
     use std::process::{Command, Stdio};
 
-    // Try pbcopy (macOS)
-    if let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn()
-        && let Some(mut stdin) = child.stdin.take()
-        && std::io::Write::write_all(&mut stdin, text.as_bytes()).is_ok()
-    {
+    for (cmd, args) in clipboard_writers() {
+        let Ok(mut child) = Command::new(cmd).args(*args).stdin(Stdio::piped()).spawn() else {
+            continue;
+        };
+        let Some(mut stdin) = child.stdin.take() else {
+            continue;
+        };
+        if std::io::Write::write_all(&mut stdin, text.as_bytes()).is_err() {
+            continue;
+        }
         drop(stdin);
-        return child.wait().is_ok_and(|s| s.success());
+        if child.wait().is_ok_and(|s| s.success()) {
+            return true;
+        }
     }
-
-    // Try xclip (Linux)
-    if let Ok(mut child) = Command::new("xclip")
-        .args(["-selection", "clipboard"])
-        .stdin(Stdio::piped())
-        .spawn()
-        && let Some(mut stdin) = child.stdin.take()
-        && std::io::Write::write_all(&mut stdin, text.as_bytes()).is_ok()
-    {
-        drop(stdin);
-        return child.wait().is_ok_and(|s| s.success());
-    }
-
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `wl-copy` must come before `xclip` so Wayland-only compositors
+    /// (Hyprland, Niri, GNOME on Wayland) get a working writer instead of
+    /// silently failing through `xclip`. `pbcopy` stays first for macOS,
+    /// `xsel` is the final X11 fallback.
+    #[test]
+    fn clipboard_writers_have_expected_order() {
+        let names: Vec<&str> = clipboard_writers().iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, vec!["pbcopy", "wl-copy", "xclip", "xsel"]);
+    }
+
+    #[test]
+    fn clipboard_writers_carry_selection_args_for_x11_tools() {
+        let table: std::collections::HashMap<&str, &[&str]> =
+            clipboard_writers().iter().map(|(n, a)| (*n, *a)).collect();
+        assert_eq!(table.get("xclip"), Some(&&["-selection", "clipboard"][..]));
+        assert_eq!(
+            table.get("xsel"),
+            Some(&&["--clipboard", "--input"][..])
+        );
+        assert!(table.get("pbcopy").unwrap().is_empty());
+        assert!(table.get("wl-copy").unwrap().is_empty());
+    }
 }
