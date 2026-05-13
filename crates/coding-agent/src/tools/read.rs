@@ -1,5 +1,6 @@
 //! Read tool — read file contents with line numbers.
 
+use crate::tools::path_utils::resolve_read_path;
 use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -57,7 +58,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
         None => return ToolResult::error("Missing required parameter: path"),
     };
 
-    let path = resolve_path(cwd, path_str);
+    let path = resolve_read_path(path_str, cwd);
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
     // `limit` is user-controlled — only enforce the line budget if absent.
     let user_limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
@@ -71,8 +72,18 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
+    // Pi-mono parity: an offset past the last line is an error the model
+    // should see explicitly, not a silently-empty read.
+    let start_zero_based = offset.saturating_sub(1);
+    if start_zero_based >= total_lines && total_lines > 0 {
+        return ToolResult::error(format!(
+            "Offset {} is beyond end of file ({} lines total)",
+            offset, total_lines
+        ));
+    }
+
     // Apply offset (1-based) and limit (line budget)
-    let start = (offset.saturating_sub(1)).min(total_lines);
+    let start = start_zero_based.min(total_lines);
     let end = (start + limit).min(total_lines);
 
     // Pi-mono parity: when no explicit user limit was given, ALSO enforce
@@ -142,11 +153,6 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
     ToolResult::text(output)
 }
 
-fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
-    let p = PathBuf::from(path);
-    if p.is_absolute() { p } else { cwd.join(p) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +218,64 @@ mod tests {
         let result = execute_read(dir.path(), json!({}));
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
+    }
+
+    /// Pi-mono parity: a `~/...` path in the read tool must expand to
+    /// the user's home directory. Hand was passing the literal `~/foo`
+    /// through `cwd.join("~/foo")`, which on POSIX produces an absolute
+    /// path joined-then-discarded but never actually reaches the home
+    /// directory — so reads of `~/something` silently fail.
+    #[test]
+    fn test_read_expands_tilde() {
+        // Pick a file that virtually always exists in $HOME and that we
+        // are allowed to read on macOS sandboxed CI: ~/.zprofile is too
+        // unreliable, but we can create one in a TempDir set as $HOME.
+        let dir = TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        // SAFETY: tests run single-threaded for std::env::set_var; tokio
+        // tests can race so we keep this in a sync test. The pattern is
+        // used throughout the codebase.
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+        std::fs::write(dir.path().join("tilde.txt"), "from home").unwrap();
+
+        let result = execute_read(dir.path(), json!({"path": "~/tilde.txt"}));
+        let text = get_text(&result);
+
+        if let Some(h) = original_home {
+            unsafe { std::env::set_var("HOME", h); }
+        } else {
+            unsafe { std::env::remove_var("HOME"); }
+        }
+
+        assert!(
+            text.contains("from home"),
+            "tilde path must resolve to $HOME, got: {text}"
+        );
+    }
+
+    /// Pi-mono parity: an explicit offset past the end of the file is a
+    /// programming error from the model side, not a silently-empty read.
+    /// Pi raises "Offset N is beyond end of file"; hand was silently
+    /// returning empty output, leaving the model confused as to whether
+    /// the file truly had no content past that line or it had skipped
+    /// past EOF.
+    #[test]
+    fn test_read_offset_beyond_eof_errors() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("small.txt");
+        std::fs::write(&file, "a\nb\nc\n").unwrap();
+
+        let result = execute_read(
+            dir.path(),
+            json!({"path": file.to_str().unwrap(), "offset": 99}),
+        );
+        let text = get_text(&result);
+        assert!(
+            text.contains("beyond end of file") || text.contains("offset"),
+            "expected explicit out-of-bounds error, got: {text}"
+        );
     }
 
     /// Pi-mono parity: when no user-supplied limit is given, the read tool

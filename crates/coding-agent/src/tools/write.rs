@@ -1,6 +1,7 @@
 //! Write tool — create or overwrite files.
 
 use crate::tools::file_mutation_queue::with_file_mutation_queue;
+use crate::tools::path_utils::resolve_to_cwd;
 use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -43,7 +44,7 @@ async fn execute_write(cwd: &Path, args: serde_json::Value) -> ToolResult {
         None => return ToolResult::error("Missing required parameter: content"),
     };
 
-    let path = resolve_path(cwd, path_str);
+    let path = resolve_to_cwd(path_str, cwd);
 
     // Create parent directories
     if let Some(parent) = path.parent()
@@ -73,11 +74,6 @@ async fn execute_write(cwd: &Path, args: serde_json::Value) -> ToolResult {
         }
     })
     .await
-}
-
-fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
-    let p = PathBuf::from(path);
-    if p.is_absolute() { p } else { cwd.join(p) }
 }
 
 #[cfg(test)]
@@ -144,5 +140,35 @@ mod tests {
         let result = execute_write(dir.path(), json!({"path": "foo.txt"})).await;
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter: content"));
+    }
+
+    /// Pi-mono parity: `~/...` paths must expand to $HOME on write too.
+    /// Without it, a write to `~/output.txt` lands in `<cwd>/~/output.txt`
+    /// (a literal tilde directory) — which silently succeeds and leaves
+    /// the user wondering where the file went.
+    #[tokio::test]
+    async fn test_write_expands_tilde() {
+        let dir = TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", dir.path());
+        }
+
+        let _result = execute_write(
+            dir.path(),
+            json!({"path": "~/written.txt", "content": "ok"}),
+        )
+        .await;
+
+        let expected = dir.path().join("written.txt");
+        let landed = expected.exists();
+
+        if let Some(h) = original_home {
+            unsafe { std::env::set_var("HOME", h); }
+        } else {
+            unsafe { std::env::remove_var("HOME"); }
+        }
+
+        assert!(landed, "expected ~/written.txt to land at $HOME/written.txt");
     }
 }

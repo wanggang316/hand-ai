@@ -1,6 +1,7 @@
 //! Edit tool — find-and-replace edits with diff output.
 
 use crate::tools::file_mutation_queue::with_file_mutation_queue;
+use crate::tools::path_utils::resolve_to_cwd;
 use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use similar::TextDiff;
@@ -60,7 +61,7 @@ async fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let path = resolve_path(cwd, file_path);
+    let path = resolve_to_cwd(file_path, cwd);
     let old_string = old_string.to_string();
     let new_string = new_string.to_string();
     let path_for_async = path.clone();
@@ -210,11 +211,6 @@ pub fn generate_diff(old: &str, new: &str, filename: &str) -> String {
     }
 
     output
-}
-
-fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
-    let p = PathBuf::from(path);
-    if p.is_absolute() { p } else { cwd.join(p) }
 }
 
 #[cfg(test)]
