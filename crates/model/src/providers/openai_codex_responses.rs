@@ -1,7 +1,5 @@
 //! OpenAI Codex Responses API provider.
 //!
-//! Mirrors `pi-mono/packages/ai/src/providers/openai-codex-responses.ts`.
-//!
 //! The Codex Responses endpoint is a ChatGPT-account-scoped variant of the
 //! standard OpenAI Responses API. Three transports are envisaged:
 //!

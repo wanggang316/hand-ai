@@ -16,9 +16,8 @@ use serde_json::Value;
 
 /// Build the JSON request body for the Responses API.
 ///
-/// Mirrors the request shape used by `pi-mono`'s
-/// `openai-responses-shared.ts`. Values that are `None`/empty are omitted so
-/// the wire payload stays compact.
+/// Values that are `None` or empty are omitted so the wire payload stays
+/// compact.
 pub(crate) fn build_request_body(
     model: &Model,
     context: &Context,
@@ -143,9 +142,9 @@ pub(crate) struct ResponsesParseState {
 
 /// Dispatch a single decoded SSE event into the parser. Returns the events
 /// the caller should yield (zero or one for every supported event type).
-/// Pi-mono parity: handles both `response.reasoning_summary_text.delta`
-/// (OpenAI native reasoning summaries) and `response.reasoning_text.delta`
-/// (LM Studio and other Responses-compatible providers — pi-mono #4191).
+/// Handles both `response.reasoning_summary_text.delta` (OpenAI's native
+/// reasoning summary stream) and `response.reasoning_text.delta` (LM Studio
+/// and other Responses-compatible providers).
 pub(crate) fn dispatch_responses_event(
     state: &mut ResponsesParseState,
     output: &mut AssistantMessage,
@@ -168,7 +167,7 @@ pub(crate) fn dispatch_responses_event(
         // Two reasoning-text channels share the same accumulator. OpenAI's
         // native Responses endpoint emits `reasoning_summary_text.delta`;
         // LM Studio and other Responses-compatible servers emit
-        // `reasoning_text.delta` (pi-mono #4191).
+        // `reasoning_text.delta`.
         "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
             if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
                 state.thinking_buffer.push_str(delta);
@@ -235,12 +234,12 @@ pub(crate) fn dispatch_responses_event(
                     state.current_tool_id.clear();
                     state.current_tool_args.clear();
                 } else if item_type == "reasoning" {
-                    // Pi-mono parity: prefer the server-authoritative
-                    // summary/content text over whatever streamed via deltas.
-                    // Servers may emit a final `item.content[].text` even when
-                    // they did not stream `*_text.delta` events at all, so
-                    // this branch is also the only path that captures the
-                    // thinking text for those transports.
+                    // Prefer the server-authoritative summary/content text
+                    // over whatever streamed via deltas. Some servers emit
+                    // a final `item.content[].text` even when they did not
+                    // stream `*_text.delta` events at all, so this branch
+                    // is the only path that captures the thinking text for
+                    // those transports.
                     let summary_text = item
                         .get("summary")
                         .and_then(|s| s.as_array())
@@ -445,7 +444,7 @@ mod tests {
         output
     }
 
-    /// Pi-mono #4191: LM Studio and other Responses-compatible servers emit
+    /// LM Studio and other Responses-compatible servers emit
     /// `response.reasoning_text.delta` instead of OpenAI's native
     /// `response.reasoning_summary_text.delta`. Both must produce
     /// ThinkingDelta events and accumulate into the final thinking block.
@@ -518,10 +517,10 @@ mod tests {
         assert_eq!(thinking, "step 1; step 2.");
     }
 
-    /// Pi-mono parity: when `response.output_item.done` arrives for a
-    /// `reasoning` item, the server-authoritative summary text replaces
-    /// whatever streamed via deltas. This matters because some servers
-    /// emit the final canonical text only in the done item.
+    /// When `response.output_item.done` arrives for a `reasoning` item,
+    /// the server-authoritative summary text replaces whatever streamed
+    /// via deltas. This matters because some servers emit the final
+    /// canonical text only in the done item.
     #[test]
     fn output_item_done_reasoning_uses_summary_text() {
         let mut state = ResponsesParseState::default();
@@ -557,8 +556,8 @@ mod tests {
         assert_eq!(thinking, "final summary");
     }
 
-    /// Pi-mono parity: when summary is absent on the done item, fall back
-    /// to `content[].text`. Some providers (LM Studio variants) deliver the
+    /// When `summary` is absent on the done item, fall back to
+    /// `content[].text`. Some providers (LM Studio variants) deliver the
     /// canonical reasoning body only in `content`.
     #[test]
     fn output_item_done_reasoning_falls_back_to_content_text() {
