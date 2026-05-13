@@ -60,7 +60,12 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 AgentSession::new(config, setup.agent_tools)?
             }
             Err(e) => {
-                eprintln!("No session to continue: {}. Starting new session.", e);
+                // The underlying error is always a "no sessions found" variant
+                // when --continue is invoked in a fresh dir. Don't leak the
+                // CodingAgentError Display prefix into the user-facing notice
+                // — the message is now informational, not an error.
+                let _ = e;
+                eprintln!("No previous session found. Starting a new session.");
                 AgentSession::new(base_config, setup.agent_tools)?
             }
         }

@@ -127,7 +127,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AgentSession::new(config, agent_tools)?
             }
             Err(e) => {
-                eprintln!("No session to continue: {}. Starting new session.", e);
+                let _ = e;
+                eprintln!("No previous session found. Starting a new session.");
                 AgentSession::new(base_config, agent_tools)?
             }
         }
