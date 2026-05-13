@@ -1424,6 +1424,82 @@ mod tests {
         assert!(listed[0].modified > 0);
     }
 
+    /// Pi-mono parity: `SessionInfo.modified` MUST prefer the latest
+    /// message timestamp over the file's mtime. Listing UIs sort by
+    /// "last activity" — using mtime would be wrong because:
+    ///   - merely loading a session updates atime/mtime on some FSes;
+    ///   - sync engines (Dropbox, iCloud) and backup tools rewrite mtime;
+    ///   - a `touch` would silently reshuffle the picker.
+    /// Pi-mono's TS test pins this by appending a message with an
+    /// explicit `timestamp` and asserting `info.modified` matches that
+    /// timestamp, not the file's mtime. We do the same by writing a
+    /// JSONL file directly so the message timestamp is decoupled from
+    /// the file write time.
+    #[test]
+    fn test_session_info_modified_uses_message_timestamp_not_mtime() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join(".hand").join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let path = session_dir.join("frozen.jsonl");
+
+        // Header with creation timestamp set well in the past, plus a
+        // message whose timestamp ALSO sits in the past. The file's
+        // mtime will be `now()` once we write it, so the three timestamps
+        // are distinct enough to make the source-of-truth obvious.
+        //
+        // Hand's on-disk shape uses the `{"type": <tag>, "data": {...}}`
+        // envelope from serde's adjacent tagging — flat pi-style shapes
+        // won't parse here.
+        let header = r#"{"type":"session","data":{"version":3,"id":"sid-frozen","timestamp":1000,"cwd":"/tmp"}}"#;
+        let message = r#"{"type":"message","data":{"id":"mid1","message":{"role":"user","content":"hi","timestamp":2000},"timestamp":2000}}"#;
+        std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
+
+        let listed = SessionManager::list(dir.path()).unwrap();
+        let info = listed
+            .into_iter()
+            .find(|i| i.id == "sid-frozen")
+            .expect("session listed");
+
+        // The message timestamp (2000) must win — NOT the file's mtime
+        // (which is `now()` and would be many orders of magnitude larger).
+        assert_eq!(
+            info.modified, 2000,
+            "modified must equal last-message timestamp, not file mtime"
+        );
+    }
+
+    /// Pi-mono parity tail case: when a session has no messages, fall
+    /// back to file mtime (which is what hand currently does) — never
+    /// the header creation timestamp. The picker should still surface
+    /// recently-touched empty sessions.
+    #[test]
+    fn test_session_info_modified_falls_back_to_mtime_when_no_messages() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join(".hand").join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let path = session_dir.join("empty.jsonl");
+
+        // Header only, no message entries. Header timestamp is set far
+        // in the past so the mtime path is the only way `modified` can
+        // be "now".
+        let header = r#"{"type":"session","data":{"version":3,"id":"sid-empty","timestamp":1000,"cwd":"/tmp"}}"#;
+        std::fs::write(&path, format!("{header}\n")).unwrap();
+
+        let listed = SessionManager::list(dir.path()).unwrap();
+        let info = listed
+            .into_iter()
+            .find(|i| i.id == "sid-empty")
+            .expect("empty session still listed");
+
+        // mtime is the wall clock at write time — at least 1970-01-01 + some
+        // nontrivial epoch. The header (1000ms) must NOT win.
+        assert!(
+            info.modified > 1000,
+            "expected mtime fallback, got {} (header was 1000)",
+            info.modified
+        );
+    }
+
     #[test]
     fn test_list_skips_corrupted_jsonl() {
         let dir = TempDir::new().unwrap();
