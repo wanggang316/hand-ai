@@ -21,6 +21,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Args::parse();
     timings::time("parse_args");
 
+    // Pi-mono parity: `--offline` flips on the same env-var guard the
+    // tools-manager already honors. Setting the env var here means every
+    // downstream caller (binary fetcher, version checker) sees offline
+    // mode without needing to thread an explicit flag.
+    if cli.offline {
+        // SAFETY: single-threaded at this point — main() hasn't spawned
+        // any tasks yet. std::env::set_var is otherwise multi-thread
+        // hostile.
+        unsafe {
+            std::env::set_var("HAND_OFFLINE", "1");
+        }
+    }
+
     // Handle --diagnostics: print system report and exit. Runs before
     // logging setup so the report is the only thing on stdout.
     if cli.diagnostics {

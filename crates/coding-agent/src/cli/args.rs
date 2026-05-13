@@ -131,6 +131,15 @@ pub struct Args {
     /// Print system diagnostics and exit
     #[arg(long)]
     pub diagnostics: bool,
+
+    /// Suppress all auto-download/network operations (mirror of pi-mono
+    /// `--offline`). When set, the binary fetcher (fd/rg auto-install),
+    /// version-check probes, and any other outbound network paths return
+    /// `Ok(None)` instead of reaching out. Equivalent to setting
+    /// `HAND_OFFLINE=1`. Useful in air-gapped CI or when a build needs to
+    /// pin to whatever's already on disk.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 #[cfg(test)]
@@ -221,5 +230,17 @@ mod tests {
             result.is_err(),
             "--rpc and --print should be mutually exclusive"
         );
+    }
+
+    /// Pi-mono parity: `--offline` is a top-level flag, default false.
+    /// Wiring through HAND_OFFLINE happens in main(); this test only
+    /// pins the parse surface.
+    #[test]
+    fn parses_offline_flag() {
+        let args =
+            Args::try_parse_from(["hand", "--offline"]).expect("--offline should parse");
+        assert!(args.offline);
+        let default = Args::try_parse_from(["hand"]).expect("no-arg parse");
+        assert!(!default.offline, "default must be false");
     }
 }
