@@ -128,6 +128,44 @@ impl AuthRecord {
     }
 }
 
+/// Detect whether a raw token string looks like a Claude.ai SUBSCRIPTION
+/// OAuth token rather than an API key.
+///
+/// Pi-mono parity. Anthropic ships two token shapes for the `anthropic`
+/// provider:
+/// - `sk-ant-api...` — programmatic API keys, intended for SDK / API use.
+/// - `sk-ant-oat...` — OAuth tokens issued by the Claude.ai subscription
+///   flow, intended for the official Claude.ai UI ONLY. Using them for
+///   direct API calls violates Anthropic's TOS and can get the
+///   account suspended.
+///
+/// The interactive mode uses this to warn the user once per session
+/// before sending requests with a subscription token. Returns true for
+/// any string starting with `sk-ant-oat`; the actual server-side
+/// suffix (`01-`, etc.) may change, so we anchor on the prefix.
+pub fn is_anthropic_subscription_token(token: &str) -> bool {
+    token.starts_with("sk-ant-oat")
+}
+
+/// Detect whether an `AuthRecord` represents an Anthropic Claude.ai
+/// subscription credential. Returns true for:
+/// - Any `Oauth` record under the `anthropic` provider (the storage
+///   layer only ever writes oauth records for the subscription flow).
+/// - Any `ApiKey` record whose stored key starts with `sk-ant-oat`.
+///
+/// `provider_id` must be the provider's id (e.g. `"anthropic"`); the
+/// check is a no-op for any other provider so a user with an OAuth
+/// record under, say, `"google"` doesn't trigger the warning.
+pub fn record_is_anthropic_subscription(provider_id: &str, record: &AuthRecord) -> bool {
+    if provider_id != "anthropic" {
+        return false;
+    }
+    match record {
+        AuthRecord::Oauth { .. } => true,
+        AuthRecord::ApiKey { key } => is_anthropic_subscription_token(key),
+    }
+}
+
 /// Filesystem-backed credential store.
 ///
 /// Cheap to construct — the on-disk file is opened lazily on each
@@ -308,6 +346,64 @@ mod tests {
 
     fn storage_in(dir: &TempDir) -> AuthStorage {
         AuthStorage::at(dir.path().join("auth.json"))
+    }
+
+    // ===== Anthropic subscription detection (pi-mono parity) =====
+
+    /// Pi-mono parity: `sk-ant-oat...` tokens are Claude.ai subscription
+    /// OAuth tokens. Using them for direct API calls violates Anthropic
+    /// TOS. The detector anchors on the `sk-ant-oat` prefix so the rule
+    /// is stable across server-side suffix changes (`oat01-`, `oat02-`).
+    #[test]
+    fn is_anthropic_subscription_token_matches_oat_prefix() {
+        assert!(is_anthropic_subscription_token("sk-ant-oat01-AAA-BBB"));
+        assert!(is_anthropic_subscription_token("sk-ant-oat02-future-shape"));
+        // Any oat-prefixed string — even a hypothetical un-versioned one —
+        // must trigger the warning. False positives are acceptable; false
+        // negatives are not.
+        assert!(is_anthropic_subscription_token("sk-ant-oat-XXXX"));
+    }
+
+    /// Normal API keys (`sk-ant-api...`) must NOT trigger the warning.
+    #[test]
+    fn is_anthropic_subscription_token_rejects_api_keys() {
+        assert!(!is_anthropic_subscription_token("sk-ant-api03-test"));
+        assert!(!is_anthropic_subscription_token("sk-ant-api04-future"));
+        assert!(!is_anthropic_subscription_token("sk-test"));
+        assert!(!is_anthropic_subscription_token(""));
+        // Defensive: prefix-similar but distinct strings stay out of the
+        // trap. The prefix is `sk-ant-oat` exactly.
+        assert!(!is_anthropic_subscription_token("sk-ant-other-flow"));
+    }
+
+    /// Pi-mono parity: an OAuth record under the anthropic provider is
+    /// ALWAYS a subscription credential — pi-mono's auth.json only ever
+    /// writes OAuth records for the Claude.ai flow.
+    #[test]
+    fn record_is_anthropic_subscription_flags_oauth_under_anthropic() {
+        let record = AuthRecord::oauth("a", "r", 0);
+        assert!(record_is_anthropic_subscription("anthropic", &record));
+        // Same record under a different provider must not trigger —
+        // other providers have legitimate OAuth flows.
+        assert!(!record_is_anthropic_subscription("google", &record));
+        assert!(!record_is_anthropic_subscription("openai", &record));
+    }
+
+    /// API-key records under anthropic only trigger when the stored key
+    /// is itself a subscription token.
+    #[test]
+    fn record_is_anthropic_subscription_flags_oat_api_key_under_anthropic() {
+        let sub_key = AuthRecord::api_key("sk-ant-oat01-leaked");
+        assert!(record_is_anthropic_subscription("anthropic", &sub_key));
+
+        let api_key = AuthRecord::api_key("sk-ant-api03-real");
+        assert!(!record_is_anthropic_subscription("anthropic", &api_key));
+
+        // Same subscription-shaped key under a non-anthropic provider —
+        // unusual but possible (someone copied it into the wrong slot);
+        // we only warn for anthropic.
+        let sub_key = AuthRecord::api_key("sk-ant-oat01-leaked");
+        assert!(!record_is_anthropic_subscription("google", &sub_key));
     }
 
     #[test]
