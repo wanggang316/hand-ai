@@ -323,6 +323,74 @@ mod tests {
         );
     }
 
+    /// Pi-mono parity: lowercase `am`/`pm` (en_AU and similar locales)
+    /// must also probe the narrow-no-break-space variant. Hand's matcher
+    /// already case-insensitively checks A/a + M/m; this test pins that
+    /// surface so a refactor can't quietly tighten it to uppercase only.
+    #[test]
+    fn resolve_read_path_probes_lowercase_am_pm_variant() {
+        let dir = TempDir::new().unwrap();
+        // Real file uses lowercase `am` with the narrow no-break space —
+        // mirrors what macOS produces under the en_AU locale.
+        let real = format!("screenshot 10.00.00\u{202F}am.png");
+        File::create(dir.path().join(&real)).unwrap();
+
+        let typed = "screenshot 10.00.00 am.png";
+        let result = resolve_read_path(typed, dir.path());
+        assert_eq!(result, dir.path().join(&real));
+    }
+
+    /// Pi-mono parity: standalone curly-quote variant (no NFD needed).
+    /// A filename that uses U+2019 RIGHT SINGLE QUOTATION MARK on disk
+    /// must resolve from a typed ASCII apostrophe. Different from the
+    /// NFD+curly French screenshot case, which combines two normalisations.
+    #[test]
+    fn resolve_read_path_probes_curly_quote_alone() {
+        let dir = TempDir::new().unwrap();
+        let real = "it\u{2019}s mine.txt"; // U+2019 curly apostrophe
+        File::create(dir.path().join(real)).unwrap();
+
+        let typed = "it's mine.txt"; // U+0027 ASCII straight apostrophe
+        let result = resolve_read_path(typed, dir.path());
+        assert!(
+            std::fs::metadata(&result).is_ok(),
+            "curly-quote-only variant must resolve, got {:?}",
+            result
+        );
+    }
+
+    /// Pi-mono parity: NFC vs NFD probing must work even without a curly-
+    /// quote complication. macOS HFS+/APFS may store filenames in NFD
+    /// (decomposed) form; a user typing an NFC string (e.g. from a chat
+    /// client) must still find the file.
+    #[test]
+    fn resolve_read_path_probes_nfd_alone() {
+        let dir = TempDir::new().unwrap();
+        // Real file stored as NFD: "é" decomposed to e + U+0301.
+        let real = "caf\u{0065}\u{0301}.txt";
+        File::create(dir.path().join(real)).unwrap();
+
+        // Find what landed on disk (FS may renormalise).
+        let on_disk: PathBuf = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .next()
+            .expect("file created");
+
+        // User types NFC composed form.
+        let typed = "caf\u{00E9}.txt";
+        let result = resolve_read_path(typed, dir.path());
+        assert!(
+            std::fs::metadata(&result).is_ok(),
+            "NFD-only variant must resolve, got {:?}",
+            result
+        );
+        let r = std::fs::canonicalize(&result).expect("canon resolved");
+        let d = std::fs::canonicalize(&on_disk).expect("canon disk");
+        assert_eq!(r, d, "resolver lands on same file");
+    }
+
     #[test]
     fn resolve_read_path_returns_resolved_when_no_variant_matches() {
         let dir = TempDir::new().unwrap();
