@@ -135,12 +135,34 @@ pub fn resolve_shell() -> String {
 }
 
 /// Sanitize output by stripping problematic characters.
+///
+/// Mirrors pi-mono's `sanitizeBinaryOutput`: strips ANSI escapes, all C0 control
+/// characters except `\t \n \r`, and Unicode format characters U+FFF9-U+FFFB
+/// (which crash terminal width calculators). Embedded control sequences can be
+/// used by an attacker to fake terminal output or smuggle prompt-injection
+/// instructions to the LLM through bash tool results.
 pub fn sanitize_output(output: &str) -> String {
-    // Strip ANSI escape sequences
     let ansi_re = regex_lite::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
     let cleaned = ansi_re.replace_all(output, "");
-    // Replace null bytes
-    cleaned.replace('\0', "")
+    cleaned
+        .chars()
+        .filter(|&c| {
+            let code = c as u32;
+            // Allow tab, LF, CR
+            if code == 0x09 || code == 0x0A || code == 0x0D {
+                return true;
+            }
+            // Drop other C0 control chars
+            if code <= 0x1F {
+                return false;
+            }
+            // Drop Unicode format characters (string-width crashers)
+            if (0xFFF9..=0xFFFB).contains(&code) {
+                return false;
+            }
+            true
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -233,6 +255,32 @@ mod tests {
     fn test_sanitize_output() {
         assert_eq!(sanitize_output("hello\x1b[31m world\x1b[0m"), "hello world");
         assert_eq!(sanitize_output("foo\0bar"), "foobar");
+    }
+
+    /// Pi-mono parity: drop C0 control characters except `\t \n \r`. Bash
+    /// output can contain BEL (0x07), VT (0x0B), or other control bytes that
+    /// confuse terminal width calculators and can be used to smuggle
+    /// instructions into LLM-rendered tool results.
+    #[test]
+    fn test_sanitize_strips_c0_controls_except_whitespace() {
+        // Tab, LF, CR pass through
+        assert_eq!(sanitize_output("a\tb\nc\rd"), "a\tb\nc\rd");
+        // BEL (0x07), VT (0x0B), FF (0x0C), SOH (0x01) get stripped
+        assert_eq!(sanitize_output("a\x07b"), "ab");
+        assert_eq!(sanitize_output("a\x0Bb\x0Cc"), "abc");
+        assert_eq!(sanitize_output("\x01\x02\x03hello\x1F"), "hello");
+        // DEL (0x7F) is not C0 — pi keeps it
+        assert_eq!(sanitize_output("a\x7Fb"), "a\x7Fb");
+    }
+
+    /// Pi-mono parity: drop Unicode format characters U+FFF9..U+FFFB. These
+    /// crash `string-width`-style libraries; pi filters them, so we do too.
+    #[test]
+    fn test_sanitize_strips_unicode_format_chars() {
+        assert_eq!(sanitize_output("a\u{FFF9}b\u{FFFA}c\u{FFFB}d"), "abcd");
+        // Adjacent codepoints (U+FFF8, U+FFFC) survive — only the documented
+        // range is stripped.
+        assert_eq!(sanitize_output("a\u{FFF8}b\u{FFFC}c"), "a\u{FFF8}b\u{FFFC}c");
     }
 
     /// Regression: a UTF-8 multi-byte sequence straddling the truncate boundary
