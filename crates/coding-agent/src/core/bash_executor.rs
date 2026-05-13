@@ -101,6 +101,11 @@ pub async fn execute_bash(
         output.push_str(&stderr);
     }
 
+    // Pi-mono parity: strip ANSI escapes, C0 controls, Unicode format chars,
+    // then drop bare `\r` (progress-bar overwrites garble captured streams).
+    output = sanitize_output(&output);
+    output = output.replace('\r', "");
+
     // Call chunk callback with combined output
     if let Some(ref cb) = options.on_chunk {
         cb(&output);
@@ -249,6 +254,53 @@ mod tests {
         assert!(result.output.contains("line1"));
         assert!(result.output.contains("line2"));
         assert!(result.output.contains("line3"));
+    }
+
+    /// Pi-mono parity: `execute_bash` must actually apply `sanitize_output`
+    /// to captured stdout/stderr. Embedded ANSI escapes, BEL bytes, and
+    /// Unicode format chars from bash output must not reach the LLM.
+    #[tokio::test]
+    async fn test_execute_sanitizes_bash_output() {
+        let dir = TempDir::new().unwrap();
+        let result = execute_bash(
+            // Emit ANSI red + BEL + visible text + ANSI reset
+            "printf 'pre\\x1b[31m\\x07mid\\x1b[0mpost'",
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.output, "premidpost",
+            "bash output must be sanitized of ANSI + BEL"
+        );
+    }
+
+    /// Pi-mono parity: bare `\r` (without trailing `\n`) is stripped from
+    /// bash output. Programs use `\r` for progress-bar overwrites; in a
+    /// captured non-interactive stream this just produces garbled lines.
+    #[tokio::test]
+    async fn test_execute_strips_bare_carriage_returns() {
+        let dir = TempDir::new().unwrap();
+        let result = execute_bash(
+            r"printf 'loading 10%%\rloading 50%%\rloading 100%%\n'",
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !result.output.contains('\r'),
+            "expected \\r stripped, got: {:?}",
+            result.output
+        );
+        assert!(
+            result.output.contains("loading 100%"),
+            "final line must survive, got: {:?}",
+            result.output
+        );
     }
 
     #[test]
