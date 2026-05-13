@@ -243,4 +243,136 @@ mod tests {
         let default = Args::try_parse_from(["hand"]).expect("no-arg parse");
         assert!(!default.offline, "default must be false");
     }
+
+    // ===== Pi-mono args.test.ts parity surface =====
+    //
+    // Each pi test that exercises an existing hand flag gets a direct
+    // mirror so a future refactor (e.g. renaming a clap field, changing
+    // a short alias) shows up in `cargo test` instead of in user
+    // scripts.
+
+    #[test]
+    fn parses_provider_flag() {
+        let args = Args::try_parse_from(["hand", "--provider", "openai"]).unwrap();
+        assert_eq!(args.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn parses_api_key_flag() {
+        let args = Args::try_parse_from(["hand", "--api-key", "sk-test"]).unwrap();
+        assert_eq!(args.api_key.as_deref(), Some("sk-test"));
+    }
+
+    #[test]
+    fn parses_system_prompt_flag() {
+        let args = Args::try_parse_from(["hand", "--system-prompt", "Be concise"]).unwrap();
+        assert_eq!(args.system_prompt.as_deref(), Some("Be concise"));
+    }
+
+    /// Pi-mono parity: --append-system-prompt is repeatable. Each invocation
+    /// pushes another entry; main() concatenates them with blank-line
+    /// separators when building the system prompt. Critical for scripts
+    /// that compose a prompt from multiple sources.
+    #[test]
+    fn parses_repeated_append_system_prompt() {
+        let args = Args::try_parse_from([
+            "hand",
+            "--append-system-prompt",
+            "first",
+            "--append-system-prompt",
+            "second",
+        ])
+        .unwrap();
+        assert_eq!(args.append_system_prompt, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn parses_continue_short_and_long() {
+        let long = Args::try_parse_from(["hand", "--continue"]).unwrap();
+        assert!(long.continue_session);
+        let short = Args::try_parse_from(["hand", "-c"]).unwrap();
+        assert!(short.continue_session);
+    }
+
+    #[test]
+    fn parses_resume_short_and_long() {
+        let long = Args::try_parse_from(["hand", "--resume", "sess-1"]).unwrap();
+        assert_eq!(long.resume.as_deref(), Some("sess-1"));
+        let short = Args::try_parse_from(["hand", "-r", "sess-2"]).unwrap();
+        assert_eq!(short.resume.as_deref(), Some("sess-2"));
+    }
+
+    /// Pi-mono parity: `--session <id>` is an alias for `--resume <id>`.
+    /// Hand uses clap's alias mechanism; this test pins the binding so a
+    /// refactor that drops the alias would break the parity contract.
+    #[test]
+    fn parses_session_alias_for_resume() {
+        let args = Args::try_parse_from(["hand", "--session", "sid-42"]).unwrap();
+        assert_eq!(args.resume.as_deref(), Some("sid-42"));
+    }
+
+    #[test]
+    fn parses_fork_flag() {
+        let args = Args::try_parse_from(["hand", "--fork", "src-session"]).unwrap();
+        assert_eq!(args.fork.as_deref(), Some("src-session"));
+    }
+
+    #[test]
+    fn parses_export_flag() {
+        let args = Args::try_parse_from(["hand", "--export", "out.html"]).unwrap();
+        assert_eq!(args.export.as_deref().map(|p| p.to_string_lossy().to_string()),
+                   Some("out.html".to_string()));
+    }
+
+    #[test]
+    fn parses_thinking_flag() {
+        let args = Args::try_parse_from(["hand", "--thinking", "high"]).unwrap();
+        assert_eq!(args.thinking.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn parses_no_session_flag() {
+        let args = Args::try_parse_from(["hand", "--no-session"]).unwrap();
+        assert!(args.no_session);
+    }
+
+    #[test]
+    fn parses_no_context_files_flag() {
+        let args = Args::try_parse_from(["hand", "--no-context-files"]).unwrap();
+        assert!(args.no_context_files);
+    }
+
+    #[test]
+    fn parses_no_skills_flag() {
+        let args = Args::try_parse_from(["hand", "--no-skills"]).unwrap();
+        assert!(args.no_skills);
+    }
+
+    #[test]
+    fn parses_session_dir_flag() {
+        let args = Args::try_parse_from(["hand", "--session-dir", "/tmp/sessions"]).unwrap();
+        assert_eq!(
+            args.session_dir.as_deref().map(|p| p.to_string_lossy().to_string()),
+            Some("/tmp/sessions".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_mode_text_and_json() {
+        let text = Args::try_parse_from(["hand", "--mode", "text"]).unwrap();
+        assert_eq!(text.mode, "text");
+        let json = Args::try_parse_from(["hand", "--mode", "json"]).unwrap();
+        assert_eq!(json.mode, "json");
+        // Default mode is "text".
+        let default = Args::try_parse_from(["hand"]).unwrap();
+        assert_eq!(default.mode, "text");
+    }
+
+    /// `--mode` rejects values outside the allowed set so a typo
+    /// surfaces immediately rather than silently picking the default.
+    #[test]
+    fn mode_rejects_unknown_value() {
+        let res = Args::try_parse_from(["hand", "--mode", "binary"]);
+        assert!(res.is_err(), "--mode binary should be rejected");
+    }
 }
