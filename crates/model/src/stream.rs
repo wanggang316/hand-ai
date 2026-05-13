@@ -246,9 +246,16 @@ pub async fn complete_simple(
 
 fn is_retriable_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
-    // HTTP status codes signaling overload / transient backpressure.
-    if lower.contains("429") || lower.contains("503") {
-        return true;
+    // HTTP status codes signaling overload / transient upstream failure.
+    // 429 too-many-requests, 502 bad gateway, 503 service unavailable,
+    // 504 gateway timeout — all are conventionally retriable. Other 5xx
+    // codes (500, 501, 505) are deliberately NOT retried because they
+    // indicate programming / configuration errors that retrying would
+    // only amplify.
+    for code in ["429", "502", "503", "504"] {
+        if lower.contains(code) {
+            return true;
+        }
     }
     // Common connection-reset / network-blip indicators.
     if lower.contains("connection reset")
@@ -256,6 +263,15 @@ fn is_retriable_error(message: &str) -> bool {
         || lower.contains("connection closed")
         || lower.contains("connection aborted")
     {
+        return true;
+    }
+    // Pi-mono parity (issue #2313): OpenAI-compatible providers (z.ai
+    // notably) surface transient blips as `finish_reason: network_error`
+    // in the stream, which the provider adapter maps to the error
+    // message `"Provider finish_reason: network_error"`. Recognise the
+    // token directly so a single z.ai connectivity dip doesn't terminate
+    // the agent loop.
+    if lower.contains("network_error") {
         return true;
     }
     false
@@ -310,6 +326,33 @@ mod tests {
         assert!(!is_retriable_error("HTTP 400 bad request"));
         assert!(!is_retriable_error("HTTP 401 unauthorized"));
         assert!(!is_retriable_error("HTTP 500 internal server error"));
+    }
+
+    /// Pi-mono parity: OpenAI-compatible providers (z.ai notably) signal
+    /// transient connectivity failures via `finish_reason: "network_error"`
+    /// in the stream. The provider adapter surfaces this as
+    /// `errorMessage: "Provider finish_reason: network_error"`. Without
+    /// recognising it here, a single z.ai blip would terminate the agent
+    /// loop with no retry. Pi explicitly tests this — issue #2313.
+    #[test]
+    fn retriable_recognizes_provider_network_error() {
+        assert!(is_retriable_error("Provider finish_reason: network_error"));
+        // Bare token also matches — covers a future provider that
+        // surfaces it differently.
+        assert!(is_retriable_error("network_error"));
+        // 502 Bad Gateway and 504 Gateway Timeout are similar transient
+        // upstream errors; recognise both so flaky CDN paths retry too.
+        assert!(is_retriable_error("HTTP 502 bad gateway"));
+        assert!(is_retriable_error("HTTP 504 gateway timeout"));
+    }
+
+    /// Defensive: a 5xx status that is NOT a transient-upstream code
+    /// must still be treated as terminal. We don't want to silently
+    /// retry a 500 forever.
+    #[test]
+    fn retriable_still_rejects_other_5xx() {
+        assert!(!is_retriable_error("HTTP 501 not implemented"));
+        assert!(!is_retriable_error("HTTP 505 http version not supported"));
     }
 
     #[test]
