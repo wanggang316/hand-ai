@@ -106,10 +106,12 @@ pub struct Args {
     #[arg(long)]
     pub print: bool,
 
-    /// Output mode for --print: `text` (default, final assistant content
-    /// only) or `json` (JSONL event stream mirroring pi-mono's
-    /// `--mode json` shape). No effect without --print.
-    #[arg(long, default_value = "text", value_parser = ["text", "json"])]
+    /// Output mode. `text` (default, final assistant content only) and
+    /// `json` (JSONL event stream mirroring pi-mono's `--mode json`
+    /// shape) apply to --print. `rpc` is a pi-mono parity alias for
+    /// `--rpc` — handy for scripts written against pi's CLI surface
+    /// (`pi --mode rpc`).
+    #[arg(long, default_value = "text", value_parser = ["text", "json", "rpc"])]
     pub mode: String,
 
     /// Run in headless RPC mode (JSONL on stdin/stdout). Mutually exclusive with --print.
@@ -366,6 +368,15 @@ mod tests {
         // Default mode is "text".
         let default = Args::try_parse_from(["hand"]).unwrap();
         assert_eq!(default.mode, "text");
+    }
+
+    /// Pi-mono parity: `--mode rpc` is accepted as an alias for `--rpc`
+    /// so scripts written against pi's CLI surface keep working. Main's
+    /// dispatcher checks `cli.mode == "rpc"` alongside `cli.rpc`.
+    #[test]
+    fn parses_mode_rpc() {
+        let args = Args::try_parse_from(["hand", "--mode", "rpc"]).unwrap();
+        assert_eq!(args.mode, "rpc");
     }
 
     /// `--mode` rejects values outside the allowed set so a typo

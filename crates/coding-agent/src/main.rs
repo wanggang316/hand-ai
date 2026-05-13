@@ -74,7 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     // Headless RPC dispatch loop: takes precedence over interactive/print modes.
-    if cli.rpc {
+    // Pi-mono parity: `--mode rpc` is an alias for `--rpc` so scripts written
+    // against pi's CLI surface (`pi --mode rpc`) work on hand unchanged.
+    if cli.rpc || cli.mode == "rpc" {
         timings::print();
         return run_rpc(cli).await;
     }
