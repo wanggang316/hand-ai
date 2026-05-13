@@ -113,14 +113,7 @@ pub async fn execute_bash(
 
     let mut truncated = false;
     if output.len() > options.max_bytes {
-        // String::truncate panics if the cut point lands inside a multi-byte
-        // UTF-8 sequence (CJK, emoji, accented Latin). Step back to the
-        // nearest char boundary so a 64 KiB cap is safe for any payload.
-        let mut cut = options.max_bytes;
-        while cut > 0 && !output.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        output.truncate(cut);
+        output = truncate_tail_bytes(&output, options.max_bytes);
         truncated = true;
     }
 
@@ -137,6 +130,38 @@ pub async fn execute_bash(
 /// falls back to `/bin/bash`.
 pub fn resolve_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+}
+
+/// Truncate output keeping the TAIL (end) within `max_bytes`.
+///
+/// Pi-mono parity: bash output is tail-truncated because errors, exit
+/// summaries, and final results live at the end. Head-truncating hides the
+/// useful information under compiler banners and progress logs.
+///
+/// Prefers to start at a line boundary so the LLM does not see a chopped
+/// first line. Always lands on a UTF-8 char boundary so we never panic and
+/// never emit invalid bytes.
+fn truncate_tail_bytes(output: &str, max_bytes: usize) -> String {
+    if output.len() <= max_bytes {
+        return output.to_string();
+    }
+    // Start ~max_bytes from the end.
+    let mut start = output.len() - max_bytes;
+    // Step forward to a char boundary so we don't slice mid-codepoint.
+    while start < output.len() && !output.is_char_boundary(start) {
+        start += 1;
+    }
+    // Prefer to align to a newline so the first surviving line is whole.
+    // Only do this when it would leave at least half the budget intact —
+    // otherwise the whole final line is bigger than the budget itself and
+    // we have to return a partial line (pi's "lastLinePartial" edge case).
+    if let Some(nl_offset) = output[start..].find('\n') {
+        let aligned = start + nl_offset + 1;
+        if output.len() - aligned >= max_bytes / 2 {
+            start = aligned;
+        }
+    }
+    output[start..].to_string()
 }
 
 /// Sanitize output by stripping problematic characters.
@@ -300,6 +325,50 @@ mod tests {
             result.output.contains("loading 100%"),
             "final line must survive, got: {:?}",
             result.output
+        );
+    }
+
+    /// Pi-mono parity: when bash output exceeds the byte budget, keep the
+    /// TAIL (end of output). The tail is where errors and final results live;
+    /// head-truncation hides them under compiler boilerplate or progress logs.
+    #[tokio::test]
+    async fn test_execute_truncates_from_tail_not_head() {
+        let dir = TempDir::new().unwrap();
+        // Emit ~3000 numbered lines so we comfortably exceed a small byte cap.
+        // The early lines contain HEAD_MARKER, the final lines contain
+        // TAIL_MARKER. Tail-truncation must keep TAIL_MARKER and drop
+        // HEAD_MARKER.
+        let result = execute_bash(
+            r#"
+            for i in $(seq 1 3000); do
+                echo "line $i HEAD_MARKER"
+            done
+            echo "TAIL_MARKER_FINAL"
+            "#,
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions {
+                max_bytes: 2048,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(result.truncated, "expected truncated=true");
+        assert!(
+            result.output.contains("TAIL_MARKER_FINAL"),
+            "tail must survive truncation, got tail: {:?}",
+            &result.output[result.output.len().saturating_sub(200)..]
+        );
+        assert!(
+            !result.output.contains("line 1 HEAD_MARKER\n"),
+            "head must be dropped, but found early line in output"
+        );
+        // Output should not exceed the budget plus a tiny truncation marker.
+        assert!(
+            result.output.len() <= 2048 + 256,
+            "output ({} bytes) exceeds budget+slack",
+            result.output.len()
         );
     }
 
