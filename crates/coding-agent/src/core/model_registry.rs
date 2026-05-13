@@ -551,6 +551,37 @@ impl ModelRegistry {
         )
     }
 
+    /// Pi-mono parity (issue #3686-adjacent): whether the credential
+    /// configured for `model.provider` is an Anthropic Claude.ai
+    /// SUBSCRIPTION credential rather than an API key. Pi-mono uses
+    /// this to render a one-time "you're using a subscription token
+    /// for API calls — that violates Anthropic's TOS" warning in
+    /// interactive mode.
+    ///
+    /// Wider net than [`Self::is_using_oauth`]: this also catches the
+    /// case where a user pasted an `sk-ant-oat...` OAuth token into
+    /// the ApiKey slot of auth.json. Returns true for:
+    /// - Any OAuth record under the `anthropic` provider, OR
+    /// - Any ApiKey record under `anthropic` whose value starts with
+    ///   `sk-ant-oat`.
+    /// False for every other provider so a Google or OpenAI OAuth
+    /// record doesn't trigger an irrelevant warning.
+    pub fn is_anthropic_subscription_credential(&self, model: &Model) -> bool {
+        let provider = model.provider.as_str();
+        if provider != "anthropic" {
+            return false;
+        }
+        let Some(auth) = self.auth_storage.as_ref() else {
+            return false;
+        };
+        match auth.get(provider) {
+            Ok(Some(record)) => {
+                crate::core::auth_storage::record_is_anthropic_subscription(provider, &record)
+            }
+            _ => false,
+        }
+    }
+
     /// Resolve API key + request headers for a model. Mirrors the TS async
     /// `getApiKeyAndHeaders`. Sync in Rust because [`AuthStorage`] is sync.
     pub fn api_key_and_headers(&self, model: &Model) -> ResolvedRequestAuth {
@@ -1775,6 +1806,85 @@ mod tests {
             .find(|m| m.provider.as_str() == "openai")
             .unwrap();
         assert!(!registry.is_using_oauth(m));
+    }
+
+    /// Pi-mono parity: `is_anthropic_subscription_credential` flags an
+    /// OAuth record under `anthropic` — the canonical Claude.ai
+    /// subscription path.
+    #[test]
+    fn is_anthropic_subscription_credential_flags_oauth_under_anthropic() {
+        let dir = TempDir::new().unwrap();
+        let storage = AuthStorage::at(dir.path().join("auth.json"));
+        storage
+            .set("anthropic", AuthRecord::oauth("a", "r", 1_700_000_000_000))
+            .unwrap();
+        let registry = ModelRegistry::in_memory(storage);
+        let m = registry
+            .all()
+            .iter()
+            .find(|m| m.provider.as_str() == "anthropic")
+            .unwrap()
+            .clone();
+        assert!(registry.is_anthropic_subscription_credential(&m));
+    }
+
+    /// Wider net than is_using_oauth: an `sk-ant-oat...` token pasted
+    /// into the ApiKey slot also trips the warning. Real-world case —
+    /// users frequently confuse subscription tokens with API keys.
+    #[test]
+    fn is_anthropic_subscription_credential_flags_oat_api_key() {
+        let dir = TempDir::new().unwrap();
+        let storage = AuthStorage::at(dir.path().join("auth.json"));
+        storage
+            .set("anthropic", AuthRecord::api_key("sk-ant-oat01-pasted"))
+            .unwrap();
+        let registry = ModelRegistry::in_memory(storage);
+        let m = registry
+            .all()
+            .iter()
+            .find(|m| m.provider.as_str() == "anthropic")
+            .unwrap()
+            .clone();
+        assert!(registry.is_anthropic_subscription_credential(&m));
+    }
+
+    /// A legitimate API key (`sk-ant-api...`) does NOT trigger the
+    /// warning even under anthropic.
+    #[test]
+    fn is_anthropic_subscription_credential_false_for_real_api_key() {
+        let dir = TempDir::new().unwrap();
+        let storage = AuthStorage::at(dir.path().join("auth.json"));
+        storage
+            .set("anthropic", AuthRecord::api_key("sk-ant-api03-legit"))
+            .unwrap();
+        let registry = ModelRegistry::in_memory(storage);
+        let m = registry
+            .all()
+            .iter()
+            .find(|m| m.provider.as_str() == "anthropic")
+            .unwrap()
+            .clone();
+        assert!(!registry.is_anthropic_subscription_credential(&m));
+    }
+
+    /// Same OAuth record under a different provider does NOT trigger —
+    /// other providers have legitimate OAuth flows and shouldn't be
+    /// flagged as anthropic-subscription.
+    #[test]
+    fn is_anthropic_subscription_credential_scoped_to_anthropic() {
+        let dir = TempDir::new().unwrap();
+        let storage = AuthStorage::at(dir.path().join("auth.json"));
+        storage
+            .set("google", AuthRecord::oauth("a", "r", 1_700_000_000_000))
+            .unwrap();
+        let registry = ModelRegistry::in_memory(storage);
+        let m = registry
+            .all()
+            .iter()
+            .find(|m| m.provider.as_str() == "google")
+            .unwrap()
+            .clone();
+        assert!(!registry.is_anthropic_subscription_credential(&m));
     }
 
     #[test]
