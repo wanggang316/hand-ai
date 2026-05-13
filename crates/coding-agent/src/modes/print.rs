@@ -433,7 +433,12 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
 
     let mut prefix = String::new();
     for path_str in &attachments {
-        let path = std::path::PathBuf::from(path_str);
+        // Expand `~` and macOS Unicode-space variants the same way the
+        // read tool does (path_utils::expand_path). Without this hand
+        // joined `~/file` onto cwd, producing an invalid path that
+        // failed with "File not found" instead of resolving to the
+        // user's home dir as pi does.
+        let path = crate::tools::path_utils::expand_path(path_str);
         let abs = if path.is_absolute() {
             path.clone()
         } else {
@@ -590,6 +595,42 @@ mod tests {
             "expected pi-mono-style error, got: {err}"
         );
         assert!(err.contains("definitely-not-a-real-path-xyz-12345"));
+    }
+
+    /// `~/path` in @-mentions must expand against the user's HOME the
+    /// same way the read tool does, not get joined onto cwd as
+    /// `cwd/~/path` (which then fails to find the file). Pi-mono
+    /// resolves these. Test writes into HOME, expands, and removes.
+    #[test]
+    fn at_mentions_expand_tilde_against_home() {
+        let home = match std::env::var("HOME") {
+            Ok(h) => std::path::PathBuf::from(h),
+            Err(_) => {
+                // No HOME → can't test tilde expansion meaningfully.
+                return;
+            }
+        };
+        let name = format!(
+            "hand-tilde-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let path = home.join(&name);
+        std::fs::write(&path, "TILDE_BODY").unwrap();
+        let prompt = format!("@~/{name} describe");
+        let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
+        assert!(
+            out.contains("TILDE_BODY"),
+            "tilde must expand to HOME, expected body inlined; got: {out}"
+        );
+        assert!(
+            out.contains(&path.display().to_string()),
+            "absolute resolved path must appear in <file name=...>, got: {out}"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
