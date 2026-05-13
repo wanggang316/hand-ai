@@ -6,6 +6,18 @@ use std::path::{Path, PathBuf};
 
 /// Default max lines to read.
 const DEFAULT_MAX_LINES: usize = 2000;
+/// Default max bytes to read (pi-mono parity: 50 KB).
+const DEFAULT_MAX_BYTES: usize = 50 * 1024;
+
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{}B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
 
 /// Create the read tool.
 pub fn create_read_tool(cwd: PathBuf) -> AgentTool {
@@ -47,10 +59,9 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
 
     let path = resolve_path(cwd, path_str);
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(DEFAULT_MAX_LINES as u64) as usize;
+    // `limit` is user-controlled — only enforce the line budget if absent.
+    let user_limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let limit = user_limit.unwrap_or(DEFAULT_MAX_LINES);
 
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -60,21 +71,70 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
-    // Apply offset (1-based) and limit
+    // Apply offset (1-based) and limit (line budget)
     let start = (offset.saturating_sub(1)).min(total_lines);
     let end = (start + limit).min(total_lines);
 
+    // Pi-mono parity: when no explicit user limit was given, ALSO enforce
+    // a byte budget (50 KB). A 2000-line file of long lines (minified JS,
+    // generated bundles) can blow the context window even though the line
+    // count fits. We accumulate complete lines until either the line
+    // window or the byte budget is hit.
+    let byte_budget_active = user_limit.is_none();
     let mut output = String::new();
-    for (i, line) in lines[start..end].iter().enumerate() {
-        let line_num = start + i + 1;
-        output.push_str(&format!("{:>6}→{}\n", line_num, line));
+    let mut included = 0usize; // number of lines actually emitted
+    let mut byte_truncated = false;
+    let mut total_bytes = 0usize;
+
+    // First-line-exceeds-limit edge case (only when byte budget is active):
+    // a single source line bigger than 50 KB cannot be displayed at all.
+    // Point the model at a bash fallback so it has an actionable next step.
+    if byte_budget_active && start < lines.len() {
+        let first_line_bytes = lines[start].len();
+        if first_line_bytes > DEFAULT_MAX_BYTES {
+            let line_num = start + 1;
+            return ToolResult::text(format!(
+                "[Line {} is {}, exceeds {} limit. Use bash: sed -n '{}p' {} | head -c {}]",
+                line_num,
+                format_size(first_line_bytes),
+                format_size(DEFAULT_MAX_BYTES),
+                line_num,
+                path.display(),
+                DEFAULT_MAX_BYTES
+            ));
+        }
     }
 
-    if end < total_lines {
+    for (i, line) in lines[start..end].iter().enumerate() {
+        let line_num = start + i + 1;
+        let prefix = format!("{:>6}→", line_num);
+        let line_bytes = prefix.len() + line.len() + 1; // +1 for trailing \n
+        if byte_budget_active && total_bytes + line_bytes > DEFAULT_MAX_BYTES && included > 0 {
+            byte_truncated = true;
+            break;
+        }
+        output.push_str(&prefix);
+        output.push_str(line);
+        output.push('\n');
+        total_bytes += line_bytes;
+        included += 1;
+    }
+
+    let last_shown = start + included;
+    if byte_truncated {
+        output.push_str(&format!(
+            "\n[Showing lines {}-{} of {} ({} byte limit). Use offset={} to continue.]",
+            start + 1,
+            last_shown,
+            total_lines,
+            format_size(DEFAULT_MAX_BYTES),
+            last_shown + 1
+        ));
+    } else if last_shown < total_lines {
         output.push_str(&format!(
             "\n[Showing lines {}-{} of {} total. Use offset/limit to read more.]",
             start + 1,
-            end,
+            last_shown,
             total_lines
         ));
     }
@@ -152,5 +212,70 @@ mod tests {
         let result = execute_read(dir.path(), json!({}));
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
+    }
+
+    /// Pi-mono parity: when no user-supplied limit is given, the read tool
+    /// must cap output at BOTH 2000 lines AND 50KB. A file of short lines
+    /// well under the line limit can still blow the context window if the
+    /// payload bytes are large (minified JS, vendored CSS).
+    #[test]
+    fn test_read_applies_byte_limit_when_no_user_limit() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("big.txt");
+        // 1000 lines × 100 chars/line ≈ 100KB, well over the 50KB byte cap
+        // but under the 2000-line cap. Without a byte cap the whole file
+        // would be returned.
+        let line: String = "x".repeat(100);
+        let mut content = String::new();
+        for _ in 0..1000 {
+            content.push_str(&line);
+            content.push('\n');
+        }
+        std::fs::write(&file, &content).unwrap();
+
+        let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
+        let text = get_text(&result);
+        // Output must fit in roughly the byte budget plus banners — ~50KB
+        // payload + a few hundred bytes of line-number prefixes per line.
+        // We assert a generous 80KB upper bound and a truncation notice.
+        assert!(
+            text.len() < 80 * 1024,
+            "expected byte-budgeted truncation, got {} bytes",
+            text.len()
+        );
+        // Pi mentions the byte limit in its truncation notice when bytes
+        // were the limiting factor.
+        assert!(
+            text.contains("KB limit") || text.contains("byte"),
+            "expected byte-limit truncation notice, got: {}",
+            &text[text.len().saturating_sub(300)..]
+        );
+    }
+
+    /// Pi-mono parity: if the first line alone exceeds the byte budget,
+    /// return a special error pointing at a `sed | head -c` fallback so
+    /// the LLM has an actionable next step. Pi calls this the
+    /// `firstLineExceedsLimit` edge case.
+    #[test]
+    fn test_read_first_line_exceeds_byte_limit() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("minified.js");
+        // One single line of 100KB — common with minified JS / bundled JSON.
+        let blob: String = "a".repeat(100 * 1024);
+        std::fs::write(&file, &blob).unwrap();
+
+        let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
+        let text = get_text(&result);
+        assert!(
+            text.contains("exceeds") && text.contains("limit"),
+            "expected first-line-exceeds-limit message, got: {}",
+            text
+        );
+        // Hand should suggest a bash fallback so the model knows what to do.
+        assert!(
+            text.contains("sed") || text.contains("head"),
+            "expected sed/head fallback hint, got: {}",
+            text
+        );
     }
 }
