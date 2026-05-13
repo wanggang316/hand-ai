@@ -129,6 +129,209 @@ pub(crate) fn convert_to_input(context: &Context) -> Value {
     Value::Array(input)
 }
 
+/// Mutable parser state shared across SSE event dispatches. Extracted out
+/// of [`drive_sse_stream`] so the per-event branching can be unit-tested
+/// without standing up an HTTP server.
+#[derive(Default)]
+pub(crate) struct ResponsesParseState {
+    pub(crate) text_buffer: String,
+    pub(crate) thinking_buffer: String,
+    pub(crate) current_tool_name: String,
+    pub(crate) current_tool_id: String,
+    pub(crate) current_tool_args: String,
+}
+
+/// Dispatch a single decoded SSE event into the parser. Returns the events
+/// the caller should yield (zero or one for every supported event type).
+/// Pi-mono parity: handles both `response.reasoning_summary_text.delta`
+/// (OpenAI native reasoning summaries) and `response.reasoning_text.delta`
+/// (LM Studio and other Responses-compatible providers — pi-mono #4191).
+pub(crate) fn dispatch_responses_event(
+    state: &mut ResponsesParseState,
+    output: &mut AssistantMessage,
+    event_type: &str,
+    data: &Value,
+) -> Vec<AssistantMessageEvent> {
+    let mut emitted = Vec::new();
+    match event_type {
+        "response.output_text.delta" => {
+            if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                state.text_buffer.push_str(delta);
+                emitted.push(AssistantMessageEvent::TextDelta {
+                    content_index: 0,
+                    delta: delta.to_string(),
+                    partial: output.clone(),
+                });
+            }
+        }
+
+        // Two reasoning-text channels share the same accumulator. OpenAI's
+        // native Responses endpoint emits `reasoning_summary_text.delta`;
+        // LM Studio and other Responses-compatible servers emit
+        // `reasoning_text.delta` (pi-mono #4191).
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                state.thinking_buffer.push_str(delta);
+                emitted.push(AssistantMessageEvent::ThinkingDelta {
+                    content_index: 0,
+                    delta: delta.to_string(),
+                    partial: output.clone(),
+                });
+            }
+        }
+
+        "response.function_call_arguments.delta" => {
+            if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+                state.current_tool_args.push_str(delta);
+            }
+        }
+
+        "response.output_item.added" => {
+            if let Some(item) = data.get("item")
+                && item.get("type").and_then(|t| t.as_str()) == Some("function_call")
+            {
+                state.current_tool_name = item
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                state.current_tool_id = item
+                    .get("call_id")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                state.current_tool_args.clear();
+            }
+        }
+
+        "response.output_item.done" => {
+            if let Some(item) = data.get("item") {
+                let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if item_type == "function_call" {
+                    // Apply the same control-byte / invalid-escape repair the
+                    // other streaming providers use, so a malformed argument
+                    // payload doesn't silently drop the entire tool call to `{}`.
+                    let args: Value = if state.current_tool_args.is_empty() {
+                        Value::Object(Default::default())
+                    } else {
+                        serde_json::from_str(&state.current_tool_args)
+                            .ok()
+                            .or_else(|| {
+                                crate::transform::parse_json_with_repair(&state.current_tool_args)
+                            })
+                            .unwrap_or(Value::Object(Default::default()))
+                    };
+                    output
+                        .content
+                        .push(AssistantContentBlock::ToolCall(ToolCall {
+                            content_type: "tool_call".to_string(),
+                            id: state.current_tool_id.clone(),
+                            name: state.current_tool_name.clone(),
+                            arguments: args,
+                            thought_signature: None,
+                        }));
+                    output.stop_reason = StopReason::ToolUse;
+                    state.current_tool_name.clear();
+                    state.current_tool_id.clear();
+                    state.current_tool_args.clear();
+                } else if item_type == "reasoning" {
+                    // Pi-mono parity: prefer the server-authoritative
+                    // summary/content text over whatever streamed via deltas.
+                    // Servers may emit a final `item.content[].text` even when
+                    // they did not stream `*_text.delta` events at all, so
+                    // this branch is also the only path that captures the
+                    // thinking text for those transports.
+                    let summary_text = item
+                        .get("summary")
+                        .and_then(|s| s.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join("\n\n")
+                        })
+                        .unwrap_or_default();
+                    let content_text = item
+                        .get("content")
+                        .and_then(|c| c.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.get("text").and_then(|t| t.as_str()))
+                                .collect::<Vec<_>>()
+                                .join("\n\n")
+                        })
+                        .unwrap_or_default();
+                    if !summary_text.is_empty() {
+                        state.thinking_buffer = summary_text;
+                    } else if !content_text.is_empty() {
+                        state.thinking_buffer = content_text;
+                    }
+                }
+            }
+        }
+
+        "response.content_part.done" if !state.text_buffer.is_empty() => {
+            output
+                .content
+                .push(AssistantContentBlock::Text(TextContent {
+                    content_type: "text".to_string(),
+                    text: state.text_buffer.clone(),
+                    text_signature: None,
+                }));
+        }
+
+        "response.completed" => {
+            if let Some(response) = data.get("response")
+                && let Some(usage) = response.get("usage")
+            {
+                output.usage.input = usage
+                    .get("input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                output.usage.output = usage
+                    .get("output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+            }
+        }
+
+        _ => {}
+    }
+    emitted
+}
+
+/// Flush trailing buffered text/thinking into the output message at the end
+/// of an SSE stream. Mirrors the post-loop logic the previous monolithic
+/// `drive_sse_stream` ran inline.
+pub(crate) fn finalize_responses_output(state: ResponsesParseState, output: &mut AssistantMessage) {
+    if !state.thinking_buffer.is_empty() {
+        output.content.insert(
+            0,
+            AssistantContentBlock::Thinking(ThinkingContent {
+                content_type: "thinking".to_string(),
+                thinking: state.thinking_buffer,
+                thinking_signature: None,
+                redacted: None,
+            }),
+        );
+    }
+
+    if !state.text_buffer.is_empty()
+        && !output
+            .content
+            .iter()
+            .any(|c| matches!(c, AssistantContentBlock::Text(_)))
+    {
+        output
+            .content
+            .push(AssistantContentBlock::Text(TextContent {
+                content_type: "text".to_string(),
+                text: state.text_buffer,
+                text_signature: None,
+            }));
+    }
+}
+
 /// Drive the SSE stream of a successful Responses API response.
 ///
 /// Returns a stream of `AssistantMessageEvent`s for the body of the
@@ -144,11 +347,7 @@ pub(crate) fn drive_sse_stream(
     output: &mut AssistantMessage,
 ) -> impl futures::Stream<Item = AssistantMessageEvent> + '_ {
     async_stream::stream! {
-        let mut text_buffer = String::new();
-        let mut current_tool_name = String::new();
-        let mut current_tool_id = String::new();
-        let mut current_tool_args = String::new();
-        let mut thinking_buffer = String::new();
+        let mut state = ResponsesParseState::default();
 
         let mut byte_stream = response.bytes_stream();
         let mut line_buffer = String::new();
@@ -194,147 +393,13 @@ pub(crate) fn drive_sse_stream(
                     Err(_) => continue,
                 };
 
-                match event_type.as_str() {
-                    "response.output_text.delta" => {
-                        if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                            text_buffer.push_str(delta);
-                            yield AssistantMessageEvent::TextDelta {
-                                content_index: 0,
-                                delta: delta.to_string(),
-                                partial: output.clone(),
-                            };
-                        }
-                    }
-
-                    "response.reasoning_summary_text.delta" => {
-                        if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                            thinking_buffer.push_str(delta);
-                            yield AssistantMessageEvent::ThinkingDelta {
-                                content_index: 0,
-                                delta: delta.to_string(),
-                                partial: output.clone(),
-                            };
-                        }
-                    }
-
-                    "response.function_call_arguments.delta" => {
-                        if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                            current_tool_args.push_str(delta);
-                        }
-                    }
-
-                    "response.output_item.added" => {
-                        if let Some(item) = data.get("item")
-                            && item.get("type").and_then(|t| t.as_str()) == Some("function_call")
-                        {
-                            current_tool_name = item
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            current_tool_id = item
-                                .get("call_id")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            current_tool_args.clear();
-                        }
-                    }
-
-                    "response.output_item.done" => {
-                        if let Some(item) = data.get("item") {
-                            let item_type =
-                                item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            if item_type == "function_call" {
-                                // Apply the same control-byte / invalid-escape
-                                // repair the other streaming providers use,
-                                // so a malformed argument payload doesn't
-                                // silently drop the entire tool call to `{}`.
-                                let args: Value = if current_tool_args.is_empty() {
-                                    Value::Object(Default::default())
-                                } else {
-                                    serde_json::from_str(&current_tool_args)
-                                        .ok()
-                                        .or_else(|| {
-                                            crate::transform::parse_json_with_repair(
-                                                &current_tool_args,
-                                            )
-                                        })
-                                        .unwrap_or(Value::Object(Default::default()))
-                                };
-                                output
-                                    .content
-                                    .push(AssistantContentBlock::ToolCall(ToolCall {
-                                        content_type: "tool_call".to_string(),
-                                        id: current_tool_id.clone(),
-                                        name: current_tool_name.clone(),
-                                        arguments: args,
-                                        thought_signature: None,
-                                    }));
-                                output.stop_reason = StopReason::ToolUse;
-                                current_tool_name.clear();
-                                current_tool_id.clear();
-                                current_tool_args.clear();
-                            }
-                        }
-                    }
-
-                    "response.content_part.done" if !text_buffer.is_empty() => {
-                        output
-                            .content
-                            .push(AssistantContentBlock::Text(TextContent {
-                                content_type: "text".to_string(),
-                                text: text_buffer.clone(),
-                                text_signature: None,
-                            }));
-                    }
-
-                    "response.completed" => {
-                        if let Some(response) = data.get("response")
-                            && let Some(usage) = response.get("usage")
-                        {
-                            output.usage.input = usage
-                                .get("input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            output.usage.output = usage
-                                .get("output_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                        }
-                    }
-
-                    _ => {}
+                for ev in dispatch_responses_event(&mut state, output, &event_type, &data) {
+                    yield ev;
                 }
             }
         }
 
-        if !thinking_buffer.is_empty() {
-            output.content.insert(
-                0,
-                AssistantContentBlock::Thinking(ThinkingContent {
-                    content_type: "thinking".to_string(),
-                    thinking: thinking_buffer,
-                    thinking_signature: None,
-                    redacted: None,
-                }),
-            );
-        }
-
-        if !text_buffer.is_empty()
-            && !output
-                .content
-                .iter()
-                .any(|c| matches!(c, AssistantContentBlock::Text(_)))
-        {
-            output
-                .content
-                .push(AssistantContentBlock::Text(TextContent {
-                    content_type: "text".to_string(),
-                    text: text_buffer,
-                    text_signature: None,
-                }));
-        }
+        finalize_responses_output(state, output);
     }
 }
 
@@ -345,4 +410,217 @@ pub(crate) fn current_timestamp_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Api, Provider, Usage};
+    use serde_json::json;
+
+    fn empty_assistant_message() -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![],
+            api: Api::OpenAIResponses,
+            provider: Provider::OpenAI,
+            model: "test".to_string(),
+            stop_reason: StopReason::Stop,
+            usage: Usage::default(),
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    fn run_events(events: &[(&str, Value)]) -> AssistantMessage {
+        let mut state = ResponsesParseState::default();
+        let mut output = empty_assistant_message();
+        for (ty, data) in events {
+            let _ = dispatch_responses_event(&mut state, &mut output, ty, data);
+        }
+        finalize_responses_output(state, &mut output);
+        output
+    }
+
+    /// Pi-mono #4191: LM Studio and other Responses-compatible servers emit
+    /// `response.reasoning_text.delta` instead of OpenAI's native
+    /// `response.reasoning_summary_text.delta`. Both must produce
+    /// ThinkingDelta events and accumulate into the final thinking block.
+    #[test]
+    fn reasoning_text_delta_emits_thinking_and_persists_block() {
+        let mut state = ResponsesParseState::default();
+        let mut output = empty_assistant_message();
+
+        let ev1 = dispatch_responses_event(
+            &mut state,
+            &mut output,
+            "response.reasoning_text.delta",
+            &json!({ "delta": "Let me " }),
+        );
+        let ev2 = dispatch_responses_event(
+            &mut state,
+            &mut output,
+            "response.reasoning_text.delta",
+            &json!({ "delta": "think." }),
+        );
+
+        assert_eq!(ev1.len(), 1, "first delta must emit one event");
+        assert_eq!(ev2.len(), 1, "second delta must emit one event");
+        assert!(matches!(
+            ev1[0],
+            AssistantMessageEvent::ThinkingDelta { .. }
+        ));
+        assert!(matches!(
+            ev2[0],
+            AssistantMessageEvent::ThinkingDelta { .. }
+        ));
+
+        finalize_responses_output(state, &mut output);
+
+        let thinking_block = output
+            .content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContentBlock::Thinking(t) => Some(t),
+                _ => None,
+            })
+            .expect("thinking block should be present after finalize");
+        assert_eq!(thinking_block.thinking, "Let me think.");
+    }
+
+    /// Both `reasoning_text.delta` and `reasoning_summary_text.delta` must
+    /// share the same thinking accumulator so providers that mix-and-match
+    /// (or change their event names mid-stream) still produce one coherent
+    /// thinking block.
+    #[test]
+    fn reasoning_text_and_summary_share_accumulator() {
+        let output = run_events(&[
+            (
+                "response.reasoning_text.delta",
+                json!({ "delta": "step 1; " }),
+            ),
+            (
+                "response.reasoning_summary_text.delta",
+                json!({ "delta": "step 2." }),
+            ),
+        ]);
+        let thinking = output
+            .content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContentBlock::Thinking(t) => Some(t.thinking.clone()),
+                _ => None,
+            })
+            .expect("thinking block missing");
+        assert_eq!(thinking, "step 1; step 2.");
+    }
+
+    /// Pi-mono parity: when `response.output_item.done` arrives for a
+    /// `reasoning` item, the server-authoritative summary text replaces
+    /// whatever streamed via deltas. This matters because some servers
+    /// emit the final canonical text only in the done item.
+    #[test]
+    fn output_item_done_reasoning_uses_summary_text() {
+        let mut state = ResponsesParseState::default();
+        let mut output = empty_assistant_message();
+
+        let _ = dispatch_responses_event(
+            &mut state,
+            &mut output,
+            "response.reasoning_text.delta",
+            &json!({ "delta": "partial..." }),
+        );
+        let _ = dispatch_responses_event(
+            &mut state,
+            &mut output,
+            "response.output_item.done",
+            &json!({
+                "item": {
+                    "type": "reasoning",
+                    "summary": [{ "text": "final summary" }],
+                }
+            }),
+        );
+        finalize_responses_output(state, &mut output);
+
+        let thinking = output
+            .content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContentBlock::Thinking(t) => Some(t.thinking.clone()),
+                _ => None,
+            })
+            .expect("thinking block missing");
+        assert_eq!(thinking, "final summary");
+    }
+
+    /// Pi-mono parity: when summary is absent on the done item, fall back
+    /// to `content[].text`. Some providers (LM Studio variants) deliver the
+    /// canonical reasoning body only in `content`.
+    #[test]
+    fn output_item_done_reasoning_falls_back_to_content_text() {
+        let mut state = ResponsesParseState::default();
+        let mut output = empty_assistant_message();
+
+        let _ = dispatch_responses_event(
+            &mut state,
+            &mut output,
+            "response.output_item.done",
+            &json!({
+                "item": {
+                    "type": "reasoning",
+                    "content": [
+                        { "text": "part a" },
+                        { "text": "part b" }
+                    ],
+                }
+            }),
+        );
+        finalize_responses_output(state, &mut output);
+
+        let thinking = output
+            .content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContentBlock::Thinking(t) => Some(t.thinking.clone()),
+                _ => None,
+            })
+            .expect("thinking block missing");
+        assert_eq!(thinking, "part a\n\npart b");
+    }
+
+    /// When neither `summary` nor `content` is present on a reasoning done
+    /// item, the streamed delta accumulator must be preserved (no clobber).
+    #[test]
+    fn output_item_done_reasoning_preserves_streamed_thinking() {
+        let mut state = ResponsesParseState::default();
+        let mut output = empty_assistant_message();
+
+        let _ = dispatch_responses_event(
+            &mut state,
+            &mut output,
+            "response.reasoning_text.delta",
+            &json!({ "delta": "kept" }),
+        );
+        let _ = dispatch_responses_event(
+            &mut state,
+            &mut output,
+            "response.output_item.done",
+            &json!({ "item": { "type": "reasoning" } }),
+        );
+        finalize_responses_output(state, &mut output);
+
+        let thinking = output
+            .content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContentBlock::Thinking(t) => Some(t.thinking.clone()),
+                _ => None,
+            })
+            .expect("thinking block missing");
+        assert_eq!(thinking, "kept");
+    }
 }
