@@ -134,7 +134,12 @@ fn try_ripgrep(
         cmd.arg("--glob").arg(glob);
     }
 
-    cmd.arg(pattern).arg(search_path);
+    // Stop flag parsing before the user-controlled pattern. Without
+    // `--`, a pattern like `--pre=/tmp/payload.sh` is interpreted by
+    // ripgrep as the `--pre` preprocessor flag, which executes the
+    // script for every searched file (an LLM-injection RCE). Pi-mono
+    // has an explicit test for this.
+    cmd.arg("--").arg(pattern).arg(search_path);
 
     match cmd.output() {
         Ok(output) => {
@@ -176,7 +181,8 @@ fn try_grep(
         cmd.arg("--include").arg(glob);
     }
 
-    cmd.arg(pattern).arg(search_path);
+    // Same flag-injection guard as the ripgrep branch above.
+    cmd.arg("--").arg(pattern).arg(search_path);
 
     match cmd.output() {
         Ok(output) => {
@@ -234,5 +240,61 @@ mod tests {
         let result = execute_grep(dir.path(), json!({}));
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter"));
+    }
+
+    /// Pi-mono test: a `--pre=…` pattern must not let ripgrep execute
+    /// the referenced script as a preprocessor. With `cmd.arg(pattern)`
+    /// directly (no `--`), ripgrep parses the flag and runs the
+    /// preprocessor on every searched file. This is a real RCE vector
+    /// when the pattern comes from an LLM acting on attacker-controlled
+    /// content. The fix is to insert `--` before the pattern so flag
+    /// parsing stops.
+    ///
+    /// We verify the guard by trying a flag-shaped pattern that, if
+    /// interpreted as a flag, would either error or execute. Either
+    /// way the search must NOT produce results and MUST NOT leave a
+    /// marker file behind.
+    #[test]
+    fn test_grep_flag_pattern_does_not_execute_preprocessor() {
+        let dir = TempDir::new().unwrap();
+        let marker = dir.path().join("grep-injection-marker");
+        let payload = dir.path().join("payload.sh");
+        let target = dir.path().join("target.txt");
+        std::fs::write(
+            &payload,
+            format!(
+                "#!/bin/sh\necho executed > {}\ncat \"$1\"\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&payload, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(&target, "target\n").unwrap();
+
+        let result = execute_grep(
+            dir.path(),
+            json!({
+                "pattern": format!("--pre={}", payload.display()),
+                "path": dir.path().to_str().unwrap(),
+            }),
+        );
+        let text = get_text(&result);
+        // The flag-shaped pattern should be treated as literal search
+        // text (no match against `target\n`).
+        assert!(
+            text.contains("No matches") || text.contains("no matches") || text.trim().is_empty()
+                || text.to_lowercase().contains("not found"),
+            "expected no matches for flag-pattern, got: {text}"
+        );
+        // And the preprocessor MUST NOT have run.
+        assert!(
+            !marker.exists(),
+            "RCE: payload executed and wrote {}",
+            marker.display()
+        );
     }
 }
