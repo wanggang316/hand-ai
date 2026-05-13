@@ -404,28 +404,99 @@ fn handle_export(
 /// behavior). This intentionally only handles TEXT files for now —
 /// image attachments require the ImageContent path and resizing logic
 /// that hand's --prompt single-string interface doesn't yet expose.
-fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, String> {
-    // Collect leading `@<path>` tokens, stop at the first non-@ token.
-    // We keep splitting on whitespace conservatively — quoted paths
-    // containing spaces aren't supported (matches pi's positional shell
-    // behavior where the shell already split them).
-    let mut iter = prompt.split_whitespace();
-    let mut attachments: Vec<String> = Vec::new();
-    let mut rest_start = 0usize;
-    let mut cursor = 0usize;
-    for tok in &mut iter {
-        let tok_start = prompt[cursor..]
-            .find(tok)
-            .map(|i| cursor + i)
-            .unwrap_or(cursor);
-        let tok_end = tok_start + tok.len();
-        if let Some(path) = tok.strip_prefix('@') {
-            attachments.push(path.to_string());
-            rest_start = tok_end;
-            cursor = tok_end;
-        } else {
+/// Split `s` on ASCII whitespace and return each token alongside its byte
+/// offset in the original string. Mirrors `str::split_whitespace` but
+/// preserves the position info we need to reconstruct the rest of the
+/// prompt after the leading @-tokens.
+fn split_whitespace_with_offsets(s: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Skip whitespace.
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
             break;
         }
+        let start = i;
+        while i < bytes.len() && !(bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+        out.push((start, &s[start..i]));
+    }
+    out
+}
+
+/// Returns `true` when the @-path candidate (after `~` / cwd expansion)
+/// points at a file the process can stat. Used by [`expand_at_mentions`]
+/// to disambiguate paths with spaces in them.
+fn at_path_exists(path_str: &str, cwd: &std::path::Path) -> bool {
+    let expanded = crate::tools::path_utils::expand_path(path_str);
+    let abs = if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    };
+    std::fs::metadata(&abs).is_ok()
+}
+
+fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, String> {
+    // Collect leading `@<path>` tokens, stop at the first non-@ token.
+    //
+    // Pi's argv-positional flow gives it free quoting for paths with
+    // spaces; hand's single --prompt string does not. To preserve the
+    // behavior we look ahead: if `@token` doesn't resolve to an existing
+    // file, greedily glue subsequent whitespace-separated tokens onto
+    // the path until we find one that does. The greedy match stops at
+    // either the first existing-file candidate OR the first remaining
+    // token that itself starts with `@` (next attachment) — that way
+    // multiple @attachments can coexist with spaced paths.
+    let tokens: Vec<(usize, &str)> = split_whitespace_with_offsets(prompt);
+    let mut attachments: Vec<String> = Vec::new();
+    let mut rest_start = 0usize;
+    let mut i = 0usize;
+    while i < tokens.len() {
+        let (tok_off, tok) = tokens[i];
+        let Some(initial_path) = tok.strip_prefix('@') else {
+            break;
+        };
+        // Greedy lookahead: try the bare candidate first, then grow it
+        // by appending more tokens (joined by a single space).
+        let mut best_end = tok_off + tok.len();
+        let mut chosen = initial_path.to_string();
+        let mut chosen_found = at_path_exists(&chosen, cwd);
+        let mut j = i + 1;
+        while j < tokens.len() {
+            let (_, next_tok) = tokens[j];
+            if next_tok.starts_with('@') {
+                // Don't swallow the next attachment.
+                break;
+            }
+            let trial = format!("{chosen} {next_tok}");
+            if at_path_exists(&trial, cwd) {
+                chosen = trial;
+                chosen_found = true;
+                best_end = tokens[j].0 + next_tok.len();
+                j += 1;
+                // Keep growing in case a longer match also exists (rare
+                // but possible with prefix-confusable paths).
+                continue;
+            }
+            // If we haven't found anything yet, optimistically keep
+            // growing — a deeper path component might bring the path
+            // into existence. If we already have a match, stop here.
+            if chosen_found {
+                break;
+            }
+            chosen = trial;
+            best_end = tokens[j].0 + next_tok.len();
+            j += 1;
+        }
+        attachments.push(chosen);
+        rest_start = best_end;
+        i = j;
     }
     if attachments.is_empty() {
         return Ok(prompt.to_string());
@@ -601,6 +672,45 @@ mod tests {
     /// same way the read tool does, not get joined onto cwd as
     /// `cwd/~/path` (which then fails to find the file). Pi-mono
     /// resolves these. Test writes into HOME, expands, and removes.
+    /// Pi-mono accepts paths with spaces as a single argv positional —
+    /// hand's single `--prompt` string can't preserve that grouping
+    /// directly. The expander uses greedy lookahead to glue subsequent
+    /// non-@ tokens onto the path until it resolves. Verifies that a
+    /// path like `@/tmp/dir with space/file` is found even though it
+    /// crosses two whitespace-separated tokens, AND that the trailing
+    /// prompt question is preserved separately.
+    #[test]
+    fn at_mentions_handle_paths_with_spaces() {
+        let dir = std::env::temp_dir().join(format!(
+            "hand-spc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let with_space = dir.join("subdir with space");
+        std::fs::create_dir_all(&with_space).unwrap();
+        let path = with_space.join("attach.txt");
+        std::fs::write(&path, "SPACE_BODY").unwrap();
+        // Prompt has the path with a literal space + a trailing question.
+        let prompt = format!("@{} describe", path.display());
+        let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
+        assert!(
+            out.contains("SPACE_BODY"),
+            "spaced path must resolve and inline the body; got: {out}"
+        );
+        assert!(
+            out.contains(&path.display().to_string()),
+            "spaced absolute path must appear in <file name=...>, got: {out}"
+        );
+        assert!(
+            out.trim_end().ends_with("describe"),
+            "trailing question must survive lookahead, got: {out}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn at_mentions_expand_tilde_against_home() {
         let home = match std::env::var("HOME") {
