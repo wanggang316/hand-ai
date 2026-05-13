@@ -86,11 +86,23 @@ fn execute_find(cwd: &Path, args: serde_json::Value) -> ToolResult {
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_MAX_RESULTS as u64) as usize;
 
-    // Build the full glob pattern
-    let full_pattern = if pattern.starts_with('/') || pattern.contains(":/") {
-        pattern.to_string()
+    // Build the full glob pattern.
+    //
+    // Pi-mono parity (issue #3302): a basename-only pattern with no `/`
+    // (e.g. `*.spec.ts`) should match at ANY depth in the search tree.
+    // Without the auto-prepend a model that runs `find *.rs` only sees
+    // top-level matches and misses the entire src/ subtree. Path-shaped
+    // patterns (containing a `/`) stay anchored at the search root so
+    // `src/**/*.spec.ts` only matches under the literal `src/`.
+    let normalized = if !pattern.contains('/') && !pattern.starts_with('/') {
+        format!("**/{}", pattern)
     } else {
-        format!("{}/{}", search_path.display(), pattern)
+        pattern.to_string()
+    };
+    let full_pattern = if normalized.starts_with('/') || normalized.contains(":/") {
+        normalized
+    } else {
+        format!("{}/{}", search_path.display(), normalized)
     };
 
     match glob::glob(&full_pattern) {
@@ -247,6 +259,52 @@ mod tests {
         assert!(!is_auto_ignored(".gitignore"));
         // The fragment `git` alone shouldn't trigger the `.git` match.
         assert!(!is_auto_ignored("git/log"));
+    }
+
+    /// Pi-mono parity (issue #3302): basename-only patterns like
+    /// `*.spec.ts` must match files at ANY depth in the search tree.
+    /// Pi-mono auto-prepends `**/` to patterns that don't contain a `/`
+    /// so users get the conventional "find by basename" behavior without
+    /// having to write `**/*.spec.ts` explicitly. Without this fix a
+    /// model that does `find *.rs` only sees top-level files and misses
+    /// the entire src/ tree.
+    #[test]
+    fn test_find_basename_pattern_matches_at_any_depth() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        std::fs::write(dir.path().join("top.spec.ts"), "").unwrap();
+        std::fs::write(dir.path().join("a/mid.spec.ts"), "").unwrap();
+        std::fs::write(dir.path().join("a/b/c/deep.spec.ts"), "").unwrap();
+        std::fs::write(dir.path().join("noise.txt"), "").unwrap();
+
+        let result = execute_find(dir.path(), json!({"pattern": "*.spec.ts"}));
+        let text = get_text(&result);
+        assert!(text.contains("top.spec.ts"), "top: {text}");
+        assert!(text.contains("mid.spec.ts"), "mid: {text}");
+        assert!(text.contains("deep.spec.ts"), "deep: {text}");
+        assert!(!text.contains("noise.txt"));
+    }
+
+    /// Path-shaped patterns (containing `/`) must continue to work as
+    /// rooted globs. Pi treats `src/**/*.spec.ts` as anchored at the
+    /// search root, not at any depth.
+    #[test]
+    fn test_find_path_shaped_pattern_anchored_at_root() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/foo")).unwrap();
+        std::fs::create_dir_all(dir.path().join("other/src/foo")).unwrap();
+        std::fs::write(dir.path().join("src/foo/match.spec.ts"), "").unwrap();
+        std::fs::write(dir.path().join("other/src/foo/skip.spec.ts"), "").unwrap();
+
+        let result = execute_find(dir.path(), json!({"pattern": "src/**/*.spec.ts"}));
+        let text = get_text(&result);
+        assert!(text.contains("src/foo/match.spec.ts"), "{text}");
+        // `src/` is anchored at root, so the nested src/ inside other/
+        // must NOT match.
+        assert!(
+            !text.contains("other/src/foo/skip.spec.ts"),
+            "anchored path shouldn't match nested src/: {text}"
+        );
     }
 
     /// Pi-mono test: a flag-shaped pattern (`--help`) must be treated as
