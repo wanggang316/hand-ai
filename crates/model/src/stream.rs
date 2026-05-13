@@ -274,6 +274,15 @@ fn is_retriable_error(message: &str) -> bool {
     if lower.contains("network_error") {
         return true;
     }
+    // Pi-mono parity (issue #3317): Apple's URLSession surfaces
+    // "Network connection lost." for transient connectivity blips it
+    // believes will recover on retry. Anthropic's Swift SDK passes
+    // this through verbatim. Recognise the substring so iOS/macOS
+    // users on flaky WiFi don't see momentary handoffs terminate the
+    // agent loop.
+    if lower.contains("network connection lost") {
+        return true;
+    }
     false
 }
 
@@ -353,6 +362,29 @@ mod tests {
     fn retriable_still_rejects_other_5xx() {
         assert!(!is_retriable_error("HTTP 501 not implemented"));
         assert!(!is_retriable_error("HTTP 505 http version not supported"));
+    }
+
+    /// Pi-mono parity (issue #3317): Apple's URLSession surfaces a
+    /// "Network connection lost." string for transient connectivity
+    /// blips that the OS itself believes will recover on retry.
+    /// Anthropic's Swift SDK passes this through verbatim; without
+    /// recognising it, an iOS/macOS user on flaky WiFi would see
+    /// every momentary handoff terminate the agent loop. Pi's fix
+    /// added the token; mirror it here. We anchor on a substring so
+    /// minor wording changes ("network connection was lost") still
+    /// retry.
+    #[test]
+    fn retriable_recognizes_network_connection_lost() {
+        assert!(is_retriable_error("Network connection lost."));
+        assert!(is_retriable_error("network connection lost"));
+        assert!(is_retriable_error(
+            "Provider returned: Network connection lost. Try again."
+        ));
+        // Adjacent phrasing that should NOT match — we want a tight
+        // anchor, not a generic "lost" string that would catch
+        // unrelated copy.
+        assert!(!is_retriable_error("Network is fine."));
+        assert!(!is_retriable_error("Connection details: ..."));
     }
 
     #[test]
