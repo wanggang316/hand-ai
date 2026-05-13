@@ -477,7 +477,7 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
         // the prompt rest so users still see what they meant.
         let bare_end = tok_off + tok.len();
         let mut chosen = initial_path.to_string();
-        let mut chosen_found = at_path_exists(&chosen, cwd);
+        let chosen_found = at_path_exists(&chosen, cwd);
         let mut best_end = bare_end;
         let mut j = i + 1;
         if !chosen_found {
@@ -493,12 +493,15 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
                 trial = format!("{trial} {next_tok}");
                 if at_path_exists(&trial, cwd) {
                     chosen = trial.clone();
-                    chosen_found = true;
                     best_end = tokens[k].0 + next_tok.len();
                     j = k + 1;
                 }
                 k += 1;
             }
+            // The flag is only read AFTER the loop in earlier drafts;
+            // clarify that we no longer need it now that `j` is the
+            // source of truth for "have we committed an extension".
+            let _ = chosen_found;
         }
         attachments.push(chosen);
         rest_start = best_end;
