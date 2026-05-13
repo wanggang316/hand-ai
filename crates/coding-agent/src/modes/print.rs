@@ -463,36 +463,37 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
             break;
         };
         // Greedy lookahead: try the bare candidate first, then grow it
-        // by appending more tokens (joined by a single space).
-        let mut best_end = tok_off + tok.len();
+        // by appending more tokens (joined by a single space). If the
+        // bare candidate or any extension resolves to an existing file,
+        // use the longest match. Otherwise — the user-typed token
+        // is broken in some way — keep the BARE initial path and let
+        // downstream report the missing file with the cleanest path
+        // (not "missing.txt summarize"). The trailing tokens stay in
+        // the prompt rest so users still see what they meant.
+        let bare_end = tok_off + tok.len();
         let mut chosen = initial_path.to_string();
         let mut chosen_found = at_path_exists(&chosen, cwd);
+        let mut best_end = bare_end;
         let mut j = i + 1;
-        while j < tokens.len() {
-            let (_, next_tok) = tokens[j];
-            if next_tok.starts_with('@') {
-                // Don't swallow the next attachment.
-                break;
+        if !chosen_found {
+            // Grow the candidate only when it might become a real path.
+            // Stop at the next `@` (next attachment) — never swallow it.
+            let mut trial = chosen.clone();
+            let mut k = j;
+            while k < tokens.len() {
+                let (_, next_tok) = tokens[k];
+                if next_tok.starts_with('@') {
+                    break;
+                }
+                trial = format!("{trial} {next_tok}");
+                if at_path_exists(&trial, cwd) {
+                    chosen = trial.clone();
+                    chosen_found = true;
+                    best_end = tokens[k].0 + next_tok.len();
+                    j = k + 1;
+                }
+                k += 1;
             }
-            let trial = format!("{chosen} {next_tok}");
-            if at_path_exists(&trial, cwd) {
-                chosen = trial;
-                chosen_found = true;
-                best_end = tokens[j].0 + next_tok.len();
-                j += 1;
-                // Keep growing in case a longer match also exists (rare
-                // but possible with prefix-confusable paths).
-                continue;
-            }
-            // If we haven't found anything yet, optimistically keep
-            // growing — a deeper path component might bring the path
-            // into existence. If we already have a match, stop here.
-            if chosen_found {
-                break;
-            }
-            chosen = trial;
-            best_end = tokens[j].0 + next_tok.len();
-            j += 1;
         }
         attachments.push(chosen);
         rest_start = best_end;
@@ -655,6 +656,24 @@ mod tests {
         let prompt = format!("preamble @{} trailing", path.display());
         let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
         assert_eq!(out, prompt, "no leading @, prompt must pass through verbatim");
+    }
+
+    /// The greedy-lookahead added for spaced paths must not swallow
+    /// trailing prompt tokens into the missing-file error message. A
+    /// non-existent @file followed by question text should error with
+    /// the bare path, never "missing.txt summarize".
+    #[test]
+    fn at_mentions_missing_file_error_excludes_trailing_prompt_tokens() {
+        let prompt = "@/tmp/this-path-does-not-exist-xyz123.txt summarize this";
+        let err = expand_at_mentions(prompt, &std::env::temp_dir()).unwrap_err();
+        assert!(
+            err.contains("/tmp/this-path-does-not-exist-xyz123.txt"),
+            "expected the bare path in error, got: {err}"
+        );
+        assert!(
+            !err.contains("summarize"),
+            "trailing prompt tokens must NOT leak into the path error, got: {err}"
+        );
     }
 
     #[test]
