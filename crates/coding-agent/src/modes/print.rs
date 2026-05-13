@@ -603,10 +603,10 @@ fn read_piped_stdin() -> Option<String> {
 
 /// Combine piped-stdin and `--prompt` into a single initial message.
 /// Pi-mono's `buildInitialMessage` concatenates `stdin + fileText + prompt`
-/// (file-text is the `--prompt @file` path that already lands in
-/// `prompt`). Order matters: stdin comes FIRST so the user prompt has
-/// final framing — e.g. `cat data | hand --print -p "summarize the
-/// preceding data"`.
+/// with an EMPTY separator (`parts.join("")`); it relies on the source
+/// strings (especially stdin) to carry their own trailing newlines. Order
+/// matters: stdin comes FIRST so the user prompt provides final framing —
+/// e.g. `cat data | hand --print -p "summarize the preceding data"`.
 ///
 /// Returns `None` when neither source contributes content so the caller
 /// can skip the agent send entirely. An empty `--prompt` is treated as
@@ -624,9 +624,11 @@ fn build_initial_message(stdin: Option<&str>, prompt: Option<&str>) -> Option<St
     if parts.is_empty() {
         None
     } else {
-        // Join with a blank line so the two sources read as separate
-        // turns rather than one run-on string.
-        Some(parts.join("\n\n"))
+        // Empty separator — pi-mono parity. Stdin payloads typically end
+        // in `\n` already, so a plain concat reads as `<stdin>\n<prompt>`.
+        // Inserting our own `\n\n` would double up newlines and diverge
+        // from pi byte-for-byte.
+        Some(parts.concat())
     }
 }
 
@@ -739,15 +741,30 @@ mod tests {
         assert!(text.contains("\"type\":\"session\""));
     }
 
-    /// Pi-mono parity: piped stdin and `--prompt` concatenate into a
-    /// single initial message. The stdin payload comes FIRST so the
-    /// user's prompt (typically framing instructions) appears last.
-    /// Without this, `cat data.csv | hand --print -p "summarize"` would
-    /// silently drop the CSV.
+    /// Pi-mono parity (exact byte equality): piped stdin and `--prompt`
+    /// concatenate into a single initial message with an empty
+    /// separator. The pi `initial-message.test.ts` test pins
+    /// `"README contents\nSummarize the text given"` — the single `\n`
+    /// is from stdin's trailing newline, not an injected blank line.
+    /// Adding our own separator would diverge from pi byte-for-byte
+    /// and could break a model that's been tuned on pi's exact prompt
+    /// shape.
     #[test]
     fn build_initial_message_concatenates_stdin_and_prompt() {
-        let combined = build_initial_message(Some("piped data"), Some("summarize"));
-        assert_eq!(combined.as_deref(), Some("piped data\n\nsummarize"));
+        // Stdin payloads typically end in \n (line-buffered shell).
+        let combined = build_initial_message(
+            Some("README contents\n"),
+            Some("Summarize the text given"),
+        );
+        assert_eq!(
+            combined.as_deref(),
+            Some("README contents\nSummarize the text given")
+        );
+
+        // Without a trailing newline on stdin the two strings adjoin
+        // directly — same as pi.
+        let no_nl = build_initial_message(Some("data"), Some("summarize"));
+        assert_eq!(no_nl.as_deref(), Some("datasummarize"));
     }
 
     /// Stdin alone — common with `echo "..." | hand --print` patterns
