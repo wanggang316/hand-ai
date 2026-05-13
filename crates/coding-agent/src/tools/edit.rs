@@ -74,28 +74,45 @@ fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
     // doesn't introduce mixed endings. See pi-mono edit tool CRLF
     // tests.
     let file_has_crlf = content.contains("\r\n");
-    let old_string_owned: String;
-    let new_string_owned: String;
-    let (old_string, new_string): (&str, &str) = {
+    let crlf_old_owned: String;
+    let crlf_new_owned: String;
+    let (crlf_old, crlf_new): (&str, &str) = {
         if content.contains(old_string) {
             (old_string, new_string)
         } else if file_has_crlf && !old_string.contains("\r\n") && old_string.contains('\n') {
-            // File is CRLF, old_string is LF — normalize old_string and
-            // new_string to CRLF so the replacement preserves the file's
-            // existing line endings.
-            old_string_owned = old_string.replace('\n', "\r\n");
-            new_string_owned = new_string.replace('\n', "\r\n");
-            (old_string_owned.as_str(), new_string_owned.as_str())
+            crlf_old_owned = old_string.replace('\n', "\r\n");
+            crlf_new_owned = new_string.replace('\n', "\r\n");
+            (crlf_old_owned.as_str(), crlf_new_owned.as_str())
         } else if !file_has_crlf && old_string.contains("\r\n") {
-            // File is LF, old_string is CRLF — strip the \r so it
-            // matches and the replacement stays LF.
-            old_string_owned = old_string.replace("\r\n", "\n");
-            new_string_owned = new_string.replace("\r\n", "\n");
-            (old_string_owned.as_str(), new_string_owned.as_str())
+            crlf_old_owned = old_string.replace("\r\n", "\n");
+            crlf_new_owned = new_string.replace("\r\n", "\n");
+            (crlf_old_owned.as_str(), crlf_new_owned.as_str())
         } else {
             (old_string, new_string)
         }
     };
+
+    // Pi-mono parity stage 2: Unicode fuzzy match. If the CRLF-tolerant
+    // version still doesn't find the old_string in the file, try
+    // matching in a normalized space where smart quotes / Unicode
+    // dashes / NBSP collapse to their ASCII equivalents. When the
+    // fuzzy match succeeds, the replacement happens in the normalized
+    // content — same side effect as pi: smart quotes in the file get
+    // rewritten to ASCII as part of the edit. Documented behavior.
+    let (content, old_string, new_string): (String, String, String) = if content.contains(crlf_old)
+    {
+        (content.clone(), crlf_old.to_string(), crlf_new.to_string())
+    } else {
+        let fuzzy_content = normalize_for_fuzzy_match(&content);
+        let fuzzy_old = normalize_for_fuzzy_match(crlf_old);
+        if fuzzy_content.contains(&fuzzy_old) {
+            let fuzzy_new = normalize_for_fuzzy_match(crlf_new);
+            (fuzzy_content, fuzzy_old, fuzzy_new)
+        } else {
+            (content.clone(), crlf_old.to_string(), crlf_new.to_string())
+        }
+    };
+    let (old_string, new_string): (&str, &str) = (old_string.as_str(), new_string.as_str());
 
     // Check for old_string in content
     let match_count = content.matches(old_string).count();
@@ -130,6 +147,36 @@ fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
     }
 
     ToolResult::text(diff)
+}
+
+/// Normalize a string for fuzzy edit-tool matching: smart quotes →
+/// ASCII, Unicode dashes → ASCII hyphen, NBSP/wide spaces → space.
+/// Mirrors pi-mono's `normalizeForFuzzyMatch` minus NFKC (we don't
+/// pull a full Unicode normalization dependency for the common case;
+/// users hitting NFKC-only edge cases can still rely on the literal-
+/// match fast path).
+pub fn normalize_for_fuzzy_match(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        let replacement = match ch {
+            // Smart single quotes (U+2018, U+2019, U+201A, U+201B)
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+            // Smart double quotes (U+201C, U+201D, U+201E, U+201F)
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+            // Unicode dashes / minus signs
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
+            | '\u{2212}' => '-',
+            // NBSP and wide / math spaces → ASCII space
+            '\u{00A0}'
+            | '\u{2002}'..='\u{200A}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}' => ' ',
+            other => other,
+        };
+        out.push(replacement);
+    }
+    out
 }
 
 /// Generate a unified diff between old and new content.
@@ -325,6 +372,105 @@ mod tests {
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("new_a\nnew_b"));
         assert!(!after.contains("\r\n"), "result stays LF: {after:?}");
+    }
+
+    /// Pi-mono fuzzy-match parity: smart curly double quotes (U+201C/D)
+    /// in the file must accept ASCII `"` in the model's old_string.
+    /// The replacement happens in the normalized space, so the file's
+    /// curly quotes get rewritten to ASCII as part of the edit
+    /// (documented side effect, mirrors pi).
+    #[test]
+    fn test_edit_fuzzy_smart_double_quotes() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("smart.txt");
+        std::fs::write(&file, "const msg = \u{201C}Hello World\u{201D};\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "const msg = \"Hello World\";",
+                "new_string": "const msg = \"Goodbye\";",
+            }),
+        );
+        let text = get_text(&result);
+        assert!(
+            !text.starts_with("Error:"),
+            "fuzzy quotes must match, got: {text}"
+        );
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("Goodbye"), "replacement applied: {after:?}");
+    }
+
+    /// Smart single quotes (apostrophes) likewise.
+    #[test]
+    fn test_edit_fuzzy_smart_single_quotes() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("smart-single.txt");
+        std::fs::write(&file, "it\u{2019}s working\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "it's working",
+                "new_string": "it's fixed",
+            }),
+        );
+        assert!(!get_text(&result).starts_with("Error:"));
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("fixed"));
+    }
+
+    /// Unicode en-dash / em-dash collapse to ASCII hyphen.
+    #[test]
+    fn test_edit_fuzzy_unicode_dashes() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("dashes.txt");
+        // U+2013 en-dash and U+2014 em-dash.
+        std::fs::write(&file, "range: 1\u{2013}5\nbreak\u{2014}here\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "range: 1-5",
+                "new_string": "range: 10-50",
+            }),
+        );
+        assert!(!get_text(&result).starts_with("Error:"));
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("range: 10-50"));
+    }
+
+    /// NBSP (U+00A0) in the file matches plain space in old_string.
+    #[test]
+    fn test_edit_fuzzy_nbsp() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("nbsp.txt");
+        std::fs::write(&file, "hello\u{00A0}world\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "hello world",
+                "new_string": "hello rust",
+            }),
+        );
+        assert!(!get_text(&result).starts_with("Error:"));
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("hello rust"));
+    }
+
+    #[test]
+    fn test_normalize_for_fuzzy_match_pure_function() {
+        assert_eq!(
+            normalize_for_fuzzy_match("smart \u{201C}quotes\u{201D} and \u{2014}dash"),
+            "smart \"quotes\" and -dash"
+        );
+        assert_eq!(normalize_for_fuzzy_match("plain ascii"), "plain ascii");
+        assert_eq!(normalize_for_fuzzy_match("nb\u{00A0}sp"), "nb sp");
     }
 
     /// Single-line edits with no `\n` in either string must continue
