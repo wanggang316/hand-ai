@@ -1,5 +1,6 @@
 //! Edit tool — find-and-replace edits with diff output.
 
+use crate::tools::file_mutation_queue::with_file_mutation_queue;
 use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use similar::TextDiff;
@@ -36,12 +37,12 @@ pub fn create_edit_tool(cwd: PathBuf) -> AgentTool {
         "Edit",
         move |_tool_call_id, args| {
             let cwd = cwd.clone();
-            async move { execute_edit(&cwd, args) }
+            async move { execute_edit(&cwd, args).await }
         },
     )
 }
 
-fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
+async fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let file_path = match args.get("file_path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return ToolResult::error("Missing required parameter: file_path"),
@@ -60,8 +61,22 @@ fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
         .unwrap_or(false);
 
     let path = resolve_path(cwd, file_path);
+    let old_string = old_string.to_string();
+    let new_string = new_string.to_string();
+    let path_for_async = path.clone();
 
-    let content = match std::fs::read_to_string(&path) {
+    // Pi-mono parity: serialise the read-modify-write against the same
+    // file. Two parallel edits to the same path would otherwise both
+    // observe the original content and the later writer would clobber
+    // the earlier edit silently.
+    with_file_mutation_queue(&path, async move {
+        run_edit(&path_for_async, &old_string, &new_string, replace_all)
+    })
+    .await
+}
+
+fn run_edit(path: &Path, old_string: &str, new_string: &str, replace_all: bool) -> ToolResult {
+    let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
     };
@@ -214,8 +229,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_edit_simple_replace() {
+    #[tokio::test]
+    async fn test_edit_simple_replace() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.txt");
         std::fs::write(&file, "hello world").unwrap();
@@ -227,15 +242,15 @@ mod tests {
                 "old_string": "world",
                 "new_string": "rust"
             }),
-        );
+        ).await;
         let text = get_text(&result);
         assert!(text.contains("-hello world"));
         assert!(text.contains("+hello rust"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello rust");
     }
 
-    #[test]
-    fn test_edit_not_found() {
+    #[tokio::test]
+    async fn test_edit_not_found() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.txt");
         std::fs::write(&file, "hello").unwrap();
@@ -247,13 +262,13 @@ mod tests {
                 "old_string": "nonexistent",
                 "new_string": "foo"
             }),
-        );
+        ).await;
         let text = get_text(&result);
         assert!(text.contains("not found"));
     }
 
-    #[test]
-    fn test_edit_ambiguous() {
+    #[tokio::test]
+    async fn test_edit_ambiguous() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.txt");
         std::fs::write(&file, "aaa bbb aaa").unwrap();
@@ -265,13 +280,13 @@ mod tests {
                 "old_string": "aaa",
                 "new_string": "ccc"
             }),
-        );
+        ).await;
         let text = get_text(&result);
         assert!(text.contains("found 2 times"));
     }
 
-    #[test]
-    fn test_edit_replace_all() {
+    #[tokio::test]
+    async fn test_edit_replace_all() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.txt");
         std::fs::write(&file, "aaa bbb aaa").unwrap();
@@ -284,7 +299,7 @@ mod tests {
                 "new_string": "ccc",
                 "replace_all": true
             }),
-        );
+        ).await;
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "ccc bbb ccc");
     }
 
@@ -299,8 +314,8 @@ mod tests {
         assert!(diff.contains("+changed"));
     }
 
-    #[test]
-    fn test_edit_multiline() {
+    #[tokio::test]
+    async fn test_edit_multiline() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.txt");
         std::fs::write(&file, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
@@ -312,7 +327,7 @@ mod tests {
                 "old_string": "    println!(\"hello\");",
                 "new_string": "    println!(\"goodbye\");"
             }),
-        );
+        ).await;
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(content.contains("goodbye"));
     }
@@ -321,8 +336,8 @@ mod tests {
     /// separators must still match a CRLF-ended file. The replacement
     /// preserves the file's existing CRLF endings (no mixed line
     /// endings introduced).
-    #[test]
-    fn test_edit_lf_old_string_matches_crlf_file() {
+    #[tokio::test]
+    async fn test_edit_lf_old_string_matches_crlf_file() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("crlf.txt");
         std::fs::write(&file, "line1\r\nold_a\r\nold_b\r\nline4\r\n").unwrap();
@@ -334,7 +349,7 @@ mod tests {
                 "old_string": "old_a\nold_b",
                 "new_string": "new_a\nnew_b",
             }),
-        );
+        ).await;
         let text = get_text(&result);
         assert!(
             !text.starts_with("Error: old_string not found"),
@@ -350,8 +365,8 @@ mod tests {
 
     /// Inverse case: file is LF, model supplies CRLF in old_string.
     /// Match must succeed and result must stay LF.
-    #[test]
-    fn test_edit_crlf_old_string_matches_lf_file() {
+    #[tokio::test]
+    async fn test_edit_crlf_old_string_matches_lf_file() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("lf.txt");
         std::fs::write(&file, "line1\nold_a\nold_b\nline4\n").unwrap();
@@ -363,7 +378,7 @@ mod tests {
                 "old_string": "old_a\r\nold_b",
                 "new_string": "new_a\r\nnew_b",
             }),
-        );
+        ).await;
         let text = get_text(&result);
         assert!(
             !text.starts_with("Error: old_string not found"),
@@ -379,8 +394,8 @@ mod tests {
     /// The replacement happens in the normalized space, so the file's
     /// curly quotes get rewritten to ASCII as part of the edit
     /// (documented side effect, mirrors pi).
-    #[test]
-    fn test_edit_fuzzy_smart_double_quotes() {
+    #[tokio::test]
+    async fn test_edit_fuzzy_smart_double_quotes() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("smart.txt");
         std::fs::write(&file, "const msg = \u{201C}Hello World\u{201D};\n").unwrap();
@@ -392,7 +407,7 @@ mod tests {
                 "old_string": "const msg = \"Hello World\";",
                 "new_string": "const msg = \"Goodbye\";",
             }),
-        );
+        ).await;
         let text = get_text(&result);
         assert!(
             !text.starts_with("Error:"),
@@ -403,8 +418,8 @@ mod tests {
     }
 
     /// Smart single quotes (apostrophes) likewise.
-    #[test]
-    fn test_edit_fuzzy_smart_single_quotes() {
+    #[tokio::test]
+    async fn test_edit_fuzzy_smart_single_quotes() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("smart-single.txt");
         std::fs::write(&file, "it\u{2019}s working\n").unwrap();
@@ -416,15 +431,15 @@ mod tests {
                 "old_string": "it's working",
                 "new_string": "it's fixed",
             }),
-        );
+        ).await;
         assert!(!get_text(&result).starts_with("Error:"));
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("fixed"));
     }
 
     /// Unicode en-dash / em-dash collapse to ASCII hyphen.
-    #[test]
-    fn test_edit_fuzzy_unicode_dashes() {
+    #[tokio::test]
+    async fn test_edit_fuzzy_unicode_dashes() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("dashes.txt");
         // U+2013 en-dash and U+2014 em-dash.
@@ -437,15 +452,15 @@ mod tests {
                 "old_string": "range: 1-5",
                 "new_string": "range: 10-50",
             }),
-        );
+        ).await;
         assert!(!get_text(&result).starts_with("Error:"));
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("range: 10-50"));
     }
 
     /// NBSP (U+00A0) in the file matches plain space in old_string.
-    #[test]
-    fn test_edit_fuzzy_nbsp() {
+    #[tokio::test]
+    async fn test_edit_fuzzy_nbsp() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("nbsp.txt");
         std::fs::write(&file, "hello\u{00A0}world\n").unwrap();
@@ -457,7 +472,7 @@ mod tests {
                 "old_string": "hello world",
                 "new_string": "hello rust",
             }),
-        );
+        ).await;
         assert!(!get_text(&result).starts_with("Error:"));
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("hello rust"));
@@ -475,8 +490,8 @@ mod tests {
 
     /// Single-line edits with no `\n` in either string must continue
     /// to work the same way they did before the CRLF support landed.
-    #[test]
-    fn test_edit_crlf_normalization_does_not_affect_single_line() {
+    #[tokio::test]
+    async fn test_edit_crlf_normalization_does_not_affect_single_line() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("simple.txt");
         std::fs::write(&file, "hello world\r\n").unwrap();
@@ -488,10 +503,69 @@ mod tests {
                 "old_string": "world",
                 "new_string": "rust",
             }),
-        );
+        ).await;
         let text = get_text(&result);
         assert!(!text.starts_with("Error:"));
         let after = std::fs::read_to_string(&file).unwrap();
         assert_eq!(after, "hello rust\r\n");
+    }
+
+    /// Pi-mono parity: parallel edits to the same file must serialise
+    /// through the mutation queue. Without the queue, two concurrent
+    /// edits both observe the original content and the later writer
+    /// silently clobbers the earlier edit. With the queue, both edits
+    /// land deterministically.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_edit_serialises_concurrent_calls_to_same_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("race.txt");
+        // Use a unique starting content so we know the pre-state. Each
+        // edit replaces a distinct marker; if the queue is wired, both
+        // markers should be gone in the final file.
+        std::fs::write(&file, "marker_A\nmarker_B\n").unwrap();
+
+        let cwd = dir.path().to_path_buf();
+        let path1 = file.to_str().unwrap().to_string();
+        let path2 = path1.clone();
+        let cwd1 = cwd.clone();
+        let cwd2 = cwd.clone();
+
+        let h1 = tokio::spawn(async move {
+            execute_edit(
+                &cwd1,
+                json!({
+                    "file_path": path1,
+                    "old_string": "marker_A",
+                    "new_string": "RESULT_A",
+                }),
+            )
+            .await
+        });
+        let h2 = tokio::spawn(async move {
+            execute_edit(
+                &cwd2,
+                json!({
+                    "file_path": path2,
+                    "old_string": "marker_B",
+                    "new_string": "RESULT_B",
+                }),
+            )
+            .await
+        });
+        let (r1, r2) = tokio::join!(h1, h2);
+        let _ = r1.unwrap();
+        let _ = r2.unwrap();
+
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("RESULT_A"), "edit A must land, got: {after:?}");
+        assert!(after.contains("RESULT_B"), "edit B must land, got: {after:?}");
+        assert!(
+            !after.contains("marker_A"),
+            "marker_A should be replaced, got: {after:?}"
+        );
+        assert!(
+            !after.contains("marker_B"),
+            "marker_B should be replaced, got: {after:?}"
+        );
     }
 }

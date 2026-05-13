@@ -1,5 +1,6 @@
 //! Write tool — create or overwrite files.
 
+use crate::tools::file_mutation_queue::with_file_mutation_queue;
 use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -27,12 +28,12 @@ pub fn create_write_tool(cwd: PathBuf) -> AgentTool {
         "Write",
         move |_tool_call_id, args| {
             let cwd = cwd.clone();
-            async move { execute_write(&cwd, args) }
+            async move { execute_write(&cwd, args).await }
         },
     )
 }
 
-fn execute_write(cwd: &Path, args: serde_json::Value) -> ToolResult {
+async fn execute_write(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let path_str = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return ToolResult::error("Missing required parameter: path"),
@@ -51,21 +52,27 @@ fn execute_write(cwd: &Path, args: serde_json::Value) -> ToolResult {
         return ToolResult::error(format!("Failed to create directories: {}", e));
     }
 
-    let existed = path.exists();
     let line_count = content.lines().count();
-
-    match std::fs::write(&path, content) {
-        Ok(()) => {
-            let action = if existed { "Updated" } else { "Created" };
-            ToolResult::text(format!(
-                "{} {} ({} lines)",
-                action,
-                path.display(),
-                line_count
-            ))
+    let content = content.to_string();
+    let path_for_async = path.clone();
+    // Pi-mono parity: serialise mutations against the same file so that
+    // parallel tool_use blocks targeting one path don't race.
+    with_file_mutation_queue(&path, async move {
+        let existed = path_for_async.exists();
+        match std::fs::write(&path_for_async, &content) {
+            Ok(()) => {
+                let action = if existed { "Updated" } else { "Created" };
+                ToolResult::text(format!(
+                    "{} {} ({} lines)",
+                    action,
+                    path_for_async.display(),
+                    line_count
+                ))
+            }
+            Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
-        Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
-    }
+    })
+    .await
 }
 
 fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
@@ -85,22 +92,23 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_write_new_file() {
+    #[tokio::test]
+    async fn test_write_new_file() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("new.txt");
 
         let result = execute_write(
             dir.path(),
             json!({"path": file.to_str().unwrap(), "content": "hello\nworld"}),
-        );
+        )
+        .await;
         let text = get_text(&result);
         assert!(text.contains("Created"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello\nworld");
     }
 
-    #[test]
-    fn test_write_overwrite() {
+    #[tokio::test]
+    async fn test_write_overwrite() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("exist.txt");
         std::fs::write(&file, "old").unwrap();
@@ -108,30 +116,32 @@ mod tests {
         let result = execute_write(
             dir.path(),
             json!({"path": file.to_str().unwrap(), "content": "new"}),
-        );
+        )
+        .await;
         let text = get_text(&result);
         assert!(text.contains("Updated"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
     }
 
-    #[test]
-    fn test_write_creates_dirs() {
+    #[tokio::test]
+    async fn test_write_creates_dirs() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("a").join("b").join("c.txt");
 
         let result = execute_write(
             dir.path(),
             json!({"path": file.to_str().unwrap(), "content": "deep"}),
-        );
+        )
+        .await;
         let text = get_text(&result);
         assert!(text.contains("Created"));
         assert!(file.exists());
     }
 
-    #[test]
-    fn test_write_missing_params() {
+    #[tokio::test]
+    async fn test_write_missing_params() {
         let dir = TempDir::new().unwrap();
-        let result = execute_write(dir.path(), json!({"path": "foo.txt"}));
+        let result = execute_write(dir.path(), json!({"path": "foo.txt"})).await;
         let text = get_text(&result);
         assert!(text.contains("Missing required parameter: content"));
     }
