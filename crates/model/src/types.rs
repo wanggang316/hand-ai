@@ -1057,7 +1057,50 @@ fn current_timestamp_ms() -> u64 {
 
 #[cfg(test)]
 mod types_tests {
-    use super::Provider;
+    use super::{
+        Api, CacheRetention, Cost, InputType, Model, Provider, SimpleStreamOptions, StreamOptions,
+        Transport,
+    };
+
+    /// `build_base_options` must propagate every transport-shaping option the
+    /// caller set on `SimpleStreamOptions` into the inner `StreamOptions`.
+    /// Forgetting to forward `transport` is the bug behind #4083 — a caller
+    /// asks for websocket-cached and silently gets SSE because the option
+    /// never crosses the boundary.
+    #[test]
+    fn build_base_options_forwards_transport_and_cache_retention() {
+        let model = Model {
+            id: "test-model".to_string(),
+            name: "Test".to_string(),
+            api: Api::OpenAICodexResponses,
+            provider: Provider::OpenAICodex,
+            base_url: "https://example.com".to_string(),
+            reasoning: false,
+            input: vec![InputType::Text],
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 0,
+            max_tokens: 1000,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        };
+        let opts = SimpleStreamOptions {
+            base: StreamOptions {
+                transport: Some(Transport::WebsocketCached),
+                cache_retention: Some(CacheRetention::Long),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let built = opts.build_base_options(&model, None);
+        assert_eq!(built.transport, Some(Transport::WebsocketCached));
+        assert_eq!(built.cache_retention, Some(CacheRetention::Long));
+    }
 
     #[test]
     fn provider_roundtrip() {
