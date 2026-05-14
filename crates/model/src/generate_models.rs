@@ -1794,9 +1794,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Add native DeepSeek models (fallback - models.dev doesn't currently
-    // include them under the `deepseek` provider key; pi-mono maintains
-    // them as first-party entries).
+    // Add native DeepSeek models (fallback — models.dev doesn't currently
+    // include them under the `deepseek` provider key, so we ship the
+    // entries as first-party catalog records).
     for model in static_deepseek_models() {
         if !all
             .iter()
