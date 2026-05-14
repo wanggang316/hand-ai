@@ -1,8 +1,8 @@
 //! On-disk persistence for OAuth tokens / API keys.
 //!
-//! Mirrors `pi-mono/packages/coding-agent/src/core/auth-storage.ts`. Records
-//! are keyed by provider id and persisted to `~/.hand/agent/auth.json` with
-//! Unix mode `0600` (owner read/write only).
+//! Records are keyed by provider id and persisted to
+//! `~/.hand/agent/auth.json` with Unix mode `0600` (owner read/write
+//! only).
 //!
 //! ## Wire format
 //!
@@ -15,9 +15,9 @@
 //!   milliseconds. Provider-specific extras (e.g. `account`, `email`) are
 //!   preserved as opaque JSON in [`AuthRecord::Oauth::extra`].
 //!
-//! These field names match the TypeScript reference exactly so that
-//! `pi-coding-agent` and `hand` can read each other's `auth.json` if a user
-//! points them at the same file.
+//! Field names are stable across compatible coding-agent
+//! implementations so an `auth.json` written by one client can be read
+//! by another pointing at the same file.
 //!
 //! ## Persistence
 //!
@@ -46,8 +46,7 @@
 //! currently no equivalent enforcement — a follow-up should add NTFS
 //! ACL hardening or OS-keychain integration. Full-disk encryption,
 //! when enabled, provides at-rest protection but does not protect the
-//! file from other processes running as the same user. This matches
-//! the TS reference's behavior; see `pi-mono/.../auth-storage.ts`.
+//! file from other processes running as the same user.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -348,12 +347,12 @@ mod tests {
         AuthStorage::at(dir.path().join("auth.json"))
     }
 
-    // ===== Anthropic subscription detection (pi-mono parity) =====
+    // ===== Anthropic subscription detection =====
 
-    /// Pi-mono parity: `sk-ant-oat...` tokens are Claude.ai subscription
-    /// OAuth tokens. Using them for direct API calls violates Anthropic
-    /// TOS. The detector anchors on the `sk-ant-oat` prefix so the rule
-    /// is stable across server-side suffix changes (`oat01-`, `oat02-`).
+    /// `sk-ant-oat...` tokens are Claude.ai subscription OAuth tokens.
+    /// Using them for direct API calls violates Anthropic TOS. The
+    /// detector anchors on the `sk-ant-oat` prefix so the rule is
+    /// stable across server-side suffix changes (`oat01-`, `oat02-`).
     #[test]
     fn is_anthropic_subscription_token_matches_oat_prefix() {
         assert!(is_anthropic_subscription_token("sk-ant-oat01-AAA-BBB"));
@@ -376,9 +375,9 @@ mod tests {
         assert!(!is_anthropic_subscription_token("sk-ant-other-flow"));
     }
 
-    /// Pi-mono parity: an OAuth record under the anthropic provider is
-    /// ALWAYS a subscription credential — pi-mono's auth.json only ever
-    /// writes OAuth records for the Claude.ai flow.
+    /// An OAuth record under the anthropic provider is ALWAYS a
+    /// subscription credential — the Claude.ai OAuth flow is the only
+    /// path that writes OAuth records under that provider key.
     #[test]
     fn record_is_anthropic_subscription_flags_oauth_under_anthropic() {
         let record = AuthRecord::oauth("a", "r", 0);

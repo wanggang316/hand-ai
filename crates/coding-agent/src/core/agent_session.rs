@@ -63,9 +63,9 @@ pub enum AgentSessionEvent {
     /// Compaction completed.
     CompactionEnd { summary: String },
     /// Session metadata changed — currently just the display name (label).
-    /// Mirrors pi-mono's `session_info_changed` event so subscribers
-    /// (extensions, UI) get notified when [`AgentSession::set_label`]
-    /// runs, without having to poll [`AgentSession::label`].
+    /// Subscribers (extensions, UI) get notified when
+    /// [`AgentSession::set_label`] runs, without having to poll
+    /// [`AgentSession::label`].
     SessionInfoChanged { name: Option<String> },
     /// Session error.
     Error(String),
@@ -101,18 +101,18 @@ pub struct AgentSessionConfig {
     /// Whether to resume an existing session.
     pub resume_session: Option<String>,
     /// When `true`, run with an in-memory ephemeral session — no JSONL
-    /// file is written under `.hand/sessions/`. Mirrors pi-mono's
-    /// `--no-session` flag.
+    /// file is written under `.hand/sessions/`. Backs the `--no-session`
+    /// CLI flag.
     pub no_session: bool,
     /// When `true`, skip auto-loading project context files (HAND.md,
-    /// .hand/context.md). Mirrors pi-mono's `--no-context-files`.
+    /// .hand/context.md). Backs the `--no-context-files` CLI flag.
     pub no_context_files: bool,
     /// Optional override for the session storage directory. When `None`,
-    /// sessions land under `<cwd>/.hand/sessions`. Mirrors pi-mono's
-    /// `--session-dir <dir>`.
+    /// sessions land under `<cwd>/.hand/sessions`. Backs the
+    /// `--session-dir <dir>` CLI flag.
     pub session_dir: Option<PathBuf>,
-    /// When `true`, skip skill discovery entirely. Mirrors pi-mono's
-    /// `--no-skills` flag.
+    /// When `true`, skip skill discovery entirely. Backs the
+    /// `--no-skills` CLI flag.
     pub no_skills: bool,
 }
 
@@ -184,10 +184,10 @@ pub struct AgentSession {
     /// before the call can't poison it.
     bash_cancel: Arc<Mutex<CancellationToken>>,
     /// In-flight indicator for [`Self::run_bash`]. `true` for the
-    /// duration of an active bash invocation, `false` otherwise.
-    /// Mirrors pi-mono's `isBashRunning` so RPC clients and UIs can
-    /// know whether [`Self::abort_bash`] would have an effect, and so
-    /// tests can pin the state transitions across an abort.
+    /// duration of an active bash invocation, `false` otherwise. RPC
+    /// clients and UIs read it to know whether [`Self::abort_bash`]
+    /// would have an effect, and tests pin the state transitions
+    /// across an abort against it.
     bash_running: Arc<std::sync::atomic::AtomicBool>,
     /// Queue of user messages submitted via the RPC `steer` command.
     /// Drained by the `get_steering_messages` callback at mid-turn
@@ -1061,11 +1061,10 @@ impl AgentSession {
         }
     }
 
-    /// Whether a [`Self::run_bash`] call is currently in flight. Mirrors
-    /// pi-mono's `isBashRunning` accessor — useful for RPC clients and
-    /// UIs that want to disable the abort button when no command is
-    /// running, and for tests that pin the state transitions across
-    /// completion / abort.
+    /// Whether a [`Self::run_bash`] call is currently in flight.
+    /// Useful for RPC clients and UIs that want to disable the abort
+    /// button when no command is running, and for tests that pin the
+    /// state transitions across completion / abort.
     ///
     /// The flag is set with Release ordering at the entry of `run_bash`
     /// and cleared by an RAII guard, so the value observed here is

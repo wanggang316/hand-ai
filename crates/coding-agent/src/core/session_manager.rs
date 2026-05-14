@@ -7,15 +7,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Current session schema version. Bumped whenever the on-disk JSONL
-/// shape changes in a way that requires migration. Mirrors
-/// `CURRENT_SESSION_VERSION` in pi-mono's `core/session-manager.ts`.
+/// shape changes in a way that requires migration.
 ///
-/// Note: pi-mono is at v3 because it also does v1->v2 (add tree
-/// structure) and v2->v3 (rename `hookMessage` role). The Rust port
-/// chose the flat-list shape from the start (no per-entry `parent_id`),
-/// so neither migration applies. The constant is exposed for callers
-/// that want to stamp v3 headers consistently and for future
-/// migrations.
+/// The version is stamped at `3` from the start; the project never
+/// shipped a v1 (pre-tree) or v2 (pre-`hookMessage` rename) on-disk
+/// layout, so no in-place migration logic is needed today. The
+/// constant is exposed so callers can stamp v3 headers consistently
+/// and so future bumps have an obvious focal point.
 pub const CURRENT_SESSION_VERSION: u32 = 3;
 
 /// Session header (first line in JSONL).
@@ -31,16 +29,16 @@ pub struct SessionHeader {
 
 /// Entry types in a session file.
 ///
-/// The on-disk shape uses `{"type": <tag>, "data": {...}}` (an envelope
-/// established before the entry-tree port). pi-mono's JSONL is flat with
-/// `type` at the top level. This Rust port keeps the envelope for
-/// backwards compatibility with already-written `.jsonl` files; cross-
-/// implementation interop with pi-mono is tracked separately.
+/// The on-disk shape uses `{"type": <tag>, "data": {...}}` — an
+/// envelope established before the entry-tree port. The envelope is
+/// retained for backwards compatibility with already-written `.jsonl`
+/// files; cross-implementation interop with other readers is tracked
+/// separately.
 ///
-/// Every variant carries `parent_id: Option<String>`, deserialized with
-/// `#[serde(default)]` so older fixtures (written before parent-id
-/// landed) still parse. The field is `null` for tree roots and for
-/// flat-list sessions that never tracked parentage.
+/// Every variant carries `parent_id: Option<String>`, deserialized
+/// with `#[serde(default)]` so older fixtures (written before
+/// parent-id landed) still parse. The field is `null` for tree roots
+/// and for flat-list sessions that never tracked parentage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum SessionEntry {
@@ -214,8 +212,8 @@ impl SessionEntry {
 }
 
 /// Summary information about a session, suitable for listing UI and
-/// search. Mirrors the relevant fields from pi-mono's `SessionInfo`,
-/// adapted to the Rust port's flat-list session shape.
+/// search. Carries the fields a flat-list session can populate
+/// (id, first message, mtime, message count).
 ///
 /// Construction is internal; consumers should treat new fields as
 /// additive — please go through [`SessionManager::list`] /
@@ -534,7 +532,7 @@ impl SessionManager {
     }
 
     /// Create a new session file under an explicit session directory.
-    /// Mirrors pi-mono's `--session-dir` override path. The directory is
+    /// Used by callers that pass `--session-dir`; the directory is
     /// created if it doesn't exist.
     pub fn create_in(cwd: &Path, session_dir: &Path) -> Result<Self, CodingAgentError> {
         let session_dir = session_dir.to_path_buf();
@@ -843,12 +841,11 @@ impl SessionManager {
     /// session as `parent_session`, carrying every non-header entry
     /// from the source verbatim.
     ///
-    /// Mirrors `SessionManager.forkFrom` in pi-mono: the new session
-    /// gets a freshly-generated id, but body entries (messages,
-    /// compactions, model changes, labels) keep their original ids and
-    /// timestamps so cross-references like
-    /// `Compaction::first_kept_entry_id` and
-    /// `Label::target_id` remain valid after the fork.
+    /// The new session gets a freshly-generated id, but body entries
+    /// (messages, compactions, model changes, labels) keep their
+    /// original ids and timestamps so cross-references like
+    /// `Compaction::first_kept_entry_id` and `Label::target_id` remain
+    /// valid after the fork.
     pub fn fork_from(source_path: &Path, cwd: &Path) -> Result<Self, CodingAgentError> {
         let source_entries = load_entries_from_file(source_path)?;
         if source_entries.is_empty() {
