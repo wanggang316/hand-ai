@@ -121,6 +121,7 @@ pub fn get_env_api_key(provider: &Provider) -> Option<String> {
                 "minimax" => &["MINIMAX_API_KEY", "MM_API_KEY"],
                 "minimax-cn" => &["MINIMAX_CN_API_KEY", "MM_API_KEY"],
                 "huggingface" => &["HF_TOKEN"],
+                "fireworks" => &["FIREWORKS_API_KEY"],
                 "opencode" => &["OPENCODE_API_KEY"],
                 "kimi-coding" => &["KIMI_API_KEY"],
                 "moonshotai" | "moonshotai-cn" => &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
@@ -170,6 +171,7 @@ pub fn get_env_api_key_by_str(provider: &str) -> Option<String> {
         "minimax" => &["MINIMAX_API_KEY", "MM_API_KEY"],
         "minimax-cn" => &["MINIMAX_CN_API_KEY", "MM_API_KEY"],
         "huggingface" => &["HF_TOKEN"],
+        "fireworks" => &["FIREWORKS_API_KEY"],
         "opencode" => &["OPENCODE_API_KEY"],
         "kimi-coding" | "kimi" => &["KIMI_API_KEY"],
         "moonshotai" | "moonshotai-cn" => &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
@@ -359,6 +361,34 @@ mod tests {
     fn test_anthropic_key_sources() {
         if env::var("ANTHROPIC_OAUTH_TOKEN").is_err() && env::var("ANTHROPIC_API_KEY").is_err() {
             assert!(get_env_api_key(&Provider::Anthropic).is_none());
+        }
+    }
+
+    /// Fireworks AI is served via the OpenAI-compatible Completions API
+    /// and authenticates with `FIREWORKS_API_KEY`. Both the enum lookup
+    /// and the string-keyed fallback must surface a value set in the
+    /// environment.
+    #[test]
+    fn test_fireworks_key_sources() {
+        // SAFETY: tests run single-threaded for this crate; we restore
+        // the prior value on exit.
+        let prior = env::var("FIREWORKS_API_KEY").ok();
+        unsafe {
+            env::set_var("FIREWORKS_API_KEY", "fw_test_sentinel");
+        }
+        assert_eq!(
+            get_env_api_key(&Provider::Fireworks).as_deref(),
+            Some("fw_test_sentinel")
+        );
+        assert_eq!(
+            get_env_api_key_by_str("fireworks").as_deref(),
+            Some("fw_test_sentinel")
+        );
+        unsafe {
+            match prior {
+                Some(v) => env::set_var("FIREWORKS_API_KEY", v),
+                None => env::remove_var("FIREWORKS_API_KEY"),
+            }
         }
     }
 
