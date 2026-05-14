@@ -361,6 +361,19 @@ fn is_zai_tool_stream_unsupported(model_id: &str) -> bool {
     )
 }
 
+/// Return true for GitHub Copilot Anthropic-branch Claude models whose
+/// proxied Messages endpoint rejects the per-tool `eager_input_streaming`
+/// flag. The default for `AnthropicMessagesCompat` is to enable eager
+/// streaming; these specific Copilot snapshots opt back out so the
+/// transformer falls through to the legacy fine-grained tool streaming
+/// beta header instead.
+fn is_copilot_eager_streaming_unsupported(model_id: &str) -> bool {
+    matches!(
+        model_id,
+        "claude-haiku-4.5" | "claude-sonnet-4" | "claude-sonnet-4.5"
+    )
+}
+
 /// Static headers attached to every Kimi-for-coding request. The
 /// upstream Kimi API gates traffic on a recognised `User-Agent`
 /// string — without it the SDK is rejected as an unknown client.
@@ -862,9 +875,10 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 Api::OpenAICompletions
             };
             // OpenAI Completions is the only branch that needs the
-            // copilot-specific compat overrides; the Claude and
-            // Responses branches use their respective provider
-            // defaults.
+            // copilot-specific compat overrides; the Responses branch
+            // uses its provider defaults. The Anthropic Messages branch
+            // attaches a compat block only for snapshots whose Copilot
+            // proxy rejects the per-tool `eager_input_streaming` flag.
             let compat = if api == Api::OpenAICompletions {
                 Some(Compat::OpenAICompletions(Box::new(
                     OpenAICompletionsCompat {
@@ -875,6 +889,13 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                         ..Default::default()
                     },
                 )))
+            } else if api == Api::AnthropicMessages
+                && is_copilot_eager_streaming_unsupported(model_id)
+            {
+                Some(Compat::AnthropicMessages(AnthropicMessagesCompat {
+                    supports_eager_tool_input_streaming: Some(false),
+                    ..Default::default()
+                }))
             } else {
                 None
             };
@@ -1895,6 +1916,40 @@ mod tests {
             assert!(
                 is_copilot_claude_4_model(id),
                 "{id} should route through anthropic-messages"
+            );
+        }
+    }
+
+    /// The Copilot Anthropic-branch eager-streaming opt-out must cover
+    /// every snapshot whose proxy rejects the per-tool
+    /// `eager_input_streaming` flag. Today that is exactly haiku-4.5 plus
+    /// the two sonnet-4 variants; unrelated ids (opus, older claude,
+    /// gpt) must keep the default eager streaming path.
+    #[test]
+    fn copilot_eager_streaming_opt_out_covers_known_snapshots() {
+        for id in ["claude-haiku-4.5", "claude-sonnet-4", "claude-sonnet-4.5"] {
+            assert!(
+                is_copilot_eager_streaming_unsupported(id),
+                "{id} should opt out of eager_input_streaming"
+            );
+        }
+    }
+
+    #[test]
+    fn copilot_eager_streaming_opt_out_excludes_unrelated_ids() {
+        for id in [
+            "claude-opus-4",
+            "claude-opus-4.6",
+            "claude-opus-4-7",
+            "claude-haiku-4",
+            "claude-sonnet-4-5",
+            "claude-haiku-3-5",
+            "gpt-5",
+            "",
+        ] {
+            assert!(
+                !is_copilot_eager_streaming_unsupported(id),
+                "{id} must keep the default eager streaming path"
             );
         }
     }
