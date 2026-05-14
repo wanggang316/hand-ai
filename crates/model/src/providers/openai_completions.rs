@@ -772,6 +772,27 @@ fn build_params(
         }
     }
 
+    // Vercel AI Gateway provider routing. The gateway exposes
+    // `providerOptions.gateway.{only, order}` to pin upstream providers
+    // or set an explicit preference order — only honoured when the
+    // base URL targets `ai-gateway.vercel.sh`. Serde drops every
+    // `Option::None` field, so we only emit the wrapper when at least
+    // one field is set (an empty `providerOptions.gateway: {}` is
+    // rejected on some routes, mirroring the OpenRouter case above).
+    if model.base_url.contains("ai-gateway.vercel.sh")
+        && let Some(crate::types::Compat::OpenAICompletions(compat_settings)) = &model.compat
+        && let Some(gateway_routing) = &compat_settings.vercel_gateway_routing
+        && let Ok(gateway_json) = serde_json::to_value(gateway_routing)
+        && gateway_json
+            .as_object()
+            .is_some_and(|obj| !obj.is_empty())
+    {
+        builder = builder.insert_extra_param(
+            "providerOptions",
+            serde_json::json!({ "gateway": gateway_json }),
+        );
+    }
+
     builder.build().map_err(|e| e.to_string())
 }
 
@@ -1829,6 +1850,94 @@ mod tests {
         assert!(
             body.get("reasoning").is_none(),
             "non-reasoning model must not emit reasoning: {body}"
+        );
+    }
+
+    /// The Vercel AI Gateway exposes provider routing via
+    /// `providerOptions.gateway.{only, order}` on the request body —
+    /// only honoured when the base URL targets the gateway. The
+    /// compat block carries the routing struct; the request body
+    /// must surface it under `providerOptions.gateway`.
+    #[test]
+    fn build_params_emits_vercel_gateway_routing_when_configured() {
+        use crate::types::{Compat, OpenAICompletionsCompat, VercelGatewayRouting};
+        let mut model = test_model(Provider::OpenAI);
+        model.base_url = "https://ai-gateway.vercel.sh/v1".to_string();
+        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
+            vercel_gateway_routing: Some(VercelGatewayRouting {
+                only: Some(vec!["bedrock".to_string(), "anthropic".to_string()]),
+                order: Some(vec!["anthropic".to_string(), "bedrock".to_string()]),
+            }),
+            ..Default::default()
+        })));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let options = OpenAICompletionsOptions::default();
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(
+            body["providerOptions"]["gateway"],
+            serde_json::json!({
+                "only": ["bedrock", "anthropic"],
+                "order": ["anthropic", "bedrock"],
+            }),
+        );
+    }
+
+    /// Routing must NOT be emitted on non-Vercel base URLs — the
+    /// gateway-specific shape would be rejected by other proxies.
+    #[test]
+    fn build_params_omits_vercel_gateway_routing_on_other_hosts() {
+        use crate::types::{Compat, OpenAICompletionsCompat, VercelGatewayRouting};
+        let mut model = test_model(Provider::OpenAI);
+        model.base_url = "https://api.openai.com/v1".to_string();
+        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
+            vercel_gateway_routing: Some(VercelGatewayRouting {
+                only: Some(vec!["bedrock".to_string()]),
+                order: None,
+            }),
+            ..Default::default()
+        })));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let options = OpenAICompletionsOptions::default();
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert!(
+            body.get("providerOptions").is_none(),
+            "non-Vercel host must not emit providerOptions: {body}"
+        );
+    }
+
+    /// An empty routing struct (both fields None) must not emit a
+    /// stub `providerOptions: { gateway: {} }`; some Vercel routes
+    /// reject the empty wrapper.
+    #[test]
+    fn build_params_omits_vercel_gateway_routing_when_struct_empty() {
+        use crate::types::{Compat, OpenAICompletionsCompat, VercelGatewayRouting};
+        let mut model = test_model(Provider::OpenAI);
+        model.base_url = "https://ai-gateway.vercel.sh/v1".to_string();
+        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
+            vercel_gateway_routing: Some(VercelGatewayRouting::default()),
+            ..Default::default()
+        })));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let options = OpenAICompletionsOptions::default();
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert!(
+            body.get("providerOptions").is_none(),
+            "empty gateway routing must not emit providerOptions: {body}"
         );
     }
 
