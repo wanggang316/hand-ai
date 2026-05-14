@@ -185,6 +185,19 @@ pub(crate) fn dispatch_responses_event(
             }
         }
 
+        // Some Responses servers skip the `.delta` events entirely and
+        // ship the full arguments payload only in `.done`. Without this
+        // branch the accumulator stays empty and `output_item.done`
+        // parses the tool call as `{}`, silently dropping every arg.
+        // When the server DID stream deltas first, treat `.done` as the
+        // authoritative final value — it covers transports that send a
+        // condensed/cleaned-up form after the partial stream.
+        "response.function_call_arguments.done" => {
+            if let Some(arguments) = data.get("arguments").and_then(|a| a.as_str()) {
+                state.current_tool_args = arguments.to_string();
+            }
+        }
+
         "response.output_item.added" => {
             if let Some(item) = data.get("item")
                 && item.get("type").and_then(|t| t.as_str()) == Some("function_call")
@@ -589,6 +602,107 @@ mod tests {
             })
             .expect("thinking block missing");
         assert_eq!(thinking, "part a\n\npart b");
+    }
+
+    /// Some Responses servers ship the entire function-call arguments
+    /// payload only in `response.function_call_arguments.done` and skip
+    /// the streaming `.delta` events. Before, the args accumulator stayed
+    /// empty, `output_item.done` parsed to `{}`, and every tool argument
+    /// disappeared. Pin the new behavior: `.done` populates the
+    /// accumulator so the subsequent `output_item.done` sees the real
+    /// arguments.
+    #[test]
+    fn function_call_arguments_done_populates_empty_accumulator() {
+        let output = run_events(&[
+            (
+                "response.output_item.added",
+                json!({
+                    "item": {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "call_id": "call-1"
+                    }
+                }),
+            ),
+            (
+                "response.function_call_arguments.done",
+                json!({ "arguments": "{\"q\":\"hello\"}" }),
+            ),
+            (
+                "response.output_item.done",
+                json!({
+                    "item": {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "call_id": "call-1",
+                        "arguments": "{\"q\":\"hello\"}"
+                    }
+                }),
+            ),
+        ]);
+        let tc = output
+            .content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContentBlock::ToolCall(tc) => Some(tc),
+                _ => None,
+            })
+            .expect("tool call missing");
+        assert_eq!(tc.name, "lookup");
+        assert_eq!(tc.arguments, json!({"q": "hello"}));
+    }
+
+    /// When deltas DID arrive first, `.done` is treated as the
+    /// authoritative final value (some transports clean up trailing
+    /// whitespace or condense the payload between the partial stream and
+    /// `.done`). The tool call carries the `.done` view, not the
+    /// concatenated delta stream.
+    #[test]
+    fn function_call_arguments_done_overrides_streamed_deltas() {
+        let output = run_events(&[
+            (
+                "response.output_item.added",
+                json!({
+                    "item": {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "call_id": "call-2"
+                    }
+                }),
+            ),
+            (
+                "response.function_call_arguments.delta",
+                json!({ "delta": "{\"q" }),
+            ),
+            (
+                "response.function_call_arguments.delta",
+                json!({ "delta": "\":\"par" }),
+            ),
+            (
+                "response.function_call_arguments.done",
+                json!({ "arguments": "{\"q\":\"partial\"}" }),
+            ),
+            (
+                "response.output_item.done",
+                json!({
+                    "item": {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "call_id": "call-2",
+                        "arguments": "{\"q\":\"partial\"}"
+                    }
+                }),
+            ),
+        ]);
+        let tc = output
+            .content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContentBlock::ToolCall(tc) => Some(tc),
+                _ => None,
+            })
+            .expect("tool call missing");
+        assert_eq!(tc.arguments, json!({"q": "partial"}));
     }
 
     /// When neither `summary` nor `content` is present on a reasoning done
