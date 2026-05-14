@@ -330,6 +330,18 @@ fn is_kimi_alias(model_id: &str) -> bool {
     matches!(model_id, "k2p5" | "k2p6")
 }
 
+/// Return true for the legacy z.ai coding-plan models that do not
+/// accept the OpenAI-compatible `tool_stream: true` flag. The four
+/// GLM 4.5 ids reject the field with HTTP 400; every newer z.ai id
+/// (glm-4.6 family, future vision siblings, ...) supports streaming
+/// and falls back to the `is_zai` default.
+fn is_zai_tool_stream_unsupported(model_id: &str) -> bool {
+    matches!(
+        model_id,
+        "glm-4.5" | "glm-4.5-air" | "glm-4.5-flash" | "glm-4.5v"
+    )
+}
+
 /// Static headers attached to every Kimi-for-coding request. The
 /// upstream Kimi API gates traffic on a recognised `User-Agent`
 /// string — without it the SDK is rejected as an unknown client.
@@ -654,6 +666,17 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             if !provider_has_tool_call(m) {
                 continue;
             }
+            // The legacy GLM 4.5 family on z.ai's coding-plan endpoint
+            // does not accept the `tool_stream: true` flag — it returns
+            // a 400 on those models. Newer ids (glm-4.6+, vision
+            // siblings, ...) support tool streaming. Explicitly pin the
+            // legacy four to `zai_tool_stream = false` so the per-zai
+            // default `true` in `detect_compat` does not flip them on.
+            let zai_tool_stream = if is_zai_tool_stream_unsupported(model_id) {
+                Some(false)
+            } else {
+                None
+            };
             models.push(Model {
                 id: model_id.clone(),
                 name: m.name.clone().unwrap_or_else(|| model_id.clone()),
@@ -676,6 +699,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                         supports_developer_role: Some(false),
                         supports_reasoning_effort: None,
                         thinking_format: Some("zai".to_string()),
+                        zai_tool_stream,
                         ..Default::default()
                     },
                 ))),
@@ -1785,6 +1809,39 @@ mod tests {
         assert!(!is_kimi_alias("kimi-k2-thinking"));
         assert!(!is_kimi_alias(""));
         assert!(!is_kimi_alias("k2"));
+    }
+
+    /// The four legacy GLM 4.5 ids reject the OpenAI-compatible
+    /// `tool_stream: true` flag, so the generator must mark them as
+    /// tool-stream-unsupported. Future z.ai ids fall back to the
+    /// `is_zai` default `true` and are not in this set.
+    #[test]
+    fn zai_tool_stream_set_covers_legacy_glm_4_5_family() {
+        for id in ["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"] {
+            assert!(
+                is_zai_tool_stream_unsupported(id),
+                "{id} must be marked tool-stream-unsupported"
+            );
+        }
+    }
+
+    /// Newer z.ai ids — glm-4.6 family and any non-listed coding-plan
+    /// model — must NOT be in the unsupported set so the per-provider
+    /// `is_zai = true` default leaves `zai_tool_stream` enabled.
+    #[test]
+    fn zai_tool_stream_set_excludes_newer_and_unrelated_ids() {
+        for id in [
+            "glm-4.6",
+            "glm-4.6-air",
+            "glm-4.6-thinking",
+            "gpt-4o",
+            "",
+        ] {
+            assert!(
+                !is_zai_tool_stream_unsupported(id),
+                "{id} must NOT be marked tool-stream-unsupported"
+            );
+        }
     }
 
     /// OpenRouter routes DeepSeek V3/V4 reasoning through openai-completions
