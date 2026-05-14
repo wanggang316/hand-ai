@@ -16,8 +16,11 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
     long_about = "Hand is an interactive AI coding agent that helps you write, edit, and understand code."
 )]
 pub struct Args {
-    /// Initial prompt (non-interactive mode)
-    #[arg(short, long)]
+    /// Initial prompt (non-interactive mode). Accepts values that start
+    /// with `-`/`--` (e.g. a markdown body whose first line is a YAML
+    /// frontmatter fence `---`) so a piped prompt isn't mistaken for a
+    /// flag.
+    #[arg(short, long, allow_hyphen_values = true)]
     pub prompt: Option<String>,
 
     /// Model pattern (e.g., "sonnet", "claude-sonnet:high", "openai/gpt-4o")
@@ -190,6 +193,27 @@ mod tests {
     fn parses_short_prompt() {
         let args = Args::try_parse_from(["hand", "-p", "hello"]).expect("-p <prompt> should parse");
         assert_eq!(args.prompt, Some("hello".into()));
+    }
+
+    /// A prompt that starts with YAML frontmatter must not be rejected as
+    /// an unknown flag. Without `allow_hyphen_values`, clap treats any
+    /// value beginning with `--` (including `---`) as a flag and bails
+    /// before reaching the value parser, so `hand -p "---\ntitle..."`
+    /// would fail at parse time.
+    #[test]
+    fn parses_prompt_with_yaml_frontmatter() {
+        let prompt = "---\ntitle: hello\n---\nSay hi.";
+        let args =
+            Args::try_parse_from(["hand", "-p", prompt]).expect("frontmatter prompt should parse");
+        assert_eq!(args.prompt.as_deref(), Some(prompt));
+    }
+
+    #[test]
+    fn parses_long_prompt_with_yaml_frontmatter() {
+        let prompt = "---\ntitle: hello\n---\nSay hi.";
+        let args = Args::try_parse_from(["hand", "--prompt", prompt])
+            .expect("frontmatter prompt should parse");
+        assert_eq!(args.prompt.as_deref(), Some(prompt));
     }
 
     #[test]
