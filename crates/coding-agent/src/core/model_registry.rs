@@ -1583,6 +1583,19 @@ mod tests {
         assert_eq!(v["b"]["c"], 1);
     }
 
+    /// A `//` line comment sitting between a trailing comma and the
+    /// closing brace must not hide the comma from the trailing-comma
+    /// pass. The two-pass order (comments first, then trailing commas)
+    /// guarantees this — a single-pass regex would have missed it.
+    #[test]
+    fn strip_json_comments_handles_comment_between_comma_and_closer() {
+        let s = "{ \"a\": 1, // trailing\n}";
+        let cleaned = strip_json_comments(s);
+        let v: serde_json::Value =
+            serde_json::from_str(&cleaned).expect("must parse as plain JSON after stripping");
+        assert_eq!(v["a"], 1);
+    }
+
     #[test]
     fn strip_json_comments_preserves_strings_with_slashes() {
         let s = r#"{ "url": "https://example.com/a//b" }"#;
