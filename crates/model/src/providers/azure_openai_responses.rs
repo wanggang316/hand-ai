@@ -197,14 +197,59 @@ fn make_error_stream(
 /// it is returned as-is — this lets tests and advanced callers pin an exact
 /// URL without the helper second-guessing them.
 fn build_azure_url(base: &str, api_version: &str) -> String {
-    let trimmed = base.trim_end_matches('/');
+    let trimmed = base.trim().trim_end_matches('/');
 
     // Already a full responses URL? Don't double-append.
     if trimmed.contains("/responses") {
         return trimmed.to_string();
     }
 
-    format!("{}/responses?api-version={}", trimmed, api_version)
+    let normalized = normalize_azure_host_path(trimmed);
+    format!("{}/responses?api-version={}", normalized, api_version)
+}
+
+/// Normalize Azure host base URLs so the AzureOpenAI SDK shape applies.
+///
+/// Azure hosts (`*.openai.azure.com`, `*.cognitiveservices.azure.com`)
+/// require an `/openai/v1` base path so the trailing `/responses` and
+/// `?api-version=...` slots line up. A bare host or one ending in just
+/// `/openai` is rewritten to include `/openai/v1`. Non-Azure hosts pass
+/// through unchanged.
+fn normalize_azure_host_path(trimmed: &str) -> String {
+    let Some((scheme_host, path)) = split_scheme_host_path(trimmed) else {
+        return trimmed.to_string();
+    };
+    let host = scheme_host
+        .strip_prefix("https://")
+        .or_else(|| scheme_host.strip_prefix("http://"))
+        .unwrap_or(&scheme_host)
+        .to_lowercase();
+    let is_azure_host = host.ends_with(".openai.azure.com")
+        || host.ends_with(".cognitiveservices.azure.com");
+    let normalized_path = path.trim_end_matches('/');
+    if is_azure_host && (normalized_path.is_empty() || normalized_path == "/openai") {
+        return format!("{scheme_host}/openai/v1");
+    }
+    if normalized_path == path {
+        return trimmed.to_string();
+    }
+    format!("{scheme_host}{normalized_path}")
+}
+
+/// Split a `scheme://host[:port]/path` URL into the `scheme://host[:port]`
+/// prefix and the `/path` suffix (path is `""` if absent). Returns
+/// `None` when no scheme separator is found, which makes the caller
+/// pass the input through untouched.
+fn split_scheme_host_path(url: &str) -> Option<(String, String)> {
+    let scheme_end = url.find("://")?;
+    let after_scheme = &url[scheme_end + 3..];
+    match after_scheme.find('/') {
+        Some(path_start) => {
+            let host_end = scheme_end + 3 + path_start;
+            Some((url[..host_end].to_string(), url[host_end..].to_string()))
+        }
+        None => Some((url.to_string(), String::new())),
+    }
 }
 
 fn stream_azure_openai_responses(
@@ -373,6 +418,49 @@ mod tests {
             url,
             "https://my-resource.openai.azure.com/openai/v1/responses?api-version=2024-12-01",
         );
+    }
+
+    /// Azure OpenAI Service hosts (`*.openai.azure.com`) without an
+    /// explicit `/openai/v1` path get the path auto-appended so the
+    /// AzureOpenAI SDK shape (`<host>/openai/v1/responses`) lines up.
+    #[test]
+    fn azure_url_normalizes_bare_openai_azure_host() {
+        let url = build_azure_url("https://my-resource.openai.azure.com", "v1");
+        assert_eq!(
+            url,
+            "https://my-resource.openai.azure.com/openai/v1/responses?api-version=v1",
+        );
+    }
+
+    /// A host that ends in `/openai` (no trailing version segment) is
+    /// rewritten to the canonical `/openai/v1` base path.
+    #[test]
+    fn azure_url_normalizes_openai_only_path() {
+        let url = build_azure_url("https://my-resource.openai.azure.com/openai", "v1");
+        assert_eq!(
+            url,
+            "https://my-resource.openai.azure.com/openai/v1/responses?api-version=v1",
+        );
+    }
+
+    /// Azure Cognitive Services hosts get the same `/openai/v1`
+    /// rewrite so a bare cognitive-services URL doesn't end up with a
+    /// broken `<host>/responses?api-version=...` shape.
+    #[test]
+    fn azure_url_normalizes_cognitiveservices_host() {
+        let url = build_azure_url("https://my-resource.cognitiveservices.azure.com", "v1");
+        assert_eq!(
+            url,
+            "https://my-resource.cognitiveservices.azure.com/openai/v1/responses?api-version=v1",
+        );
+    }
+
+    /// Non-Azure hosts must pass through unchanged — the helper must
+    /// not invent an `/openai/v1` path for arbitrary proxies.
+    #[test]
+    fn azure_url_leaves_non_azure_hosts_alone() {
+        let url = build_azure_url("https://proxy.example.com/v1", "v1");
+        assert_eq!(url, "https://proxy.example.com/v1/responses?api-version=v1");
     }
 
     #[test]
