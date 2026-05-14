@@ -587,6 +587,21 @@ fn build_params(
         .messages(messages)
         .stream(true);
 
+    let cache_decision = decide_openai_prompt_cache(
+        &model.base_url,
+        options.base.session_id.as_deref(),
+        options.base.cache_retention,
+    );
+    if let Some(key) = cache_decision.key {
+        builder = builder.prompt_cache_key(key);
+    }
+    if let Some(retention) = cache_decision.retention {
+        builder = builder.insert_extra_param(
+            "prompt_cache_retention",
+            serde_json::Value::String(retention.to_string()),
+        );
+    }
+
     if compat.supports_usage_in_streaming {
         builder = builder.stream_options(openai_rust::types::StreamOptions {
             include_usage: Some(true),
@@ -1003,6 +1018,49 @@ pub(crate) fn decide_tools_field<'a>(
     }
 }
 
+/// Decision for OpenAI's prompt-cache fields. Direct OpenAI requests
+/// only — other openai-compatible providers either don't support these
+/// fields at all (DashScope, vLLM) or use their own naming. The pi-mono
+/// reference scopes the same way, gating on `model.baseUrl.includes
+/// ("api.openai.com")`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PromptCacheDecision {
+    /// Value for `prompt_cache_key`. `None` means omit the field.
+    pub key: Option<String>,
+    /// Value for `prompt_cache_retention`. `None` means omit the field.
+    pub retention: Option<&'static str>,
+}
+
+pub(crate) fn decide_openai_prompt_cache(
+    base_url: &str,
+    session_id: Option<&str>,
+    cache_retention: Option<crate::types::CacheRetention>,
+) -> PromptCacheDecision {
+    use crate::types::CacheRetention;
+    if !base_url.contains("api.openai.com") {
+        return PromptCacheDecision {
+            key: None,
+            retention: None,
+        };
+    }
+    // pi-mono defaults to "short" when the caller did not pin a value.
+    let resolved = cache_retention.unwrap_or(CacheRetention::Short);
+    let key = if resolved != CacheRetention::None {
+        session_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    } else {
+        None
+    };
+    let retention = if resolved == CacheRetention::Long {
+        Some("24h")
+    } else {
+        None
+    };
+    PromptCacheDecision { key, retention }
+}
+
 /// Normalize tool call ID for Mistral.
 /// Mistral requires tool IDs to be exactly 9 alphanumeric characters.
 pub fn normalize_mistral_tool_id(id: &str) -> String {
@@ -1370,6 +1428,76 @@ mod tests {
             ToolsField::EmptyArrayForHistory => {}
             other => panic!("expected EmptyArrayForHistory, got {other:?}"),
         }
+    }
+
+    /// Direct OpenAI requests should emit `prompt_cache_key` (the session
+    /// id) whenever caching is enabled, even at the default "short"
+    /// retention. Long retention adds the 24h hint. Pi-mono gates both
+    /// on `model.baseUrl.includes("api.openai.com")` and the same logic
+    /// drives this helper.
+    #[test]
+    fn openai_prompt_cache_emits_key_for_direct_openai() {
+        use crate::types::CacheRetention;
+        let decision = decide_openai_prompt_cache(
+            "https://api.openai.com/v1",
+            Some("sess-42"),
+            None, // default → "short"
+        );
+        assert_eq!(decision.key.as_deref(), Some("sess-42"));
+        assert_eq!(decision.retention, None);
+
+        let long = decide_openai_prompt_cache(
+            "https://api.openai.com/v1",
+            Some("sess-42"),
+            Some(CacheRetention::Long),
+        );
+        assert_eq!(long.key.as_deref(), Some("sess-42"));
+        assert_eq!(long.retention, Some("24h"));
+    }
+
+    /// Retention "none" disables the cache key entirely so callers can
+    /// opt out of cross-request affinity (e.g. for one-shot completions
+    /// where caching adds latency without payoff).
+    #[test]
+    fn openai_prompt_cache_omits_key_when_retention_none() {
+        use crate::types::CacheRetention;
+        let decision = decide_openai_prompt_cache(
+            "https://api.openai.com/v1",
+            Some("sess-42"),
+            Some(CacheRetention::None),
+        );
+        assert_eq!(decision.key, None);
+        assert_eq!(decision.retention, None);
+    }
+
+    /// Non-OpenAI proxies (DashScope, vLLM, OpenRouter) must NOT receive
+    /// the OpenAI-specific cache fields — DashScope rejects unknown
+    /// extra parameters as 400 and most proxies just ignore them. The
+    /// helper short-circuits.
+    #[test]
+    fn openai_prompt_cache_skips_other_proxies() {
+        use crate::types::CacheRetention;
+        for base in [
+            "https://openrouter.ai/api/v1",
+            "https://dashscope.aliyuncs.com/api/v1",
+            "https://api.deepseek.com",
+            "",
+        ] {
+            let decision =
+                decide_openai_prompt_cache(base, Some("sess"), Some(CacheRetention::Long));
+            assert_eq!(decision.key, None, "{base}");
+            assert_eq!(decision.retention, None, "{base}");
+        }
+    }
+
+    /// Missing or empty session id means no cache key — sending an
+    /// empty string would create a cross-session cache collision.
+    #[test]
+    fn openai_prompt_cache_requires_session_id() {
+        let decision = decide_openai_prompt_cache("https://api.openai.com/v1", None, None);
+        assert_eq!(decision.key, None);
+        let empty = decide_openai_prompt_cache("https://api.openai.com/v1", Some("   "), None);
+        assert_eq!(empty.key, None);
     }
 
     #[test]
