@@ -8,8 +8,8 @@
 //! decoder.
 
 use crate::types::{
-    AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Context, Message, Model,
-    StopReason, StreamOptions, TextContent, ThinkingContent, ToolCall,
+    AssistantContentBlock, AssistantMessage, AssistantMessageEvent, CacheRetention, Compat,
+    Context, Message, Model, StopReason, StreamOptions, TextContent, ThinkingContent, ToolCall,
 };
 use futures::StreamExt;
 use serde_json::Value;
@@ -61,7 +61,40 @@ pub(crate) fn build_request_body(
         body["max_output_tokens"] = Value::from(max);
     }
 
+    // Prompt caching:
+    // - `prompt_cache_key` lets the upstream key its cache to a specific
+    //   client session. Emit it whenever caching is requested AND the
+    //   caller passed a session id.
+    // - `prompt_cache_retention` opts in to a longer-lived cache.
+    //   "24h" is only valid on endpoints whose compat block says
+    //   `supportsLongCacheRetention: true` (defaults to true for direct
+    //   OpenAI; models.dev sets it to false for proxies that reject the
+    //   field).
+    let retention = options.cache_retention.unwrap_or(CacheRetention::Short);
+    if retention != CacheRetention::None
+        && let Some(session_id) = options.session_id.as_deref()
+        && !session_id.is_empty()
+    {
+        body["prompt_cache_key"] = Value::String(session_id.to_string());
+    }
+    if retention == CacheRetention::Long && responses_supports_long_cache_retention(model) {
+        body["prompt_cache_retention"] = Value::String("24h".to_string());
+    }
+
     body
+}
+
+/// Whether the model's OpenAI Responses compat block opts in to the
+/// long (24h) prompt-cache retention. Default is `true` — only
+/// proxies that explicitly reject the `prompt_cache_retention` field
+/// disable it via models.dev compat metadata.
+fn responses_supports_long_cache_retention(model: &Model) -> bool {
+    if let Some(Compat::OpenAIResponses(c)) = model.compat.as_ref()
+        && let Some(v) = c.supports_long_cache_retention
+    {
+        return v;
+    }
+    true
 }
 
 /// Convert a `Context` into the `input` array accepted by the Responses API.
@@ -703,6 +736,125 @@ mod tests {
             })
             .expect("tool call missing");
         assert_eq!(tc.arguments, json!({"q": "partial"}));
+    }
+
+    fn responses_test_model() -> Model {
+        use crate::types::{Cost, InputType};
+        Model {
+            id: "gpt-5".to_string(),
+            name: "gpt-5".to_string(),
+            api: Api::OpenAIResponses,
+            provider: Provider::OpenAI,
+            base_url: String::new(),
+            reasoning: false,
+            input: vec![InputType::Text],
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 0,
+            max_tokens: 0,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        }
+    }
+
+    fn responses_test_context() -> Context {
+        use crate::types::{Message, UserMessage};
+        Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        }
+    }
+
+    /// Direct OpenAI Responses calls emit `prompt_cache_key` when the
+    /// caller supplied a session id and caching wasn't explicitly
+    /// disabled. The key lets the upstream pin its cache to a single
+    /// client session so cache hits stay deterministic.
+    #[test]
+    fn build_request_body_emits_prompt_cache_key_for_session() {
+        let mut options = StreamOptions::default();
+        options.session_id = Some("sess-abc".to_string());
+        let body = build_request_body(&responses_test_model(), &responses_test_context(), &options);
+        assert_eq!(body["prompt_cache_key"].as_str(), Some("sess-abc"));
+    }
+
+    /// When the caller explicitly opts out of caching via
+    /// `cache_retention: none`, the key must be omitted regardless of
+    /// whether a session id was supplied.
+    #[test]
+    fn build_request_body_omits_prompt_cache_key_when_caching_disabled() {
+        let mut options = StreamOptions::default();
+        options.session_id = Some("sess-abc".to_string());
+        options.cache_retention = Some(CacheRetention::None);
+        let body = build_request_body(&responses_test_model(), &responses_test_context(), &options);
+        assert!(body.get("prompt_cache_key").is_none(), "body: {body}");
+        assert!(body.get("prompt_cache_retention").is_none(), "body: {body}");
+    }
+
+    /// `cache_retention: long` opts in to the 24-hour cache window on
+    /// endpoints that accept it. Default-compat models support it; the
+    /// builder emits `prompt_cache_retention: "24h"`.
+    #[test]
+    fn build_request_body_emits_24h_retention_for_long_cache() {
+        let mut options = StreamOptions::default();
+        options.session_id = Some("sess-long".to_string());
+        options.cache_retention = Some(CacheRetention::Long);
+        let body = build_request_body(&responses_test_model(), &responses_test_context(), &options);
+        assert_eq!(body["prompt_cache_retention"].as_str(), Some("24h"));
+    }
+
+    /// Some proxies reject `prompt_cache_retention` entirely. Models
+    /// served by such proxies opt out via
+    /// `OpenAIResponsesCompat.supportsLongCacheRetention = false` —
+    /// the builder must honour that flag and omit the field.
+    #[test]
+    fn build_request_body_omits_24h_retention_when_compat_opts_out() {
+        use crate::types::OpenAIResponsesCompat;
+        let mut model = responses_test_model();
+        model.compat = Some(Compat::OpenAIResponses(OpenAIResponsesCompat {
+            send_session_id_header: None,
+            supports_long_cache_retention: Some(false),
+        }));
+        let mut options = StreamOptions::default();
+        options.session_id = Some("sess-long".to_string());
+        options.cache_retention = Some(CacheRetention::Long);
+        let body = build_request_body(&model, &responses_test_context(), &options);
+        // Key still emits (short-cache equivalent) but the 24h
+        // retention does not.
+        assert_eq!(body["prompt_cache_key"].as_str(), Some("sess-long"));
+        assert!(
+            body.get("prompt_cache_retention").is_none(),
+            "compat-opt-out must drop retention field, got: {body}"
+        );
+    }
+
+    /// `cache_retention: short` (the default) only requests the key;
+    /// the 24h retention is opt-in.
+    #[test]
+    fn build_request_body_omits_24h_retention_for_short_cache() {
+        let mut options = StreamOptions::default();
+        options.session_id = Some("sess-short".to_string());
+        options.cache_retention = Some(CacheRetention::Short);
+        let body = build_request_body(&responses_test_model(), &responses_test_context(), &options);
+        assert_eq!(body["prompt_cache_key"].as_str(), Some("sess-short"));
+        assert!(body.get("prompt_cache_retention").is_none());
+    }
+
+    /// No session id means no prompt_cache_key — the field is only
+    /// useful if the upstream can group calls by client session.
+    #[test]
+    fn build_request_body_omits_prompt_cache_key_without_session() {
+        let body = build_request_body(
+            &responses_test_model(),
+            &responses_test_context(),
+            &StreamOptions::default(),
+        );
+        assert!(body.get("prompt_cache_key").is_none());
     }
 
     /// When neither `summary` nor `content` is present on a reasoning done
