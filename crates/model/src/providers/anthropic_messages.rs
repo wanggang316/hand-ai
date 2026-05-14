@@ -864,6 +864,18 @@ fn parse_sse_body(body: &str, model: &Model) -> Result<Vec<AssistantMessageEvent
                         if let Some(m) = msg.get("model").and_then(|v| v.as_str()) {
                             output.model = m.to_string();
                         }
+
+                        // Capture the provider-assigned response id
+                        // (`msg_...`) so callers can correlate this
+                        // assistant turn with Anthropic's own logging
+                        // / observability — and so downstream tooling
+                        // can replay the exact response when needed.
+                        if let Some(id) = msg.get("id").and_then(|v| v.as_str())
+                            && !id.is_empty()
+                            && output.response_id.is_none()
+                        {
+                            output.response_id = Some(id.to_string());
+                        }
                     }
 
                     events.push(AssistantMessageEvent::Start {
@@ -1311,6 +1323,55 @@ mod tests {
             matches!(last, AssistantMessageEvent::Done { .. }),
             "expected Done, got {last:?}"
         );
+    }
+
+    /// The `message_start` event carries the provider-assigned
+    /// response id (`msg_...`). Surfacing it on the assistant message
+    /// lets callers correlate the turn with Anthropic's own logging
+    /// and lets downstream tooling replay the exact response.
+    #[test]
+    fn parse_sse_body_captures_response_id_from_message_start() {
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_abc123\",\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        );
+        let events = parse_sse_body(body, &test_model()).expect("parse should succeed");
+        let done = events
+            .last()
+            .and_then(|e| match e {
+                AssistantMessageEvent::Done { message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("Done event with message");
+        assert_eq!(done.response_id.as_deref(), Some("msg_abc123"));
+    }
+
+    /// Streams that omit the response id (older Anthropic backends,
+    /// proxies that strip the field) must still parse cleanly with
+    /// `response_id == None` — no panic, no error.
+    #[test]
+    fn parse_sse_body_leaves_response_id_none_when_missing() {
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        );
+        let events = parse_sse_body(body, &test_model()).expect("parse should succeed");
+        let done = events
+            .last()
+            .and_then(|e| match e {
+                AssistantMessageEvent::Done { message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("Done event with message");
+        assert!(done.response_id.is_none());
     }
 
     #[test]
