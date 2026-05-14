@@ -135,6 +135,12 @@ struct ModelsDevData {
     cerebras: Option<ModelsDevProviderData>,
     xai: Option<ModelsDevProviderData>,
     zai: Option<ModelsDevProviderData>,
+    /// models.dev renamed the zAi catalog to `zai-coding-plan` so the
+    /// generator reads from whichever key the snapshot carries.
+    /// Either source feeds the same hand-ai `Provider::Zai` entries
+    /// downstream — only the JSON key differs.
+    #[serde(rename = "zai-coding-plan")]
+    zai_coding_plan: Option<ModelsDevProviderData>,
     mistral: Option<ModelsDevProviderData>,
     huggingface: Option<ModelsDevProviderData>,
     opencode: Option<ModelsDevProviderData>,
@@ -639,8 +645,11 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
         }
     }
 
-    // zAi
-    if let Some(ref prov) = data.zai {
+    // zAi: accept either the legacy `zai` key or the newer
+    // `zai-coding-plan` key from the models.dev snapshot. Whichever
+    // is present feeds the same hand-ai `Provider::Zai` output.
+    let zai_source = data.zai_coding_plan.as_ref().or(data.zai.as_ref());
+    if let Some(prov) = zai_source {
         for (model_id, m) in &prov.models {
             if !provider_has_tool_call(m) {
                 continue;
@@ -1813,5 +1822,28 @@ mod tests {
         // the compat block.
         assert!(openrouter_compat("deepseek/deepseek-v2").is_none());
         assert!(openrouter_compat("").is_none());
+    }
+
+    /// models.dev renamed the zAi entry from `zai` to `zai-coding-plan`.
+    /// The generator must accept either key on the snapshot so a
+    /// catalog refresh against either shape still produces zAi
+    /// entries. The serde rename gives us the new key; the bare
+    /// `zai` field still maps the legacy snapshots.
+    #[test]
+    fn models_dev_data_accepts_both_zai_and_zai_coding_plan_keys() {
+        let new_shape = serde_json::json!({
+            "zai-coding-plan": { "id": "zai-coding-plan", "models": {} }
+        });
+        let parsed: ModelsDevData = serde_json::from_value(new_shape).expect("new-shape parse ok");
+        assert!(parsed.zai_coding_plan.is_some());
+        assert!(parsed.zai.is_none());
+
+        let legacy_shape = serde_json::json!({
+            "zai": { "id": "zai", "models": {} }
+        });
+        let parsed: ModelsDevData =
+            serde_json::from_value(legacy_shape).expect("legacy-shape parse ok");
+        assert!(parsed.zai.is_some());
+        assert!(parsed.zai_coding_plan.is_none());
     }
 }
