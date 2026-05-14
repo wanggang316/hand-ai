@@ -278,14 +278,10 @@ pub(crate) fn convert_messages(messages: &[Message], model: &Model) -> Vec<Value
                                     Value::String(sig.clone()),
                                 );
                             }
-                            if model.id.to_lowercase().contains("gemini-3")
-                                && part.get("thoughtSignature").is_none()
-                            {
-                                part.as_object_mut().unwrap().insert(
-                                    "thoughtSignature".to_string(),
-                                    Value::String("skip_thought_signature_validator".to_string()),
-                                );
-                            }
+                            // Gemini-3 previously took a `skip_thought_signature_validator`
+                            // sentinel for unsigned tool calls. Vertex now rejects the
+                            // sentinel; omit `thoughtSignature` entirely for unsigned
+                            // replays and let the validator skip the check on its own.
                             parts.push(part);
                         }
                     }
@@ -840,4 +836,101 @@ pub(crate) fn current_timestamp_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        Api, AssistantContentBlock, AssistantMessage, Cost, InputType, Message, Provider,
+        StopReason, ToolCall, Usage,
+    };
+
+    fn gemini3_model(id: &str) -> Model {
+        Model {
+            id: id.to_string(),
+            name: id.to_string(),
+            api: Api::GoogleGenerativeAi,
+            provider: Provider::Google,
+            base_url: "https://example.com".to_string(),
+            reasoning: true,
+            input: vec![InputType::Text],
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 0,
+            max_tokens: 1000,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        }
+    }
+
+    fn assistant_with_tool_call(
+        model_id: &str,
+        provider: Provider,
+        signature: Option<&str>,
+    ) -> Message {
+        let mut tc = ToolCall::new("call-1", "lookup", serde_json::json!({"q": "x"}));
+        tc.thought_signature = signature.map(|s| s.to_string());
+        Message::Assistant(AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::ToolCall(tc)],
+            api: Api::GoogleGenerativeAi,
+            provider,
+            model: model_id.to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        })
+    }
+
+    /// Gemini-3 used to receive a `skip_thought_signature_validator`
+    /// sentinel for any unsigned tool call so the validator wouldn't
+    /// reject the replay. Vertex started rejecting the sentinel itself,
+    /// so the upstream now omits `thoughtSignature` instead. Pin the
+    /// new behavior: no sentinel on unsigned Gemini-3 tool calls.
+    #[test]
+    fn gemini3_unsigned_tool_call_drops_signature_field() {
+        let model = gemini3_model("gemini-3-pro");
+        let msg = assistant_with_tool_call("gemini-3-pro", Provider::Google, None);
+        let contents = convert_messages(&[msg], &model);
+        assert_eq!(contents.len(), 1, "expected one content entry");
+        let parts = contents[0]
+            .get("parts")
+            .and_then(Value::as_array)
+            .expect("parts array");
+        assert_eq!(parts.len(), 1, "expected one part");
+        let part = &parts[0];
+        assert!(
+            part.get("functionCall").is_some(),
+            "must keep functionCall: {part}"
+        );
+        assert!(
+            part.get("thoughtSignature").is_none(),
+            "unsigned Gemini-3 tool call must not carry sentinel signature: {part}"
+        );
+    }
+
+    /// A real, valid base64 thought signature from the same provider/
+    /// model must still flow through — only the unsigned-replay path
+    /// loses the sentinel.
+    #[test]
+    fn gemini3_signed_tool_call_preserves_signature() {
+        let model = gemini3_model("gemini-3-pro");
+        let msg = assistant_with_tool_call("gemini-3-pro", Provider::Google, Some("dGVzdA=="));
+        let contents = convert_messages(&[msg], &model);
+        let part = &contents[0]["parts"][0];
+        assert_eq!(
+            part.get("thoughtSignature").and_then(Value::as_str),
+            Some("dGVzdA==")
+        );
+    }
 }
