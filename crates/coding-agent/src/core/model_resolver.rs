@@ -1,19 +1,19 @@
 //! Model resolution — parses model patterns, thinking levels, and provider/id combos.
 //!
-//! Mirrors `pi-mono`'s `core/model-resolver.ts`. See module functions for
-//! TS-parity helpers (`find_exact_model_reference_match`, `parse_model_pattern_full`,
-//! `resolve_model_scope`, `resolve_cli_model`, `find_initial_model`,
-//! `restore_model_from_session`). The legacy `resolve_model`/`parse_model_pattern`
-//! signatures are preserved for existing call sites in `main` and `session_setup`.
+//! Public helpers — `find_exact_model_reference_match`,
+//! `parse_model_pattern_full`, `resolve_model_scope`, `resolve_cli_model`,
+//! `find_initial_model`, `restore_model_from_session` — encode the
+//! resolution rules. The legacy `resolve_model` / `parse_model_pattern`
+//! signatures are preserved for the existing call sites in `main` and
+//! `session_setup`.
 
 use model::{Model, ThinkingLevel};
 
 /// Default model id for each known provider, used as the seed for fallback
 /// model construction and the priority order in `find_initial_model`.
 ///
-/// Mirrors `defaultModelPerProvider` in `pi-mono/core/model-resolver.ts`.
-/// Iteration order is the declaration order, so callers that scan for a
-/// "preferred" model see the same priority as the TS reference.
+/// Iteration order is the declaration order, so callers that scan for
+/// a "preferred" model see a stable priority list.
 pub fn default_model_per_provider() -> &'static [(&'static str, &'static str)] {
     &[
         ("amazon-bedrock", "us.anthropic.claude-opus-4-6-v1"),
@@ -67,8 +67,7 @@ pub fn default_model_id_for_known_provider(provider: &str) -> Option<&'static st
 /// Whether a model id looks like an alias (no date suffix).
 ///
 /// An alias is either a `-latest` suffix or any id that does **not** end in
-/// `-YYYYMMDD` (8 trailing digits after the last `-`). Mirrors `isAlias` in
-/// `pi-mono/core/model-resolver.ts`.
+/// `-YYYYMMDD` (8 trailing digits after the last `-`).
 pub fn is_alias(id: &str) -> bool {
     if id.ends_with("-latest") {
         return true;
@@ -222,9 +221,9 @@ pub fn resolve_model(provider: Option<&str>, model_id: &str) -> ResolvedModel {
     // 4. Cross-provider fuzzy fallback — only when no explicit --provider
     //    was given. With an explicit provider, drop straight to the
     //    build_fallback_model path so we don't silently route to a
-    //    different provider the user has no credentials configured for.
-    //    Mirrors pi-mono's resolveCliModel which filters candidates by
-    //    the explicit provider and never crosses providers.
+    //    different provider the user has no credentials configured for:
+    //    candidate filtering stays inside the requested provider and
+    //    never crosses providers.
     if provider.is_none() {
         for prov_key in model::get_provider_keys() {
             let models = model::get_models(&prov_key);
@@ -354,9 +353,9 @@ fn build_fallback_model(provider: &str, model_id: &str) -> Model {
 
 /// Resolve a sensible default base URL for an unrecognised model.
 ///
-/// Mirrors pi-mono's per-provider default endpoints. The OAI-compatible
-/// providers each pick a `<PROVIDER>_BASE_URL` env var (matching the
-/// secrets.env convention), falling back to the documented public endpoint.
+/// The OAI-compatible providers each pick a `<PROVIDER>_BASE_URL` env
+/// var (matching the secrets.env convention), falling back to the
+/// documented public endpoint.
 fn default_base_url_for(provider: model::types::Provider) -> String {
     use model::types::Provider;
     // Candidate env var names per provider. First non-empty wins. The
@@ -530,13 +529,13 @@ fn try_match_model<'a>(model_pattern: &str, available_models: &'a [Model]) -> Op
     }
 }
 
-/// Whether `level` is a TS-parity thinking level literal.
+/// Whether `level` is one of the canonical thinking-level literals.
 ///
-/// Mirrors `isValidThinkingLevel` in `pi-mono/cli/args.ts`. Strict — accepts
-/// only the canonical literals (`off`, `minimal`, `low`, `medium`, `high`,
-/// `xhigh`). Use this for pattern parsing where the suffix must be one of the
-/// documented values, distinct from the more permissive [`parse_thinking_level`]
-/// which accepts aliases like `min`/`med`/`max`/`none`.
+/// Strict — accepts only the canonical literals (`off`, `minimal`,
+/// `low`, `medium`, `high`, `xhigh`). Use this for pattern parsing
+/// where the suffix must be one of the documented values, distinct
+/// from the more permissive [`parse_thinking_level`] which accepts
+/// aliases like `min`/`med`/`max`/`none`.
 pub fn is_valid_thinking_level_literal(level: &str) -> bool {
     matches!(
         level,
@@ -1017,15 +1016,13 @@ pub struct InitialModelResult {
 }
 
 /// Default thinking level when no other source supplies one.
-///
-/// Mirrors `DEFAULT_THINKING_LEVEL = "medium"` in `pi-mono/core/defaults.ts`.
 pub const DEFAULT_THINKING_LEVEL: ThinkingLevel = ThinkingLevel::Medium;
 
 /// Inputs to [`find_initial_model`].
 ///
-/// Mirrors the option bag in the TS reference. `available_models` is the
-/// auth-configured catalog; `all_models` is the full catalog used for CLI
-/// resolution (so `--api-key` can be used for first-time setup).
+/// `available_models` is the auth-configured catalog; `all_models` is
+/// the full catalog used for CLI resolution (so `--api-key` can be
+/// used for first-time setup).
 #[derive(Debug, Clone, Default)]
 pub struct FindInitialModelArgs<'a> {
     pub cli_provider: Option<&'a str>,

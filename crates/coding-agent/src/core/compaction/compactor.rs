@@ -1,31 +1,24 @@
 //! Compaction pipeline — message-list path.
 //!
-//! Rust port of pi-mono `core/compaction/compaction.ts`. Produces the
-//! summary that lets a long session keep running without overflowing the
-//! model's context window.
+//! Produces the summary that lets a long session keep running without
+//! overflowing the model's context window.
 //!
-//! The TS reference walks `SessionEntry`s end-to-end (`prepareCompaction`,
-//! `findCutPoint`, `findValidCutPoints`, `findTurnStartIndex`,
-//! `getMessageFromEntry`, `extractFileOperations` over previous
-//! compaction entries). The current Rust
-//! [`crate::core::session_manager::SessionEntry`] is strictly less
-//! expressive — no `branch_summary` / `custom_message` / `bash_execution`
-//! / `thinking_level_change` variants and no parent-id tree — so those
-//! helpers are deliberately deferred. This module ports the
-//! message-list-oriented half:
+//! The current [`crate::core::session_manager::SessionEntry`] does not
+//! yet model `branch_summary` / `custom_message` / `bash_execution` /
+//! `thinking_level_change` variants or a parent-id tree, so the
+//! entry-tree-walking helpers (cut-point selection over previous
+//! compaction entries, turn-start projection, etc.) are deferred. This
+//! module ships the message-list half:
 //!
 //! - Token math: [`calculate_context_tokens`], [`estimate_tokens_for_message`],
 //!   [`estimate_context_tokens_with_usage`], [`get_last_assistant_usage`].
-//! - Threshold gate: [`should_compact_with_reserve`] (TS `reserveTokens`
-//!   semantics, distinct from the legacy threshold gate in
+//! - Threshold gate: [`should_compact_with_reserve`] (a `reserve_tokens`
+//!   policy distinct from the legacy threshold gate in
 //!   [`super::utils::should_compact`]).
 //! - LLM-driven summarization: [`generate_summary`],
-//!   [`generate_turn_prefix_summary`], [`compact`] — all routed through the
-//!   [`super::branch_summarization::SummarizationClient`] trait so tests
-//!   can mock the network.
-//!
-//! Entry-tree-walking helpers are left as TODOs referencing
-//! `docs/exec-plans/parity-completion.md` §A4.
+//!   [`generate_turn_prefix_summary`], [`compact`] — all routed through
+//!   the [`super::branch_summarization::SummarizationClient`] trait so
+//!   tests can mock the network.
 
 use crate::core::compaction::branch_summarization::SummarizationClient;
 use crate::core::compaction::utils::{
@@ -44,11 +37,10 @@ use std::sync::Arc;
 
 /// Runtime settings used by the message-list compactor.
 ///
-/// Mirrors pi-mono's `CompactionSettings` shape (`enabled`, `reserveTokens`,
-/// `keepRecentTokens`) directly. This is a separate type from the
-/// project-level [`crate::core::settings::CompactionSettings`], whose
-/// `threshold` semantics are kept for backwards compatibility with the
-/// legacy [`super::utils::should_compact`] gate.
+/// Distinct from the project-level
+/// [`crate::core::settings::CompactionSettings`], whose `threshold`
+/// semantics are kept for backwards compatibility with the legacy
+/// [`super::utils::should_compact`] gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionRuntimeSettings {
     pub enabled: bool,
@@ -57,7 +49,8 @@ pub struct CompactionRuntimeSettings {
 }
 
 impl Default for CompactionRuntimeSettings {
-    /// Matches pi-mono's `DEFAULT_COMPACTION_SETTINGS`.
+    /// Ship the default policy: enabled, 16 384-token reserve,
+    /// 20 000-token keep-recent budget.
     fn default() -> Self {
         Self {
             enabled: true,
@@ -71,8 +64,8 @@ impl Default for CompactionRuntimeSettings {
 // CompactionDetails (persisted file lists)
 // ============================================================================
 
-/// Persistable file-tracking payload, mirroring pi-mono's
-/// `CompactionDetails`. Consumed by the entry-tree port when it lands.
+/// Persistable file-tracking payload. Consumed by the entry-tree
+/// port when it lands.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompactionDetails {
     #[serde(rename = "readFiles", default)]
@@ -97,9 +90,9 @@ pub fn calculate_context_tokens(usage: &Usage) -> u64 {
     }
 }
 
-/// Pull the [`Usage`] record off an assistant message, but only when the
-/// message is "good" — pi-mono explicitly skips aborted and error messages
-/// because their usage data is unreliable.
+/// Pull the [`Usage`] record off an assistant message, but only when
+/// the message is "good" — aborted and error messages carry unreliable
+/// usage data and are skipped.
 fn assistant_usage(msg: &Message) -> Option<&Usage> {
     let Message::Assistant(a) = msg else {
         return None;
@@ -131,9 +124,9 @@ fn last_assistant_usage_info(messages: &[Message]) -> Option<(usize, &Usage)> {
 
 /// Estimate token count for a single message using a chars/4 heuristic.
 ///
-/// This is conservative (overestimates tokens), matching pi-mono's
-/// `estimateTokens(message)`. Tool results and images are billed at
-/// fixed-size approximations identical to the TS reference.
+/// Conservative — overestimates tokens — so the reserve gate fires a
+/// little early rather than overshooting the context window. Tool
+/// results and images are billed at fixed-size approximations.
 pub fn estimate_tokens_for_message(message: &Message) -> u64 {
     let mut chars: u64 = 0;
     match message {
@@ -172,8 +165,7 @@ pub fn estimate_tokens_for_message(message: &Message) -> u64 {
     chars.div_ceil(4)
 }
 
-/// Combined context-tokens estimate, mirroring pi-mono's
-/// `ContextUsageEstimate`.
+/// Combined context-tokens estimate.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextUsageEstimate {
     /// Best-effort total: `usage_tokens + trailing_tokens` when usage is
@@ -189,9 +181,9 @@ pub struct ContextUsageEstimate {
 
 /// Estimate context tokens using the last assistant usage as an anchor.
 ///
-/// When a recent assistant message has good usage data, only the messages
-/// after it are scored heuristically. Otherwise every message is scored.
-/// Direct port of pi-mono's `estimateContextTokens`.
+/// When a recent assistant message has good usage data, only the
+/// messages after it are scored heuristically. Otherwise every message
+/// is scored.
 pub fn estimate_context_tokens_with_usage(messages: &[Message]) -> ContextUsageEstimate {
     match last_assistant_usage_info(messages) {
         Some((idx, usage)) => {
@@ -220,8 +212,8 @@ pub fn estimate_context_tokens_with_usage(messages: &[Message]) -> ContextUsageE
     }
 }
 
-/// Decide whether compaction should fire under pi-mono's `reserveTokens`
-/// semantics: trigger when `context_tokens > context_window - reserve`.
+/// Decide whether compaction should fire under the `reserve_tokens`
+/// policy: trigger when `context_tokens > context_window - reserve`.
 ///
 /// Distinct from the legacy [`super::utils::should_compact`] gate, which
 /// uses a `threshold` ratio and is still consumed by `agent_session`
@@ -239,7 +231,7 @@ pub fn should_compact_with_reserve(
 }
 
 // ============================================================================
-// Summarization prompts (verbatim from pi-mono)
+// Summarization prompts
 // ============================================================================
 
 const SUMMARIZATION_PROMPT: &str = r#"The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
@@ -348,7 +340,8 @@ pub async fn generate_summary(
     previous_summary: Option<&str>,
     thinking_level: Option<ThinkingLevel>,
 ) -> Result<String, String> {
-    // pi-mono uses Math.floor(0.8 * reserveTokens) for the response budget.
+    // 80% of the reserve budget goes to the response; the remaining
+    // 20% is left as headroom for the prompt itself.
     let max_tokens = ((reserve_tokens as f64) * 0.8).floor() as u32;
 
     let mut base_prompt = if previous_summary.is_some() {
@@ -377,10 +370,10 @@ pub async fn generate_summary(
 
     let mut options = SimpleStreamOptions::default();
     options.base.max_tokens = Some(max_tokens);
-    // pi-mono only forwards `reasoning` when the model supports it AND the
-    // caller passed a non-"off" level. The Rust `ThinkingLevel` enum has no
-    // `Off` variant; absence is encoded as `None` already, so a `Some`
-    // value here is always meaningful.
+    // Only forward `reasoning` when the model supports it AND the
+    // caller passed a non-"off" level. `ThinkingLevel` has no `Off`
+    // variant — absence is encoded as `None` — so a `Some` value
+    // here is always meaningful.
     if let Some(level) = thinking_level.filter(|_| model.reasoning) {
         options.reasoning = Some(level);
     }
@@ -399,7 +392,8 @@ pub async fn generate_summary(
 }
 
 /// Generate a summary for a turn prefix when the cut point splits a turn.
-/// Uses a smaller budget than the main summary (pi-mono: 0.5 × reserve).
+/// Uses half the reserve budget — the turn prefix is a smaller chunk
+/// than the full conversation.
 pub async fn generate_turn_prefix_summary(
     messages: &[Message],
     model: &Model,
@@ -422,10 +416,10 @@ pub async fn generate_turn_prefix_summary(
 
     let mut options = SimpleStreamOptions::default();
     options.base.max_tokens = Some(max_tokens);
-    // pi-mono only forwards `reasoning` when the model supports it AND the
-    // caller passed a non-"off" level. The Rust `ThinkingLevel` enum has no
-    // `Off` variant; absence is encoded as `None` already, so a `Some`
-    // value here is always meaningful.
+    // Only forward `reasoning` when the model supports it AND the
+    // caller passed a non-"off" level. `ThinkingLevel` has no `Off`
+    // variant — absence is encoded as `None` — so a `Some` value
+    // here is always meaningful.
     if let Some(level) = thinking_level.filter(|_| model.reasoning) {
         options.reasoning = Some(level);
     }
@@ -443,10 +437,9 @@ pub async fn generate_turn_prefix_summary(
     Ok(extract_text(&response))
 }
 
-/// Already-prepared inputs for [`compact`]. Mirrors pi-mono's
-/// `CompactionPreparation` minus the entry-tree fields (`firstKeptEntryId`,
-/// `tokensBefore`) — those are produced by the entry-tree port and
-/// re-attached when [`compact`] returns.
+/// Already-prepared inputs for [`compact`]. The entry-tree fields
+/// (`first_kept_entry_id`, `tokens_before`) are produced by the
+/// entry-tree port and re-attached when [`compact`] returns.
 #[derive(Debug, Clone)]
 pub struct CompactionInput {
     /// Messages that will be summarized and discarded.
@@ -477,9 +470,9 @@ pub struct CompactionOutput {
 ///
 /// When [`CompactionInput::is_split_turn`] is `true` and the turn prefix
 /// is non-empty, the history and turn-prefix summaries are produced
-/// concurrently with [`tokio::join`] and stitched together with the same
-/// separator pi-mono uses. The file-operations XML is appended to the
-/// final summary.
+/// concurrently with [`tokio::join`] and stitched together with the
+/// standard separator. The file-operations XML is appended to the final
+/// summary.
 pub async fn compact(
     input: CompactionInput,
     model: &Model,
@@ -563,14 +556,12 @@ fn extract_text(msg: &AssistantMessage) -> String {
 // Entry-tree path — placeholders.
 // ============================================================================
 
-// TODO(parity): the pi-mono entry-tree path
-// (`prepareCompaction`, `findCutPoint`, `findValidCutPoints`,
-// `findTurnStartIndex`, `getMessageFromEntry`, `getMessageFromEntryForCompaction`,
-// the previous-compaction-aware `extractFileOperations`) requires extending
+// TODO: the entry-tree path (preparing compaction, finding cut points,
+// projecting entries to messages, and tracking file operations across
+// previous compaction entries) requires extending
 // `crate::core::session_manager::SessionEntry` with `branch_summary`,
 // `custom_message`, `bash_execution`, and `thinking_level_change`
-// variants plus a `parent_id` tree. Tracked in
-// `docs/exec-plans/parity-completion.md` §A4.
+// variants plus a `parent_id` tree.
 
 #[cfg(test)]
 mod tests {
@@ -965,8 +956,9 @@ mod tests {
 
     #[tokio::test]
     async fn generate_summary_skips_reasoning_when_level_is_none() {
-        // None encodes "no reasoning" — pi-mono uses the "off" sentinel
-        // for the same effect; the Rust enum has no Off variant.
+        // None encodes "no reasoning" — `ThinkingLevel` has no `Off`
+        // variant, so absence carries the same meaning as an explicit
+        // off sentinel would.
         let client = ScriptedClient::new(vec![ok_assistant("ok")]);
         let model = dummy_model(true);
         let messages = vec![Message::User(UserMessage::new_text("hi"))];
@@ -1097,7 +1089,7 @@ mod tests {
     // ---- Settings defaults ----
 
     #[test]
-    fn runtime_settings_defaults_match_pi_mono() {
+    fn runtime_settings_defaults_are_stable() {
         let s = CompactionRuntimeSettings::default();
         assert!(s.enabled);
         assert_eq!(s.reserve_tokens, 16_384);
