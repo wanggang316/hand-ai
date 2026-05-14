@@ -1137,8 +1137,11 @@ pub(crate) fn decide_openai_prompt_cache(
             retention: None,
         };
     }
-    // pi-mono defaults to "short" when the caller did not pin a value.
-    let resolved = cache_retention.unwrap_or(CacheRetention::Short);
+    // Default to `Short` when the caller did not pin a value, but let
+    // `PI_CACHE_RETENTION=long` flip the default to `Long` so operators
+    // can opt every direct request into 24h prompt caching without
+    // threading an option through every call site.
+    let resolved = CacheRetention::resolve(cache_retention);
     let key = if resolved != CacheRetention::None {
         session_id
             .map(str::trim)

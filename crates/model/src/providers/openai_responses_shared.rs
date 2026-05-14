@@ -77,7 +77,7 @@ pub(crate) fn build_request_body(
     //   `supportsLongCacheRetention: true` (defaults to true for direct
     //   OpenAI; models.dev sets it to false for proxies that reject the
     //   field).
-    let retention = options.cache_retention.unwrap_or(CacheRetention::Short);
+    let retention = CacheRetention::resolve(options.cache_retention);
     if retention != CacheRetention::None
         && let Some(session_id) = options.session_id.as_deref()
         && !session_id.is_empty()

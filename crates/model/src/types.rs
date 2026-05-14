@@ -30,6 +30,28 @@ pub enum CacheRetention {
     Long,
 }
 
+impl CacheRetention {
+    /// Resolve the effective cache retention for a stream.
+    ///
+    /// - If the caller passed an explicit value, honour it.
+    /// - Otherwise, read the `PI_CACHE_RETENTION` env var: a value of
+    ///   `"long"` (case-insensitive) opts in to long retention. Any
+    ///   other value, or an unset variable, falls back to `Short`.
+    ///
+    /// The env-var fallback lets operators turn on 1h Anthropic caches
+    /// and 24h OpenAI caches globally without threading a knob through
+    /// every call site.
+    pub fn resolve(explicit: Option<CacheRetention>) -> CacheRetention {
+        if let Some(value) = explicit {
+            return value;
+        }
+        match std::env::var("PI_CACHE_RETENTION") {
+            Ok(v) if v.eq_ignore_ascii_case("long") => CacheRetention::Long,
+            _ => CacheRetention::Short,
+        }
+    }
+}
+
 /// HTTP response metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderResponse {
@@ -1129,6 +1151,66 @@ mod types_tests {
         let built = opts.build_base_options(&model, None);
         assert_eq!(built.transport, Some(Transport::WebsocketCached));
         assert_eq!(built.cache_retention, Some(CacheRetention::Long));
+    }
+
+    /// An explicit caller value always wins over `PI_CACHE_RETENTION`,
+    /// even when the env var is set. The env-var fallback only kicks in
+    /// when the caller passed `None`.
+    #[test]
+    fn cache_retention_resolve_honours_explicit_value() {
+        let prior = std::env::var("PI_CACHE_RETENTION").ok();
+        unsafe {
+            std::env::set_var("PI_CACHE_RETENTION", "long");
+        }
+        assert_eq!(
+            CacheRetention::resolve(Some(CacheRetention::None)),
+            CacheRetention::None,
+        );
+        assert_eq!(
+            CacheRetention::resolve(Some(CacheRetention::Short)),
+            CacheRetention::Short,
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("PI_CACHE_RETENTION", v),
+                None => std::env::remove_var("PI_CACHE_RETENTION"),
+            }
+        }
+    }
+
+    /// With no explicit value, `PI_CACHE_RETENTION=long` (any case)
+    /// promotes the default to `Long`. Any other value or an unset
+    /// variable falls back to `Short`.
+    #[test]
+    fn cache_retention_resolve_reads_pi_cache_retention_env() {
+        let prior = std::env::var("PI_CACHE_RETENTION").ok();
+
+        unsafe {
+            std::env::set_var("PI_CACHE_RETENTION", "long");
+        }
+        assert_eq!(CacheRetention::resolve(None), CacheRetention::Long);
+
+        unsafe {
+            std::env::set_var("PI_CACHE_RETENTION", "LONG");
+        }
+        assert_eq!(CacheRetention::resolve(None), CacheRetention::Long);
+
+        unsafe {
+            std::env::set_var("PI_CACHE_RETENTION", "short");
+        }
+        assert_eq!(CacheRetention::resolve(None), CacheRetention::Short);
+
+        unsafe {
+            std::env::remove_var("PI_CACHE_RETENTION");
+        }
+        assert_eq!(CacheRetention::resolve(None), CacheRetention::Short);
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("PI_CACHE_RETENTION", v),
+                None => std::env::remove_var("PI_CACHE_RETENTION"),
+            }
+        }
     }
 
     #[test]

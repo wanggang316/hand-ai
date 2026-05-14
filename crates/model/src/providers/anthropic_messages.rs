@@ -396,9 +396,7 @@ pub(crate) fn resolve_anthropic_cache_control(
     model: &Model,
     options: Option<&StreamOptions>,
 ) -> Option<Value> {
-    let retention = options
-        .and_then(|o| o.cache_retention)
-        .unwrap_or(CacheRetention::Short);
+    let retention = CacheRetention::resolve(options.and_then(|o| o.cache_retention));
     if retention == CacheRetention::None {
         return None;
     }
