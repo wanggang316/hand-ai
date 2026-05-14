@@ -267,6 +267,14 @@ fn build_codex_request_body(model: &Model, context: &Context, options: &StreamOp
     // store: false is mandatory for Codex Responses.
     body["store"] = Value::Bool(false);
 
+    // Codex Responses (chat.com /backend-api/codex/responses) doesn't
+    // accept `prompt_cache_retention`. The shared builder may have
+    // injected it for `cache_retention: long`; strip it back out.
+    // `prompt_cache_key` is fine — Codex accepts and uses it.
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("prompt_cache_retention");
+    }
+
     // Always emit `instructions` for codex — backend rejects empty/missing.
     let has_instructions = body
         .get("instructions")
@@ -898,6 +906,32 @@ mod tests {
             body["text"]["verbosity"].as_str(),
             Some("low"),
             "body must default text.verbosity to low: {body}"
+        );
+    }
+
+    /// Codex Responses accepts `prompt_cache_key` but not
+    /// `prompt_cache_retention`. The shared Responses body builder
+    /// emits both for `cache_retention: long`; the codex wrapper has
+    /// to strip the retention field while preserving the key.
+    #[test]
+    fn codex_body_strips_prompt_cache_retention_but_keeps_key() {
+        use crate::types::CacheRetention;
+        let mut options = StreamOptions::default();
+        options.session_id = Some("sess-codex".to_string());
+        options.cache_retention = Some(CacheRetention::Long);
+        let body = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(Some("You are pi.")),
+            &options,
+        );
+        assert_eq!(
+            body["prompt_cache_key"].as_str(),
+            Some("sess-codex"),
+            "codex must still emit prompt_cache_key: {body}"
+        );
+        assert!(
+            body.get("prompt_cache_retention").is_none(),
+            "codex must strip prompt_cache_retention: {body}"
         );
     }
 
