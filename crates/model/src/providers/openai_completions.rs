@@ -456,7 +456,14 @@ fn handle_delta(
                         last_tc.id = tool_id.clone();
                     }
                 }
-                if let Some(name) = &function.name {
+                // Treat the first non-empty name as authoritative.
+                // Some providers (notably proxies) repeat `function.name`
+                // on later chunks with a stale or wrong value; clobbering
+                // would silently rename the tool mid-stream.
+                if tc.name.is_empty()
+                    && let Some(name) = &function.name
+                    && !name.is_empty()
+                {
                     tc.name = name.clone();
                     if let Some(AssistantContentBlock::ToolCall(last_tc)) =
                         output.content.last_mut()
@@ -2185,6 +2192,44 @@ mod tests {
         // Modality switch from thinking -> text should close the thinking
         // block (ThinkingEnd) before opening the text block (TextStart).
         assert_eq!(tags, vec!["ts", "td", "td", "te", "Ts", "Td", "Te"]);
+    }
+
+    /// Some providers emit malformed mid-stream chunks that repeat
+    /// `function.name` with a stale or wrong value after the first
+    /// chunk already set the canonical name. Once a name is recorded
+    /// from the first chunk, later chunks must NOT overwrite it —
+    /// the parser must treat the first non-empty name as authoritative
+    /// (mirroring the same id-preservation rule that's been in place).
+    #[test]
+    fn streaming_tool_call_preserves_first_name_against_later_overrides() {
+        let mut output = empty_output();
+        let mut current: Option<CurrentBlock> = None;
+        let _ = handle_delta(
+            &tool_call_delta(0, Some("call_abc"), Some("read"), Some("{")),
+            &mut current,
+            &mut output,
+        );
+        // Malformed later chunk repeats the name with a different
+        // value. This must NOT silently rename the tool.
+        let _ = handle_delta(
+            &tool_call_delta(0, None, Some("write"), Some("\"a\":1}")),
+            &mut current,
+            &mut output,
+        );
+        let _ = finish_current_block(&mut current, &mut output);
+
+        assert_eq!(output.content.len(), 1);
+        match &output.content[0] {
+            AssistantContentBlock::ToolCall(tc) => {
+                assert_eq!(tc.id, "call_abc");
+                assert_eq!(
+                    tc.name, "read",
+                    "first chunk's name must be authoritative"
+                );
+                assert_eq!(tc.arguments, serde_json::json!({"a": 1}));
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
     }
 
     #[test]
