@@ -5,9 +5,10 @@
 
 use crate::api_registry::AssistantMessageEventStream;
 use crate::types::{
-    Api, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Context, InputType,
-    Message, Model, Provider, SimpleStreamOptions, StopReason, StreamOptions, TextContent,
-    ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolResultContent, UserContentBlock,
+    Api, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, CacheRetention, Compat,
+    Context, InputType, Message, Model, Provider, SimpleStreamOptions, StopReason, StreamOptions,
+    TextContent, ThinkingContent, ThinkingLevel, Tool, ToolCall, ToolResultContent,
+    UserContentBlock,
 };
 use crate::{env_api_keys, supports_xhigh};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -237,11 +238,29 @@ fn build_request_body(
     let messages = convert_messages_to_anthropic(&context.messages, model);
     body.insert("messages".to_string(), Value::Array(messages));
 
-    // Tools
+    // Tools — attach `cache_control` to the LAST tool when prompt caching
+    // is enabled. Anthropic uses the last cache breakpoint as the boundary
+    // for what gets cached; placing it on the tool list lets tool schemas
+    // be cached independently from the (frequently-changing) transcript.
     if let Some(tools) = &context.tools
         && !tools.is_empty()
     {
-        let tool_defs: Vec<Value> = tools.iter().map(convert_tool_to_anthropic).collect();
+        let cache_control = resolve_anthropic_cache_control(model, options.as_ref());
+        let last_idx = tools.len() - 1;
+        let tool_defs: Vec<Value> = tools
+            .iter()
+            .enumerate()
+            .map(|(idx, t)| {
+                let mut tool_obj = convert_tool_to_anthropic(t);
+                if idx == last_idx
+                    && let Some(cc) = &cache_control
+                    && let Some(obj) = tool_obj.as_object_mut()
+                {
+                    obj.insert("cache_control".to_string(), cc.clone());
+                }
+                tool_obj
+            })
+            .collect();
         body.insert("tools".to_string(), Value::Array(tool_defs));
     }
 
@@ -254,6 +273,48 @@ fn build_request_body(
     }
 
     Ok(Value::Object(body))
+}
+
+/// Whether the model opts in to Anthropic long-cache retention.
+/// Defaults to `true` for native `api.anthropic.com` and any
+/// `AnthropicMessagesCompat.supports_long_cache_retention = true`
+/// override; explicit `Some(false)` disables it.
+fn supports_long_cache_retention(model: &Model) -> bool {
+    if let Some(Compat::AnthropicMessages(c)) = &model.compat
+        && let Some(v) = c.supports_long_cache_retention
+    {
+        return v;
+    }
+    model.base_url.contains("api.anthropic.com")
+}
+
+/// Compute the `cache_control` JSON object to attach to the last tool
+/// definition (and, eventually, system / last conversation message)
+/// for Anthropic prompt caching. Returns `None` when caching is
+/// disabled, so callers can skip emitting the field entirely.
+///
+/// Caching policy mirrors pi-mono:
+/// - `CacheRetention::None` → never emit `cache_control`.
+/// - any other retention → emit `{type: ephemeral}`; when the resolved
+///   value is `Long` *and* the model supports long retention, add
+///   `ttl: "1h"` so the Anthropic backend keeps the breakpoint for an
+///   hour instead of the default five-minute window.
+pub(crate) fn resolve_anthropic_cache_control(
+    model: &Model,
+    options: Option<&StreamOptions>,
+) -> Option<Value> {
+    let retention = options
+        .and_then(|o| o.cache_retention)
+        .unwrap_or(CacheRetention::Short);
+    if retention == CacheRetention::None {
+        return None;
+    }
+    let mut cc = serde_json::Map::new();
+    cc.insert("type".to_string(), Value::String("ephemeral".to_string()));
+    if retention == CacheRetention::Long && supports_long_cache_retention(model) {
+        cc.insert("ttl".to_string(), Value::String("1h".to_string()));
+    }
+    Some(Value::Object(cc))
 }
 
 fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
@@ -1161,6 +1222,81 @@ mod tests {
         assert_eq!(body["max_tokens"], 4096);
         assert_eq!(body["stream"], true);
         assert_eq!(body["system"], "You are helpful.");
+    }
+
+    fn tool_def(name: &str) -> Tool {
+        Tool::new(name, format!("desc {name}"), serde_json::json!({}))
+    }
+
+    /// Anthropic prompt caching keys off the last `cache_control`
+    /// breakpoint. Placing it on the final tool definition lets the
+    /// tool list (which is stable across turns) be cached independently
+    /// from the constantly-changing transcript. Default `cache_retention`
+    /// is `Short` so the breakpoint should appear even when the caller
+    /// doesn't set the option.
+    #[test]
+    fn last_tool_carries_cache_control_when_caching_enabled() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: Some(vec![tool_def("a"), tool_def("b"), tool_def("c")]),
+        };
+        let body = build_request_body(&model, &context, 4096, None, &None).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert!(
+            tools[0].get("cache_control").is_none(),
+            "first tool must not carry cache_control: {tools:?}"
+        );
+        assert!(
+            tools[1].get("cache_control").is_none(),
+            "middle tool must not carry cache_control: {tools:?}"
+        );
+        let cc = tools[2]
+            .get("cache_control")
+            .unwrap_or_else(|| panic!("last tool missing cache_control: {tools:?}"));
+        assert_eq!(cc["type"], "ephemeral");
+        assert!(cc.get("ttl").is_none(), "short retention must not set ttl");
+    }
+
+    /// `Long` retention against an Anthropic-supported endpoint promotes
+    /// the breakpoint to the 1-hour TTL window.
+    #[test]
+    fn last_tool_cache_control_long_retention_sets_1h_ttl() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![],
+            tools: Some(vec![tool_def("a")]),
+        };
+        let opts = StreamOptions {
+            cache_retention: Some(CacheRetention::Long),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
+        let cc = &body["tools"][0]["cache_control"];
+        assert_eq!(cc["type"], "ephemeral");
+        assert_eq!(cc["ttl"], "1h");
+    }
+
+    /// `None` retention is the explicit opt-out; the request must NOT
+    /// carry any `cache_control` markers so a caller that knows the
+    /// transcript will never repeat avoids paying the cache-write cost.
+    #[test]
+    fn last_tool_cache_control_omitted_when_retention_none() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![],
+            tools: Some(vec![tool_def("a")]),
+        };
+        let opts = StreamOptions {
+            cache_retention: Some(CacheRetention::None),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
+        assert!(body["tools"][0].get("cache_control").is_none());
     }
 
     #[test]
