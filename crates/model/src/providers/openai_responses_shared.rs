@@ -367,6 +367,50 @@ pub(crate) fn dispatch_responses_event(
             }
         }
 
+        // `response.failed` is the upstream's signal that the
+        // response could not be produced — e.g. content moderation,
+        // upstream model errors. The event carries the actual cause
+        // in `response.error` (code + message) or
+        // `response.incomplete_details.reason`. Surface as an Error
+        // event with the cleaned-up reason so callers see WHY the
+        // turn failed instead of a generic "unknown error".
+        //
+        // The previous behaviour silently ignored the event and let
+        // the stream finish, producing a successful-looking Done
+        // with empty content.
+        "response.failed" => {
+            let response = data.get("response");
+            let msg = response
+                .and_then(|r| r.get("error"))
+                .map(|err| {
+                    let code = err
+                        .get("code")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let message = err
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("no message");
+                    format!("{code}: {message}")
+                })
+                .or_else(|| {
+                    response
+                        .and_then(|r| r.get("incomplete_details"))
+                        .and_then(|d| d.get("reason"))
+                        .and_then(|v| v.as_str())
+                        .map(|reason| format!("incomplete: {reason}"))
+                })
+                .unwrap_or_else(|| {
+                    "response.failed event without error details".to_string()
+                });
+            output.stop_reason = StopReason::Error;
+            output.error_message = Some(msg);
+            emitted.push(AssistantMessageEvent::Error {
+                reason: StopReason::Error,
+                error: output.clone(),
+            });
+        }
+
         _ => {}
     }
     emitted
@@ -795,6 +839,73 @@ mod tests {
             system_prompt: None,
             messages: vec![Message::User(UserMessage::new_text("hi"))],
             tools: None,
+        }
+    }
+
+    /// The Responses API surfaces a `response.failed` SSE event when
+    /// it cannot produce a response (content moderation, upstream
+    /// model errors, ...). The event body carries the actual cause
+    /// in `response.error` — silently dropping the event made the
+    /// stream look successful even though the turn failed. Pin the
+    /// Error event so callers see WHY the turn failed.
+    #[test]
+    fn response_failed_event_emits_error_with_code_and_message() {
+        let mut state = ResponsesParseState::default();
+        let mut output = empty_assistant_message();
+        let events = dispatch_responses_event(
+            &mut state,
+            &mut output,
+            "response.failed",
+            &json!({
+                "response": {
+                    "error": {
+                        "code": "content_filter",
+                        "message": "Request flagged by safety policy."
+                    }
+                }
+            }),
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AssistantMessageEvent::Error { error, .. } => {
+                let msg = error.error_message.as_deref().unwrap_or_default();
+                assert!(
+                    msg.contains("content_filter") && msg.contains("safety policy"),
+                    "error msg must carry code and message: {msg}"
+                );
+            }
+            other => panic!("expected Error event, got {other:?}"),
+        }
+        assert_eq!(output.stop_reason, StopReason::Error);
+    }
+
+    /// Some failures report only `incomplete_details.reason` without
+    /// an `error` object. The decoder must still surface a meaningful
+    /// message instead of a generic "unknown error".
+    #[test]
+    fn response_failed_event_falls_back_to_incomplete_details() {
+        let mut state = ResponsesParseState::default();
+        let mut output = empty_assistant_message();
+        let events = dispatch_responses_event(
+            &mut state,
+            &mut output,
+            "response.failed",
+            &json!({
+                "response": {
+                    "incomplete_details": { "reason": "max_output_tokens" }
+                }
+            }),
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            AssistantMessageEvent::Error { error, .. } => {
+                let msg = error.error_message.as_deref().unwrap_or_default();
+                assert!(
+                    msg.contains("incomplete") && msg.contains("max_output_tokens"),
+                    "fallback message must carry the incomplete reason: {msg}"
+                );
+            }
+            other => panic!("expected Error event, got {other:?}"),
         }
     }
 
