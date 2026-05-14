@@ -275,6 +275,14 @@ fn build_codex_request_body(model: &Model, context: &Context, options: &StreamOp
         obj.remove("prompt_cache_retention");
     }
 
+    // Codex Responses returns reasoning content as encrypted blobs that
+    // the backend re-attaches on subsequent turns. Without this opt-in
+    // include the response stream drops reasoning entirely, breaking
+    // multi-turn chains that depend on prior reasoning context.
+    body["include"] = Value::Array(vec![Value::String(
+        "reasoning.encrypted_content".to_string(),
+    )]);
+
     // Always emit `instructions` for codex — backend rejects empty/missing.
     let has_instructions = body
         .get("instructions")
@@ -906,6 +914,30 @@ mod tests {
             body["text"]["verbosity"].as_str(),
             Some("low"),
             "body must default text.verbosity to low: {body}"
+        );
+    }
+
+    /// Codex Responses returns reasoning as encrypted blobs that the
+    /// backend only re-attaches on subsequent turns when the caller
+    /// opts in via `include: ["reasoning.encrypted_content"]`. Without
+    /// the include the reasoning chain is dropped after one turn, so
+    /// the field must be set on every codex request — regardless of
+    /// `cache_retention`, `session_id`, or any other option.
+    #[test]
+    fn codex_body_always_requests_encrypted_reasoning_content() {
+        let body = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(Some("You are pi.")),
+            &StreamOptions::default(),
+        );
+        let include = body
+            .get("include")
+            .and_then(|v| v.as_array())
+            .expect("codex body must carry an `include` array");
+        let entries: Vec<&str> = include.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            entries.contains(&"reasoning.encrypted_content"),
+            "include must request encrypted reasoning content: {body}"
         );
     }
 
