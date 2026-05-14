@@ -889,24 +889,26 @@ pub fn convert_messages(
                     if !thinking_blocks.is_empty() && compat.requires_thinking_as_text {
                         let thinking_text: String = thinking_blocks
                             .iter()
-                            .map(|t| t.thinking.as_str())
+                            .map(|t| sanitize_surrogates(&t.thinking))
                             .collect::<Vec<_>>()
                             .join("\n\n");
 
-                        match assistant_content {
-                            Content::Array(mut parts) => {
-                                parts.insert(
-                                    0,
-                                    ContentPart::Text {
-                                        text: thinking_text,
-                                    },
-                                );
-                                Content::Array(parts)
-                            }
-                            Content::Text(existing) => {
-                                Content::Text(format!("{thinking_text}\n\n{existing}"))
-                            }
+                        // Emit a `Content::Array` so the thinking text and any
+                        // existing assistant text survive as discrete
+                        // `{type: "text"}` parts. Joining them into a single
+                        // string corrupts same-model replays for providers
+                        // that key on the multi-part shape (e.g. llama.cpp +
+                        // gpt-oss assistant turns with both thinking and
+                        // text).
+                        let mut parts: Vec<ContentPart> = vec![ContentPart::Text {
+                            text: thinking_text,
+                        }];
+                        for tb in &text_blocks {
+                            parts.push(ContentPart::Text {
+                                text: sanitize_surrogates(&tb.text),
+                            });
                         }
+                        Content::Array(parts)
                     } else {
                         assistant_content
                     };
@@ -2185,6 +2187,69 @@ mod tests {
         let msgs = convert_messages(&model, &context, &compat);
         assert_eq!(msgs.len(), 2);
         assert!(matches!(msgs[0].role, Role::System));
+    }
+
+    /// `requires_thinking_as_text` compat replay must preserve every original
+    /// assistant text block alongside the thinking text as discrete
+    /// `{type: "text"}` content parts. Joining them into one string corrupts
+    /// same-model replays for providers (e.g. llama.cpp + gpt-oss) that key on
+    /// the multi-part shape — they crash when prior assistant messages mix
+    /// thinking and text.
+    #[test]
+    fn assistant_with_thinking_and_text_emits_array_parts_when_compat_requires() {
+        use crate::types::{AssistantContentBlock, TextContent, ThinkingContent};
+        let mut model = test_model(Provider::Mistral);
+        model.base_url = "https://api.mistral.ai".to_string();
+        let compat = detect_compat(&model);
+        assert!(
+            compat.requires_thinking_as_text,
+            "mistral baseline must require thinking-as-text"
+        );
+
+        let asst = AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![
+                AssistantContentBlock::Thinking(ThinkingContent::new("inner reasoning")),
+                AssistantContentBlock::Text(TextContent::new("visible answer")),
+            ],
+            api: Api::OpenAICompletions,
+            provider: Provider::Mistral,
+            model: model.id.clone(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        };
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage::new_text("hi")),
+                Message::Assistant(asst),
+            ],
+            tools: None,
+        };
+        let msgs = convert_messages(&model, &context, &compat);
+        let assistant_msg = msgs
+            .iter()
+            .find(|m| matches!(m.role, Role::Assistant))
+            .expect("assistant message present");
+        match &assistant_msg.content {
+            Content::Array(parts) => {
+                assert_eq!(parts.len(), 2, "expected two text parts, got {parts:?}");
+                match &parts[0] {
+                    ContentPart::Text { text } => assert_eq!(text, "inner reasoning"),
+                    other => panic!("part[0] must be text, got {other:?}"),
+                }
+                match &parts[1] {
+                    ContentPart::Text { text } => assert_eq!(text, "visible answer"),
+                    other => panic!("part[1] must be text, got {other:?}"),
+                }
+            }
+            other => panic!("assistant content must be array, got {other:?}"),
+        }
     }
 
     /// Parity with pi-mono openai-completions-tool-result-images.test.ts:
