@@ -334,12 +334,22 @@ fn build_request_body(
         body.insert("tools".to_string(), Value::Array(tool_defs));
     }
 
-    // Thinking/reasoning configuration
-    if let Some(level) = reasoning
-        && model.reasoning
-    {
-        let thinking_config = build_thinking_config(level, model);
-        body.insert("thinking".to_string(), thinking_config);
+    // Thinking/reasoning configuration. On reasoning-capable models,
+    // an absent `reasoning` level is an explicit opt-out: send
+    // `thinking: { type: "disabled" }` so newer Claudes (Opus 4.7,
+    // Mythos Preview) don't fall back to their server-side default
+    // of running thinking anyway and bill the caller for unwanted
+    // thought tokens. Non-reasoning models stay clean.
+    if model.reasoning {
+        if let Some(level) = reasoning {
+            let thinking_config = build_thinking_config(level, model);
+            body.insert("thinking".to_string(), thinking_config);
+        } else {
+            body.insert(
+                "thinking".to_string(),
+                serde_json::json!({ "type": "disabled" }),
+            );
+        }
     }
 
     Ok(Value::Object(body))
@@ -1362,6 +1372,49 @@ mod tests {
         assert_eq!(
             config["display"], "summarized",
             "adaptive thinking must pin display: summarized: {config}"
+        );
+    }
+
+    /// Anthropic's newer Claudes (Opus 4.7, Mythos Preview) run
+    /// thinking by default when no `thinking` field is sent. That
+    /// charges the caller for unwanted thought tokens on every
+    /// request that omitted the reasoning level. Emit
+    /// `thinking: { type: "disabled" }` explicitly on reasoning-
+    /// capable models when no reasoning level is set, so the model
+    /// stays silent unless the caller asked for thinking.
+    #[test]
+    fn build_request_body_explicitly_disables_thinking_when_off() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        // reasoning = None → opt-out
+        let body = build_request_body(&model, &context, 4096, None, &None).unwrap();
+        assert_eq!(
+            body["thinking"],
+            serde_json::json!({ "type": "disabled" }),
+            "reasoning-capable model with no level must send thinking: disabled: {body}"
+        );
+    }
+
+    /// Non-reasoning models must not carry a `thinking` field at all
+    /// — the upstream rejects it on models that don't support
+    /// thinking.
+    #[test]
+    fn build_request_body_omits_thinking_on_non_reasoning_model() {
+        let mut model = test_model();
+        model.reasoning = false;
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let body = build_request_body(&model, &context, 4096, None, &None).unwrap();
+        assert!(
+            body.get("thinking").is_none(),
+            "non-reasoning model must NOT emit thinking: {body}"
         );
     }
 
