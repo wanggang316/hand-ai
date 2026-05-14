@@ -187,6 +187,43 @@ fn make_error_stream(
     })
 }
 
+/// Resolve the Azure OpenAI base URL by walking the precedence chain:
+/// provider-level override → `AZURE_OPENAI_BASE_URL` env var →
+/// `AZURE_OPENAI_RESOURCE_NAME` env var (expanded to the canonical
+/// `https://{resource}.openai.azure.com/openai/v1`) → `model.base_url`.
+/// Empty / whitespace values at each stage are skipped. Returns `None`
+/// when nothing resolves so the caller can emit a clear error.
+fn resolve_azure_base_url(override_url: Option<&str>, model_base_url: &str) -> Option<String> {
+    let from_override = override_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if from_override.is_some() {
+        return from_override;
+    }
+    let from_env_base = std::env::var("AZURE_OPENAI_BASE_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if from_env_base.is_some() {
+        return from_env_base;
+    }
+    let from_env_resource = std::env::var("AZURE_OPENAI_RESOURCE_NAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|r| format!("https://{r}.openai.azure.com/openai/v1"));
+    if from_env_resource.is_some() {
+        return from_env_resource;
+    }
+    let from_model = model_base_url.trim();
+    if from_model.is_empty() {
+        None
+    } else {
+        Some(from_model.to_string())
+    }
+}
+
 /// Build the Azure responses endpoint URL.
 ///
 /// Treats `base` as the Azure base (e.g. `https://{resource}.openai.azure.com/openai/v1`)
@@ -283,15 +320,20 @@ fn stream_azure_openai_responses(
 
         let body = build_request_body(&model, &context, &options);
 
-        // URL: prefer explicit override (test seam), then `model.base_url`.
-        let base = base_url_override
-            .as_deref()
-            .unwrap_or(model.base_url.as_str())
-            .trim();
-
-        if base.is_empty() {
+        // URL resolution precedence:
+        //   1. Provider-level `base_url_override` (test seam).
+        //   2. `AZURE_OPENAI_BASE_URL` env var.
+        //   3. `AZURE_OPENAI_RESOURCE_NAME` env var, expanded to the
+        //      canonical `https://{resource}.openai.azure.com/openai/v1`.
+        //   4. `model.base_url` from the registry.
+        // Empty / whitespace values at each stage are skipped so a
+        // stale env var doesn't shadow a real config further down the
+        // chain.
+        let resolved_base = resolve_azure_base_url(base_url_override.as_deref(), &model.base_url);
+        let Some(base) = resolved_base else {
             output.error_message = Some(
-                "Azure OpenAI base URL is required (set model.base_url or pass an override).".to_string(),
+                "Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or \
+                 AZURE_OPENAI_RESOURCE_NAME, or set model.base_url.".to_string(),
             );
             output.stop_reason = StopReason::Error;
             yield AssistantMessageEvent::Error {
@@ -299,9 +341,16 @@ fn stream_azure_openai_responses(
                 error: output,
             };
             return;
-        }
+        };
 
-        let url = build_azure_url(base, DEFAULT_AZURE_API_VERSION);
+        // API version: caller-supplied env override beats the baked
+        // default; honour an empty env var as "use the default".
+        let api_version = std::env::var("AZURE_OPENAI_API_VERSION")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_AZURE_API_VERSION.to_string());
+        let url = build_azure_url(&base, &api_version);
 
         let api_key = options.api_key
             .or_else(|| env_api_keys::get_env_api_key(&model.provider))
@@ -461,6 +510,78 @@ mod tests {
     fn azure_url_leaves_non_azure_hosts_alone() {
         let url = build_azure_url("https://proxy.example.com/v1", "v1");
         assert_eq!(url, "https://proxy.example.com/v1/responses?api-version=v1");
+    }
+
+    /// `resolve_azure_base_url` walks the precedence chain — explicit
+    /// override beats every other source, including the env vars and
+    /// the model registry. Empty / whitespace overrides fall through.
+    /// `AZURE_OPENAI_BASE_URL` then `AZURE_OPENAI_RESOURCE_NAME`
+    /// expand next, and `model.base_url` is the final fallback;
+    /// missing every stage returns `None` so the caller can surface a
+    /// precise error. Cargo tests run in parallel and share process
+    /// env, so this case folds every scenario into a single test
+    /// guarded by a static mutex.
+    #[test]
+    fn resolve_azure_base_url_walks_precedence_chain() {
+        static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_base = std::env::var("AZURE_OPENAI_BASE_URL").ok();
+        let prior_resource = std::env::var("AZURE_OPENAI_RESOURCE_NAME").ok();
+
+        // Case 1: explicit override beats env and model.
+        unsafe {
+            std::env::set_var("AZURE_OPENAI_BASE_URL", "https://from-env.example.com");
+            std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", "from-resource");
+        }
+        assert_eq!(
+            resolve_azure_base_url(
+                Some("https://from-override.example.com"),
+                "https://from-model.example.com",
+            ),
+            Some("https://from-override.example.com".to_string()),
+        );
+        // Whitespace-only override falls through to env.
+        assert_eq!(
+            resolve_azure_base_url(Some("   "), "https://from-model.example.com"),
+            Some("https://from-env.example.com".to_string()),
+        );
+
+        // Case 2: AZURE_OPENAI_RESOURCE_NAME expands when no override
+        // and no `AZURE_OPENAI_BASE_URL`.
+        unsafe {
+            std::env::remove_var("AZURE_OPENAI_BASE_URL");
+            std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", "my-resource");
+        }
+        assert_eq!(
+            resolve_azure_base_url(None, ""),
+            Some("https://my-resource.openai.azure.com/openai/v1".to_string()),
+        );
+
+        // Case 3: `model.base_url` is the final fallback when nothing
+        // else is set.
+        unsafe {
+            std::env::remove_var("AZURE_OPENAI_BASE_URL");
+            std::env::remove_var("AZURE_OPENAI_RESOURCE_NAME");
+        }
+        assert_eq!(
+            resolve_azure_base_url(None, "https://my-resource.openai.azure.com/openai/v1"),
+            Some("https://my-resource.openai.azure.com/openai/v1".to_string()),
+        );
+
+        // Case 4: nothing set anywhere → None so the caller errors.
+        assert_eq!(resolve_azure_base_url(None, ""), None);
+        assert_eq!(resolve_azure_base_url(None, "   "), None);
+
+        unsafe {
+            match prior_base {
+                Some(v) => std::env::set_var("AZURE_OPENAI_BASE_URL", v),
+                None => std::env::remove_var("AZURE_OPENAI_BASE_URL"),
+            }
+            match prior_resource {
+                Some(v) => std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", v),
+                None => std::env::remove_var("AZURE_OPENAI_RESOURCE_NAME"),
+            }
+        }
     }
 
     #[test]
