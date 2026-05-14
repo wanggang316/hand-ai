@@ -318,8 +318,15 @@ pub(crate) fn dispatch_responses_event(
         }
 
         "response.function_call_arguments.delta" => {
-            if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
+            if let Some(delta) = data.get("delta").and_then(|d| d.as_str())
+                && !delta.is_empty()
+            {
                 state.current_tool_args.push_str(delta);
+                emitted.push(AssistantMessageEvent::ToolCallDelta {
+                    content_index: output.content.len() as u32,
+                    delta: delta.to_string(),
+                    partial: output.clone(),
+                });
             }
         }
 
@@ -329,10 +336,27 @@ pub(crate) fn dispatch_responses_event(
         // parses the tool call as `{}`, silently dropping every arg.
         // When the server DID stream deltas first, treat `.done` as the
         // authoritative final value — it covers transports that send a
-        // condensed/cleaned-up form after the partial stream.
+        // condensed/cleaned-up form after the partial stream. Either
+        // way, surface the unseen tail as a `ToolCallDelta` so callers
+        // that mirror the wire stream don't miss any arguments.
         "response.function_call_arguments.done" => {
             if let Some(arguments) = data.get("arguments").and_then(|a| a.as_str()) {
+                let previous = std::mem::take(&mut state.current_tool_args);
                 state.current_tool_args = arguments.to_string();
+                let tail = if arguments.starts_with(&previous) {
+                    &arguments[previous.len()..]
+                } else if previous.is_empty() {
+                    arguments
+                } else {
+                    ""
+                };
+                if !tail.is_empty() {
+                    emitted.push(AssistantMessageEvent::ToolCallDelta {
+                        content_index: output.content.len() as u32,
+                        delta: tail.to_string(),
+                        partial: output.clone(),
+                    });
+                }
             }
         }
 
@@ -663,6 +687,22 @@ mod tests {
         output
     }
 
+    /// Same as [`run_events`] but returns the per-event emit lists so a
+    /// caller can assert which `AssistantMessageEvent`s the dispatcher
+    /// yielded along the way.
+    fn run_events_collecting(
+        events: &[(&str, Value)],
+    ) -> (AssistantMessage, Vec<AssistantMessageEvent>) {
+        let mut state = ResponsesParseState::default();
+        let mut output = empty_assistant_message();
+        let mut emitted = Vec::new();
+        for (ty, data) in events {
+            emitted.extend(dispatch_responses_event(&mut state, &mut output, ty, data));
+        }
+        finalize_responses_output(state, &mut output);
+        (output, emitted)
+    }
+
     /// `response.created` carries the upstream's stable response id
     /// (`resp_...`). Capture it eagerly on the first event so callers
     /// can correlate the turn even when the stream is aborted before
@@ -915,6 +955,109 @@ mod tests {
             .expect("tool call missing");
         assert_eq!(tc.name, "lookup");
         assert_eq!(tc.arguments, json!({"q": "hello"}));
+    }
+
+    /// Streaming consumers (TUIs, log mirrors) expect a `ToolCallDelta`
+    /// for every chunk of function-call arguments. Pin that the
+    /// dispatcher emits one per `.delta` event with the exact delta
+    /// payload and the (future) content index of the tool call.
+    #[test]
+    fn function_call_arguments_delta_emits_tool_call_delta_events() {
+        let (_, emitted) = run_events_collecting(&[
+            (
+                "response.output_item.added",
+                json!({
+                    "item": {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "call_id": "call-d1"
+                    }
+                }),
+            ),
+            (
+                "response.function_call_arguments.delta",
+                json!({ "delta": "{\"q" }),
+            ),
+            (
+                "response.function_call_arguments.delta",
+                json!({ "delta": "\":\"hi\"}" }),
+            ),
+        ]);
+        let deltas: Vec<&str> = emitted
+            .iter()
+            .filter_map(|ev| match ev {
+                AssistantMessageEvent::ToolCallDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["{\"q", "\":\"hi\"}"]);
+    }
+
+    /// When a server skips `.delta` entirely and only sends `.done`,
+    /// the dispatcher must still surface the unseen arguments as a
+    /// single synthetic `ToolCallDelta` so consumers don't miss the
+    /// payload entirely.
+    #[test]
+    fn function_call_arguments_done_emits_synthetic_tool_call_delta() {
+        let (_, emitted) = run_events_collecting(&[
+            (
+                "response.output_item.added",
+                json!({
+                    "item": {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "call_id": "call-d2"
+                    }
+                }),
+            ),
+            (
+                "response.function_call_arguments.done",
+                json!({ "arguments": "{\"q\":\"hello\"}" }),
+            ),
+        ]);
+        let deltas: Vec<&str> = emitted
+            .iter()
+            .filter_map(|ev| match ev {
+                AssistantMessageEvent::ToolCallDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["{\"q\":\"hello\"}"]);
+    }
+
+    /// When deltas arrived first and `.done` only restates the same
+    /// payload, the dispatcher must not emit a duplicate delta — the
+    /// stream should mirror the wire feed exactly, no extra echoes.
+    #[test]
+    fn function_call_arguments_done_skips_delta_when_payload_already_streamed() {
+        let (_, emitted) = run_events_collecting(&[
+            (
+                "response.output_item.added",
+                json!({
+                    "item": {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "call_id": "call-d3"
+                    }
+                }),
+            ),
+            (
+                "response.function_call_arguments.delta",
+                json!({ "delta": "{\"q\":\"hello\"}" }),
+            ),
+            (
+                "response.function_call_arguments.done",
+                json!({ "arguments": "{\"q\":\"hello\"}" }),
+            ),
+        ]);
+        let deltas: Vec<&str> = emitted
+            .iter()
+            .filter_map(|ev| match ev {
+                AssistantMessageEvent::ToolCallDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["{\"q\":\"hello\"}"]);
     }
 
     /// When deltas DID arrive first, `.done` is treated as the
