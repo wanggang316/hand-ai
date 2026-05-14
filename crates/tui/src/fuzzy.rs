@@ -93,6 +93,14 @@ pub fn fuzzy_match(query: &str, target: &str) -> Option<FuzzyMatch> {
     // Shorter targets get a slight bonus (more relevant)
     score -= (target_chars.len() as i32 - query_lower.len() as i32).max(0) / 4;
 
+    // Exact-match bonus. Without this, queries like "cl" tie with longer
+    // prefix candidates ("clone") on every other dimension and unstable
+    // sort decides the order. A flat +100 keeps the exact hit on top
+    // even after the length penalty cancels out.
+    if query_lower == target_lower {
+        score += 100;
+    }
+
     Some(FuzzyMatch { score, indices })
 }
 
@@ -163,6 +171,33 @@ mod tests {
         let consecutive = fuzzy_match("abc", "abcdef").unwrap();
         let scattered = fuzzy_match("abc", "axbxcx").unwrap();
         assert!(consecutive.score > scattered.score);
+    }
+
+    /// An exact match must outrank longer items that share the query as
+    /// a prefix. Without an explicit exact-match bonus, "cl" and "clone"
+    /// both earn the prefix + consecutive + start-of-word bonuses and
+    /// tie, leaving the order at the mercy of an unstable sort.
+    #[test]
+    fn exact_match_outranks_longer_prefix_match() {
+        let exact = fuzzy_match("cl", "cl").unwrap();
+        let longer = fuzzy_match("cl", "clone").unwrap();
+        assert!(
+            exact.score > longer.score,
+            "exact={} should beat prefix={}",
+            exact.score,
+            longer.score
+        );
+    }
+
+    #[test]
+    fn fuzzy_filter_prioritizes_exact_over_longer_prefix() {
+        let items = vec!["clone", "cl"];
+        let results = fuzzy_filter("cl", &items);
+        assert_eq!(
+            results.first().map(|(i, _)| *i),
+            Some(1),
+            "exact match 'cl' must come first"
+        );
     }
 
     #[test]
