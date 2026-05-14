@@ -763,22 +763,19 @@ pub fn convert_messages(
                     .filter(|t| !t.text.trim().is_empty())
                     .collect();
 
+                // Always serialize assistant text as a plain string. The
+                // legacy `Content::Array([{type: "text", text: ...}])`
+                // shape is non-standard for `role: "assistant"` and
+                // triggers mirrored-structure output on some hosted
+                // gateways (e.g. DeepSeek V3.2 via NVIDIA NIM echoes the
+                // wrapper as literal text in the reply). pi-mono #3387.
                 let assistant_content = if !text_blocks.is_empty() {
-                    if model.provider == Provider::GitHubCopilot {
-                        let text: String = text_blocks
-                            .iter()
-                            .map(|t| sanitize_surrogates(&t.text))
-                            .collect();
-                        Content::Text(text)
-                    } else {
-                        let parts: Vec<ContentPart> = text_blocks
-                            .iter()
-                            .map(|t| ContentPart::Text {
-                                text: sanitize_surrogates(&t.text),
-                            })
-                            .collect();
-                        Content::Array(parts)
-                    }
+                    let joined: String = text_blocks
+                        .iter()
+                        .map(|t| sanitize_surrogates(&t.text))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    Content::Text(joined)
                 } else {
                     assistant_content
                 };
@@ -1849,6 +1846,44 @@ mod tests {
             .filter(|p| matches!(p, ContentPart::ImageUrl { .. }))
             .count();
         assert_eq!(image_count, 2, "both images must be batched");
+    }
+
+    /// Assistant turns with text-only content must serialize as a plain
+    /// string. The legacy `Content::Array([{type: "text", text: ...}])`
+    /// shape is non-standard for `role: "assistant"` and triggers
+    /// mirrored-structure output on some hosted gateways (DeepSeek V3.2
+    /// via NVIDIA NIM recursively echoes the wrapper as literal text in
+    /// the reply). Pi-mono #3387 pins the plain-string shape.
+    #[test]
+    fn assistant_text_only_content_serializes_as_plain_string() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        let assistant = AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::Text(TextContent::new("hi there"))],
+            api: Api::OpenAICompletions,
+            provider: Provider::OpenAI,
+            model: "test".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        };
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::Assistant(assistant)],
+            tools: None,
+        };
+        let msgs = convert_messages(&model, &context, &compat);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0].role, Role::Assistant));
+        match &msgs[0].content {
+            openai_rust::types::Content::Text(s) => assert_eq!(s, "hi there"),
+            other => panic!("expected plain string content, got {other:?}"),
+        }
     }
 
     #[test]
