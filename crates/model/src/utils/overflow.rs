@@ -44,6 +44,17 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
     {
         let lower = error_msg.to_lowercase();
 
+        // Skip messages that look like throttling / rate-limit errors
+        // even though they share token-related vocabulary with real
+        // overflow. AWS Bedrock formats throttling as
+        // `ThrottlingException: Too many tokens, please wait ...`
+        // which would otherwise trip the `too many tokens` overflow
+        // pattern. 429s and generic rate-limit strings get the same
+        // treatment — they're transient, not context-overflow.
+        if is_non_overflow_error(&lower) {
+            return false;
+        }
+
         if OVERFLOW_PATTERNS.iter().any(|p| lower.contains(p)) {
             return true;
         }
@@ -54,6 +65,7 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
         }
     }
 
+    // (Falls through to silent-overflow check.)
     // Case 2: Silent overflow - successful but usage exceeds context
     if let Some(cw) = context_window
         && message.stop_reason == StopReason::Stop
@@ -65,6 +77,20 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
     }
 
     false
+}
+
+/// Returns true when the (already-lowercased) error message looks like
+/// a throttling / rate-limit error rather than a real context
+/// overflow. These share some vocabulary with overflow patterns
+/// (notably "too many tokens") and must be excluded so the agent
+/// loop treats them as retryable rate-limit errors, not as overflow
+/// that needs context trimming.
+fn is_non_overflow_error(lower: &str) -> bool {
+    lower.starts_with("throttling")
+        || lower.starts_with("service unavailable:")
+        || lower.contains("throttlingexception")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
 }
 
 #[cfg(test)]
@@ -113,6 +139,40 @@ mod tests {
     fn test_anthropic_overflow() {
         let msg = make_error_message("prompt is too long: 213462 tokens > 200000 maximum");
         assert!(is_context_overflow(&msg, None));
+    }
+
+    /// AWS Bedrock formats throttling as
+    /// `ThrottlingException: Too many tokens, please wait ...`. The
+    /// "too many tokens" tail matches the generic overflow pattern
+    /// but the actual cause is rate limiting, not context overflow.
+    /// Misclassifying a throttle as overflow would silently trim the
+    /// transcript and re-send instead of backing off — wasted work
+    /// at best, data loss at worst. Pin the exclusion explicitly.
+    #[test]
+    fn test_bedrock_throttling_is_not_overflow() {
+        let msg = make_error_message(
+            "ThrottlingException: Too many tokens, please wait before trying again.",
+        );
+        assert!(
+            !is_context_overflow(&msg, None),
+            "throttling must NOT be classified as overflow"
+        );
+    }
+
+    /// Generic HTTP 429 / rate-limit strings get the same treatment —
+    /// they are transient errors, not overflow.
+    #[test]
+    fn test_rate_limit_errors_are_not_overflow() {
+        for raw in [
+            "HTTP 429 too many requests: please retry after 30s",
+            "rate limit exceeded for this organization",
+        ] {
+            let msg = make_error_message(raw);
+            assert!(
+                !is_context_overflow(&msg, None),
+                "rate limit '{raw}' must NOT be classified as overflow"
+            );
+        }
     }
 
     /// Ollama deployments behave differently around context overflow.
