@@ -716,22 +716,18 @@ pub(crate) fn requires_tool_call_id(model_id: &str) -> bool {
 }
 
 /// Whether a streamed Gemini `Part` should be treated as a thinking
-/// block. Returns true when either the `thought: true` marker is set or
-/// the part carries a non-empty `thoughtSignature`. Google streaming
-/// may emit `thoughtSignature` without `thought: true` (including
-/// signature-only parts at the end of a stream); classifying those as
-/// text would leak reasoning into the normal assistant text stream and
-/// strand the signature for multi-turn replay.
+/// block. The `thought: true` flag is the definitive marker; a
+/// `thoughtSignature` is an opaque context-replay handle that can
+/// appear on *any* part type (text, functionCall, ...) and must NOT
+/// be used to reclassify the part — text parts that carry a signature
+/// stay as text and persist the signature into `text_signature` for
+/// the next turn's replay.
+///
+/// See: <https://ai.google.dev/gemini-api/docs/thought-signatures>
 pub(crate) fn is_thinking_part(part: &Value) -> bool {
-    let thought = part
-        .get("thought")
+    part.get("thought")
         .and_then(|t| t.as_bool())
-        .unwrap_or(false);
-    let has_signature = part
-        .get("thoughtSignature")
-        .and_then(|s| s.as_str())
-        .is_some_and(|s| !s.is_empty());
-    thought || has_signature
+        .unwrap_or(false)
 }
 
 pub(crate) fn is_gemini3_pro_model(model_id: &str) -> bool {
@@ -1139,28 +1135,28 @@ mod tests {
         );
     }
 
-    /// Google streaming may emit `thoughtSignature` without
-    /// `thought: true` (including signature-only parts at the end of a
-    /// stream). The classifier must treat any non-empty signature as
-    /// thinking so reasoning text does not leak into the normal text
-    /// stream and the signature survives for multi-turn replay.
+    /// `thought: true` is the definitive marker for thinking parts.
+    /// The `thoughtSignature` field is a context-replay handle that
+    /// can appear on any part type and MUST NOT be used to
+    /// reclassify the part — text parts that carry a signature stay
+    /// as text and persist the signature into `text_signature`.
     #[test]
-    fn is_thinking_part_treats_non_empty_signature_as_thinking() {
-        // thought: true with text -> thinking
-        let part_with_thought = serde_json::json!({
+    fn is_thinking_part_keys_only_on_thought_true() {
+        let part_thought_true = serde_json::json!({
             "text": "let me reason",
             "thought": true,
         });
-        assert!(is_thinking_part(&part_with_thought));
+        assert!(is_thinking_part(&part_thought_true));
 
-        // Non-empty signature only (no thought flag) -> thinking
+        // Signature only (no thought flag) -> NOT thinking; the
+        // signature still rides on the text block via the converter.
         let part_with_sig_only = serde_json::json!({
-            "text": "partial",
+            "text": "answer",
             "thoughtSignature": "dGVzdA==",
         });
-        assert!(is_thinking_part(&part_with_sig_only));
+        assert!(!is_thinking_part(&part_with_sig_only));
 
-        // Both -> thinking
+        // Both -> thinking (the explicit flag wins).
         let part_both = serde_json::json!({
             "text": "thinking text",
             "thought": true,
@@ -1169,22 +1165,20 @@ mod tests {
         assert!(is_thinking_part(&part_both));
     }
 
-    /// Plain text parts without `thought: true` and without a non-empty
-    /// `thoughtSignature` must NOT be classified as thinking — they are
-    /// the assistant's regular text output.
+    /// Plain text parts without `thought: true` are normal assistant
+    /// text. Missing flag, explicit `false`, and a signature-only part
+    /// all stay as text.
     #[test]
     fn is_thinking_part_treats_plain_text_as_non_thinking() {
         let plain_text = serde_json::json!({ "text": "Hello there" });
         assert!(!is_thinking_part(&plain_text));
 
-        // Empty signature does not promote the part to thinking.
         let empty_sig = serde_json::json!({
             "text": "Hello there",
             "thoughtSignature": "",
         });
         assert!(!is_thinking_part(&empty_sig));
 
-        // thought: false is the same as missing.
         let explicit_false = serde_json::json!({
             "text": "Hello there",
             "thought": false,
