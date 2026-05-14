@@ -88,6 +88,13 @@ const XHIGH_MODEL_ID_PATTERNS: &[&str] = &[
     "gpt-5.5",
     "deepseek-v4-pro",
     "deepseek-v4-flash",
+    // Anthropic Opus 4.6 maps xhigh to adaptive effort "max" on the
+    // Anthropic Messages API. Match by id (both dashed and dotted
+    // variants are seen across catalogs / proxies) so OpenRouter's
+    // `anthropic/claude-opus-4.6` and the direct
+    // `claude-opus-4-6-20251001` ids both surface as xhigh-capable.
+    "opus-4-6",
+    "opus-4.6",
 ];
 
 /// Whether this model supports xhigh thinking level.
@@ -242,6 +249,41 @@ mod tests {
         for id in ["gpt-4o", "claude-sonnet-4", "deepseek-v3", "gpt-5.0-mini"] {
             let m = test_model(id, Provider::OpenAI);
             assert!(!supports_xhigh(&m), "{id} should NOT support xhigh");
+        }
+    }
+
+    /// Anthropic Opus 4.6 (and its namespaced openrouter id) supports
+    /// xhigh and must be recognised across every wire-form id the
+    /// catalog uses. The pattern keys off the version stub so future
+    /// 4.6 sub-variants (`claude-opus-4-6-20251001`,
+    /// `claude-opus-4.6-thinking`, OpenRouter
+    /// `anthropic/claude-opus-4.6`) all match.
+    #[test]
+    fn supports_xhigh_recognises_opus_4_6_variants() {
+        for id in [
+            "claude-opus-4-6",
+            "claude-opus-4-6-20251001",
+            "claude-opus-4.6",
+            "claude-opus-4.6-thinking",
+            "anthropic/claude-opus-4.6",
+        ] {
+            let m = test_model(id, Provider::Anthropic);
+            assert!(supports_xhigh(&m), "{id} should support xhigh");
+        }
+    }
+
+    /// Older Opus generations stay below the xhigh threshold so we
+    /// don't accidentally clamp a non-thinking model's effort.
+    #[test]
+    fn supports_xhigh_excludes_older_opus_generations() {
+        for id in [
+            "claude-opus-4",
+            "claude-opus-4-1",
+            "claude-opus-3-5",
+            "claude-opus-3",
+        ] {
+            let m = test_model(id, Provider::Anthropic);
+            assert!(!supports_xhigh(&m), "{id} must NOT support xhigh");
         }
     }
 
