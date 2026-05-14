@@ -649,12 +649,20 @@ impl SimpleStreamOptions {
     /// Build base stream options with defaults applied.
     ///
     /// If max_tokens is not specified, defaults to min(model.max_tokens, 32000).
+    /// When `model.max_tokens == 0` (catalog entry hasn't pinned a
+    /// ceiling), the field stays `None` so the wire request omits it
+    /// rather than transmitting a literal `0` — providers that gate
+    /// on the absence of `max_tokens` (Bedrock's `inferenceConfig`,
+    /// for one) need to see the field dropped, not zeroed.
     pub fn build_base_options(&self, model: &Model, api_key: Option<String>) -> StreamOptions {
         StreamOptions {
             temperature: self.base.temperature,
             max_tokens: self.base.max_tokens.or_else(|| {
-                let default_max = model.max_tokens.min(32000) as u32;
-                Some(default_max)
+                if model.max_tokens == 0 {
+                    None
+                } else {
+                    Some(model.max_tokens.min(32000) as u32)
+                }
             }),
             api_key: api_key.or_else(|| self.base.api_key.clone()),
             session_id: self.base.session_id.clone(),
@@ -1151,6 +1159,54 @@ mod types_tests {
         let built = opts.build_base_options(&model, None);
         assert_eq!(built.transport, Some(Transport::WebsocketCached));
         assert_eq!(built.cache_retention, Some(CacheRetention::Long));
+    }
+
+    /// When `model.max_tokens == 0` (the catalog entry hasn't pinned a
+    /// ceiling) and the caller didn't specify a value, `max_tokens`
+    /// must stay `None` so the wire request omits the field. Sending
+    /// a literal `0` would make Bedrock's `inferenceConfig.maxTokens`
+    /// reserve no output capacity at all from the TPM quota window.
+    #[test]
+    fn build_base_options_omits_max_tokens_when_model_default_is_zero() {
+        let mut model = Model {
+            id: "test-zero-max".to_string(),
+            name: "Test".to_string(),
+            api: Api::OpenAICompletions,
+            provider: Provider::OpenAI,
+            base_url: "https://example.com".to_string(),
+            reasoning: false,
+            input: vec![InputType::Text],
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 0,
+            max_tokens: 0,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        };
+        let opts = SimpleStreamOptions::default();
+        let built = opts.build_base_options(&model, None);
+        assert_eq!(built.max_tokens, None);
+
+        // Non-zero model max gets the min(.., 32000) default.
+        model.max_tokens = 100_000;
+        let built = opts.build_base_options(&model, None);
+        assert_eq!(built.max_tokens, Some(32_000));
+
+        // Caller-supplied value wins regardless of model default.
+        let opts = SimpleStreamOptions {
+            base: StreamOptions {
+                max_tokens: Some(512),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let built = opts.build_base_options(&model, None);
+        assert_eq!(built.max_tokens, Some(512));
     }
 
     /// An explicit caller value always wins over `PI_CACHE_RETENTION`,
