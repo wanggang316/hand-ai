@@ -631,6 +631,12 @@ fn list_models_for_cli(search: Option<&str>) -> Vec<model::Model> {
         Err(_) => return model_resolver::list_models(search),
     };
     let registry = ModelRegistry::create(auth);
+    // Surface models.json load errors on stderr so users discover broken
+    // configs instead of silently losing custom models / overrides.
+    // Mirrors pi-mono's --list-models stderr warning.
+    if let Some(err) = registry.error() {
+        eprintln!("\x1b[33mWarning: {err}\x1b[0m");
+    }
     let mut models = registry.available();
     if let Some(pattern) = search.filter(|s| !s.is_empty()) {
         let haystacks: Vec<String> = models
