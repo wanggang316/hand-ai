@@ -29,8 +29,9 @@ use tokio::sync::broadcast;
 #[serde(rename_all = "kebab-case", default)]
 pub struct Settings {
     /// Most recent changelog version the agent has shown to the user.
-    /// Global-only in pi-mono; we keep it on the same struct because every
-    /// field is `Option<T>` and the project layer simply leaves it `None`.
+    /// Stored on the same struct as all other settings — every field is
+    /// `Option<T>` and the project-level layer simply leaves this one
+    /// `None`, so global-only semantics fall out of the merge rules.
     #[serde(alias = "lastChangelogVersion")]
     pub last_changelog_version: Option<String>,
     #[serde(alias = "defaultProvider")]
@@ -39,8 +40,8 @@ pub struct Settings {
     pub default_model: Option<String>,
     #[serde(alias = "defaultThinkingLevel")]
     pub default_thinking_level: Option<ThinkingLevelSetting>,
-    /// Streaming transport mode. Mirrors pi-mono's `transport`. Default
-    /// when unset is [`TransportSetting::Auto`] — read via the accessor on
+    /// Streaming transport mode. Default when unset is
+    /// [`TransportSetting::Auto`] — read via the accessor on
     /// [`Settings`] rather than the raw field.
     pub transport: Option<TransportSetting>,
     /// Surface mode for the steering queue (`all` vs `one-at-a-time`).
@@ -275,14 +276,15 @@ pub struct RetrySettings {
     pub enabled: Option<bool>,
     #[serde(alias = "maxRetries")]
     pub max_retries: Option<u32>,
-    /// Base delay for exponential backoff. Aliased to the pi-mono TS field
-    /// `baseDelayMs` so JSON-import round-trips cleanly.
+    /// Base delay for exponential backoff. The `baseDelayMs` alias
+    /// accepts the legacy camelCase JSON spelling so external configs
+    /// round-trip cleanly.
     #[serde(alias = "initialDelayMs", alias = "baseDelayMs")]
     pub initial_delay_ms: Option<u32>,
     #[serde(alias = "maxDelayMs")]
     pub max_delay_ms: Option<u32>,
-    /// Provider-level retry knobs (SDK request timeout, max retries, max
-    /// retry-after delay). Mirrors pi-mono's `RetrySettings.provider`.
+    /// Provider-level retry knobs (SDK request timeout, max retries,
+    /// max retry-after delay).
     #[serde(default)]
     pub provider: ProviderRetrySettings,
 }
@@ -332,9 +334,9 @@ impl RetrySettings {
     }
 }
 
-/// Provider-level retry tuning. Mirrors pi-mono's `ProviderRetrySettings`:
-/// SDK request timeout, max retry attempts, and the cap on a server-requested
-/// `retry-after` delay before we give up.
+/// Provider-level retry tuning: SDK request timeout, max retry
+/// attempts, and the cap on a server-requested `retry-after` delay
+/// before we give up.
 ///
 /// Read effective values via the accessor methods — direct field access
 /// yields `Option<T>` because the struct represents the raw YAML layer.
@@ -365,7 +367,7 @@ impl ProviderRetrySettings {
     }
 }
 
-/// Branch summarisation prompt knobs. Mirrors pi-mono `BranchSummarySettings`.
+/// Branch summarisation prompt knobs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct BranchSummarySettings {
@@ -396,7 +398,7 @@ impl BranchSummarySettings {
     }
 }
 
-/// Terminal rendering preferences. Mirrors pi-mono `TerminalSettings`.
+/// Terminal rendering preferences.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct TerminalSettings {
@@ -412,7 +414,7 @@ pub struct TerminalSettings {
 
 impl TerminalSettings {
     /// Whether inline images should be rendered when the terminal supports
-    /// them. Default: `true` (pi-mono parity).
+    /// them. Default: `true`.
     pub fn show_images(&self) -> bool {
         self.show_images.unwrap_or(true)
     }
@@ -444,7 +446,7 @@ impl TerminalSettings {
     }
 }
 
-/// Image handling. Mirrors pi-mono `ImageSettings`.
+/// Image handling.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct ImageSettings {
@@ -473,9 +475,9 @@ impl ImageSettings {
     }
 }
 
-/// Custom token budgets per thinking level. Mirrors pi-mono
-/// `ThinkingBudgetsSettings` — every field is optional so missing entries
-/// fall back to the provider default for that level.
+/// Custom token budgets per thinking level. Every field is optional
+/// so missing entries fall back to the provider default for that
+/// level.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct ThinkingBudgetsSettings {
@@ -496,7 +498,7 @@ impl ThinkingBudgetsSettings {
     }
 }
 
-/// Markdown rendering preferences. Mirrors pi-mono `MarkdownSettings`.
+/// Markdown rendering preferences.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct MarkdownSettings {
@@ -517,7 +519,7 @@ impl MarkdownSettings {
     }
 }
 
-/// Soft warnings the UI surfaces. Mirrors pi-mono `WarningSettings`.
+/// Soft warnings the UI surfaces.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", default)]
 pub struct WarningSettings {
@@ -540,13 +542,13 @@ impl WarningSettings {
     }
 }
 
-/// Re-export of [`model::Transport`] under the pi-mono name `TransportSetting`.
-/// Settings YAML stores the transport selection as a kebab-case string
-/// (`auto`, `sse`, `websocket`, `websocket-cached`).
+/// Re-export of [`model::Transport`] under the `TransportSetting`
+/// alias used by the settings layer. The YAML stores the transport
+/// selection as a kebab-case string (`auto`, `sse`, `websocket`,
+/// `websocket-cached`).
 pub type TransportSetting = model::Transport;
 
 /// Action taken when the user double-presses Escape on an empty editor.
-/// Mirrors pi-mono's `doubleEscapeAction`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum DoubleEscapeAction {
@@ -557,7 +559,6 @@ pub enum DoubleEscapeAction {
 }
 
 /// Default filter applied when opening the conversation tree view.
-/// Mirrors pi-mono's `treeFilterMode`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TreeFilterMode {
@@ -569,8 +570,7 @@ pub enum TreeFilterMode {
     All,
 }
 
-/// How the steering / follow-up queue surfaces pending items. Mirrors
-/// pi-mono's `steeringMode` / `followUpMode` (same value space).
+/// How the steering / follow-up queue surfaces pending items.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SteeringMode {
@@ -579,8 +579,8 @@ pub enum SteeringMode {
     OneAtATime,
 }
 
-/// Alias for `SteeringMode` — pi-mono uses identical semantics for the
-/// follow-up mode setting, so we share the type rather than duplicating it.
+/// Alias for `SteeringMode`. Follow-up mode shares the steering-queue
+/// value space exactly, so the two settings reuse a single type.
 pub type FollowUpMode = SteeringMode;
 
 /// UI theme.
@@ -809,18 +809,18 @@ impl Settings {
         }
     }
 
-    /// Deserialize a pi-mono-style JSON document into [`Settings`].
+    /// Deserialize a camelCase JSON document into [`Settings`].
     ///
-    /// pi-mono persists settings as JSON with camelCase field names; the
-    /// hand port uses YAML with kebab-case. This function deserializes the
-    /// JSON shape via the camelCase aliases declared on every field, so
-    /// the same struct round-trips through both formats. Unknown JSON
-    /// fields are dropped silently (matching `serde(default)` semantics on
-    /// the container).
+    /// External tools and ports persist settings as JSON with camelCase
+    /// field names; this crate's on-disk format is YAML with kebab-case.
+    /// The function deserializes the JSON shape via the camelCase
+    /// aliases declared on every field, so the same struct round-trips
+    /// through both formats. Unknown JSON fields are dropped silently
+    /// (matching `serde(default)` semantics on the container).
     ///
-    /// Note that [`Settings::from_json_str`] does **not** apply legacy
-    /// migrations like the YAML loader does — pi-mono's runtime settings
-    /// are already in the new shape, so no key rewriting is performed.
+    /// Legacy YAML-style migrations are **not** applied here — the
+    /// incoming JSON is assumed to already be in the current shape,
+    /// so no key rewriting is performed.
     pub fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str::<Self>(s)
     }
@@ -833,7 +833,7 @@ impl Settings {
     /// surfaced as [`SettingsError`].
     ///
     /// Unknown top-level YAML keys are ignored with a `tracing::warn!`
-    /// diagnostic — matches the TS implementation in `pi-mono`.
+    /// diagnostic.
     pub fn load(
         global_path: Option<&Path>,
         project_path: Option<&Path>,
@@ -2993,8 +2993,8 @@ themes:
     }
 
     // ---------------------------------------------------------------------
-    // M2: pi-mono parity sub-structs — YAML round-trip + merge semantics.
-    // The JSON-import path is exercised by the dedicated integration test
+    // Sub-struct settings — YAML round-trip + merge semantics. The
+    // JSON-import path is exercised by the dedicated integration test
     // at `tests/settings_json_import_test.rs`.
     // ---------------------------------------------------------------------
 
@@ -3009,7 +3009,7 @@ themes:
         let s = Settings::load(Some(&p), None).unwrap();
         assert_eq!(s.branch_summary.reserve_tokens, Some(8000));
         assert_eq!(s.branch_summary.skip_prompt, Some(true));
-        // Accessors apply pi-mono defaults when a field is unset.
+        // Accessors fall back to the documented defaults when a field is unset.
         let absent = BranchSummarySettings::default();
         assert_eq!(absent.reserve_tokens(), 16_384);
         assert!(!absent.skip_prompt());
