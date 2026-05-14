@@ -167,7 +167,12 @@ async fn stream_anthropic_inner(
     if has_tools && !crate::transform::supports_eager_tool_input_streaming(&model) {
         betas.push("fine-grained-tool-streaming-2025-05-14");
     }
-    if reasoning.is_some() {
+    // Adaptive-thinking models (Opus 4.6+, Sonnet 4.6) interleave
+    // thinking natively. The `interleaved-thinking-2025-05-14` beta
+    // is deprecated on Opus 4.6 and redundant on Sonnet 4.6, so only
+    // attach it for legacy reasoning models (Sonnet 3.7, Opus 4.0,
+    // ...) where it's still required.
+    if reasoning.is_some() && !supports_adaptive_thinking(&model.id) {
         betas.push("interleaved-thinking-2025-05-14");
     }
     if !betas.is_empty() {
@@ -272,9 +277,17 @@ fn build_request_body(
         }
     }
 
-    // Temperature
+    // Temperature.
+    //
+    // Extended thinking (adaptive OR budget-based) is incompatible
+    // with the `temperature` field: the upstream rejects requests
+    // that set both. When reasoning is enabled on a thinking-capable
+    // model, drop the caller's `temperature` value rather than
+    // letting the upstream reject the request.
+    let thinking_enabled = reasoning.is_some() && model.reasoning;
     if let Some(opts) = options
         && let Some(temp) = opts.temperature
+        && !thinking_enabled
     {
         body.insert(
             "temperature".to_string(),
@@ -449,9 +462,22 @@ pub(crate) fn apply_last_user_message_cache_control(messages: &mut [Value], cc: 
     }
 }
 
+/// Models that support adaptive thinking — Opus 4.6+ and Sonnet 4.6.
+/// Older Opus 4.0 / 4.1 use budget-based thinking and the broader
+/// `opus-4` substring match would mis-route them. The check stays
+/// id-substring based so OpenRouter's `anthropic/claude-opus-4.6`
+/// and the direct `claude-opus-4-6-20251022` ids both match.
+pub(crate) fn supports_adaptive_thinking(model_id: &str) -> bool {
+    model_id.contains("opus-4-6")
+        || model_id.contains("opus-4.6")
+        || model_id.contains("opus-4-7")
+        || model_id.contains("opus-4.7")
+        || model_id.contains("sonnet-4-6")
+        || model_id.contains("sonnet-4.6")
+}
+
 fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
-    // Check if model supports adaptive thinking (Opus 4.6, Sonnet 4.6)
-    let supports_adaptive = model.id.contains("opus-4") || model.id.contains("sonnet-4");
+    let supports_adaptive = supports_adaptive_thinking(&model.id);
 
     // `display: "summarized"` keeps thinking text in the streamed
     // response. Anthropic's silent API default flipped to "omitted"
@@ -1351,13 +1377,29 @@ mod tests {
 
     #[test]
     fn test_build_thinking_config_adaptive() {
+        // Opus 4.6+ and Sonnet 4.6 use adaptive thinking; older Opus
+        // 4.0 / 4.1 still use the budget-based path.
         let model = Model {
-            id: "claude-opus-4-20250514".to_string(),
+            id: "claude-opus-4-6-20251022".to_string(),
             ..test_model()
         };
         let config = build_thinking_config(ThinkingLevel::High, &model);
         assert_eq!(config["type"], "adaptive");
         assert_eq!(config["effort"], "high");
+    }
+
+    /// Older Opus 4.0 / 4.1 don't support adaptive thinking — they
+    /// route through the legacy budget-based path. The substring
+    /// check previously matched `opus-4` and mis-classified them.
+    #[test]
+    fn test_build_thinking_config_opus_4_0_uses_budget_not_adaptive() {
+        let model = Model {
+            id: "claude-opus-4-20250514".to_string(),
+            ..test_model()
+        };
+        let config = build_thinking_config(ThinkingLevel::High, &model);
+        assert_eq!(config["type"], "enabled");
+        assert!(config["budget_tokens"].as_u64().is_some());
     }
 
     #[test]
@@ -1431,6 +1473,89 @@ mod tests {
         let config = build_thinking_config(ThinkingLevel::Xhigh, &model);
         assert_eq!(config["type"], "adaptive");
         assert_eq!(config["effort"], "high");
+    }
+
+    /// Extended thinking is incompatible with `temperature`: the
+    /// upstream rejects requests that set both. When reasoning is
+    /// enabled on a thinking-capable model, the builder must drop
+    /// the caller's `temperature` value rather than letting the
+    /// request fail.
+    #[test]
+    fn build_request_body_drops_temperature_when_thinking_enabled() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let opts = StreamOptions {
+            temperature: Some(0.7),
+            ..Default::default()
+        };
+        let body = build_request_body(
+            &model,
+            &context,
+            4096,
+            Some(ThinkingLevel::High),
+            &Some(opts),
+        )
+        .unwrap();
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be dropped when thinking is enabled: {body}"
+        );
+        assert!(body.get("thinking").is_some(), "thinking must be set");
+    }
+
+    /// Without reasoning, temperature must still flow through.
+    #[test]
+    fn build_request_body_keeps_temperature_when_thinking_off() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let opts = StreamOptions {
+            temperature: Some(0.7),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
+        assert_eq!(
+            body["temperature"].as_f64().map(|v| (v * 10.0).round() / 10.0),
+            Some(0.7)
+        );
+    }
+
+    /// `supports_adaptive_thinking` recognises Opus 4.6+, Opus 4.7,
+    /// and Sonnet 4.6 (both dashed and dotted ids). Older Opus 4.0,
+    /// Sonnet 3.7, Haiku 3.5 don't qualify.
+    #[test]
+    fn supports_adaptive_thinking_recognises_4_6_plus() {
+        for id in [
+            "claude-opus-4-6",
+            "claude-opus-4.6",
+            "claude-opus-4-7",
+            "claude-opus-4.7",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4.6",
+            "anthropic/claude-opus-4.7",
+        ] {
+            assert!(supports_adaptive_thinking(id), "{id} should be adaptive");
+        }
+        for id in [
+            "claude-opus-4",
+            "claude-opus-4-0",
+            "claude-opus-4-1",
+            "claude-sonnet-4",
+            "claude-sonnet-3-7",
+            "claude-3-5-haiku",
+        ] {
+            assert!(
+                !supports_adaptive_thinking(id),
+                "{id} must NOT be adaptive"
+            );
+        }
     }
 
     /// Anthropic's newer Claudes (Opus 4.7, Mythos Preview) run
