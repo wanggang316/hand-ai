@@ -107,6 +107,97 @@ pub fn supports_xhigh(model: &Model) -> bool {
         .any(|needle| model.id.contains(needle))
 }
 
+/// Ordered set of thinking levels surfaced to callers, where `None`
+/// represents the "off" sentinel (no reasoning) and each `Some` variant
+/// is a budget tier from minimal up through xhigh.
+const EXTENDED_THINKING_LEVELS: &[Option<crate::types::ThinkingLevel>] = &[
+    None,
+    Some(crate::types::ThinkingLevel::Minimal),
+    Some(crate::types::ThinkingLevel::Low),
+    Some(crate::types::ThinkingLevel::Medium),
+    Some(crate::types::ThinkingLevel::High),
+    Some(crate::types::ThinkingLevel::Xhigh),
+];
+
+/// Translate the `None = off` / `Some(level)` representation into the
+/// lower-case key that `Model.thinking_level_map` uses on disk so the
+/// helpers below can consult per-model overrides.
+fn thinking_level_map_key(level: Option<crate::types::ThinkingLevel>) -> &'static str {
+    match level {
+        None => "off",
+        Some(crate::types::ThinkingLevel::Minimal) => "minimal",
+        Some(crate::types::ThinkingLevel::Low) => "low",
+        Some(crate::types::ThinkingLevel::Medium) => "medium",
+        Some(crate::types::ThinkingLevel::High) => "high",
+        Some(crate::types::ThinkingLevel::Xhigh) => "xhigh",
+    }
+}
+
+/// Return the thinking levels this model accepts. `None` in the list is
+/// the "off" sentinel; reasoning models always include it. Non-reasoning
+/// models return exactly `[None]`.
+///
+/// When the model carries an explicit `thinking_level_map`, each level
+/// is filtered by that table: a `Some(None)` entry (JSON `null`) marks
+/// a level as unsupported, while a missing key keeps the level for the
+/// general tiers and drops `xhigh` (matching the upstream `xhigh
+/// requires an explicit entry` rule). Without a map, every tier is
+/// admitted and `xhigh` falls back to the substring-based
+/// [`supports_xhigh`] heuristic so existing GPT-5.x / Opus 4.6+ /
+/// DeepSeek V4 catalog entries keep advertising xhigh.
+pub fn get_supported_thinking_levels(model: &Model) -> Vec<Option<crate::types::ThinkingLevel>> {
+    if !model.reasoning {
+        return vec![None];
+    }
+    EXTENDED_THINKING_LEVELS
+        .iter()
+        .copied()
+        .filter(|level| {
+            let key = thinking_level_map_key(*level);
+            match &model.thinking_level_map {
+                Some(map) => match map.get(key) {
+                    Some(None) => false,
+                    Some(Some(_)) => true,
+                    None => !matches!(level, Some(crate::types::ThinkingLevel::Xhigh)),
+                },
+                None => match level {
+                    Some(crate::types::ThinkingLevel::Xhigh) => supports_xhigh(model),
+                    _ => true,
+                },
+            }
+        })
+        .collect()
+}
+
+/// Clamp `requested` to the closest level this model actually supports.
+/// Search first by walking up (toward `xhigh`) and then back down toward
+/// `off`. If the requested level is unrecognised, fall back to the
+/// model's first supported level (or `off`).
+pub fn clamp_thinking_level(
+    model: &Model,
+    requested: Option<crate::types::ThinkingLevel>,
+) -> Option<crate::types::ThinkingLevel> {
+    let available = get_supported_thinking_levels(model);
+    if available.iter().any(|l| *l == requested) {
+        return requested;
+    }
+    let Some(requested_index) = EXTENDED_THINKING_LEVELS.iter().position(|l| *l == requested)
+    else {
+        return available.first().copied().flatten();
+    };
+    for level in &EXTENDED_THINKING_LEVELS[requested_index..] {
+        if available.contains(level) {
+            return *level;
+        }
+    }
+    for level in EXTENDED_THINKING_LEVELS[..requested_index].iter().rev() {
+        if available.contains(level) {
+            return *level;
+        }
+    }
+    None
+}
+
 /// Compare two models by id and provider. Returns false if either is None.
 pub fn models_are_equal(a: Option<&Model>, b: Option<&Model>) -> bool {
     match (a, b) {
@@ -118,7 +209,7 @@ pub fn models_are_equal(a: Option<&Model>, b: Option<&Model>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Api, Cost, InputType, Provider, Usage};
+    use crate::types::{Api, Cost, InputType, Provider, ThinkingLevel, Usage};
 
     fn test_model(id: &str, provider: Provider) -> Model {
         Model {
@@ -316,5 +407,121 @@ mod tests {
         assert!(!models_are_equal(Some(&a), Some(&c)));
         assert!(!models_are_equal(Some(&a), Some(&d)));
         assert!(!models_are_equal(Some(&a), None));
+    }
+
+    /// Non-reasoning models advertise exactly `[off]`; reasoning models
+    /// without an explicit map admit every tier and fall back to the
+    /// substring `supports_xhigh` heuristic for the top slot.
+    #[test]
+    fn get_supported_thinking_levels_uses_substring_default_when_map_missing() {
+        // Non-reasoning -> only off.
+        let mut non_reasoning = test_model("gpt-4o", Provider::OpenAI);
+        non_reasoning.reasoning = false;
+        assert_eq!(get_supported_thinking_levels(&non_reasoning), vec![None]);
+
+        // Reasoning, xhigh-substring -> all six levels.
+        let mut xhigh_model = test_model("gpt-5.3-mini", Provider::OpenAI);
+        xhigh_model.reasoning = true;
+        let levels = get_supported_thinking_levels(&xhigh_model);
+        assert_eq!(
+            levels,
+            vec![
+                None,
+                Some(ThinkingLevel::Minimal),
+                Some(ThinkingLevel::Low),
+                Some(ThinkingLevel::Medium),
+                Some(ThinkingLevel::High),
+                Some(ThinkingLevel::Xhigh),
+            ]
+        );
+
+        // Reasoning, no xhigh substring -> xhigh excluded.
+        let mut no_xhigh = test_model("claude-sonnet-4", Provider::Anthropic);
+        no_xhigh.reasoning = true;
+        let levels = get_supported_thinking_levels(&no_xhigh);
+        assert!(!levels.contains(&Some(ThinkingLevel::Xhigh)));
+        assert!(levels.contains(&Some(ThinkingLevel::High)));
+        assert!(levels.contains(&None));
+    }
+
+    /// An explicit `thinking_level_map` is authoritative — a `null`
+    /// entry marks the level unsupported; an omitted key drops the
+    /// xhigh slot but admits the other tiers.
+    #[test]
+    fn get_supported_thinking_levels_respects_explicit_map() {
+        let mut model = test_model("custom", Provider::OpenAI);
+        model.reasoning = true;
+        let mut map = std::collections::HashMap::new();
+        map.insert("off".to_string(), Some("off".to_string()));
+        map.insert("minimal".to_string(), Some("minimal".to_string()));
+        map.insert("low".to_string(), Some("low".to_string()));
+        map.insert("medium".to_string(), None); // marked unsupported
+        map.insert("high".to_string(), Some("high".to_string()));
+        // xhigh deliberately omitted -> excluded.
+        model.thinking_level_map = Some(map);
+
+        let levels = get_supported_thinking_levels(&model);
+        assert_eq!(
+            levels,
+            vec![
+                None,
+                Some(ThinkingLevel::Minimal),
+                Some(ThinkingLevel::Low),
+                Some(ThinkingLevel::High),
+            ],
+            "medium must be dropped (null) and xhigh must be dropped (missing): {levels:?}",
+        );
+    }
+
+    /// `clamp_thinking_level` walks up first, then back down — so an
+    /// unsupported request rises to the next available tier rather than
+    /// dropping straight to `off`.
+    #[test]
+    fn clamp_thinking_level_walks_up_then_down() {
+        let mut model = test_model("custom", Provider::OpenAI);
+        model.reasoning = true;
+        let mut map = std::collections::HashMap::new();
+        map.insert("off".to_string(), Some("off".to_string()));
+        // Mark minimal/low explicitly unsupported (null).
+        map.insert("minimal".to_string(), None);
+        map.insert("low".to_string(), None);
+        map.insert("medium".to_string(), Some("medium".to_string()));
+        map.insert("high".to_string(), Some("high".to_string()));
+        // xhigh omitted -> excluded (upstream "missing key" rule).
+        model.thinking_level_map = Some(map);
+
+        // low -> walk up over the null gap -> medium.
+        assert_eq!(
+            clamp_thinking_level(&model, Some(ThinkingLevel::Low)),
+            Some(ThinkingLevel::Medium)
+        );
+        // xhigh -> walk up off the end, then down -> high.
+        assert_eq!(
+            clamp_thinking_level(&model, Some(ThinkingLevel::Xhigh)),
+            Some(ThinkingLevel::High)
+        );
+        // off stays off (explicitly supported).
+        assert_eq!(clamp_thinking_level(&model, None), None);
+    }
+
+    /// Non-reasoning models clamp every request to `off`.
+    #[test]
+    fn clamp_thinking_level_collapses_to_off_for_non_reasoning_models() {
+        let mut model = test_model("gpt-4o", Provider::OpenAI);
+        model.reasoning = false;
+        for level in [
+            None,
+            Some(ThinkingLevel::Minimal),
+            Some(ThinkingLevel::Low),
+            Some(ThinkingLevel::Medium),
+            Some(ThinkingLevel::High),
+            Some(ThinkingLevel::Xhigh),
+        ] {
+            assert_eq!(
+                clamp_thinking_level(&model, level),
+                None,
+                "non-reasoning model must clamp {level:?} to off"
+            );
+        }
     }
 }
