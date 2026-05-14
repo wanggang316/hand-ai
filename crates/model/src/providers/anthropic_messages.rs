@@ -250,8 +250,14 @@ fn build_request_body(
         );
     }
 
-    // Messages
-    let messages = convert_messages_to_anthropic(&context.messages, model);
+    // Messages — when prompt caching is enabled, the last user message's
+    // final cacheable content block (text/image/tool_result) carries an
+    // additional `cache_control` breakpoint so the entire conversation
+    // prefix up to that point can be reused on the next turn.
+    let mut messages = convert_messages_to_anthropic(&context.messages, model);
+    if let Some(cc) = resolve_anthropic_cache_control(model, options.as_ref()) {
+        apply_last_user_message_cache_control(&mut messages, &cc);
+    }
     body.insert("messages".to_string(), Value::Array(messages));
 
     // Tools — attach `cache_control` to the LAST tool when prompt caching
@@ -331,6 +337,58 @@ pub(crate) fn resolve_anthropic_cache_control(
         cc.insert("ttl".to_string(), Value::String("1h".to_string()));
     }
     Some(Value::Object(cc))
+}
+
+/// Attach a `cache_control` breakpoint to the trailing cacheable block
+/// of the last user message in `messages`. No-op when the conversation
+/// has no user message, or when the last user message's content array
+/// has no text / image / tool_result block to mark.
+///
+/// Anthropic's documentation places the breakpoint on the LAST user
+/// turn so the cached prefix covers the entire conversation up to that
+/// point. Marking an assistant turn would shorten the cached prefix
+/// and waste the breakpoint budget.
+pub(crate) fn apply_last_user_message_cache_control(messages: &mut [Value], cc: &Value) {
+    let Some(last_user_idx) = messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(Value::as_str) == Some("user"))
+    else {
+        return;
+    };
+    let last_user = &mut messages[last_user_idx];
+    let Some(obj) = last_user.as_object_mut() else {
+        return;
+    };
+    let Some(content) = obj.get_mut("content") else {
+        return;
+    };
+    // Anthropic accepts content as a string OR an array. The current
+    // converter always emits the array form; defensively handle the
+    // string case anyway so a future refactor that returns Content::Text
+    // doesn't silently lose the breakpoint.
+    if content.is_string() {
+        let text = content.as_str().unwrap_or("").to_string();
+        *content = Value::Array(vec![serde_json::json!({
+            "type": "text",
+            "text": text,
+            "cache_control": cc.clone(),
+        })]);
+        return;
+    }
+    let Some(arr) = content.as_array_mut() else {
+        return;
+    };
+    // Walk backwards to find the last text / image / tool_result block.
+    for block in arr.iter_mut().rev() {
+        let Some(block_obj) = block.as_object_mut() else {
+            continue;
+        };
+        let block_type = block_obj.get("type").and_then(Value::as_str);
+        if matches!(block_type, Some("text" | "image" | "tool_result")) {
+            block_obj.insert("cache_control".to_string(), cc.clone());
+            return;
+        }
+    }
 }
 
 fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
@@ -1319,6 +1377,87 @@ mod tests {
         let cc = &body["tools"][0]["cache_control"];
         assert_eq!(cc["type"], "ephemeral");
         assert_eq!(cc["ttl"], "1h");
+    }
+
+    /// Anthropic places the conversation breakpoint on the LAST user
+    /// message so the cached prefix covers everything up to that turn.
+    /// Marking an assistant turn would shorten the prefix and waste a
+    /// breakpoint budget slot — assistants must stay untouched.
+    #[test]
+    fn last_user_message_carries_cache_control_when_caching_enabled() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage::new_text("first")),
+                Message::Assistant(AssistantMessage {
+                    role: "assistant".to_string(),
+                    content: vec![AssistantContentBlock::Text(TextContent::new("ack"))],
+                    api: Api::AnthropicMessages,
+                    provider: Provider::Anthropic,
+                    model: "test".to_string(),
+                    usage: Default::default(),
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
+                }),
+                Message::User(UserMessage::new_text("follow-up")),
+            ],
+            tools: None,
+        };
+        let body = build_request_body(&model, &context, 4096, None, &None).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        // The non-last user message stays in its historical
+        // `Value::String` content shape and obviously carries no
+        // breakpoint. Just assert the type to pin the contract.
+        assert!(msgs[0]["content"].is_string());
+        // Assistant must NOT carry a breakpoint anywhere in its
+        // content array.
+        let assistant_content = msgs[1]["content"].as_array().unwrap();
+        for b in assistant_content {
+            assert!(
+                b.get("cache_control").is_none(),
+                "assistant must not carry cache_control: {b:?}"
+            );
+        }
+        // Last user message's content gets promoted to array form (if
+        // it wasn't already) and its trailing block carries the
+        // breakpoint.
+        let last_user_content = msgs[2]["content"].as_array().unwrap();
+        let last_block = last_user_content.last().unwrap();
+        assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+    }
+
+    /// Disabling caching must skip every conversation-level breakpoint
+    /// just as it does for system / tools.
+    #[test]
+    fn last_user_message_cache_control_omitted_when_caching_disabled() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let opts = StreamOptions {
+            cache_retention: Some(CacheRetention::None),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
+        // No breakpoint of any kind should appear in or around the
+        // user content. Plain-string shape is fine; assert just that.
+        let content = &body["messages"][0]["content"];
+        match content {
+            Value::String(_) => {}
+            Value::Array(blocks) => {
+                for b in blocks {
+                    assert!(b.get("cache_control").is_none(), "{b:?}");
+                }
+            }
+            other => panic!("unexpected content shape: {other:?}"),
+        }
     }
 
     /// `None` retention is the explicit opt-out; the request must NOT
