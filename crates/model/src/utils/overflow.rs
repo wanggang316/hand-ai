@@ -22,6 +22,7 @@ const OVERFLOW_PATTERNS: &[&str] = &[
     "exceeded model token limit", // Kimi For Coding
     "too large for model with", // Mistral
     "model_context_window_exceeded", // z.ai
+    "prompt too long; exceeded", // Ollama explicit overflow error
     "context length exceeded", // Generic fallback
     "context_length_exceeded", // Generic fallback (underscore variant)
     "too many tokens",   // Generic fallback
@@ -112,6 +113,21 @@ mod tests {
     fn test_anthropic_overflow() {
         let msg = make_error_message("prompt is too long: 213462 tokens > 200000 maximum");
         assert!(is_context_overflow(&msg, None));
+    }
+
+    /// Ollama deployments behave differently around context overflow.
+    /// Many setups truncate the input silently (undetectable here
+    /// because we don't know the expected token count), but some
+    /// return an explicit error string like
+    /// `prompt too long; exceeded max context length by N tokens`.
+    /// Match the explicit error so callers can trim and retry.
+    #[test]
+    fn test_ollama_overflow() {
+        let msg = make_error_message("prompt too long; exceeded max context length by 1024 tokens");
+        assert!(is_context_overflow(&msg, None));
+        // Some Ollama builds drop the "max " qualifier.
+        let msg2 = make_error_message("prompt too long; exceeded context length");
+        assert!(is_context_overflow(&msg2, None));
     }
 
     /// Anthropic returns HTTP 413 with a `request_too_large` error code
