@@ -315,6 +315,14 @@ async fn fetch_ai_gateway_models(client: &reqwest::Client) -> Vec<Model> {
     models
 }
 
+/// Return true for known versioned aliases of the canonical
+/// `kimi-for-coding` model. models.dev exposes new aliases over time
+/// (`k2p5`, `k2p6`, ...) that all point at the same model family; we
+/// fold them onto the canonical id rather than shipping duplicates.
+fn is_kimi_alias(model_id: &str) -> bool {
+    matches!(model_id, "k2p5" | "k2p6")
+}
+
 fn provider_has_tool_call(m: &ModelsDevModel) -> bool {
     m.tool_call == Some(true)
 }
@@ -847,13 +855,35 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
 
     // Kimi for coding
     if let Some(ref prov) = data.kimi_for_coding {
+        let has_canonical = prov.models.contains_key("kimi-for-coding");
         for (model_id, m) in &prov.models {
             if !provider_has_tool_call(m) {
                 continue;
             }
+
+            // models.dev exposes versioned aliases (e.g. `k2p5`, `k2p6`) for
+            // the canonical `kimi-for-coding` snapshot. Drop aliases when
+            // the canonical id is also present so we don't ship duplicate
+            // entries; otherwise normalize the alias to the canonical id
+            // and human-readable name.
+            let (normalized_id, normalized_name) = if is_kimi_alias(model_id) {
+                if has_canonical {
+                    continue;
+                }
+                (
+                    "kimi-for-coding".to_string(),
+                    "Kimi For Coding".to_string(),
+                )
+            } else {
+                (
+                    model_id.clone(),
+                    m.name.clone().unwrap_or_else(|| model_id.clone()),
+                )
+            };
+
             models.push(Model {
-                id: model_id.clone(),
-                name: m.name.clone().unwrap_or_else(|| model_id.clone()),
+                id: normalized_id,
+                name: normalized_name,
                 api: Api::AnthropicMessages,
                 provider: Provider::KimiCoding,
                 base_url: "https://api.kimi.com/coding".to_string(),
@@ -1699,4 +1729,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kimi_alias_set_matches_known_versions() {
+        assert!(is_kimi_alias("k2p5"));
+        assert!(is_kimi_alias("k2p6"));
+    }
+
+    #[test]
+    fn kimi_alias_set_excludes_canonical_and_unrelated_ids() {
+        assert!(!is_kimi_alias("kimi-for-coding"));
+        assert!(!is_kimi_alias("kimi-k2-thinking"));
+        assert!(!is_kimi_alias(""));
+        assert!(!is_kimi_alias("k2"));
+    }
 }
