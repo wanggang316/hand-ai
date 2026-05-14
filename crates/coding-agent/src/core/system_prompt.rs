@@ -190,14 +190,22 @@ fn escape_xml(s: &str) -> String {
     out
 }
 
-/// Load context files (HAND.md) from the working directory.
+/// Load context files (HAND.md / HAND.MD) from the working directory.
+///
+/// Case-insensitive resolution mirrors users who land on a project whose
+/// context file shipped with an uppercase extension (e.g. created on a
+/// case-insensitive filesystem). The lowercase variant wins when both
+/// exist so a project that ships `HAND.md` plus a stray `HAND.MD` from a
+/// merge conflict still gets a single, deterministic file.
 pub fn load_context_files(cwd: &Path) -> Vec<String> {
     let mut files = Vec::new();
 
-    // Check for HAND.md in cwd
-    let hand_md = cwd.join("HAND.md");
-    if let Ok(content) = std::fs::read_to_string(&hand_md) {
-        files.push(content);
+    for candidate in ["HAND.md", "HAND.MD"] {
+        let path = cwd.join(candidate);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            files.push(content);
+            break;
+        }
     }
 
     // Check for .hand/context.md
@@ -360,6 +368,41 @@ mod tests {
         let files = load_context_files(dir.path());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], "# My Project");
+    }
+
+    /// A project that shipped `HAND.MD` (uppercase ext) must still load.
+    /// Users hopping between case-insensitive filesystems often end up
+    /// with the uppercase variant; silently ignoring it loses context.
+    #[test]
+    fn test_load_context_files_with_uppercase_hand_md() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("HAND.MD"), "# upper-case ext").unwrap();
+        let files = load_context_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], "# upper-case ext");
+    }
+
+    /// When both `HAND.md` and `HAND.MD` exist, the canonical lowercase
+    /// variant wins — the candidate order pins the resolution.
+    #[test]
+    fn test_load_context_files_prefers_lowercase_when_both_exist() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // On case-insensitive filesystems (macOS default APFS) both
+        // paths point at the same file. Skip the test there because we
+        // can't reliably create two distinct entries.
+        let lower = dir.path().join("HAND.md");
+        let upper = dir.path().join("HAND.MD");
+        std::fs::write(&lower, "lowercase wins").unwrap();
+        if std::fs::write(&upper, "uppercase loses").is_err() {
+            return;
+        }
+        if std::fs::read_to_string(&lower).ok().as_deref() != Some("lowercase wins") {
+            // Filesystem collapsed the two writes — nothing to assert.
+            return;
+        }
+        let files = load_context_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0], "lowercase wins");
     }
 
     // T2.5 — Skills section emission.
