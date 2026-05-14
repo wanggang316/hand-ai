@@ -118,7 +118,7 @@ fn image_tool_result_downgrades_for_text_only_target() {
     ));
     assert!(matches!(
         &tr.content[1],
-        ToolResultContent::Text(t) if t.text == "[image omitted]"
+        ToolResultContent::Text(t) if t.text == "(tool image omitted: model does not support images)"
     ));
 }
 

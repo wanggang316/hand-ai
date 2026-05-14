@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 /// Optional callback for normalizing tool call IDs across providers.
 pub type NormalizeToolCallIdFn = Box<dyn Fn(&str, &Model, &AssistantMessage) -> String>;
 
-const TOOL_RESULT_IMAGE_PLACEHOLDER: &str = "[image omitted]";
+const TOOL_RESULT_IMAGE_PLACEHOLDER: &str = "(tool image omitted: model does not support images)";
 const USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
 
 /// Transform messages for cross-provider compatibility.
