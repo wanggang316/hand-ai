@@ -3,6 +3,7 @@
 use crate::core::error::CodingAgentError;
 use std::path::Path;
 use std::process::Stdio;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 /// Default maximum output bytes before truncation.
@@ -55,7 +56,7 @@ pub async fn execute_bash(
     // success on the wire while the destructive command kept running
     // to natural completion (the timeout also lives in the dropped
     // future, so it's bypassed too).
-    let child = Command::new(shell_path)
+    let mut child = Command::new(shell_path)
         .arg("-c")
         .arg(command)
         .current_dir(cwd)
@@ -72,12 +73,51 @@ pub async fn execute_bash(
         None
     };
 
-    let wait_future = child.wait_with_output();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CodingAgentError::Tool("bash child missing stdout pipe".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CodingAgentError::Tool("bash child missing stderr pipe".into()))?;
 
-    let child_output = if let Some(timeout) = timeout_duration {
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let stdout_tx = chunk_tx.clone();
+    let stderr_tx = chunk_tx;
+    let stdout_task = tokio::spawn(forward_pipe(stdout, stdout_tx));
+    let stderr_task = tokio::spawn(forward_pipe(stderr, stderr_tx));
+
+    // Drain chunks into a combined raw buffer, invoking on_chunk on each
+    // arrival. The accumulator runs in this task so back-pressure is
+    // bounded by tokio's mpsc buffer (unbounded — fine for terminal
+    // output rates).
+    let drain_future = async {
+        let mut raw: Vec<u8> = Vec::new();
+        while let Some(chunk) = chunk_rx.recv().await {
+            raw.extend_from_slice(&chunk);
+            if let Some(ref cb) = options.on_chunk {
+                let snapshot = sanitize_output(&String::from_utf8_lossy(&raw)).replace('\r', "");
+                cb(&snapshot);
+            }
+        }
+        raw
+    };
+
+    let wait_future = async {
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| CodingAgentError::Tool(format!("Failed to wait for bash: {}", e)))?;
+        let _ = stdout_task.await;
+        let _ = stderr_task.await;
+        let raw = drain_future.await;
+        Ok::<_, CodingAgentError>((status, raw))
+    };
+
+    let (status, raw_output) = if let Some(timeout) = timeout_duration {
         match tokio::time::timeout(timeout, wait_future).await {
-            Ok(result) => result
-                .map_err(|e| CodingAgentError::Tool(format!("Failed to wait for bash: {}", e)))?,
+            Ok(result) => result?,
             Err(_) => {
                 return Ok(BashResult {
                     output: format!("[Timed out after {}s]", options.timeout_secs),
@@ -87,29 +127,13 @@ pub async fn execute_bash(
             }
         }
     } else {
-        wait_future
-            .await
-            .map_err(|e| CodingAgentError::Tool(format!("Failed to wait for bash: {}", e)))?
+        wait_future.await?
     };
-
-    let mut output = String::from_utf8_lossy(&child_output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&child_output.stderr).to_string();
-    if !stderr.is_empty() {
-        if !output.is_empty() {
-            output.push('\n');
-        }
-        output.push_str(&stderr);
-    }
 
     // Pi-mono parity: strip ANSI escapes, C0 controls, Unicode format chars,
     // then drop bare `\r` (progress-bar overwrites garble captured streams).
-    output = sanitize_output(&output);
+    let mut output = sanitize_output(&String::from_utf8_lossy(&raw_output));
     output = output.replace('\r', "");
-
-    // Call chunk callback with combined output
-    if let Some(ref cb) = options.on_chunk {
-        cb(&output);
-    }
 
     let mut truncated = false;
     if output.len() > options.max_bytes {
@@ -119,9 +143,28 @@ pub async fn execute_bash(
 
     Ok(BashResult {
         output,
-        exit_code: child_output.status.code(),
+        exit_code: status.code(),
         truncated,
     })
+}
+
+/// Read from a child pipe in small chunks and forward each chunk to
+/// the drain task. Ends when the pipe reports EOF.
+async fn forward_pipe<R>(mut reader: R, tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>)
+where
+    R: AsyncReadExt + Unpin,
+{
+    let mut buf = [0u8; 4096];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => {
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// Resolve the shell to invoke for `bash`-tagged commands. Honors `$SHELL`
@@ -376,6 +419,52 @@ mod tests {
     fn test_sanitize_output() {
         assert_eq!(sanitize_output("hello\x1b[31m world\x1b[0m"), "hello world");
         assert_eq!(sanitize_output("foo\0bar"), "foobar");
+    }
+
+    /// `on_chunk` must fire while the child is still running, not only
+    /// once after it exits. A 1.5s command that emits a line every
+    /// ~200ms should yield more than one snapshot, with the early
+    /// snapshots strictly shorter than the final one.
+    #[tokio::test]
+    async fn on_chunk_fires_incrementally() {
+        use std::sync::{Arc, Mutex};
+
+        let dir = TempDir::new().unwrap();
+        let snapshots: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let snapshots_for_cb = Arc::clone(&snapshots);
+        let on_chunk: OnChunkFn = Box::new(move |s: &str| {
+            snapshots_for_cb.lock().unwrap().push(s.to_string());
+        });
+
+        let result = execute_bash(
+            "for i in 1 2 3 4 5 6; do echo line $i; sleep 0.2; done",
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions {
+                on_chunk: Some(on_chunk),
+                timeout_secs: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        let captured = snapshots.lock().unwrap().clone();
+        assert!(
+            captured.len() >= 2,
+            "expected ≥ 2 chunk callbacks, got {}: {:?}",
+            captured.len(),
+            captured
+        );
+        let final_len = captured.last().unwrap().len();
+        let first_len = captured.first().unwrap().len();
+        assert!(
+            first_len < final_len,
+            "first snapshot must be shorter than final: first={} final={}",
+            first_len,
+            final_len
+        );
     }
 
     /// Pi-mono parity: drop C0 control characters except `\t \n \r`. Bash
