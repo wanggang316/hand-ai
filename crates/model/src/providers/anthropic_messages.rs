@@ -443,6 +443,13 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
     // Check if model supports adaptive thinking (Opus 4.6, Sonnet 4.6)
     let supports_adaptive = model.id.contains("opus-4") || model.id.contains("sonnet-4");
 
+    // `display: "summarized"` keeps thinking text in the streamed
+    // response. Anthropic's silent API default flipped to "omitted"
+    // for newer Claudes (Opus 4.7, Mythos Preview), which strips the
+    // text while still returning the encrypted signature for
+    // multi-turn continuity. Pin "summarized" so behaviour matches
+    // older Claude 4 models — UIs that surface the thinking trace
+    // depend on it; the encrypted signature is unaffected either way.
     if supports_adaptive {
         let effort = match level {
             ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
@@ -454,6 +461,7 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
         serde_json::json!({
             "type": "adaptive",
             "effort": effort,
+            "display": "summarized",
         })
     } else {
         // Budget-based thinking for older models
@@ -467,6 +475,7 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
         serde_json::json!({
             "type": "enabled",
             "budget_tokens": budget,
+            "display": "summarized",
         })
     }
 }
@@ -1332,6 +1341,42 @@ mod tests {
         let config = build_thinking_config(ThinkingLevel::Medium, &model);
         assert_eq!(config["type"], "enabled");
         assert_eq!(config["budget_tokens"], 8192);
+    }
+
+    /// Anthropic silently changed the API default for thinking
+    /// `display` from "summarized" to "omitted" on newer Claudes
+    /// (Opus 4.7, Mythos Preview). "omitted" strips the thinking text
+    /// while still returning the encrypted signature, so multi-turn
+    /// continuity works but UIs that surface the trace see empty
+    /// blocks. Pin "summarized" on every emitted thinking config so
+    /// the visible behaviour matches older Claude 4 models — UIs that
+    /// depend on the trace keep working.
+    #[test]
+    fn thinking_config_pins_display_summarized_on_adaptive_branch() {
+        let model = Model {
+            id: "claude-opus-4-7-20260101".to_string(),
+            ..test_model()
+        };
+        let config = build_thinking_config(ThinkingLevel::High, &model);
+        assert_eq!(config["type"], "adaptive");
+        assert_eq!(
+            config["display"], "summarized",
+            "adaptive thinking must pin display: summarized: {config}"
+        );
+    }
+
+    #[test]
+    fn thinking_config_pins_display_summarized_on_budget_branch() {
+        let model = Model {
+            id: "claude-3-5-haiku-20251022".to_string(),
+            ..test_model()
+        };
+        let config = build_thinking_config(ThinkingLevel::Medium, &model);
+        assert_eq!(config["type"], "enabled");
+        assert_eq!(
+            config["display"], "summarized",
+            "budget-based thinking must pin display: summarized: {config}"
+        );
     }
 
     #[test]
