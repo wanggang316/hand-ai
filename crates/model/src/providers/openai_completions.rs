@@ -251,6 +251,8 @@ pub fn stream_openai_completions(
                 Err(e) => { errored = Some(e.to_string()); break; }
             };
 
+            capture_chunk_metadata(&chunk.id, &chunk.model, &model.id, &mut output);
+
             let Some(choice) = chunk.choices.first() else { continue };
 
             if let Some(finish_reason) = &choice.finish_reason {
@@ -285,6 +287,31 @@ pub fn stream_openai_completions(
 // =============================================================================
 // Stream Processing
 // =============================================================================
+
+/// Capture per-stream identifiers from a streaming chunk.
+///
+/// OpenAI documents `id` as the unique chat completion identifier and
+/// every chunk in a stream repeats it; record it once. `model` is the
+/// model that actually served the request — for OpenRouter's `auto`
+/// route it differs from the requested id (e.g. `anthropic/...`), so
+/// surface it as `response_model` only when it diverges so downstream
+/// callers know the routing landed on a different concrete model.
+fn capture_chunk_metadata(
+    chunk_id: &str,
+    chunk_model: &str,
+    requested_id: &str,
+    output: &mut AssistantMessage,
+) {
+    if output.response_id.is_none() && !chunk_id.is_empty() {
+        output.response_id = Some(chunk_id.to_string());
+    }
+    if output.response_model.is_none()
+        && !chunk_model.is_empty()
+        && chunk_model != requested_id
+    {
+        output.response_model = Some(chunk_model.to_string());
+    }
+}
 
 /// Apply a single SSE delta to `output`, returning the events to yield.
 ///
@@ -2167,5 +2194,84 @@ mod tests {
         let events = finish_current_block(&mut current, &mut output);
         assert!(events.is_empty());
         assert!(output.content.is_empty());
+    }
+
+    /// `capture_chunk_metadata` records the chat completion id from
+    /// the first chunk that carries one and never overwrites it after.
+    #[test]
+    fn capture_chunk_metadata_records_id_once() {
+        let mut output = empty_output();
+        capture_chunk_metadata("chatcmpl-abc", "gpt-4o", "gpt-4o", &mut output);
+        assert_eq!(output.response_id.as_deref(), Some("chatcmpl-abc"));
+        // A later chunk with a different id (shouldn't happen in
+        // practice, but guard against it) must not clobber.
+        capture_chunk_metadata("chatcmpl-different", "gpt-4o", "gpt-4o", &mut output);
+        assert_eq!(output.response_id.as_deref(), Some("chatcmpl-abc"));
+    }
+
+    /// Empty chunk ids are ignored — some proxies emit a placeholder
+    /// chunk before the real one with id populated.
+    #[test]
+    fn capture_chunk_metadata_skips_empty_id() {
+        let mut output = empty_output();
+        capture_chunk_metadata("", "gpt-4o", "gpt-4o", &mut output);
+        assert_eq!(output.response_id, None);
+        capture_chunk_metadata("chatcmpl-xyz", "gpt-4o", "gpt-4o", &mut output);
+        assert_eq!(output.response_id.as_deref(), Some("chatcmpl-xyz"));
+    }
+
+    /// `response_model` is set ONLY when the served model differs from
+    /// the requested one. OpenRouter's `auto` route returns concrete
+    /// ids like `anthropic/claude-...` and callers rely on this field
+    /// to know what routing actually picked.
+    #[test]
+    fn capture_chunk_metadata_records_routed_model() {
+        let mut output = empty_output();
+        capture_chunk_metadata(
+            "chatcmpl-1",
+            "anthropic/claude-opus-4",
+            "openrouter/auto",
+            &mut output,
+        );
+        assert_eq!(
+            output.response_model.as_deref(),
+            Some("anthropic/claude-opus-4")
+        );
+    }
+
+    /// If the served model matches what was requested, `response_model`
+    /// stays None — there is nothing interesting to surface.
+    #[test]
+    fn capture_chunk_metadata_skips_matching_model() {
+        let mut output = empty_output();
+        capture_chunk_metadata("chatcmpl-1", "gpt-4o", "gpt-4o", &mut output);
+        assert_eq!(output.response_model, None);
+    }
+
+    /// Once `response_model` is set, later chunks must not overwrite
+    /// it — only the first routed-model signal is authoritative.
+    #[test]
+    fn capture_chunk_metadata_does_not_overwrite_routed_model() {
+        let mut output = empty_output();
+        capture_chunk_metadata("chatcmpl-1", "anthropic/claude-opus-4", "auto", &mut output);
+        capture_chunk_metadata(
+            "chatcmpl-1",
+            "anthropic/claude-sonnet-4",
+            "auto",
+            &mut output,
+        );
+        assert_eq!(
+            output.response_model.as_deref(),
+            Some("anthropic/claude-opus-4")
+        );
+    }
+
+    /// An empty `chunk.model` must not populate response_model —
+    /// some proxies omit the field entirely on early chunks.
+    #[test]
+    fn capture_chunk_metadata_skips_empty_model() {
+        let mut output = empty_output();
+        capture_chunk_metadata("chatcmpl-1", "", "gpt-4o", &mut output);
+        assert_eq!(output.response_model, None);
     }
 }
