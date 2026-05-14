@@ -678,9 +678,65 @@ fn marker_styled(marker: &str, ctx: &RenderCtx) -> String {
     }
 }
 
-/// Build an OSC 8 hyperlink wrapper around `text` with destination `url`.
+/// Build an OSC 8 hyperlink wrapper around `text` with destination `url`,
+/// or fall back to `text (url)` when the host terminal won't render OSC 8
+/// reliably. tmux/screen without passthrough silently swallows the
+/// sequence, dropping the URL from the rendered output; better to show
+/// the URL as plain text than to lose it entirely.
 fn hyperlink(text: &str, url: &str) -> String {
-    format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+    hyperlink_with_support(text, url, supports_osc8_hyperlinks())
+}
+
+/// Pure helper extracted for tests: choose OSC 8 vs. plain-text fallback
+/// based on the supplied support flag.
+fn hyperlink_with_support(text: &str, url: &str, osc8_supported: bool) -> String {
+    if osc8_supported {
+        format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+    } else {
+        // Suffix the URL in parens so the user can copy it. Skip the
+        // suffix when text already equals the URL (autolinks) to avoid
+        // `https://x (https://x)` redundancy.
+        if text == url {
+            text.to_string()
+        } else {
+            format!("{text} ({url})")
+        }
+    }
+}
+
+/// Whether the host terminal renders OSC 8 hyperlinks. Defaults to
+/// `false` for unknown terminals and any tmux / screen multiplexer
+/// session — both pass OSC 8 through to the outer terminal unreliably,
+/// often swallowing the sequence entirely. Mirrors the pi-mono
+/// `detectCapabilities()` policy.
+fn supports_osc8_hyperlinks() -> bool {
+    if std::env::var("HAND_DISABLE_OSC8").is_ok_and(|v| !v.is_empty() && v != "0") {
+        return false;
+    }
+    if std::env::var_os("TMUX").is_some() {
+        return false;
+    }
+    let term = std::env::var("TERM").unwrap_or_default().to_lowercase();
+    if term.starts_with("tmux") || term.starts_with("screen") {
+        return false;
+    }
+    let term_program = std::env::var("TERM_PROGRAM")
+        .unwrap_or_default()
+        .to_lowercase();
+    matches!(
+        term_program.as_str(),
+        "iterm.app"
+            | "wezterm"
+            | "ghostty"
+            | "vscode"
+            | "kitty"
+            | "alacritty"
+            | "warpterminal"
+            | "apple_terminal"
+    ) || std::env::var("KITTY_WINDOW_ID").is_ok()
+        || std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
+        || std::env::var("WEZTERM_PANE").is_ok()
+        || std::env::var("ITERM_SESSION_ID").is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -911,12 +967,30 @@ mod tests {
 
     #[test]
     fn test_link_renders_osc8() {
-        let md = MarkdownComponent::new("see [example](https://example.com)");
-        let lines = md.render(80);
-        let joined = lines.join("");
-        assert!(joined.contains("\x1b]8;;https://example.com\x1b\\"));
-        assert!(joined.contains("example"));
-        assert!(joined.contains("\x1b]8;;\x1b\\"));
+        // The outer renderer's choice depends on the host env (TERM,
+        // TMUX, ...) which is unstable across CI shells. Pin both
+        // branches directly on the pure helper instead.
+        let osc8 = hyperlink_with_support("example", "https://example.com", true);
+        assert!(osc8.contains("\x1b]8;;https://example.com\x1b\\"));
+        assert!(osc8.contains("example"));
+        assert!(osc8.ends_with("\x1b]8;;\x1b\\"));
+    }
+
+    /// tmux/screen and unknown terminals swallow OSC 8. The fallback
+    /// renders `text (url)` so the URL is at least visible.
+    #[test]
+    fn test_link_falls_back_to_plain_text_without_osc8() {
+        let plain = hyperlink_with_support("example", "https://example.com", false);
+        assert_eq!(plain, "example (https://example.com)");
+    }
+
+    /// An autolink (`<https://x>` or bare URL) renders as the URL
+    /// itself; the fallback must NOT duplicate it as `https://x (https://x)`.
+    #[test]
+    fn test_link_autolink_fallback_does_not_duplicate() {
+        let plain =
+            hyperlink_with_support("https://example.com", "https://example.com", false);
+        assert_eq!(plain, "https://example.com");
     }
 
     #[test]
