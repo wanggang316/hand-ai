@@ -76,6 +76,25 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
         }
     }
 
+    // Case 3: Length-stop overflow (Xiaomi MiMo style). The server
+    // truncates the oversized input to exactly fill the context window,
+    // leaving no room to generate, then closes the stream with
+    // `finish_reason = "length"` and `completion_tokens = 0`. Detect
+    // the signal: stop reason `length`, zero output, and input + cache
+    // hits filling >=99% of the context window (use 99% to tolerate
+    // off-by-a-few token rounding the server applies).
+    if let Some(cw) = context_window
+        && message.stop_reason == StopReason::Length
+        && message.usage.output == 0
+    {
+        let input_tokens = message.usage.input + message.usage.cache_read;
+        // `cw * 99 / 100` (integer-safe) instead of casting to f64.
+        let threshold = (cw.saturating_mul(99)) / 100;
+        if input_tokens >= threshold {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -269,5 +288,72 @@ mod tests {
         msg.usage.cache_read = 60_000;
         // Total input = 150k + 60k = 210k > 200k
         assert!(is_context_overflow(&msg, Some(200_000)));
+    }
+
+    fn make_length_stop_message(input_tokens: u64) -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![],
+            api: Api::OpenAICompletions,
+            provider: Provider::OpenAI,
+            model: "mimo-v2.5-pro".to_string(),
+            usage: Usage {
+                input: input_tokens,
+                output: 0,
+                cache_read: 0,
+                cache_write: 0,
+                total_tokens: input_tokens,
+                cost: Default::default(),
+            },
+            stop_reason: StopReason::Length,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    /// Length-stop overflow: providers like Xiaomi MiMo truncate the
+    /// oversized input to exactly fill the context window, then close
+    /// the stream with `finish_reason = "length"` and zero output.
+    /// Detect it when input+cache_read fills >=99% of the context window.
+    #[test]
+    fn test_length_stop_overflow_at_context_window() {
+        let msg = make_length_stop_message(200_000);
+        assert!(is_context_overflow(&msg, Some(200_000)));
+    }
+
+    /// 99% threshold tolerates a small rounding slack the server may
+    /// apply when truncating.
+    #[test]
+    fn test_length_stop_overflow_within_one_percent_slack() {
+        let msg = make_length_stop_message(199_000);
+        assert!(is_context_overflow(&msg, Some(200_000)));
+    }
+
+    /// Below the 99% threshold the length stop is a normal completion
+    /// hitting `max_tokens`, not a context overflow.
+    #[test]
+    fn test_length_stop_not_overflow_when_below_threshold() {
+        let msg = make_length_stop_message(150_000);
+        assert!(!is_context_overflow(&msg, Some(200_000)));
+    }
+
+    /// Length-stop with non-zero output is a normal `max_tokens` cutoff,
+    /// not overflow — the model had room to generate.
+    #[test]
+    fn test_length_stop_with_output_not_overflow() {
+        let mut msg = make_length_stop_message(200_000);
+        msg.usage.output = 4_096;
+        assert!(!is_context_overflow(&msg, Some(200_000)));
+    }
+
+    /// Length-stop signal needs a context window — without it we can
+    /// only treat the stop reason as a normal `max_tokens` cutoff.
+    #[test]
+    fn test_length_stop_requires_context_window() {
+        let msg = make_length_stop_message(200_000);
+        assert!(!is_context_overflow(&msg, None));
     }
 }
