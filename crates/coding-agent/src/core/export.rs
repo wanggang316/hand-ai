@@ -25,6 +25,8 @@ pub fn export_to_html(
     model_id: &str,
     output: &Path,
 ) -> Result<(), CodingAgentError> {
+    let session_id_esc = escape_html(session_id);
+    let model_id_esc = escape_html(model_id);
     let mut html = String::new();
     html.push_str(&format!(
         r#"<!DOCTYPE html>
@@ -32,7 +34,7 @@ pub fn export_to_html(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hand Session — {session_id}</title>
+<title>Hand Session — {session_id_esc}</title>
 <style>
 body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; background: #1a1a2e; color: #eee; }}
 .header {{ border-bottom: 1px solid #333; padding-bottom: 1rem; margin-bottom: 2rem; }}
@@ -55,7 +57,7 @@ pre code {{ background: none; padding: 0; }}
 <body>
 <div class="header">
 <h1>Hand Session</h1>
-<div class="meta">Session: {session_id} &bull; Model: {model_id}</div>
+<div class="meta">Session: {session_id_esc} &bull; Model: {model_id_esc}</div>
 </div>
 "#
     ));
@@ -188,5 +190,40 @@ mod tests {
     fn test_escape_html() {
         assert_eq!(escape_html("<script>"), "&lt;script&gt;");
         assert_eq!(escape_html("a & b"), "a &amp; b");
+    }
+
+    /// HTML export interpolates session metadata into the `<title>` and a
+    /// header `<div>`. Without escaping, a session id like
+    /// `</title><script>alert(1)</script>` would close the title tag and
+    /// execute script at view time. Same exposure for model id.
+    /// Cross-site contexts: a session HTML pulled from a shared share or
+    /// loaded as a local file in a browser executes whatever the metadata
+    /// contains.
+    #[test]
+    fn export_html_escapes_session_and_model_metadata() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("xss-meta.html");
+        let session_id = "</title><script>alert('xss')</script>";
+        let model_id = "evil<img src=x onerror=alert(1)>";
+        export_to_html(&[], session_id, model_id, &output).unwrap();
+        let content = std::fs::read_to_string(&output).unwrap();
+        // Find the <body> region and inspect only the rendered portion —
+        // the inline <style> block obviously contains < and > tokens, but
+        // we care about whether attacker-controlled text was emitted as
+        // raw HTML inside the document body.
+        let body = content
+            .split_once("<body>")
+            .map(|(_, rest)| rest)
+            .unwrap_or(&content);
+        assert!(
+            !body.contains("<script>"),
+            "session metadata must not inject <script>: {body}"
+        );
+        assert!(
+            !body.contains("<img "),
+            "model metadata must not inject raw <img> tag: {body}"
+        );
+        assert!(body.contains("&lt;script&gt;alert"));
+        assert!(body.contains("evil&lt;img"));
     }
 }
