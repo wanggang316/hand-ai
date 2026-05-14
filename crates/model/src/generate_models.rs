@@ -330,6 +330,25 @@ fn is_kimi_alias(model_id: &str) -> bool {
     matches!(model_id, "k2p5" | "k2p6")
 }
 
+/// Return true for GitHub Copilot Claude 4.x models, which route
+/// through the Anthropic Messages API rather than the Copilot OpenAI
+/// surface. Matches the upstream regex `^claude-(haiku|sonnet|opus)-4(?:[.\-]|$)`
+/// — so `claude-haiku-4`, `claude-sonnet-4.5`, `claude-opus-4-7`, ...
+/// all hit the Anthropic branch. The "4" must be followed by `.`,
+/// `-`, or end-of-string so we don't false-positive on a future
+/// `claude-haiku-40` family.
+fn is_copilot_claude_4_model(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    let stripped = lower
+        .strip_prefix("claude-haiku-4")
+        .or_else(|| lower.strip_prefix("claude-sonnet-4"))
+        .or_else(|| lower.strip_prefix("claude-opus-4"));
+    match stripped {
+        Some(rest) => rest.is_empty() || rest.starts_with('.') || rest.starts_with('-'),
+        None => false,
+    }
+}
+
 /// Return true for the legacy z.ai coding-plan models that do not
 /// accept the OpenAI-compatible `tool_stream: true` flag. The four
 /// GLM 4.5 ids reject the field with HTTP 400; every newer z.ai id
@@ -828,15 +847,25 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
             if m.status.as_deref() == Some("deprecated") {
                 continue;
             }
-            let needs_responses_api = model_id.starts_with("gpt-5") || model_id.starts_with("oswe");
-            let api = if needs_responses_api {
+            // Claude 4.x models on GitHub Copilot route through the
+            // Anthropic Messages API (haiku/sonnet/opus). gpt-5* and
+            // oswe* use OpenAI Responses; everything else falls back
+            // to OpenAI Completions with the copilot compat overrides.
+            let is_copilot_claude_4 = is_copilot_claude_4_model(model_id);
+            let needs_responses_api = !is_copilot_claude_4
+                && (model_id.starts_with("gpt-5") || model_id.starts_with("oswe"));
+            let api = if is_copilot_claude_4 {
+                Api::AnthropicMessages
+            } else if needs_responses_api {
                 Api::OpenAIResponses
             } else {
                 Api::OpenAICompletions
             };
-            let compat = if needs_responses_api {
-                None
-            } else {
+            // OpenAI Completions is the only branch that needs the
+            // copilot-specific compat overrides; the Claude and
+            // Responses branches use their respective provider
+            // defaults.
+            let compat = if api == Api::OpenAICompletions {
                 Some(Compat::OpenAICompletions(Box::new(
                     OpenAICompletionsCompat {
                         supports_store: Some(false),
@@ -846,6 +875,8 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                         ..Default::default()
                     },
                 )))
+            } else {
+                None
             };
             models.push(Model {
                 id: model_id.clone(),
@@ -1840,6 +1871,53 @@ mod tests {
             assert!(
                 !is_zai_tool_stream_unsupported(id),
                 "{id} must NOT be marked tool-stream-unsupported"
+            );
+        }
+    }
+
+    /// GitHub Copilot Claude 4.x models route through the Anthropic
+    /// Messages API. The matcher must cover every published variant —
+    /// `claude-haiku-4`, `claude-sonnet-4.5`, `claude-opus-4-7`,
+    /// dotted/dashed minor versions, and the bare top-level id.
+    #[test]
+    fn copilot_claude_4_matcher_recognises_published_variants() {
+        for id in [
+            "claude-haiku-4",
+            "claude-haiku-4.5",
+            "claude-sonnet-4",
+            "claude-sonnet-4.5",
+            "claude-sonnet-4-5",
+            "claude-opus-4",
+            "claude-opus-4.6",
+            "claude-opus-4-7",
+            "claude-opus-4-7-20260101",
+        ] {
+            assert!(
+                is_copilot_claude_4_model(id),
+                "{id} should route through anthropic-messages"
+            );
+        }
+    }
+
+    /// The matcher must NOT false-positive on older Claude generations
+    /// (3.5, 3.7), unrelated providers, or a hypothetical `claude-haiku-40`
+    /// family (the "4" must be followed by `.`, `-`, or end-of-string).
+    #[test]
+    fn copilot_claude_4_matcher_excludes_older_and_unrelated_ids() {
+        for id in [
+            "claude-haiku-3-5",
+            "claude-sonnet-3-7",
+            "claude-opus-3",
+            "claude-haiku-40",
+            "claude-sonnet-40-preview",
+            "gpt-5",
+            "gpt-5-codex",
+            "oswe-preview",
+            "",
+        ] {
+            assert!(
+                !is_copilot_claude_4_model(id),
+                "{id} must NOT route through anthropic-messages"
             );
         }
     }
