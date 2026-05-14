@@ -201,7 +201,14 @@ pub fn stream_openai_completions(
             .or_else(|| env_api_keys::get_env_api_key(&model.provider))
             .unwrap_or_default();
 
-        let client = match create_client(&model, &context, &api_key, options.headers()) {
+        let client = match create_client(
+            &model,
+            &context,
+            &api_key,
+            options.headers(),
+            options.base.session_id.as_deref(),
+            options.base.cache_retention,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 output.stop_reason = StopReason::Error;
@@ -560,8 +567,15 @@ fn create_client(
     context: &Context,
     api_key: &str,
     options_headers: Option<&HashMap<String, String>>,
+    session_id: Option<&str>,
+    cache_retention: Option<crate::types::CacheRetention>,
 ) -> Result<Client, String> {
+    let compat = get_compat(model);
     let mut headers = model.headers.clone().unwrap_or_default();
+
+    for (k, v) in resolve_session_affinity_headers(&compat, session_id, cache_retention) {
+        headers.insert(k, v);
+    }
 
     if model.provider == Provider::GitHubCopilot {
         let messages = &context.messages;
@@ -1273,6 +1287,14 @@ pub struct ResolvedCompat {
     /// assistant turn that doesn't already carry one. Mirrors pi-mono's
     /// `requiresReasoningContentOnAssistantMessages`.
     pub requires_reasoning_content_on_assistant_messages: bool,
+    /// `true` when the upstream uses three known session-affinity
+    /// headers (`session_id`, `x-client-request-id`,
+    /// `x-session-affinity`) keyed off the caller's session id to
+    /// route repeated prompts to the same cache node. Default
+    /// `false` — OpenAI's prompt cache uses the `prompt_cache_key`
+    /// body field instead. Proxies that rely on header-based affinity
+    /// flip this true via models.dev compat metadata.
+    pub send_session_affinity_headers: bool,
 }
 
 fn detect_compat(model: &Model) -> ResolvedCompat {
@@ -1351,6 +1373,7 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
         supports_strict_mode: !is_cloudflare_workers_ai,
         zai_tool_stream: is_zai,
         requires_reasoning_content_on_assistant_messages: is_deepseek,
+        send_session_affinity_headers: false,
     }
 }
 
@@ -1408,6 +1431,9 @@ fn get_compat(model: &Model) -> ResolvedCompat {
             requires_reasoning_content_on_assistant_messages: compat_settings
                 .requires_reasoning_content_on_assistant_messages
                 .unwrap_or(detected.requires_reasoning_content_on_assistant_messages),
+            send_session_affinity_headers: compat_settings
+                .send_session_affinity_headers
+                .unwrap_or(detected.send_session_affinity_headers),
         };
     }
 
@@ -1421,6 +1447,37 @@ fn get_compat(model: &Model) -> ResolvedCompat {
 /// fall back to URL/provider auto-detection.
 pub fn resolve_compat(model: &Model) -> ResolvedCompat {
     get_compat(model)
+}
+
+/// Compute the session-affinity HTTP headers for a request.
+///
+/// A small set of proxies (LiteLLM with affinity routing, vendor
+/// gateways) route repeated prompts to the same cache node by reading
+/// the session id from three headers. Off by default — OpenAI's
+/// prompt cache uses the `prompt_cache_key` body field instead.
+/// Models served by affinity-routing proxies set
+/// `OpenAICompletionsCompat.sendSessionAffinityHeaders = true` to
+/// opt in. Caching must not be explicitly disabled
+/// (`CacheRetention::None`); otherwise affinity is moot.
+fn resolve_session_affinity_headers(
+    compat: &ResolvedCompat,
+    session_id: Option<&str>,
+    cache_retention: Option<crate::types::CacheRetention>,
+) -> Vec<(String, String)> {
+    if !compat.send_session_affinity_headers {
+        return Vec::new();
+    }
+    if matches!(cache_retention, Some(crate::types::CacheRetention::None)) {
+        return Vec::new();
+    }
+    let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    vec![
+        ("session_id".to_string(), sid.to_string()),
+        ("x-client-request-id".to_string(), sid.to_string()),
+        ("x-session-affinity".to_string(), sid.to_string()),
+    ]
 }
 
 #[cfg(test)]
@@ -1577,6 +1634,71 @@ mod tests {
             compat: None,
             thinking_level_map: None,
         }
+    }
+
+    fn affinity_compat(send: bool) -> ResolvedCompat {
+        use crate::types::OpenRouterRouting;
+        let _ = OpenRouterRouting::default();
+        // Build via detect_compat for stable defaults, then override
+        // the field under test.
+        let model = test_model(Provider::OpenAI);
+        let mut compat = detect_compat(&model);
+        compat.send_session_affinity_headers = send;
+        compat
+    }
+
+    /// Default behaviour: affinity headers are off so direct OpenAI
+    /// calls don't ship the three headers (the prompt_cache_key body
+    /// field handles cache affinity instead).
+    #[test]
+    fn session_affinity_headers_off_by_default() {
+        let compat = affinity_compat(false);
+        let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
+        assert!(
+            headers.is_empty(),
+            "default off must return no headers: {headers:?}"
+        );
+    }
+
+    /// When compat opts in AND the caller supplies a non-empty
+    /// session id, all three known affinity headers are emitted.
+    #[test]
+    fn session_affinity_headers_emit_when_compat_opts_in() {
+        let compat = affinity_compat(true);
+        let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
+        assert_eq!(headers.len(), 3);
+        for (name, value) in &headers {
+            assert_eq!(value, "sess-abc", "{name} carries the session id");
+        }
+        let names: std::collections::HashSet<&str> =
+            headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(names.contains("session_id"));
+        assert!(names.contains("x-client-request-id"));
+        assert!(names.contains("x-session-affinity"));
+    }
+
+    /// `CacheRetention::None` is the explicit cache-off opt-out —
+    /// affinity headers are pointless because no caching happens.
+    /// Drop them.
+    #[test]
+    fn session_affinity_headers_dropped_when_caching_disabled() {
+        use crate::types::CacheRetention;
+        let compat = affinity_compat(true);
+        let headers = resolve_session_affinity_headers(
+            &compat,
+            Some("sess-abc"),
+            Some(CacheRetention::None),
+        );
+        assert!(headers.is_empty());
+    }
+
+    /// No session id means no affinity headers — they'd carry no
+    /// signal for the proxy to route on.
+    #[test]
+    fn session_affinity_headers_dropped_without_session_id() {
+        let compat = affinity_compat(true);
+        assert!(resolve_session_affinity_headers(&compat, None, None).is_empty());
+        assert!(resolve_session_affinity_headers(&compat, Some(""), None).is_empty());
     }
 
     /// Local Qwen-compatible servers (vLLM, llama.cpp) read thinking
