@@ -135,7 +135,7 @@ pub(crate) fn convert_to_input(context: &Context) -> Value {
                             input.push(serde_json::json!({
                                 "type": "function_call",
                                 "name": tc.name,
-                                "call_id": tc.id,
+                                "call_id": normalize_responses_tool_id(&tc.id),
                                 "arguments": serde_json::to_string(&tc.arguments).unwrap_or_default(),
                             }));
                         }
@@ -148,7 +148,7 @@ pub(crate) fn convert_to_input(context: &Context) -> Value {
             Message::ToolResult(tr) => {
                 input.push(serde_json::json!({
                     "type": "function_call_output",
-                    "call_id": tr.tool_call_id,
+                    "call_id": normalize_responses_tool_id(&tr.tool_call_id),
                     "output": tr.content.iter().filter_map(|c| match c {
                         crate::types::ToolResultContent::Text(t) => Some(t.text.clone()),
                         _ => None,
@@ -159,6 +159,33 @@ pub(crate) fn convert_to_input(context: &Context) -> Value {
     }
 
     Value::Array(input)
+}
+
+/// Normalize a tool-call id for replay through the Responses API.
+///
+/// OpenAI Responses requires `call_id` to be alphanumeric (plus `_`
+/// and `-`), 64 chars or fewer, with no trailing underscore. Foreign
+/// providers (Anthropic `toolu_01...`, Google function-call ids that
+/// can carry `:` or `.`, etc.) sometimes produce ids that violate
+/// the spec. Sanitize once and truncate, then strip trailing
+/// underscores left over from truncation or character replacement.
+pub(crate) fn normalize_responses_tool_id(id: &str) -> String {
+    let sanitized: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let truncated = if sanitized.len() > 64 {
+        sanitized[..64].to_string()
+    } else {
+        sanitized
+    };
+    truncated.trim_end_matches('_').to_string()
 }
 
 /// Mutable parser state shared across SSE event dispatches. Extracted out
@@ -769,6 +796,44 @@ mod tests {
             messages: vec![Message::User(UserMessage::new_text("hi"))],
             tools: None,
         }
+    }
+
+    /// `call_id` on a Responses request must be alphanumeric, `_`,
+    /// or `-`, max 64 chars, with no trailing underscore. Foreign
+    /// providers can produce ids with `:`, `.`, `|`, or other
+    /// punctuation that the upstream rejects. Sanitize them so a
+    /// cross-provider replay (Anthropic → OpenAI Responses) keeps
+    /// flowing instead of failing the second turn.
+    #[test]
+    fn normalize_tool_id_replaces_disallowed_characters() {
+        assert_eq!(
+            normalize_responses_tool_id("toolu_01:abc.def|123"),
+            "toolu_01_abc_def_123",
+        );
+        assert_eq!(normalize_responses_tool_id("call_a/b@c#"), "call_a_b_c",);
+    }
+
+    /// Ids longer than 64 chars get truncated.
+    #[test]
+    fn normalize_tool_id_truncates_to_64_chars() {
+        let long_id = "a".repeat(120);
+        let out = normalize_responses_tool_id(&long_id);
+        assert_eq!(out.len(), 64);
+        assert!(out.chars().all(|c| c == 'a'));
+    }
+
+    /// Trailing underscores from truncation or replacement are
+    /// stripped — OpenAI Codex rejects them.
+    #[test]
+    fn normalize_tool_id_strips_trailing_underscores() {
+        assert_eq!(normalize_responses_tool_id("call_abc___"), "call_abc");
+        assert_eq!(normalize_responses_tool_id("call___"), "call");
+        // Truncate-then-strip: after truncating to 64 chars the tail
+        // may be all underscores from the replacement step.
+        let mut s = "good_id".to_string();
+        s.push_str(&"!".repeat(60));
+        let out = normalize_responses_tool_id(&s);
+        assert!(!out.ends_with('_'), "must not end with underscore: {out}");
     }
 
     /// Direct OpenAI Responses calls emit `prompt_cache_key` when the
