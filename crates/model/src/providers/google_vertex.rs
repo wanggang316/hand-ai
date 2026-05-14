@@ -334,10 +334,7 @@ async fn stream_vertex_inner(
     let project = resolve_project(&options)?;
     let location = resolve_location(&options)?;
 
-    let host_base = base_url_override
-        .clone()
-        .unwrap_or_else(|| format!("https://{location}-aiplatform.googleapis.com"));
-    let host_base = host_base.trim_end_matches('/').to_string();
+    let host_base = resolve_vertex_host_base(base_url_override.as_deref(), &model.base_url, &location);
 
     let mut url = format!(
         "{host_base}/v1/projects/{project}/locations/{location}/publishers/google/models/{model_id}:streamGenerateContent?alt=sse",
@@ -406,6 +403,37 @@ async fn stream_vertex_inner(
     }
 
     google_shared::parse_sse_stream(response, &model, Api::GoogleVertex).await
+}
+
+/// Pick the Vertex host base.
+///
+/// Precedence:
+/// 1. Provider-level `base_url_override` (test seam or programmatic override).
+/// 2. A custom `model.base_url` from the registry — anything that is not the
+///    default template (`{location}-aiplatform.googleapis.com`) and not empty.
+///    Lets `models.json` or extensions point Vertex traffic at a proxy.
+/// 3. Default Vertex host built from the resolved location.
+fn resolve_vertex_host_base(
+    base_url_override: Option<&str>,
+    model_base_url: &str,
+    location: &str,
+) -> String {
+    let from_override = base_url_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let from_model = {
+        let trimmed = model_base_url.trim();
+        if trimmed.is_empty() || trimmed.contains("{location}") {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+    let host = from_override
+        .or(from_model)
+        .unwrap_or_else(|| format!("https://{location}-aiplatform.googleapis.com"));
+    host.trim_end_matches('/').to_string()
 }
 
 fn resolve_explicit_api_key(options: &GoogleVertexOptions) -> Option<String> {
@@ -488,6 +516,52 @@ fn resolve_location(options: &GoogleVertexOptions) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Generated Vertex models ship a `{location}` placeholder in
+    /// `model.base_url` so the runtime can interpolate the resolved
+    /// location at call time. The helper must NOT treat that as a
+    /// caller-supplied override — doing so would emit a literal
+    /// `{location}` to the wire.
+    #[test]
+    fn vertex_host_base_ignores_location_template_in_model_base_url() {
+        let host = resolve_vertex_host_base(
+            None,
+            "https://{location}-aiplatform.googleapis.com",
+            "us-central1",
+        );
+        assert_eq!(host, "https://us-central1-aiplatform.googleapis.com");
+    }
+
+    /// A non-templated `model.base_url` is a deliberate proxy / gateway
+    /// pointer and must beat the default host.
+    #[test]
+    fn vertex_host_base_uses_model_base_url_when_custom() {
+        let host =
+            resolve_vertex_host_base(None, "https://proxy.example.com", "us-central1");
+        assert_eq!(host, "https://proxy.example.com");
+    }
+
+    /// Provider-level override (test seam, programmatic config) wins over
+    /// `model.base_url` so a runtime can force a specific endpoint.
+    #[test]
+    fn vertex_host_base_provider_override_beats_model_base_url() {
+        let host = resolve_vertex_host_base(
+            Some("https://override.example.com"),
+            "https://proxy.example.com",
+            "us-central1",
+        );
+        assert_eq!(host, "https://override.example.com");
+    }
+
+    #[test]
+    fn vertex_host_base_trims_trailing_slash() {
+        let host = resolve_vertex_host_base(
+            Some("https://override.example.com/"),
+            "https://{location}-aiplatform.googleapis.com",
+            "us-central1",
+        );
+        assert_eq!(host, "https://override.example.com");
+    }
 
     #[test]
     fn placeholder_api_key_detection() {
