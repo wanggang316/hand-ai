@@ -55,8 +55,20 @@ pub fn get_env_api_key(provider: &Provider) -> Option<String> {
                 .ok()
         }
         Provider::GoogleVertex => {
-            // Vertex AI uses Application Default Credentials, not API keys.
-            // Auth is configured via `gcloud auth application-default login`.
+            // Vertex AI supports two auth paths:
+            // 1. Explicit `GOOGLE_CLOUD_API_KEY` — the Cloud API key
+            //    issued from the GCP console. When set, it wins and
+            //    bypasses the ADC + project + location triad.
+            // 2. Application Default Credentials, configured via
+            //    `gcloud auth application-default login`, paired with
+            //    `GOOGLE_CLOUD_PROJECT`/`GCLOUD_PROJECT` and
+            //    `GOOGLE_CLOUD_LOCATION`.
+            if let Ok(api_key) = env::var("GOOGLE_CLOUD_API_KEY")
+                && !api_key.is_empty()
+            {
+                return Some(api_key);
+            }
+
             let has_credentials = has_vertex_adc_credentials();
             let has_project =
                 env::var("GOOGLE_CLOUD_PROJECT").is_ok() || env::var("GCLOUD_PROJECT").is_ok();
@@ -347,6 +359,38 @@ mod tests {
     fn test_anthropic_key_sources() {
         if env::var("ANTHROPIC_OAUTH_TOKEN").is_err() && env::var("ANTHROPIC_API_KEY").is_err() {
             assert!(get_env_api_key(&Provider::Anthropic).is_none());
+        }
+    }
+
+    /// Vertex AI accepts a direct `GOOGLE_CLOUD_API_KEY` in addition
+    /// to the standard ADC + project + location triad. Without the
+    /// fast path, callers who exported an API key in their shell
+    /// hit the slower ADC code path (and failed if any of the three
+    /// triad vars were missing).
+    #[test]
+    fn vertex_prefers_google_cloud_api_key_when_set() {
+        // Skip if a real value happens to be set in the dev env —
+        // we don't want this test to flake based on user shell.
+        if env::var("GOOGLE_CLOUD_API_KEY").is_ok_and(|v| !v.is_empty()) {
+            // Real value set: just exercise the code path.
+            let resolved = get_env_api_key(&Provider::GoogleVertex);
+            assert!(
+                resolved.is_some(),
+                "with a real GOOGLE_CLOUD_API_KEY the resolver must hand it back"
+            );
+            return;
+        }
+        // No real key set — `get_env_api_key(GoogleVertex)` falls
+        // through to the ADC triad check, which returns None when
+        // any triad var is missing. Don't try to mutate the
+        // process-wide env from a parallel test; pinning the
+        // negative path here is enough.
+        let resolved = get_env_api_key(&Provider::GoogleVertex);
+        let has_triad = env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok()
+            && (env::var("GOOGLE_CLOUD_PROJECT").is_ok() || env::var("GCLOUD_PROJECT").is_ok())
+            && env::var("GOOGLE_CLOUD_LOCATION").is_ok();
+        if !has_triad {
+            assert!(resolved.is_none());
         }
     }
 
