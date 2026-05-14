@@ -365,6 +365,22 @@ fn build_request_body(
         }
     }
 
+    // Anthropic's API accepts an optional `metadata.user_id` for abuse
+    // tracking and rate limiting. Forward a caller-supplied
+    // `metadata["user_id"]` string from the generic StreamOptions
+    // metadata bag; ignore non-string values so we never emit a
+    // malformed `metadata` block.
+    if let Some(opts) = options
+        && let Some(meta) = opts.metadata.as_ref()
+        && let Some(user_id) = meta.get("user_id").and_then(|v| v.as_str())
+        && !user_id.is_empty()
+    {
+        body.insert(
+            "metadata".to_string(),
+            serde_json::json!({ "user_id": user_id }),
+        );
+    }
+
     Ok(Value::Object(body))
 }
 
@@ -1647,6 +1663,86 @@ mod tests {
         assert!(
             body.get("thinking").is_none(),
             "non-reasoning model must NOT emit thinking: {body}"
+        );
+    }
+
+    /// Anthropic accepts `metadata.user_id` for abuse tracking and rate
+    /// limiting. When the caller threads `metadata["user_id"]` through
+    /// `StreamOptions`, the request body must surface it as a top-level
+    /// `metadata: { user_id: ... }` object.
+    #[test]
+    fn build_request_body_forwards_metadata_user_id() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "user_id".to_string(),
+            serde_json::Value::String("u_42".to_string()),
+        );
+        let opts = StreamOptions {
+            metadata: Some(metadata),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
+        assert_eq!(
+            body["metadata"]["user_id"], "u_42",
+            "metadata.user_id must flow into the request body: {body}"
+        );
+    }
+
+    /// Non-string `metadata["user_id"]` values (numbers, objects,
+    /// nulls) are ignored — we never emit a malformed `metadata` block.
+    #[test]
+    fn build_request_body_ignores_non_string_user_id() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "user_id".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(42)),
+        );
+        let opts = StreamOptions {
+            metadata: Some(metadata),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
+        assert!(
+            body.get("metadata").is_none(),
+            "non-string user_id must not emit metadata: {body}"
+        );
+    }
+
+    /// Empty-string `user_id` values are dropped too — Anthropic would
+    /// reject `metadata: { user_id: "" }`.
+    #[test]
+    fn build_request_body_drops_empty_user_id() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "user_id".to_string(),
+            serde_json::Value::String(String::new()),
+        );
+        let opts = StreamOptions {
+            metadata: Some(metadata),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
+        assert!(
+            body.get("metadata").is_none(),
+            "empty user_id must not emit metadata: {body}"
         );
     }
 
