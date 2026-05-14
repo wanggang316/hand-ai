@@ -216,14 +216,16 @@ impl ApiProvider for OpenAICodexResponsesProvider {
         context: Context,
         options: Option<SimpleStreamOptions>,
     ) -> AssistantMessageEventStream<'static> {
-        let mut base = StreamOptions::default();
-        if let Some(opts) = options {
-            base.temperature = opts.temperature();
-            base.max_tokens = opts.max_tokens();
-            base.api_key = opts.api_key().map(|s| s.to_string());
-            base.session_id = opts.session_id().map(|s| s.to_string());
-            base.headers = opts.headers().cloned();
-        }
+        // Use `build_base_options` so every field the caller set on the
+        // simple options surface — notably `transport`, `cache_retention`,
+        // `metadata`, `signal`, `on_payload`, `on_response`, and the
+        // retry / timeout knobs — propagates to the underlying stream.
+        // The previous manual mapping silently dropped `transport`, so a
+        // caller asking for `Transport::Websocket` got SSE instead.
+        let base = options.map(|opts| {
+            let api_key = opts.api_key().map(|s| s.to_string());
+            opts.build_base_options(&model, api_key)
+        });
         stream_openai_codex_responses(
             self.client.clone(),
             self.oauth_registry.clone(),
@@ -231,7 +233,7 @@ impl ApiProvider for OpenAICodexResponsesProvider {
             self.base_url_override.clone(),
             model,
             context,
-            Some(base),
+            base,
         )
     }
 }
@@ -896,6 +898,72 @@ mod tests {
             body["text"]["verbosity"].as_str(),
             Some("low"),
             "body must default text.verbosity to low: {body}"
+        );
+    }
+
+    /// `stream_simple` is the entry point for the agent loop. It previously
+    /// only forwarded a handful of fields from `SimpleStreamOptions`,
+    /// silently dropping `transport`, `cache_retention`, `metadata`,
+    /// `signal`, `on_payload`, `on_response`, and the retry / timeout
+    /// knobs. A caller asking for `Transport::Websocket` therefore got
+    /// SSE behaviour, hiding the "not yet implemented" error and giving
+    /// the wrong transport semantics. Pin the propagation via the public
+    /// helper so a future refactor cannot regress it.
+    #[test]
+    fn simple_options_build_base_options_forwards_transport() {
+        let model = codex_test_model();
+        let mut simple = SimpleStreamOptions::default();
+        simple.base.transport = Some(Transport::Websocket);
+        let base = simple.build_base_options(&model, None);
+        assert_eq!(base.transport, Some(Transport::Websocket));
+
+        simple.base.transport = Some(Transport::WebsocketCached);
+        let base = simple.build_base_options(&model, None);
+        assert_eq!(base.transport, Some(Transport::WebsocketCached));
+
+        simple.base.transport = Some(Transport::Auto);
+        let base = simple.build_base_options(&model, None);
+        assert_eq!(base.transport, Some(Transport::Auto));
+    }
+
+    /// `stream_simple` must surface the websocket-not-implemented error
+    /// when the caller asks for a WebSocket transport — anything else
+    /// means the option was silently dropped and the call fell back to
+    /// SSE behaviour against the real network.
+    #[tokio::test]
+    async fn stream_simple_with_websocket_transport_yields_not_implemented_error() {
+        use crate::api_registry::ApiProvider;
+        use futures::StreamExt;
+
+        let provider = OpenAICodexResponsesProvider::new();
+        let mut model = codex_test_model();
+        model.base_url = "https://chatgpt.com/backend-api".to_string();
+
+        let mut simple = SimpleStreamOptions::default();
+        simple.base.api_key = Some("sk-fake".to_string());
+        simple.base.transport = Some(Transport::Websocket);
+
+        let mut stream = provider.stream_simple(
+            model,
+            codex_user_context(Some("You are pi.")),
+            Some(simple),
+        );
+
+        let mut saw_websocket_error = false;
+        while let Some(event) = stream.next().await {
+            if let AssistantMessageEvent::Error { error, .. } = event {
+                let msg = error.error_message.clone().unwrap_or_default();
+                assert!(
+                    msg.contains("WebSocket transport"),
+                    "expected websocket-not-implemented error, got: {msg}"
+                );
+                saw_websocket_error = true;
+                break;
+            }
+        }
+        assert!(
+            saw_websocket_error,
+            "stream_simple must yield an Error event when transport is WebSocket"
         );
     }
 }
