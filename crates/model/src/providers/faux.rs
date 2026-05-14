@@ -1,10 +1,8 @@
 //! Faux (in-memory) provider for tests and harness scenarios.
 //!
-//! Mirrors `pi-mono/packages/ai/src/providers/faux.ts` but uses a
-//! Rust-friendly script-step model: callers describe the events they want the
-//! stream to emit (text deltas, thinking deltas, tool calls, errors, sleeps,
-//! aborts, …) and the provider drives those steps over a `tokio::sync::mpsc`
-//! channel.
+//! Callers describe the events they want the stream to emit (text deltas,
+//! thinking deltas, tool calls, errors, sleeps, aborts, …) and the provider
+//! drives those steps over a `tokio::sync::mpsc` channel.
 //!
 //! Gated behind `cfg(any(test, feature = "faux"))` so it never ships into a
 //! production build accidentally.

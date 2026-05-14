@@ -365,7 +365,7 @@ fn stream_bedrock(
                     "contentBlockStop" if !current_tool_name.is_empty() => {
                         // Repair pass mirrors the other streaming providers
                         // — malformed tool input shouldn't silently drop the
-                        // whole call to `{}` (pi-mono #1022).
+                        // whole call to `{}`.
                         let args: Value = if current_tool_input.is_empty() {
                             Value::Object(Default::default())
                         } else {

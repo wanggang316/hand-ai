@@ -1,7 +1,6 @@
 //! Cloudflare overlays on top of the OpenAI Completions wire protocol.
 //!
-//! Mirrors `pi-mono/packages/ai/src/providers/cloudflare.ts`. Cloudflare
-//! exposes two OpenAI-compatible endpoints:
+//! Cloudflare exposes two OpenAI-compatible endpoints:
 //!
 //! - **Workers AI**: a direct endpoint at
 //!   `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1`. The

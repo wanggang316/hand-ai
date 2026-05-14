@@ -1,9 +1,7 @@
 //! Registration helpers for the built-in API providers.
 //!
-//! Mirrors `pi-mono/packages/ai/src/providers/register-builtins.ts`. The TS
-//! implementation lazy-imports each provider; here every provider is already
-//! linked into the crate, so we just construct one of each and insert it
-//! against its canonical `Api` key.
+//! Every provider is linked into the crate, so we just construct one of each
+//! and insert it against its canonical `Api` key.
 //!
 //! Calling `register_builtins` twice is safe — later registrations overwrite
 //! earlier ones, matching `ApiProviderRegistry::register`'s last-wins
