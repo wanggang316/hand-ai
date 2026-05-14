@@ -155,7 +155,13 @@ fn build_google_options(model: &Model, options: Option<&SimpleStreamOptions>) ->
 
             if google_shared::is_gemini3_pro_model(&model.id)
                 || google_shared::is_gemini3_flash_model(&model.id)
+                || google_shared::is_gemma4_model(&model.id)
             {
+                // Gemini 3 and Gemma 4 both expose the
+                // `thinkingLevel` knob; the underlying mapping picks
+                // the right per-family bucket. Gemma 4 collapses to
+                // MINIMAL / HIGH, Gemini 3 Pro uses LOW / HIGH,
+                // Gemini 3 Flash exposes all four levels.
                 google_opts.thinking_level = Some(shared_to_public(
                     google_shared::get_gemini3_thinking_level(effort, &model.id),
                 ));

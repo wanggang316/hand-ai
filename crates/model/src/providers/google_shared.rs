@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static TOOL_CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Thinking level strings shared by both Google providers.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GoogleThinkingLevel {
     Minimal,
     Low,
@@ -157,9 +157,24 @@ pub(crate) fn get_disabled_thinking_config(model_id: &str) -> Value {
         serde_json::json!({"thinkingLevel": "LOW"})
     } else if is_gemini3_flash_model(model_id) {
         serde_json::json!({"thinkingLevel": "MINIMAL"})
+    } else if is_gemma4_model(model_id) {
+        // Gemma 4 mirrors the Gemini-3 surface and exposes the same
+        // `thinkingLevel` knob, but it only supports MINIMAL / HIGH.
+        // "Disabled" maps to MINIMAL — the smallest knob that still
+        // accepts the request shape.
+        serde_json::json!({"thinkingLevel": "MINIMAL"})
     } else {
         serde_json::json!({"thinkingBudget": 0})
     }
+}
+
+/// Gemma 4 models accept the same `thinkingLevel` knob as Gemini-3
+/// but only expose two settings: `MINIMAL` and `HIGH`. Matched on a
+/// case-insensitive prefix so both `gemma-4` and `gemma4` forms map
+/// onto the same branch.
+pub(crate) fn is_gemma4_model(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    lower.starts_with("gemma-4") || lower.starts_with("gemma4")
 }
 
 // =============================================================================
@@ -756,6 +771,16 @@ pub(crate) fn get_gemini3_thinking_level(
                 GoogleThinkingLevel::High
             }
         }
+    } else if is_gemma4_model(model_id) {
+        // Gemma 4 collapses the four-level effort surface onto just
+        // MINIMAL / HIGH. Map low and below to MINIMAL, medium and up
+        // to HIGH — the same two-bucket layout pi-mono uses.
+        match effort {
+            ThinkingLevel::Minimal | ThinkingLevel::Low => GoogleThinkingLevel::Minimal,
+            ThinkingLevel::Medium | ThinkingLevel::High | ThinkingLevel::Xhigh => {
+                GoogleThinkingLevel::High
+            }
+        }
     } else {
         match effort {
             ThinkingLevel::Minimal => GoogleThinkingLevel::Minimal,
@@ -931,6 +956,66 @@ mod tests {
         assert_eq!(
             part.get("thoughtSignature").and_then(Value::as_str),
             Some("dGVzdA==")
+        );
+    }
+
+    /// `is_gemma4_model` recognises both spellings — `gemma-4` and
+    /// `gemma4` — but doesn't false-positive on Gemma 3, Gemini, or
+    /// unrelated ids.
+    #[test]
+    fn is_gemma4_recognises_both_dash_and_squashed_forms() {
+        for id in ["gemma-4", "gemma-4-9b", "gemma4", "gemma4-9b", "Gemma-4-2b"] {
+            assert!(is_gemma4_model(id), "{id} should match gemma 4");
+        }
+        for id in [
+            "gemma-3",
+            "gemma-3-9b",
+            "gemma",
+            "gemini-3-pro",
+            "gemini-2.5-flash",
+            "",
+        ] {
+            assert!(!is_gemma4_model(id), "{id} must NOT match gemma 4");
+        }
+    }
+
+    /// Gemma 4 collapses the four effort levels onto MINIMAL / HIGH:
+    /// minimal+low → MINIMAL, medium+high+xhigh → HIGH. This is the
+    /// upstream's documented two-bucket mapping.
+    #[test]
+    fn gemma4_thinking_level_collapses_to_minimal_or_high() {
+        assert_eq!(
+            get_gemini3_thinking_level(ThinkingLevel::Minimal, "gemma-4"),
+            GoogleThinkingLevel::Minimal
+        );
+        assert_eq!(
+            get_gemini3_thinking_level(ThinkingLevel::Low, "gemma-4"),
+            GoogleThinkingLevel::Minimal
+        );
+        assert_eq!(
+            get_gemini3_thinking_level(ThinkingLevel::Medium, "gemma-4"),
+            GoogleThinkingLevel::High
+        );
+        assert_eq!(
+            get_gemini3_thinking_level(ThinkingLevel::High, "gemma-4"),
+            GoogleThinkingLevel::High
+        );
+        assert_eq!(
+            get_gemini3_thinking_level(ThinkingLevel::Xhigh, "gemma-4"),
+            GoogleThinkingLevel::High
+        );
+    }
+
+    /// Disabling thinking on a Gemma 4 model emits the same `thinkingLevel`
+    /// payload shape as Gemini 3 — not the legacy `thinkingBudget` form
+    /// — and pins the value to MINIMAL.
+    #[test]
+    fn gemma4_disabled_thinking_uses_minimal_level() {
+        let config = get_disabled_thinking_config("gemma-4-9b");
+        assert_eq!(config["thinkingLevel"], "MINIMAL");
+        assert!(
+            config.get("thinkingBudget").is_none(),
+            "Gemma 4 must not use the legacy thinkingBudget knob: {config}"
         );
     }
 }
