@@ -642,31 +642,7 @@ pub(crate) async fn parse_sse_stream(
         }
 
         if let Some(usage) = chunk.get("usageMetadata") {
-            let input = usage
-                .get("promptTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let candidates_tokens = usage
-                .get("candidatesTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let thoughts_tokens = usage
-                .get("thoughtsTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let cache_read = usage
-                .get("cachedContentTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let total = usage
-                .get("totalTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-
-            output.usage.input = input;
-            output.usage.output = candidates_tokens + thoughts_tokens;
-            output.usage.cache_read = cache_read;
-            output.usage.total_tokens = total;
+            apply_google_usage_metadata(usage, &mut output.usage);
             calculate_cost(model, &mut output.usage);
         }
     }
@@ -844,6 +820,40 @@ pub(crate) fn get_google_budget(
     }
 }
 
+/// Apply a Google `usageMetadata` JSON object onto the assistant
+/// message's `Usage`. Google reports `promptTokenCount` INCLUDING
+/// the `cachedContentTokenCount` cache hits — counting both the
+/// raw sum as `input` AND cache_read separately would double-bill
+/// the cache portion at the `input` rate. Subtract cache_read so
+/// `input` carries only the non-cached prompt tokens.
+pub(crate) fn apply_google_usage_metadata(usage_meta: &Value, target: &mut crate::types::Usage) {
+    let prompt_total = usage_meta
+        .get("promptTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let candidates_tokens = usage_meta
+        .get("candidatesTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let thoughts_tokens = usage_meta
+        .get("thoughtsTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_read = usage_meta
+        .get("cachedContentTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let total = usage_meta
+        .get("totalTokenCount")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    target.input = prompt_total.saturating_sub(cache_read);
+    target.output = candidates_tokens + thoughts_tokens;
+    target.cache_read = cache_read;
+    target.total_tokens = total;
+}
+
 pub(crate) fn map_stop_reason(reason: &str) -> StopReason {
     match reason {
         "STOP" => StopReason::Stop,
@@ -969,6 +979,68 @@ mod tests {
             part.get("thoughtSignature").and_then(Value::as_str),
             Some("dGVzdA==")
         );
+    }
+
+    /// Google's `promptTokenCount` already INCLUDES
+    /// `cachedContentTokenCount` cache hits. Without subtracting the
+    /// cache portion, calculate_cost would charge the same tokens at
+    /// BOTH the input rate AND the cache_read rate. Verify the
+    /// extracted helper applies the subtraction.
+    #[test]
+    fn google_usage_metadata_subtracts_cache_from_input() {
+        let mut usage = crate::types::Usage::default();
+        apply_google_usage_metadata(
+            &serde_json::json!({
+                "promptTokenCount": 1000,
+                "candidatesTokenCount": 200,
+                "thoughtsTokenCount": 50,
+                "cachedContentTokenCount": 400,
+                "totalTokenCount": 1250,
+            }),
+            &mut usage,
+        );
+        assert_eq!(usage.input, 600, "input should drop cache portion");
+        assert_eq!(usage.cache_read, 400, "cache_read carries the full cache");
+        assert_eq!(usage.output, 250, "candidates + thoughts");
+        assert_eq!(usage.total_tokens, 1250);
+    }
+
+    /// When the upstream omits the cache field, `input` keeps the
+    /// full prompt count and `cache_read` stays zero.
+    #[test]
+    fn google_usage_metadata_no_cache_keeps_full_input() {
+        let mut usage = crate::types::Usage::default();
+        apply_google_usage_metadata(
+            &serde_json::json!({
+                "promptTokenCount": 500,
+                "candidatesTokenCount": 100,
+                "totalTokenCount": 600,
+            }),
+            &mut usage,
+        );
+        assert_eq!(usage.input, 500);
+        assert_eq!(usage.cache_read, 0);
+        assert_eq!(usage.output, 100);
+    }
+
+    /// Defensive: if a provider somehow reports
+    /// `cachedContentTokenCount` larger than `promptTokenCount`
+    /// (mismatched chunks, partial usage), the subtraction must
+    /// saturate at zero instead of overflowing.
+    #[test]
+    fn google_usage_metadata_saturates_when_cache_exceeds_prompt() {
+        let mut usage = crate::types::Usage::default();
+        apply_google_usage_metadata(
+            &serde_json::json!({
+                "promptTokenCount": 100,
+                "cachedContentTokenCount": 999,
+                "candidatesTokenCount": 0,
+                "totalTokenCount": 999,
+            }),
+            &mut usage,
+        );
+        assert_eq!(usage.input, 0, "saturating_sub must not panic");
+        assert_eq!(usage.cache_read, 999);
     }
 
     /// Gemini 2.5 Flash Lite's minimum thinking budget is 512, not
