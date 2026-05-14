@@ -146,6 +146,20 @@ fn stream_openai_responses(
             .header("Authorization", format!("Bearer {}", api_key))
             .body(serde_json::to_string(&body).unwrap_or_default());
 
+        // Session-id headers — emitted for every OpenAI-Responses-shaped
+        // endpoint (not just `api.openai.com`) so cache-affinity and
+        // request-correlation work uniformly across proxies. Strict
+        // proxies that reject the underscored header name opt out via
+        // `OpenAIResponsesCompat.sendSessionIdHeader = false`.
+        if let Some(sid) = options.session_id.as_deref()
+            && !sid.is_empty()
+        {
+            if super::openai_codex_responses::should_send_session_id_header(model.compat.as_ref()) {
+                builder = builder.header("session_id", sid);
+            }
+            builder = builder.header("x-client-request-id", sid);
+        }
+
         // Add custom headers
         if let Some(ref headers) = options.headers {
             for (k, v) in headers {
