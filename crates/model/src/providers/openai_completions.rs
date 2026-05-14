@@ -1348,6 +1348,14 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
     let is_cloudflare_workers_ai = *provider == Provider::CloudflareWorkersAi
         || base_url.contains("cloudflare.com/client/v4/accounts");
 
+    // Moonshot's OpenAI-compatible endpoint (Kimi family) rejects
+    // `reasoning_effort`, OpenAI strict tool mode, and `developer` role,
+    // and requires `max_tokens` (not `max_completion_tokens`). Recognise
+    // both the global and China-region providers and the public base URL.
+    let is_moonshot = *provider == Provider::Moonshotai
+        || *provider == Provider::MoonshotaiCn
+        || base_url.contains("api.moonshot.");
+
     let is_non_standard = *provider == Provider::Cerebras
         || base_url.contains("cerebras.ai")
         || *provider == Provider::Xai
@@ -1357,13 +1365,15 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
         || base_url.contains("chutes.ai")
         || is_deepseek
         || is_zai
+        || is_moonshot
         || *provider == Provider::Opencode
         || base_url.contains("opencode.ai")
         || is_cloudflare_workers_ai;
 
     let use_max_tokens = *provider == Provider::Mistral
         || base_url.contains("mistral.ai")
-        || base_url.contains("chutes.ai");
+        || base_url.contains("chutes.ai")
+        || is_moonshot;
 
     let is_grok = *provider == Provider::Xai || base_url.contains("api.x.ai");
     let is_mistral = *provider == Provider::Mistral || base_url.contains("mistral.ai");
@@ -1386,7 +1396,7 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
     ResolvedCompat {
         supports_store: !is_non_standard,
         supports_developer_role: !is_non_standard,
-        supports_reasoning_effort: !is_grok && !is_zai,
+        supports_reasoning_effort: !is_grok && !is_zai && !is_moonshot,
         supports_usage_in_streaming: true,
         max_tokens_field: if use_max_tokens {
             Some("max_tokens".to_string())
@@ -1404,7 +1414,7 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
             None
         },
         vercel_gateway_routing: None,
-        supports_strict_mode: !is_cloudflare_workers_ai,
+        supports_strict_mode: !is_cloudflare_workers_ai && !is_moonshot,
         zai_tool_stream: is_zai,
         requires_reasoning_content_on_assistant_messages: is_deepseek,
         send_session_affinity_headers: false,
@@ -2096,6 +2106,59 @@ mod tests {
         let compat = detect_compat(&model);
         assert!(!compat.supports_store);
         assert!(!compat.supports_reasoning_effort);
+    }
+
+    /// Moonshot's OpenAI-compatible endpoint (Kimi family) rejects
+    /// `reasoning_effort`, OpenAI strict tool mode, `store`, and the
+    /// `developer` role, and requires `max_tokens` instead of
+    /// `max_completion_tokens`. Pin the detection across the global
+    /// provider, the China-region provider, and the public base URL.
+    #[test]
+    fn test_detect_compat_moonshot_disables_unsupported_openai_features() {
+        for provider in [Provider::Moonshotai, Provider::MoonshotaiCn] {
+            let mut model = test_model(provider);
+            model.base_url = "https://api.moonshot.cn/v1".to_string();
+            let compat = detect_compat(&model);
+            assert!(
+                !compat.supports_store,
+                "moonshot {:?} must not advertise store",
+                provider
+            );
+            assert!(
+                !compat.supports_developer_role,
+                "moonshot {:?} must not use developer role",
+                provider
+            );
+            assert!(
+                !compat.supports_reasoning_effort,
+                "moonshot {:?} must not send reasoning_effort",
+                provider
+            );
+            assert!(
+                !compat.supports_strict_mode,
+                "moonshot {:?} must not enable strict tool mode",
+                provider
+            );
+            assert_eq!(
+                compat.max_tokens_field,
+                Some("max_tokens".to_string()),
+                "moonshot {:?} must use max_tokens",
+                provider
+            );
+        }
+    }
+
+    /// The base-URL fallback for Moonshot must catch proxies that route
+    /// through the public `api.moonshot.*` host even when the provider
+    /// enum is something else (e.g. a generic OpenAI-compatible).
+    #[test]
+    fn test_detect_compat_moonshot_via_base_url() {
+        let mut model = test_model(Provider::OpenAI);
+        model.base_url = "https://api.moonshot.ai/v1".to_string();
+        let compat = detect_compat(&model);
+        assert!(!compat.supports_reasoning_effort);
+        assert!(!compat.supports_strict_mode);
+        assert_eq!(compat.max_tokens_field, Some("max_tokens".to_string()));
     }
 
     #[test]
