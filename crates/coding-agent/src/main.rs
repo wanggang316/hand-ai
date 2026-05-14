@@ -46,11 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Handle --list-models — mirror pi-mono's six-column layout
-    // (provider, model, context, max-out, thinking, images), filtered
-    // to providers that have credentials configured (env var or auth.json)
-    // so the table matches what `pi --list-models` shows on the same
-    // machine.
+    // Handle --list-models — emit a six-column table (provider, model,
+    // context, max-out, thinking, images) filtered to providers that
+    // have credentials configured (env var or auth.json).
     if let Some(ref search) = cli.list_models {
         let models = list_models_for_cli(search.as_deref());
         if models.is_empty() {
@@ -616,11 +614,11 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
     }
 }
 
-/// Resolve the model list shown by `--list-models`, filtered to providers
-/// whose credentials are configured (env var or auth.json). Mirrors
-/// pi-mono's `pi --list-models` which only surfaces models the user can
-/// actually call. Falls back to the unfiltered catalogue when auth.json
-/// is unreadable (so the command never returns a misleading "no models").
+/// Resolve the model list shown by `--list-models`, filtered to
+/// providers whose credentials are configured (env var or auth.json).
+/// Only surfaces models the user can actually call. Falls back to the
+/// unfiltered catalogue when auth.json is unreadable (so the command
+/// never returns a misleading "no models").
 fn list_models_for_cli(search: Option<&str>) -> Vec<model::Model> {
     use hand_coding_agent::core::auth_storage::AuthStorage;
     use hand_coding_agent::core::model_registry::ModelRegistry;
@@ -631,9 +629,9 @@ fn list_models_for_cli(search: Option<&str>) -> Vec<model::Model> {
         Err(_) => return model_resolver::list_models(search),
     };
     let registry = ModelRegistry::create(auth);
-    // Surface models.json load errors on stderr so users discover broken
-    // configs instead of silently losing custom models / overrides.
-    // Mirrors pi-mono's --list-models stderr warning.
+    // Surface models.json load errors on stderr so users discover
+    // broken configs instead of silently losing custom models or
+    // overrides.
     if let Some(err) = registry.error() {
         eprintln!("\x1b[33mWarning: {err}\x1b[0m");
     }
@@ -657,10 +655,10 @@ fn list_models_for_cli(search: Option<&str>) -> Vec<model::Model> {
     models
 }
 
-/// Render the model catalog as pi-mono's six-column table
-/// (provider, model, context, max-out, thinking, images). Lowercase
-/// header labels match the TS reference's `cli/list-models.ts` output
-/// exactly, so the diff harness produces byte-identical results.
+/// Render the model catalog as a six-column table (provider, model,
+/// context, max-out, thinking, images). Header labels are lowercase
+/// so the output stays stable for any downstream diff or snapshot
+/// harness consuming this command.
 fn print_models_table(models: &[model::Model]) {
     use model::types::InputType;
 

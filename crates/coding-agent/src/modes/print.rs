@@ -24,11 +24,12 @@ pub async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     match run_inner(args).await {
         Ok(()) => Ok(()),
         Err(e) => {
-            // Render setup-time errors with pi-mono's `Error: <msg>` shape
-            // (single-line, no Debug-wrapping). Without this we'd surface
-            // `Error: Other("...")` or `Error: Session("...")` from
-            // tokio main's default Debug formatter, which breaks the
-            // contract scripts pattern-match against.
+            // Render setup-time errors with the canonical
+            // `Error: <msg>` shape (single-line, no Debug-wrapping).
+            // Without this we'd surface `Error: Other("...")` or
+            // `Error: Session("...")` from tokio main's default Debug
+            // formatter, which breaks the contract scripts pattern-match
+            // against.
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
@@ -98,7 +99,7 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let json_mode = args.mode == "json";
 
     if json_mode {
-        // Emit pi-mono-style session header before any agent events fire.
+        // Emit the JSONL session header before any agent events fire.
         emit_json_session(&cwd, session.session_id());
     }
 
@@ -155,8 +156,8 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Non-interactive: build a single initial message from piped-stdin
-    // and `--prompt`, concatenating in that order to match pi-mono's
-    // `buildInitialMessage` contract. Use cases the concat unblocks:
+    // and `--prompt`, concatenating in that order. Use cases the
+    // concat unblocks:
     //
     //   cat data.csv | hand --print --prompt "summarize this CSV"
     //
@@ -184,9 +185,9 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         handle_export(&session, export_path)?;
     }
 
-    // Exit non-zero if any assistant message ended with Error/Aborted —
-    // matches pi-mono's `pi --print` exit-code contract (1 on failure)
-    // so callers can pipe / `&&` against the binary reliably.
+    // Exit non-zero if any assistant message ended with Error/Aborted
+    // so callers can pipe / `&&` against the binary reliably (`1` on
+    // failure).
     if SAW_ERROR.load(std::sync::atomic::Ordering::Relaxed) {
         std::process::exit(1);
     }
@@ -258,21 +259,21 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
 }
 
 // ============================================================================
-// JSON mode (pi-mono `--mode json` parity)
+// JSON mode (--mode json)
 // ============================================================================
 
-/// Print the per-run `session` JSONL header pi-mono emits before any events
-/// fire. Mirrors `{"type":"session","version":3,"id":<uuid>,
+/// Print the per-run `session` JSONL header emitted before any agent
+/// events fire: `{"type":"session","version":3,"id":<uuid>,
 /// "timestamp":<iso8601>,"cwd":<path>}`.
 fn emit_json_session(cwd: &std::path::Path, id: &str) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = now.as_secs();
-    // Crude UTC ISO-8601 formatter — depends only on chrono via serde_json's
-    // ecosystem? No, just format manually to avoid pulling in chrono just
-    // for this one timestamp. Matches pi's "2026-05-12T20:41:22.791Z" shape
-    // closely enough for script consumption.
+    // Crude UTC ISO-8601 formatter. Built manually to avoid pulling in
+    // chrono just for this one timestamp; the
+    // `"2026-05-12T20:41:22.791Z"` shape is close enough for script
+    // consumption.
     let dt = format_iso8601(secs, now.subsec_millis());
     let val = serde_json::json!({
         "type": "session",
@@ -311,13 +312,13 @@ fn format_iso8601(secs: u64, millis: u32) -> String {
     )
 }
 
-/// JSON-mode counterpart to [`handle_agent_event`]. Mirrors pi-mono's
-/// `--mode json` event types: `agent_start`, `turn_start`, `message_start`,
-/// `message_update` (with the inner streaming event), `message_end`,
-/// `turn_end`, `tool_execution_start`/`_end`, `agent_end`. The exact
-/// payload shapes are camelCased Message/AssistantMessageEvent JSON which
-/// matches the TS reference because both crates serialize the same
-/// underlying types with serde rename_all = "camelCase".
+/// JSON-mode counterpart to [`handle_agent_event`]. Emits the
+/// `--mode json` event stream: `agent_start`, `turn_start`,
+/// `message_start`, `message_update` (with the inner streaming event),
+/// `message_end`, `turn_end`, `tool_execution_start` / `_end`,
+/// `agent_end`. Payload shapes are camelCased
+/// `Message` / `AssistantMessageEvent` JSON via
+/// `serde rename_all = "camelCase"`.
 fn handle_agent_event_json(event: &hand_agent::types::AgentEvent) {
     use hand_agent::types::AgentEvent;
     use std::sync::atomic::Ordering;
@@ -385,9 +386,10 @@ fn handle_export(
     session: &AgentSession,
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // `.json` aliases to the JSONL form — pi-mono has no separate JSON
-    // exporter and a JSONL stream parses as a sequence of JSON values,
-    // which is what most consumers want.
+    // `.json` aliases to the JSONL exporter — a JSONL stream parses as
+    // a sequence of JSON values, which is what most consumers want and
+    // avoids shipping a second exporter for an effectively identical
+    // payload.
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("html");
 
     match ext {
@@ -600,7 +602,6 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
 /// Read stdin to EOF when it's been piped (not a TTY). Returns `None`
 /// when stdin is interactive — reading it would block on Ctrl-D and
 /// the user almost certainly meant the prompt to come from `--prompt`.
-/// Mirrors pi-mono's `process.stdin.isTTY` guard.
 fn read_piped_stdin() -> Option<String> {
     use std::io::{IsTerminal, Read};
     let stdin = io::stdin();
@@ -637,10 +638,9 @@ fn build_initial_message(stdin: Option<&str>, prompt: Option<&str>) -> Option<St
     if parts.is_empty() {
         None
     } else {
-        // Empty separator — pi-mono parity. Stdin payloads typically end
-        // in `\n` already, so a plain concat reads as `<stdin>\n<prompt>`.
-        // Inserting our own `\n\n` would double up newlines and diverge
-        // from pi byte-for-byte.
+        // Empty separator. Stdin payloads typically end in `\n` already,
+        // so a plain concat reads as `<stdin>\n<prompt>`; inserting our
+        // own `\n\n` would double-up newlines.
         Some(parts.concat())
     }
 }
@@ -741,9 +741,9 @@ mod tests {
         );
     }
 
-    /// `.json` extension aliases to the JSONL exporter — pi-mono has no
-    /// separate JSON export and the JSONL stream parses as a sequence
-    /// of JSON values, which is what most consumers want.
+    /// `.json` extension aliases to the JSONL exporter — a JSONL stream
+    /// parses as a sequence of JSON values, which is what most
+    /// consumers want.
     #[tokio::test]
     async fn handle_export_json_extension_aliases_to_jsonl() {
         let tmp = tempfile::tempdir().unwrap();
@@ -943,20 +943,20 @@ mod tests {
     }
 
     #[test]
-    fn at_mentions_missing_file_errors_with_pi_text() {
+    fn at_mentions_missing_file_errors_with_canonical_text() {
         let prompt = "@/tmp/definitely-not-a-real-path-xyz-12345 hi";
         let err = expand_at_mentions(prompt, &std::env::temp_dir()).unwrap_err();
         assert!(
             err.starts_with("File not found:"),
-            "expected pi-mono-style error, got: {err}"
+            "expected `File not found:` prefix, got: {err}"
         );
         assert!(err.contains("definitely-not-a-real-path-xyz-12345"));
     }
 
     /// `~/path` in @-mentions must expand against the user's HOME the
     /// same way the read tool does, not get joined onto cwd as
-    /// `cwd/~/path` (which then fails to find the file). Pi-mono
-    /// resolves these. Test writes into HOME, expands, and removes.
+    /// `cwd/~/path` (which then fails to find the file). The test
+    /// writes into HOME, expands, and removes.
     /// Pi-mono accepts paths with spaces as a single argv positional —
     /// hand's single `--prompt` string can't preserve that grouping
     /// directly. The expander uses greedy lookahead to glue subsequent

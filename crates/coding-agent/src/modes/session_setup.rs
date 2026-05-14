@@ -30,7 +30,7 @@ pub struct SessionSetup {
     /// Text appended to the system prompt.
     pub custom_guidelines: Option<String>,
     /// `--no-session`: skip on-disk persistence and run with an in-memory
-    /// session. Mirrors pi-mono's flag of the same name.
+    /// session.
     pub no_session: bool,
     /// `--no-context-files`: skip auto-loading project context files.
     pub no_context_files: bool,
@@ -56,8 +56,8 @@ impl SessionSetup {
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-        // Reject typo'd `--provider` values up-front with pi-mono's exact
-        // error text. Without this we'd silently fall back to the default
+        // Reject typo'd `--provider` values up-front with a clear error.
+        // Without this we'd silently fall back to the default
         // (anthropic) and surface a confusing "No API key found for
         // Anthropic" message at stream time, making it look like an auth
         // problem rather than a typo.
@@ -151,12 +151,11 @@ impl SessionSetup {
             tools::create_default_tools(&cwd)
         };
 
-        // --append-system-prompt and --system-prompt both auto-load from
-        // disk when the value resolves to an existing file. Mirrors
-        // pi-mono's resolvePromptInput: arg is a file path → read it;
-        // otherwise treat as literal text. Silent fallthrough to literal
-        // on read errors (with a stderr warning) so a transient FS issue
-        // doesn't kill the run.
+        // --append-system-prompt and --system-prompt both auto-load
+        // from disk when the value resolves to an existing file —
+        // otherwise the argument is treated as literal text. Silent
+        // fallthrough to literal on read errors (with a stderr warning)
+        // so a transient FS issue doesn't kill the run.
         let custom_system_prompt = args.system_prompt.as_deref().map(resolve_prompt_input);
         // --append-system-prompt can be supplied multiple times. Each
         // value is resolved (literal-or-file), then the non-empty
@@ -297,11 +296,10 @@ mod tests {
         assert!(setup.agent_tools.is_empty());
     }
 
-    /// Parity with pi-mono: a typo'd `--provider` must surface a clean
-    /// "Unknown provider" error rather than silently falling back to the
-    /// default provider and then erroring on a missing API key further
-    /// downstream. Mirrors pi-mono's exact message text so scripts can
-    /// pattern-match on it.
+    /// A typo'd `--provider` must surface a clean "Unknown provider"
+    /// error rather than silently falling back to the default provider
+    /// and then erroring on a missing API key further downstream. The
+    /// message text is stable so scripts can pattern-match against it.
     #[test]
     fn unknown_provider_returns_descriptive_error() {
         let args = Args::try_parse_from([
@@ -444,15 +442,14 @@ mod tests {
     #[test]
     fn resolve_prompt_input_passes_missing_path_through_as_text() {
         // A path-shaped string that doesn't exist becomes the literal
-        // text — pi-mono's resolvePromptInput drops back to the input
-        // in that case rather than erroring.
+        // text rather than erroring.
         let got = resolve_prompt_input("/definitely/not/a/real/path/zz.md");
         assert_eq!(got, "/definitely/not/a/real/path/zz.md");
     }
 
-    /// Pi-mono parity: --append-system-prompt is repeatable. Each
-    /// invocation's value gets concatenated into a single guidelines
-    /// section, separated by blank lines.
+    /// `--append-system-prompt` is repeatable. Each invocation's value
+    /// gets concatenated into a single guidelines section, separated by
+    /// blank lines.
     #[test]
     fn multiple_append_system_prompts_concatenate() {
         let args = Args::try_parse_from([
@@ -510,9 +507,9 @@ mod tests {
         assert_eq!(resolve_prompt_input(""), "");
     }
 
-    /// `--session <id>` must be accepted as a pi-mono-compat alias for
-    /// `--resume <id>` so scripts written against pi work against hand
-    /// unchanged.
+    /// `--session <id>` is accepted as a compatibility alias for
+    /// `--resume <id>` so scripts written against other clients work
+    /// against this binary unchanged.
     #[test]
     fn session_alias_is_accepted_for_resume() {
         let args = Args::try_parse_from(["hand", "--session", "abc123"]).expect("parse");
