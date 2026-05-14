@@ -1,17 +1,12 @@
 //! Easter-egg [`ArminComponent`]: a 31×36 XBM image of "Armin says hi"
 //! revealed with one of seven animation effects.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/armin.ts`.
-//!
-//! The TS component drives itself with `setInterval(_, 1000/fps)` and calls
-//! `tui.requestRender()` on every tick. The Rust port mirrors the
-//! ownership-inversion pattern used by [`super::countdown_timer::CountdownTimer`]
-//! and [`super::daxnuts::DaxnutsComponent`]: callers invoke
-//! [`ArminComponent::tick`] from whatever cadence their driver provides
-//! (frame loop, `tokio::time::interval`, manual test stepping). The tick rate
-//! is per-effect (30 fps for most, 60 fps for `glitch`) and reported via
-//! [`ArminComponent::tick_interval`] so drivers can schedule appropriately.
+//! Callers drive the animation by invoking [`ArminComponent::tick`]
+//! from whatever cadence their driver provides (frame loop,
+//! `tokio::time::interval`, manual test stepping). The tick rate is
+//! per-effect (30 fps for most, 60 fps for `glitch`) and reported via
+//! [`ArminComponent::tick_interval`] so drivers can schedule
+//! appropriately.
 //!
 //! Parity scope: the data table and all seven reveal effects (`Fade`,
 //! `Scanline`, `Typewriter`, `Rain`, `Crt`, `Glitch`, `Dissolve`) are

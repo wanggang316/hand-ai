@@ -1,18 +1,13 @@
 //! Yes/No selector for the "show images inline" preference.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/show-images-selector.ts`.
+//! Wraps a [`SelectListComponent`] in dynamic borders and emits the
+//! boolean choice over a Tokio channel (`mpsc::UnboundedSender`), so
+//! the host driver can `recv` outcomes without juggling
+//! synchronization primitives.
 //!
-//! pi-mono wraps a [`SelectListComponent`] in dynamic borders and emits a
-//! boolean callback on selection. The Rust port keeps the same shape but uses
-//! Tokio channels (`mpsc::UnboundedSender`) instead of `Box<dyn Fn>` callbacks
-//! so the host driver can `recv` outcomes without juggling synchronization
-//! primitives.
-//!
-//! Theming caveat: the TS source pulls the SelectList palette from the
-//! coding-agent theme. Until the theme port lands the renderer relies on
-//! `SelectListComponent`'s built-in defaults (matches the dark theme's
-//! visual style closely enough for the parity gates).
+//! Theming caveat: the renderer relies on `SelectListComponent`'s
+//! built-in palette defaults until the coding-agent theme exposes a
+//! dedicated SelectList slot.
 //!
 //! TODO(parity): theme integration deferred — see
 //! docs/exec-plans/parity-completion.md §A1.

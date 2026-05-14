@@ -1,7 +1,6 @@
-//! Phase-1 interactive-mode components.
+//! Interactive-mode components.
 //!
-//! Each submodule ports a single self-contained renderer from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/`. See the
+//! Each submodule provides a single self-contained renderer. See the
 //! parent module's docs for the theming caveat.
 
 pub mod armin;

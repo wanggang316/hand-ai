@@ -1,22 +1,16 @@
 //! Selector for the active coding-agent color theme.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/theme-selector.ts`.
+//! Until a global theme registry is wired up, the available theme list
+//! is taken as a constructor argument (view-model pattern). The
+//! component never mutates the list — it just renders, navigates, and
+//! emits a [`ThemeOutcome`].
 //!
-//! pi-mono's selector pulls the available theme list from a global registry.
-//! Until the theme system is ported the available list is taken as a
-//! constructor argument (view-model pattern, see Phase-2 footer port). The
-//! component never mutates the list — it just renders, navigates, and emits a
-//! [`ThemeOutcome`].
+//! In addition to confirm/cancel, outcomes include a `Preview` variant
+//! emitted on every selection-change tick so the host can repaint the
+//! screen with the previewed theme.
 //!
-//! In addition to confirm/cancel, the TS source also calls an
-//! `onPreview(theme)` callback whenever the highlighted item changes so the
-//! host can repaint the screen with the previewed theme. The Rust port keeps
-//! the same shape: outcomes include a `Preview` variant emitted on every
-//! selection-change tick.
-//!
-//! TODO(parity): theme integration deferred — see
-//! docs/exec-plans/parity-completion.md §A1.
+//! TODO: full theme integration deferred until the theme registry
+//! lands.
 
 use hand_tui::{
     Component, Container, HandleResult, InputEvent, SelectItem, SelectListComponent,

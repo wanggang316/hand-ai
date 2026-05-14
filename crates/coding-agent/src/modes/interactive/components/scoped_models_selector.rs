@@ -1,9 +1,6 @@
 //! Multi-select picker for the user's "scoped" model list (the Ctrl+P cycle).
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/scoped-models-selector.ts`.
-//!
-//! pi-mono lets users:
+//! The dialog lets users:
 //! * Toggle individual models on/off (Enter).
 //! * Bulk enable / clear / toggle-by-provider for the current filter.
 //! * Reorder enabled models (Ctrl+Up / Ctrl+Down).

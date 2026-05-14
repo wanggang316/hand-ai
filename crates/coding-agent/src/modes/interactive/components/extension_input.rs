@@ -1,24 +1,19 @@
 //! Single-line text-input dialog used by extensions.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/extension-input.ts`.
+//! Owns an [`InputComponent`] and renders a framed dialog directly
+//! (border, title, input, hint, border) — bypassing a `Container`
+//! because the embedded primitives don't expose downcast handles after
+//! being moved into one.
 //!
-//! The TS class extends pi-tui's `Container` and dispatches input via
-//! callbacks. The Rust port owns the [`InputComponent`] and renders a
-//! framed dialog directly (border, title, input, hint, border) — bypassing
-//! a `Container` because the embedded primitives don't expose downcast
-//! handles after being moved into one.
+//! Events ([`ExtensionInputEvent::Submit`] / `Cancel`) are surfaced via
+//! an [`mpsc::Sender`] supplied at construction — channels are
+//! preferred over `Box<dyn Fn>` callbacks for cross-component
+//! signalling.
 //!
-//! Events ([`ExtensionInputEvent::Submit`] / `Cancel`) are surfaced via an
-//! [`mpsc::Sender`] supplied at construction. Per
-//! `.claude/conversion-guidelines.md`, channels are preferred over
-//! `Box<dyn Fn>` callbacks for cross-component signalling.
-//!
-//! Theming caveat: pi-mono reads the `accent` slot from the coding-agent
-//! theme. The newly-ported [`crate::modes::interactive::theme::Theme`] is
-//! the eventual home for that, but this component is wired for both: pass
-//! a `Theme` to colour the title, or pass `None` to render plain text and
-//! defer styling to the driver.
+//! Theming caveat: the dialog can read an `accent` slot from the
+//! coding-agent theme. The component is wired for both code paths —
+//! pass a `Theme` to colour the title, or pass `None` to render plain
+//! text and defer styling to the driver.
 
 use std::sync::mpsc::Sender;
 use std::time::Duration;

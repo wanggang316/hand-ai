@@ -1,32 +1,25 @@
 //! Coding-agent specific editor wrapper that adds app-level shortcut routing
 //! on top of [`hand_tui::EditorComponent`].
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/custom-editor.ts`.
+//! ## Composition over inheritance
 //!
-//! ## Why a wrapper rather than inheritance
-//!
-//! The TS source `class CustomEditor extends Editor` and overrides
-//! `handleInput` to intercept app-level shortcuts before delegating to the
-//! base editor. Rust has no inheritance, and our conversion guidelines (see
-//! `.claude/conversion-guidelines.md`) forbid extending the base class via a
-//! supertrait — instead, [`CustomEditor`] **wraps** an
-//! [`EditorComponent`] by composition. The wrapped editor is exposed via
-//! [`CustomEditor::editor`] / [`CustomEditor::editor_mut`] so callers can
-//! drive it just like a bare editor when they need to.
+//! [`CustomEditor`] **wraps** an [`EditorComponent`] by composition so it
+//! can intercept app-level shortcuts before delegating to the base
+//! editor. The wrapped editor is exposed via [`CustomEditor::editor`]
+//! / [`CustomEditor::editor_mut`] so callers can drive it like a bare
+//! editor when they need to.
 //!
 //! ## Why string-keyed shortcuts
 //!
-//! pi-mono's `CustomEditor` consults a `KeybindingsManager` indexed by
-//! [`AppKeybinding`] (e.g. `"app.interrupt"`, `"app.exit"`,
-//! `"app.clipboard.pasteImage"`). The Rust `app.*` keybinding table has not
-//! been ported yet — `core/keybindings.ts` (370 lines) is its own unit of
-//! work, and `hand_tui::Keybinding` only knows `tui.*` namespaces. So this
-//! wrapper exposes its own minimal mapping: callers register `(raw_key,
-//! handler)` pairs and the wrapper performs literal byte-string matching
-//! against the inbound `InputEvent`. Once the app keybinding port lands, this
-//! type can be re-keyed in a follow-up without breaking the wider component
-//! surface.
+//! A general `app.*` keybinding table (with a `KeybindingsManager`
+//! indexed by symbolic names like `"app.interrupt"`, `"app.exit"`,
+//! `"app.clipboard.pasteImage"`) hasn't been wired yet —
+//! `hand_tui::Keybinding` only knows `tui.*` namespaces. This wrapper
+//! exposes its own minimal mapping instead: callers register
+//! `(raw_key, handler)` pairs and the wrapper performs literal
+//! byte-string matching against the inbound `InputEvent`. Once the app
+//! keybinding table lands, this type can be re-keyed in a follow-up
+//! without breaking the wider component surface.
 //!
 //! Special handlers (`on_escape`, `on_ctrl_d`, `on_paste_image`,
 //! `on_extension_shortcut`) keep parity with the TS-side dynamic slots used

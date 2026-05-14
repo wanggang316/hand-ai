@@ -1,11 +1,8 @@
 //! Minimal-viable session selector dialog.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/session-selector.ts`.
+//! ## Current scope
 //!
-//! ## Scope of this port
-//!
-//! The TS source is ~1023 lines and bundles:
+//! The full selector bundles:
 //!
 //! - `SessionInfo` listing with sort/scope/name-filter toggles.
 //! - Search input with `re:`, `name:`, fuzzy and phrase tokens.

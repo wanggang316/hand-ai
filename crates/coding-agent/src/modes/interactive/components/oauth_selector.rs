@@ -1,8 +1,5 @@
 //! Provider picker used by `/login` and `/logout`.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/oauth-selector.ts`.
-//!
 //! Unlike the simpler picker selectors, this component renders a custom
 //! provider list (with per-provider status indicators) instead of wrapping
 //! `SelectListComponent`. It owns an embedded

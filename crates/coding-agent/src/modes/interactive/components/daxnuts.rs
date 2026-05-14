@@ -1,11 +1,10 @@
-//! Easter-egg `DaxnutsComponent`. Renders a 32×32 RGB pixel-art image of
-//! `dax` (`@thdxr`) with a scanline-reveal effect. Mirrors the TS source at
-//! `pi-mono/.../components/daxnuts.ts`.
+//! Easter-egg `DaxnutsComponent`. Renders a 32×32 RGB pixel-art image
+//! of `dax` (`@thdxr`) with a scanline-reveal effect.
 //!
-//! The animation is driver-driven: callers should call [`DaxnutsComponent::tick`]
-//! roughly every 80 ms (the rate the TS port uses), which drives the
+//! The animation is driver-driven: callers should call
+//! [`DaxnutsComponent::tick`] roughly every 80 ms, which drives the
 //! scanline reveal and the staged text fade-in. This is the same
-//! ownership-inversion pattern Phase-2 used for `CountdownTimer` —
+//! ownership-inversion pattern used for `CountdownTimer` —
 //! components don't own their own timers; the driver does.
 
 use hand_tui::Component;

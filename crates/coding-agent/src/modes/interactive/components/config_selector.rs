@@ -1,8 +1,5 @@
 //! Resource configuration TUI dialog.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/config-selector.ts`.
-//!
 //! Renders the resolved resources from
 //! [`crate::core::extensions::source_registry::ResolvedPaths`] grouped by
 //! configured package source, then by resource kind. The user navigates
@@ -773,8 +770,9 @@ mod tests {
 
     #[test]
     fn extensions_subdir_display_uses_parent_prefix() {
-        // For extensions whose parent directory name is *not* "extensions",
-        // pi-mono prefixes the display with the parent name. Mirror it.
+        // For extensions whose parent directory name is *not*
+        // "extensions", prefix the display with the parent name so the
+        // user can tell sibling extensions apart.
         let resolved = make_resolved(&[(
             "/agent/npm/node_modules/foo/extensions/sub/ext.ts",
             ResourceKind::Extensions,

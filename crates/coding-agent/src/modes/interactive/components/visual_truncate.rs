@@ -1,19 +1,17 @@
 //! Tail-truncation helper aware of terminal-line wrapping.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/visual-truncate.ts`.
+//! Truncates text to at most `max_visual_lines` rendered lines
+//! (visual, not logical), keeping the *tail*. Wrapping is computed at
+//! the supplied width so the result is what the user would actually
+//! see in a terminal of that width. A `padding_x` parameter lets
+//! callers reserve horizontal padding before wrapping — pass `0` when
+//! the result will be placed in a `Box` component (which adds its own
+//! padding) and `1` for plain containers.
 //!
-//! Truncates text to at most `max_visual_lines` rendered lines (visual, not
-//! logical), keeping the *tail*. Wrapping is computed at the supplied width so
-//! the result is what the user would actually see in a terminal of that
-//! width. A `padding_x` parameter lets callers reserve horizontal padding
-//! before wrapping — pass `0` when the result will be placed in a `Box`
-//! component (which adds its own padding) and `1` for plain containers.
-//!
-//! pi-mono implements this by instantiating a temporary `Text` component and
-//! slicing its rendered output. We delegate to [`hand_tui::TextComponent`]
-//! for the same reason: it guarantees identical wrapping/padding semantics
-//! to whatever rendering the caller would otherwise have done.
+//! Implementation delegates to [`hand_tui::TextComponent`] to render
+//! the source into wrapped lines and then slices the tail. Reusing the
+//! shared component guarantees identical wrapping/padding semantics to
+//! whatever rendering the caller would otherwise have done.
 
 use hand_tui::{Component, TextComponent};
 

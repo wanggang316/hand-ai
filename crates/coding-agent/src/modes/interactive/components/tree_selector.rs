@@ -1,12 +1,9 @@
 //! Minimal-viable session-tree selector dialog.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/tree-selector.ts`.
+//! ## Current scope
 //!
-//! ## Scope of this port
-//!
-//! The TS source is ~1246 lines and bundles three components plus a
-//! container:
+//! The full selector is a large dialog that bundles three components
+//! plus a container:
 //!
 //! - `TreeList`: scrolling tree view with depth-aware gutter, fold/unfold,
 //!   tool-call clustering, search, five filter modes, and current-leaf

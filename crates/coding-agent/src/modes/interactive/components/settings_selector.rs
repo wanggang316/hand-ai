@@ -1,13 +1,11 @@
 //! Settings selector dialog.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/settings-selector.ts`.
+//! ## Current scope (minimal viable)
 //!
-//! ## Scope of this port (minimal viable)
-//!
-//! The TS component is ~530 lines that build a giant `Vec<SettingItem>` from
-//! a `SettingsConfig` view-model, wire 28 individual callbacks, and embed
-//! submenus that pop a `SelectList` for enum choices. To stay within scope
+//! The full settings selector is a large component that builds a
+//! `Vec<SettingItem>` from a `SettingsConfig` view-model, wires
+//! per-item callbacks, and embeds submenus that pop a `SelectList`
+//! for enum choices. To stay within scope
 //! and avoid blocking on the (not-yet-ported) submenu primitives in
 //! `hand_tui`, the Rust port renders **only the top-level settings list**:
 //!

@@ -1,8 +1,5 @@
 //! Branch-summary message renderer.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/branch-summary-message.ts`.
-//!
 //! When the user navigates back from a branched conversation, the driver
 //! inserts a synthetic "branchSummary" message that shows either a short
 //! collapsed line or the full markdown summary.

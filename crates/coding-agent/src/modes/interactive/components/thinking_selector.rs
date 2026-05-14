@@ -1,17 +1,13 @@
 //! Selector for the active thinking / reasoning level.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/thinking-selector.ts`.
+//! The option set is `Option::<ThinkingLevel>::None` for "off" plus
+//! whatever ordered `ThinkingLevel` variants the active model exposes;
+//! the constructor accepts the list of available levels because the
+//! host decides which the model supports.
 //!
-//! pi-mono accepts the option set as a `ThinkingLevel[]`, where the string
-//! `"off"` represents the disabled state. The Rust port keeps the same
-//! semantics by representing "off" as `Option::<ThinkingLevel>::None`, and the
-//! constructor accepts the list of available levels (matching the TS shape:
-//! the host decides which levels the active model exposes).
-//!
-//! Theming caveat: the TS source pulls the SelectList palette from the
-//! coding-agent theme. Until the theme port lands the renderer relies on
-//! `SelectListComponent`'s built-in defaults.
+//! Theming caveat: the renderer relies on `SelectListComponent`'s
+//! built-in palette defaults until the coding-agent theme exposes a
+//! dedicated SelectList slot.
 //!
 //! TODO(parity): theme integration deferred — see
 //! docs/exec-plans/parity-completion.md §A1.

@@ -1,12 +1,9 @@
 //! List-of-options selector dialog used by extensions.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/extension-selector.ts`.
-//!
 //! Renders a framed dialog with a title, the option list (selected row
 //! marked with `→`), and a hint line. Drives selection with `tui.select.up`
 //! / `tui.select.down` / `tui.select.confirm` / `tui.select.cancel`, plus
-//! the vim-style `j` / `k` shortcuts pi-mono accepts.
+//! the vim-style `j` / `k` shortcuts.
 //!
 //! Events ([`ExtensionSelectorEvent::Select`] / `Cancel`) flow through an
 //! [`mpsc::Sender`] supplied at construction. Theme colouring of the
