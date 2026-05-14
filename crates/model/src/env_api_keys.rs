@@ -104,8 +104,8 @@ pub fn get_env_api_key(provider: &Provider) -> Option<String> {
         _ => {
             // Per-provider env-var candidates. Each entry is tried in order;
             // first non-empty value wins. The aliases (e.g. ZHIPU_API_KEY for
-            // zai, MM_API_KEY for minimax) match the conventions used by the
-            // pi-mono / hand-ai user community.
+            // zai, MM_API_KEY for minimax) match the conventions established
+            // by the existing user community.
             let candidates: &[&str] = match provider.as_str() {
                 "openai" => &["OPENAI_API_KEY"],
                 "azure-openai-responses" => &["AZURE_OPENAI_API_KEY"],

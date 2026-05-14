@@ -334,9 +334,10 @@ pub struct OpenAICompletionsCompat {
     #[serde(skip_serializing_if = "Option::is_none", rename = "zaiToolStream")]
     pub zai_tool_stream: Option<bool>,
     /// When `true`, the upstream requires every assistant message in
-    /// replayed context to carry a `reasoning_content` field. Native
-    /// deepseek API enforces this; mirrors pi-mono's
-    /// `requiresReasoningContentOnAssistantMessages`.
+    /// replayed context to carry a `reasoning_content` field. The
+    /// native DeepSeek API enforces this; OpenRouter's DeepSeek V3/V4
+    /// shim does the same. Without the flag, replayed turns lose
+    /// their reasoning blocks and the model refuses the request.
     #[serde(
         skip_serializing_if = "Option::is_none",
         rename = "requiresReasoningContentOnAssistantMessages"
