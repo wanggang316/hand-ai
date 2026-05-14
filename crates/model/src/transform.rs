@@ -31,6 +31,7 @@
 use crate::types::{
     AnthropicMessagesCompat, Api, AssistantContentBlock, AssistantMessage, Compat, InputType,
     Message, Model, StopReason, TextContent, ToolCall, ToolResultContent, ToolResultMessage,
+    UserContent, UserContentBlock,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -38,6 +39,7 @@ use std::collections::{HashMap, HashSet};
 pub type NormalizeToolCallIdFn = Box<dyn Fn(&str, &Model, &AssistantMessage) -> String>;
 
 const TOOL_RESULT_IMAGE_PLACEHOLDER: &str = "[image omitted]";
+const USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
 
 /// Transform messages for cross-provider compatibility.
 ///
@@ -49,11 +51,67 @@ pub fn transform_messages(
     normalize_tool_call_id: Option<&NormalizeToolCallIdFn>,
 ) -> Vec<Message> {
     let staged: Vec<Message> = messages.to_vec();
+    let staged = downgrade_unsupported_user_images(staged, model);
     let staged = downgrade_unsupported_tool_result_images(staged, model);
     let staged = drop_response_id_on_cross_api(staged, model);
     let staged = apply_eager_tool_input_streaming_compat(staged, model);
     let staged = transform_assistant_content(staged, model, normalize_tool_call_id);
     flush_orphans_and_skip_errored(staged)
+}
+
+/// Replace image blocks inside user messages with a text placeholder when
+/// the target model does not advertise `InputType::Image` support.
+///
+/// Previously each provider's `convert_messages` silently filtered image
+/// blocks out, so non-vision models received a user turn with no signal
+/// that the user had attached an image. Producing a placeholder keeps
+/// the conversation auditable and lets the model acknowledge the
+/// limitation in its reply.
+fn downgrade_unsupported_user_images(messages: Vec<Message>, model: &Model) -> Vec<Message> {
+    if model.input.contains(&InputType::Image) {
+        return messages;
+    }
+    messages
+        .into_iter()
+        .map(|msg| match msg {
+            Message::User(mut u) => {
+                if let UserContent::Blocks(blocks) = u.content {
+                    let downgraded = replace_user_images_with_placeholder(blocks);
+                    u.content = UserContent::Blocks(downgraded);
+                }
+                Message::User(u)
+            }
+            other => other,
+        })
+        .collect()
+}
+
+fn replace_user_images_with_placeholder(
+    blocks: Vec<UserContentBlock>,
+) -> Vec<UserContentBlock> {
+    let mut out: Vec<UserContentBlock> = Vec::with_capacity(blocks.len());
+    let mut previous_was_placeholder = false;
+    for block in blocks {
+        match block {
+            UserContentBlock::Image(_) => {
+                if !previous_was_placeholder {
+                    out.push(UserContentBlock::Text(TextContent::new(
+                        USER_IMAGE_PLACEHOLDER,
+                    )));
+                }
+                previous_was_placeholder = true;
+            }
+            other => {
+                if let UserContentBlock::Text(ref t) = other {
+                    previous_was_placeholder = t.text == USER_IMAGE_PLACEHOLDER;
+                } else {
+                    previous_was_placeholder = false;
+                }
+                out.push(other);
+            }
+        }
+    }
+    out
 }
 
 /// Normalize a tool call ID to be compatible with Anthropic's requirements.
@@ -644,6 +702,83 @@ mod tests {
         let result = transform_messages(&messages, &model, None);
         assert_eq!(result.len(), 1);
         assert!(matches!(&result[0], Message::User(_)));
+    }
+
+    /// Non-vision models previously had image blocks silently filtered
+    /// inside each provider's `convert_messages`. The user lost any
+    /// signal that their attached image was dropped. Now the transform
+    /// pipeline replaces each image with a text placeholder so the
+    /// model can acknowledge the limitation and the user sees what
+    /// happened.
+    #[test]
+    fn user_image_blocks_become_placeholder_for_non_vision_models() {
+        use crate::types::{ImageContent, UserContent, UserContentBlock};
+        let mut model = test_model();
+        model.input = vec![InputType::Text]; // non-vision
+
+        let user_msg = Message::User(UserMessage {
+            role: "user".into(),
+            content: UserContent::Blocks(vec![
+                UserContentBlock::Text(TextContent::new("Look at this:")),
+                UserContentBlock::Image(ImageContent::new("base64data", "image/png")),
+                UserContentBlock::Image(ImageContent::new("base64data2", "image/png")),
+                UserContentBlock::Text(TextContent::new("Thoughts?")),
+            ]),
+            timestamp: 0,
+        });
+        let out = transform_messages(&[user_msg], &model, None);
+        let Message::User(user) = &out[0] else {
+            panic!("expected user message");
+        };
+        let UserContent::Blocks(blocks) = &user.content else {
+            panic!("expected block content");
+        };
+        // Two consecutive images collapse into a single placeholder.
+        assert_eq!(blocks.len(), 3, "blocks: {blocks:?}");
+        match &blocks[1] {
+            UserContentBlock::Text(t) => assert!(
+                t.text.contains("image omitted"),
+                "expected placeholder, got {:?}",
+                t.text
+            ),
+            other => panic!("expected text placeholder, got {other:?}"),
+        }
+        // No image block survives.
+        for b in blocks {
+            assert!(
+                !matches!(b, UserContentBlock::Image(_)),
+                "image block should not survive: {b:?}"
+            );
+        }
+    }
+
+    /// Vision-capable models keep their image blocks intact — the
+    /// downgrade only fires when `InputType::Image` is missing.
+    #[test]
+    fn user_image_blocks_passthrough_for_vision_models() {
+        use crate::types::{ImageContent, UserContent, UserContentBlock};
+        let mut model = test_model();
+        model.input = vec![InputType::Text, InputType::Image];
+
+        let user_msg = Message::User(UserMessage {
+            role: "user".into(),
+            content: UserContent::Blocks(vec![
+                UserContentBlock::Text(TextContent::new("look:")),
+                UserContentBlock::Image(ImageContent::new("data", "image/png")),
+            ]),
+            timestamp: 0,
+        });
+        let out = transform_messages(&[user_msg], &model, None);
+        let Message::User(user) = &out[0] else {
+            panic!("user expected");
+        };
+        let UserContent::Blocks(blocks) = &user.content else {
+            panic!("blocks expected");
+        };
+        assert!(
+            blocks.iter().any(|b| matches!(b, UserContentBlock::Image(_))),
+            "image must survive for vision models"
+        );
     }
 
     #[test]
