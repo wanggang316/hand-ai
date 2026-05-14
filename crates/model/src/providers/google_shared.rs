@@ -820,6 +820,18 @@ pub(crate) fn get_google_budget(
             ThinkingLevel::Medium => 8192,
             ThinkingLevel::High | ThinkingLevel::Xhigh => 32768,
         }
+    } else if model_id.contains("2.5-flash-lite") {
+        // Gemini 2.5 Flash Lite's minimum thinking budget is 512, not
+        // 128. The full Flash variant accepts 128 down to ~512 floor.
+        // Match this branch BEFORE the more-permissive `2.5-flash`
+        // arm so a request for "gemini-2.5-flash-lite" doesn't fall
+        // through and submit an invalid 128-token minimal budget.
+        match level {
+            ThinkingLevel::Minimal => 512,
+            ThinkingLevel::Low => 2048,
+            ThinkingLevel::Medium => 8192,
+            ThinkingLevel::High | ThinkingLevel::Xhigh => 24576,
+        }
     } else if model_id.contains("2.5-flash") {
         match level {
             ThinkingLevel::Minimal => 128,
@@ -956,6 +968,44 @@ mod tests {
         assert_eq!(
             part.get("thoughtSignature").and_then(Value::as_str),
             Some("dGVzdA==")
+        );
+    }
+
+    /// Gemini 2.5 Flash Lite's minimum thinking budget is 512, not
+    /// 128. The full Flash variant accepts 128. Without a dedicated
+    /// branch the more permissive `2.5-flash` arm captured Flash Lite
+    /// too and submitted an invalid 128-token minimal budget — the
+    /// upstream rejected it with "thinking budget 128 is invalid".
+    #[test]
+    fn google_budget_flash_lite_minimal_is_512_not_128() {
+        assert_eq!(
+            get_google_budget("gemini-2.5-flash-lite", ThinkingLevel::Minimal, None),
+            512,
+            "flash-lite minimal must be 512 (not 128) to clear the upstream's 512 floor"
+        );
+        // Sanity-check the other Flash Lite levels match the upstream
+        // table: 2048 / 8192 / 24576.
+        assert_eq!(
+            get_google_budget("gemini-2.5-flash-lite", ThinkingLevel::Low, None),
+            2048
+        );
+        assert_eq!(
+            get_google_budget("gemini-2.5-flash-lite", ThinkingLevel::Medium, None),
+            8192
+        );
+        assert_eq!(
+            get_google_budget("gemini-2.5-flash-lite", ThinkingLevel::High, None),
+            24576
+        );
+    }
+
+    /// The regular Flash variant still gets the 128-token minimal —
+    /// only Flash Lite raises the floor.
+    #[test]
+    fn google_budget_regular_flash_minimal_is_128() {
+        assert_eq!(
+            get_google_budget("gemini-2.5-flash", ThinkingLevel::Minimal, None),
+            128
         );
     }
 
