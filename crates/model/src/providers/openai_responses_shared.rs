@@ -28,7 +28,7 @@ pub(crate) fn build_request_body(
         "stream": true,
     });
 
-    body["input"] = convert_to_input(context);
+    body["input"] = convert_to_input_for_model(context, model);
 
     if let Some(ref prompt) = context.system_prompt
         && !prompt.is_empty()
@@ -98,7 +98,26 @@ fn responses_supports_long_cache_retention(model: &Model) -> bool {
 }
 
 /// Convert a `Context` into the `input` array accepted by the Responses API.
+///
+/// Kept as the legacy single-arg surface so tests that don't care
+/// about vision routing don't have to thread a model through. New
+/// callers should prefer `convert_to_input_for_model`, which forwards
+/// tool-result image blocks when the target model advertises image
+/// input support.
 pub(crate) fn convert_to_input(context: &Context) -> Value {
+    convert_to_input_for_model_inner(context, false)
+}
+
+/// Like [`convert_to_input`] but routes tool-result images into the
+/// `function_call_output` content array when the model accepts image
+/// input. This lets vision-capable Responses models see screenshots,
+/// PDFs, and other binary tool-output payloads inline.
+pub(crate) fn convert_to_input_for_model(context: &Context, model: &Model) -> Value {
+    let supports_images = model.input.contains(&crate::types::InputType::Image);
+    convert_to_input_for_model_inner(context, supports_images)
+}
+
+fn convert_to_input_for_model_inner(context: &Context, supports_images: bool) -> Value {
     let mut input = Vec::new();
 
     for msg in &context.messages {
@@ -146,13 +165,65 @@ pub(crate) fn convert_to_input(context: &Context) -> Value {
                 }
             }
             Message::ToolResult(tr) => {
+                let text_result = tr
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        crate::types::ToolResultContent::Text(t) => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let has_text = !text_result.is_empty();
+                let has_images = tr
+                    .content
+                    .iter()
+                    .any(|c| matches!(c, crate::types::ToolResultContent::Image(_)));
+
+                let output_value = if has_images && supports_images {
+                    // Vision-capable model: ship images inline as a
+                    // `function_call_output` content list. Mirrors
+                    // the OpenAI Responses
+                    // `ResponseFunctionCallOutputItemList` shape:
+                    // input_text and input_image parts side by side.
+                    let mut parts: Vec<Value> = Vec::new();
+                    if has_text {
+                        parts.push(serde_json::json!({
+                            "type": "input_text",
+                            "text": text_result,
+                        }));
+                    }
+                    for c in &tr.content {
+                        if let crate::types::ToolResultContent::Image(img) = c {
+                            parts.push(serde_json::json!({
+                                "type": "input_image",
+                                "detail": "auto",
+                                "image_url": format!(
+                                    "data:{};base64,{}",
+                                    img.mime_type, img.data,
+                                ),
+                            }));
+                        }
+                    }
+                    Value::Array(parts)
+                } else if has_text {
+                    Value::String(text_result)
+                } else if has_images {
+                    // Non-vision model with image-only tool result:
+                    // emit a placeholder string so the function_call
+                    // still gets matched. The transform layer should
+                    // ideally have downgraded this earlier but the
+                    // placeholder avoids sending a confusing empty
+                    // function_call_output that the upstream rejects.
+                    Value::String("(see attached image)".to_string())
+                } else {
+                    Value::String(String::new())
+                };
+
                 input.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": normalize_responses_tool_id(&tr.tool_call_id),
-                    "output": tr.content.iter().filter_map(|c| match c {
-                        crate::types::ToolResultContent::Text(t) => Some(t.text.clone()),
-                        _ => None,
-                    }).collect::<Vec<_>>().join("\n"),
+                    "output": output_value,
                 }));
             }
         }
@@ -840,6 +911,132 @@ mod tests {
             messages: vec![Message::User(UserMessage::new_text("hi"))],
             tools: None,
         }
+    }
+
+    fn vision_responses_model() -> Model {
+        use crate::types::{Api, Cost, InputType, Provider};
+        Model {
+            id: "gpt-5".to_string(),
+            name: "gpt-5".to_string(),
+            api: Api::OpenAIResponses,
+            provider: Provider::OpenAI,
+            base_url: String::new(),
+            reasoning: false,
+            input: vec![InputType::Text, InputType::Image],
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 0,
+            max_tokens: 0,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        }
+    }
+
+    fn tool_result_with_image(text: &str, mime: &str, data: &str) -> Context {
+        use crate::types::{
+            ImageContent, Message, TextContent, ToolResultContent, ToolResultMessage,
+        };
+        let mut content: Vec<ToolResultContent> = Vec::new();
+        if !text.is_empty() {
+            content.push(ToolResultContent::Text(TextContent::new(text)));
+        }
+        content.push(ToolResultContent::Image(ImageContent {
+            content_type: "image".to_string(),
+            mime_type: mime.to_string(),
+            data: data.to_string(),
+        }));
+        Context {
+            system_prompt: None,
+            messages: vec![Message::ToolResult(ToolResultMessage {
+                role: "toolResult".to_string(),
+                tool_call_id: "call_abc".to_string(),
+                tool_name: "screenshot".to_string(),
+                content,
+                details: None,
+                is_error: false,
+                timestamp: 0,
+            })],
+            tools: None,
+        }
+    }
+
+    /// On vision-capable Responses models, tool-result images must
+    /// land in the `function_call_output` content list as
+    /// `input_image` parts alongside any `input_text` part for the
+    /// text portion. Sending only the text would drop the screenshot
+    /// the agent needs to reason over.
+    #[test]
+    fn tool_result_images_inline_for_vision_capable_model() {
+        let model = vision_responses_model();
+        let context = tool_result_with_image("found 3 items", "image/png", "AAA");
+        let input = convert_to_input_for_model(&context, &model);
+        let arr = input.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        let out = &arr[0];
+        assert_eq!(out["type"], "function_call_output");
+        let parts = out["output"].as_array().expect("output is content list");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "input_text");
+        assert_eq!(parts[0]["text"], "found 3 items");
+        assert_eq!(parts[1]["type"], "input_image");
+        assert_eq!(parts[1]["detail"], "auto");
+        assert_eq!(parts[1]["image_url"], "data:image/png;base64,AAA");
+    }
+
+    /// Image-only tool result on a vision model: emit just the
+    /// `input_image` part — no empty `input_text`.
+    #[test]
+    fn tool_result_image_only_skips_input_text_part() {
+        let model = vision_responses_model();
+        let context = tool_result_with_image("", "image/jpeg", "ZZZ");
+        let input = convert_to_input_for_model(&context, &model);
+        let parts = input.as_array().unwrap()[0]["output"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["type"], "input_image");
+    }
+
+    /// Non-vision Responses models keep the legacy plain-string
+    /// output shape; image content gets dropped into the placeholder.
+    #[test]
+    fn tool_result_images_collapse_to_placeholder_on_non_vision_model() {
+        let mut model = vision_responses_model();
+        model.input = vec![crate::types::InputType::Text];
+        let context = tool_result_with_image("", "image/png", "AAA");
+        let input = convert_to_input_for_model(&context, &model);
+        let out = &input.as_array().unwrap()[0]["output"];
+        assert!(
+            out.is_string(),
+            "non-vision model must emit plain string output: {out}"
+        );
+        assert_eq!(out.as_str(), Some("(see attached image)"));
+    }
+
+    /// Text-only tool result keeps the plain-string shape even when
+    /// the model is vision-capable — there's no image to inline.
+    #[test]
+    fn tool_result_text_only_keeps_plain_string_shape() {
+        use crate::types::{Message, TextContent, ToolResultContent, ToolResultMessage};
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::ToolResult(ToolResultMessage {
+                role: "toolResult".to_string(),
+                tool_call_id: "call_xyz".to_string(),
+                tool_name: "read".to_string(),
+                content: vec![ToolResultContent::Text(TextContent::new("hello"))],
+                details: None,
+                is_error: false,
+                timestamp: 0,
+            })],
+            tools: None,
+        };
+        let input = convert_to_input_for_model(&context, &vision_responses_model());
+        let out = &input.as_array().unwrap()[0]["output"];
+        assert_eq!(out.as_str(), Some("hello"));
     }
 
     /// The Responses API surfaces a `response.failed` SSE event when
