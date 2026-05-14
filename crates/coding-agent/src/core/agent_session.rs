@@ -1117,7 +1117,16 @@ impl AgentSession {
         let _guard = InFlightGuard(self.bash_running.clone());
 
 
-        let shell_path = crate::core::bash_executor::resolve_shell();
+        // Prefer the session's `shell_path` setting over the ambient
+        // `$SHELL`. Without this, multiple agent sessions running from the
+        // same parent process all inherit whatever shell launched the
+        // launcher — per-project shellPath in settings.json never takes
+        // effect during bash execution.
+        let shell_path = self
+            .settings_manager
+            .shell_path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(crate::core::bash_executor::resolve_shell);
         let options = crate::core::bash_executor::BashExecutorOptions {
             on_chunk: None,
             timeout_secs,
