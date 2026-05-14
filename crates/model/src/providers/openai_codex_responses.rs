@@ -274,6 +274,25 @@ fn build_codex_request_body(model: &Model, context: &Context, options: &StreamOp
         body["instructions"] = Value::String("You are a helpful assistant.".to_string());
     }
 
+    // Default to `text.verbosity: "low"` so codex returns terse output by
+    // default; agents that wrap responses with their own narration get
+    // more signal per token. The upstream lowered this from `medium` for
+    // the same reason. Callers that already set `text.verbosity` win.
+    let text_has_verbosity = body
+        .get("text")
+        .and_then(|t| t.get("verbosity"))
+        .is_some();
+    if !text_has_verbosity {
+        let entry = body
+            .as_object_mut()
+            .expect("request body is an object")
+            .entry("text")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("verbosity".to_string(), Value::String("low".to_string()));
+        }
+    }
+
     body
 }
 
@@ -789,5 +808,23 @@ mod tests {
             &StreamOptions::default(),
         );
         assert_eq!(body["store"], serde_json::Value::Bool(false));
+    }
+
+    /// Codex defaults to `text.verbosity: "low"` so the backend returns
+    /// terse output unless the caller overrides it. Without the default,
+    /// the model leans toward verbose narration that wraps inside the
+    /// agent's own narration and burns tokens.
+    #[test]
+    fn codex_body_defaults_text_verbosity_to_low() {
+        let body = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(Some("You are pi.")),
+            &StreamOptions::default(),
+        );
+        assert_eq!(
+            body["text"]["verbosity"].as_str(),
+            Some("low"),
+            "body must default text.verbosity to low: {body}"
+        );
     }
 }
