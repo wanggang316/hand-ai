@@ -671,24 +671,29 @@ fn convert_assistant_content(asst_msg: &AssistantMessage, model: &Model) -> Vec<
                                 }));
                             }
                         } else if !tc.thinking.is_empty() {
-                            // No signature - convert to text to avoid API rejection
+                            // No signature — emit as plain text without
+                            // `<thinking>` tags. Wrapping unsigned thinking
+                            // in tags teaches Claude to mimic the tag
+                            // structure in its own replies (the model
+                            // copies the historical shape).
                             blocks.push(serde_json::json!({
                                 "type": "text",
-                                "text": format!("<thinking>{}</thinking>", &tc.thinking),
+                                "text": sanitize_surrogates(&tc.thinking),
                             }));
                         }
                     } else if !tc.thinking.is_empty() {
-                        // No signature - convert to text
                         blocks.push(serde_json::json!({
                             "type": "text",
-                            "text": format!("<thinking>{}</thinking>", &tc.thinking),
+                            "text": sanitize_surrogates(&tc.thinking),
                         }));
                     }
                 } else if !tc.thinking.is_empty() {
-                    // Cross-model: convert to text
+                    // Cross-model: signature is invalid on the target
+                    // model. Convert to plain text without `<thinking>`
+                    // tags so the new model doesn't mimic the wrapper.
                     blocks.push(serde_json::json!({
                         "type": "text",
-                        "text": format!("<thinking>{}</thinking>", &tc.thinking),
+                        "text": sanitize_surrogates(&tc.thinking),
                     }));
                 }
             }
@@ -1926,8 +1931,13 @@ mod tests {
         assert_eq!(content.len(), 2);
     }
 
+    /// Cross-model thinking blocks must be converted to plain text
+    /// without `<thinking>` wrapper tags. Previous behavior wrapped
+    /// them, which taught Claude to mimic the tag structure in its own
+    /// replies (the model copies historical shapes). Convert to plain
+    /// text so the model sees only the reasoning content.
     #[test]
-    fn test_thinking_cross_model_converted_to_text() {
+    fn test_thinking_cross_model_converted_to_plain_text_without_tags() {
         let model = test_model();
         let asst = AssistantMessage {
             role: "assistant".to_string(),
@@ -1948,6 +1958,50 @@ mod tests {
         let result = convert_assistant_content(&asst, &model);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0]["type"], "text");
-        assert!(result[0]["text"].as_str().unwrap().contains("<thinking>"));
+        let text = result[0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("<thinking>"),
+            "cross-model thinking must not be wrapped in <thinking> tags: {text}"
+        );
+        assert!(
+            !text.contains("</thinking>"),
+            "cross-model thinking must not be wrapped in </thinking> tags: {text}"
+        );
+        assert_eq!(text, "Let me think...");
+    }
+
+    /// Same-model thinking blocks without a signature (aborted stream,
+    /// missing scratch buffer) must also be emitted as plain text
+    /// without `<thinking>` wrapper tags — the unsigned shape is
+    /// rejected by the API and the wrapper trains the model to mimic
+    /// the tags.
+    #[test]
+    fn test_thinking_same_model_unsigned_converted_to_plain_text() {
+        let model = test_model();
+        let mut thinking = ThinkingContent::new("partial reasoning");
+        thinking.thinking_signature = None;
+        let asst = AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::Thinking(thinking)],
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            model: model.id.clone(),
+            usage: crate::types::Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        };
+        let result = convert_assistant_content(&asst, &model);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["type"], "text");
+        let text = result[0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("<thinking>"),
+            "unsigned thinking must not be wrapped in <thinking> tags: {text}"
+        );
+        assert_eq!(text, "partial reasoning");
     }
 }
