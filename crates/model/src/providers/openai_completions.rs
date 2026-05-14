@@ -610,11 +610,15 @@ fn build_params(
         builder = builder.temperature(temp);
     }
 
-    if let Some(tools) = &context.tools {
-        let openai_tools: Vec<OpenAiTool> = tools.iter().map(convert_tool).collect();
-        builder = builder.tools(openai_tools);
-    } else if has_tool_history(&context.messages) {
-        builder = builder.tools(vec![]);
+    match decide_tools_field(context.tools.as_deref(), &context.messages) {
+        ToolsField::NonEmpty(tools) => {
+            let openai_tools: Vec<OpenAiTool> = tools.iter().map(convert_tool).collect();
+            builder = builder.tools(openai_tools);
+        }
+        ToolsField::EmptyArrayForHistory => {
+            builder = builder.tools(vec![]);
+        }
+        ToolsField::Omit => {}
     }
 
     if let Some(tool_choice) = &options.tool_choice {
@@ -971,6 +975,34 @@ fn has_tool_history(messages: &[Message]) -> bool {
     })
 }
 
+/// What to do with the `tools` field on an OpenAI-compatible request.
+///
+/// DashScope / Aliyun Qwen rejects `tools: []` with HTTP 400 (`"[] is too
+/// short - 'tools'"`). At the same time, LiteLLM and certain Anthropic
+/// proxies require `tools: []` when the conversation already has tool
+/// history. Encode that policy here as a pure decision so the body
+/// builder doesn't have to mix the three cases inline.
+#[derive(Debug)]
+pub(crate) enum ToolsField<'a> {
+    /// Omit the `tools` field entirely.
+    Omit,
+    /// Emit `tools: []` to satisfy proxies that need the field present.
+    EmptyArrayForHistory,
+    /// Emit a non-empty array of tool definitions.
+    NonEmpty(&'a [crate::types::Tool]),
+}
+
+pub(crate) fn decide_tools_field<'a>(
+    tools: Option<&'a [crate::types::Tool]>,
+    messages: &[Message],
+) -> ToolsField<'a> {
+    match tools {
+        Some(t) if !t.is_empty() => ToolsField::NonEmpty(t),
+        _ if has_tool_history(messages) => ToolsField::EmptyArrayForHistory,
+        _ => ToolsField::Omit,
+    }
+}
+
 /// Normalize tool call ID for Mistral.
 /// Mistral requires tool IDs to be exactly 9 alphanumeric characters.
 pub fn normalize_mistral_tool_id(id: &str) -> String {
@@ -1291,9 +1323,64 @@ pub fn resolve_compat(model: &Model) -> ResolvedCompat {
 mod tests {
     use super::*;
     use crate::types::{
-        Api, AssistantContentBlock, AssistantMessage, Cost, InputType, TextContent, ToolCall,
-        Usage, UserMessage,
+        Api, AssistantContentBlock, AssistantMessage, Cost, InputType, TextContent, Tool, ToolCall,
+        ToolResultContent, ToolResultMessage, Usage, UserMessage,
     };
+
+    fn user_msg(text: &str) -> Message {
+        Message::User(UserMessage::new_text(text))
+    }
+
+    /// Sending `tools: []` on requests with no tool history triggers a
+    /// hard 400 on DashScope / Aliyun Qwen ("[] is too short"). When the
+    /// caller passes an empty array we must omit the field entirely.
+    #[test]
+    fn decide_tools_omits_field_when_tools_some_but_empty_and_no_history() {
+        let messages = vec![user_msg("hi")];
+        let tools: [Tool; 0] = [];
+        match decide_tools_field(Some(&tools), &messages) {
+            ToolsField::Omit => {}
+            other => panic!("expected Omit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_tools_omits_field_when_tools_none_and_no_history() {
+        let messages = vec![user_msg("hi")];
+        match decide_tools_field(None, &messages) {
+            ToolsField::Omit => {}
+            other => panic!("expected Omit, got {other:?}"),
+        }
+    }
+
+    /// LiteLLM and certain Anthropic proxies require `tools: []` when
+    /// the conversation already has tool history (otherwise they reject
+    /// the replay). Preserve that branch.
+    #[test]
+    fn decide_tools_emits_empty_array_when_history_has_tool_results() {
+        let messages = vec![
+            user_msg("hi"),
+            Message::ToolResult(ToolResultMessage::new(
+                "call-1",
+                "lookup",
+                vec![ToolResultContent::Text(TextContent::new("ok"))],
+            )),
+        ];
+        match decide_tools_field(None, &messages) {
+            ToolsField::EmptyArrayForHistory => {}
+            other => panic!("expected EmptyArrayForHistory, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_tools_passes_non_empty_array_through() {
+        let messages = vec![user_msg("hi")];
+        let tools = vec![Tool::new("lookup", "look it up", serde_json::json!({}))];
+        match decide_tools_field(Some(&tools), &messages) {
+            ToolsField::NonEmpty(passed) => assert_eq!(passed.len(), 1),
+            other => panic!("expected NonEmpty, got {other:?}"),
+        }
+    }
 
     fn test_model(provider: Provider) -> Model {
         Model {
