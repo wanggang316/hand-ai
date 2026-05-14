@@ -214,11 +214,27 @@ fn build_request_body(
     body.insert("max_tokens".to_string(), Value::Number(max_tokens.into()));
     body.insert("stream".to_string(), Value::Bool(true));
 
-    // System prompt
+    // System prompt — emit as an array of content blocks so the system
+    // prefix can carry its own `cache_control` breakpoint when prompt
+    // caching is enabled. Without a breakpoint here, Anthropic only
+    // caches up to the tool list; long system prompts (HAND.md, skill
+    // catalog, ...) re-bill on every turn.
     if let Some(system_prompt) = &context.system_prompt
         && !system_prompt.is_empty()
     {
-        body.insert("system".to_string(), Value::String(system_prompt.clone()));
+        let cache_control = resolve_anthropic_cache_control(model, options.as_ref());
+        if let Some(cc) = cache_control {
+            body.insert(
+                "system".to_string(),
+                Value::Array(vec![serde_json::json!({
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": cc,
+                })]),
+            );
+        } else {
+            body.insert("system".to_string(), Value::String(system_prompt.clone()));
+        }
     }
 
     // Temperature
@@ -1221,6 +1237,31 @@ mod tests {
         assert_eq!(body["model"], "claude-sonnet-4-20250514");
         assert_eq!(body["max_tokens"], 4096);
         assert_eq!(body["stream"], true);
+        // Default caching is `Short`, so the system prompt now ships as
+        // a single content block with a `cache_control` breakpoint.
+        let sys = body["system"].as_array().unwrap();
+        assert_eq!(sys.len(), 1);
+        assert_eq!(sys[0]["type"], "text");
+        assert_eq!(sys[0]["text"], "You are helpful.");
+        assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    /// Caching disabled (`CacheRetention::None`) keeps the historical
+    /// plain-string `system` shape so callers that explicitly opt out
+    /// don't see the array form on the wire.
+    #[test]
+    fn system_prompt_remains_plain_string_when_caching_disabled() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: Some("You are helpful.".to_string()),
+            messages: vec![],
+            tools: None,
+        };
+        let opts = StreamOptions {
+            cache_retention: Some(CacheRetention::None),
+            ..Default::default()
+        };
+        let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
         assert_eq!(body["system"], "You are helpful.");
     }
 
