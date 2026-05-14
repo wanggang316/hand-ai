@@ -184,6 +184,24 @@ async fn stream_anthropic_inner(
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
 
+    // `on_response` callback fires once the response headers are in,
+    // regardless of HTTP status. Extensions use it to surface rate-limit
+    // headers, request ids, retry-after hints, etc. Bypass anything that
+    // isn't ASCII or fails to round-trip cleanly to a String — neither
+    // the callback contract nor downstream observers expect non-UTF-8
+    // header values.
+    if let Some(on_response) = options.as_ref().and_then(|o| o.on_response.clone()) {
+        let status = response.status().as_u16();
+        let mut headers_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (name, value) in response.headers().iter() {
+            if let Ok(v) = value.to_str() {
+                headers_map.insert(name.as_str().to_string(), v.to_string());
+            }
+        }
+        on_response(status, headers_map, &model);
+    }
+
     if !response.status().is_success() {
         let status = response.status();
         let body = response

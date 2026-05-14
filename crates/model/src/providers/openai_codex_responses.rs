@@ -601,6 +601,21 @@ fn stream_openai_codex_responses(
             }
         };
 
+        // `on_response` callback fires once the response headers are in,
+        // regardless of HTTP status. Extensions use it to capture
+        // rate-limit / request-id / retry hint headers per request.
+        if let Some(on_response) = options.on_response.clone() {
+            let status = response.status().as_u16();
+            let mut headers_map: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for (name, value) in response.headers().iter() {
+                if let Ok(v) = value.to_str() {
+                    headers_map.insert(name.as_str().to_string(), v.to_string());
+                }
+            }
+            on_response(status, headers_map, &model);
+        }
+
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
