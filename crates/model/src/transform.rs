@@ -149,8 +149,9 @@ pub fn normalize_tool_call_id_for_anthropic(id: &str) -> String {
 /// emit tool-call arguments containing literal `\t`/`\n`/`\r` bytes or
 /// invalid escape sequences such as `\H`. Plain `serde_json::from_str` fails
 /// on these and we'd otherwise drop the entire payload to `{}`, silently
-/// breaking the tool call. This mirrors pi-mono's `repairJson` so the same
-/// arguments round-trip through hand.
+/// breaking the tool call. The repair pass escapes raw control characters
+/// inside string literals and doubles backslashes before invalid escapes so
+/// the same arguments round-trip end-to-end.
 pub fn repair_json(json: &str) -> String {
     const VALID_ESCAPES: &[char] = &['"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u'];
     let chars: Vec<char> = json.chars().collect();
@@ -851,12 +852,12 @@ mod tests {
         assert_eq!(result.len(), 64);
     }
 
-    /// Regression test for pi-mono issue #1022 — OpenAI Responses API generates
-    /// 450+ character pipe-separated tool-call IDs that crash Anthropic's
-    /// validator (which caps IDs at 64 chars matching `^[a-zA-Z0-9_-]+$`).
-    /// The exact failing ID is copied verbatim from the pi-mono test fixture.
+    /// OpenAI Responses generates 450+ character pipe-separated tool-call
+    /// IDs that crash Anthropic's validator (which caps IDs at 64 chars
+    /// matching `^[a-zA-Z0-9_-]+$`). Pin the exact pathological payload so
+    /// the normalizer can never regress on it again.
     #[test]
-    fn normalize_handles_pi_mono_issue_1022_failing_id() {
+    fn normalize_handles_long_pipe_separated_tool_call_id() {
         let failing_id = "call_pAYbIr76hXIjncD9UE4eGfnS|t5nnb2qYMFWGSsr13fhCd1CaCu3t3qONEPuOudu4HSVEtA8YJSL6FAZUxvoOoD792VIJWl91g87EdqsCWp9krVsdBysQoDaf9lMCLb8BS4EYi4gQd5kBQBYLlgD71PYwvf+TbMD9J9/5OMD42oxSRj8H+vRf78/l2Xla33LWz4nOgsddBlbvabICRs8GHt5C9PK5keFtzyi3lsyVKNlfduK3iphsZqs4MLv4zyGJnvZo/+QzShyk5xnMSQX/f98+aEoNflEApCdEOXipipgeiNWnpFSHbcwmMkZoJhURNu+JEz3xCh1mrXeYoN5o+trLL3IXJacSsLYXDrYTipZZbJFRPAucgbnjYBC+/ZzJOfkwCs+Gkw7EoZR7ZQgJ8ma+9586n4tT4cI8DEhBSZsWMjrCt8dxKg==";
         let result = normalize_tool_call_id_for_anthropic(failing_id);
         // Length cap.
@@ -934,7 +935,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // JSON repair (pi-mono parity: utils/json-parse.ts)
+    // JSON repair
     // -----------------------------------------------------------------------
 
     #[test]
@@ -985,9 +986,9 @@ mod tests {
     }
 
     #[test]
-    fn repair_pi_1022_anthropic_tool_payload() {
-        // Exact payload from pi-mono's anthropic-sse-parsing test:
-        // path="A\H" (invalid escape) and text="col1<TAB>col2" (raw control).
+    fn repair_combines_invalid_escape_and_raw_control_in_one_payload() {
+        // path="A\H" (invalid escape) and text="col1<TAB>col2" (raw control)
+        // co-occurred in real-world Anthropic SSE streams.
         let input = "{\"path\":\"A\\H\",\"text\":\"col1\tcol2\"}";
         let parsed = parse_json_with_repair(input).expect("must repair successfully");
         assert_eq!(parsed["path"], "A\\H");
