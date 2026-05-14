@@ -1,8 +1,6 @@
 //! OAuth credential management for AI providers.
 //!
-//! This module mirrors the TypeScript implementation in
-//! `pi-mono/packages/ai/src/utils/oauth/` and provides login, refresh,
-//! and persistence for OAuth-based providers:
+//! Provides login, refresh, and persistence for OAuth-based providers:
 //!
 //! - Anthropic (Claude Pro/Max) — PKCE + loopback HTTP server
 //! - OpenAI Codex (ChatGPT Plus/Pro) — PKCE + loopback HTTP server

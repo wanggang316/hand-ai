@@ -1,10 +1,10 @@
 //! Anthropic OAuth (Claude Pro/Max) — PKCE + loopback HTTP server.
 //!
-//! Mirrors `pi-mono/.../oauth/anthropic.ts`. The flow:
+//! The flow:
 //!
-//! 1. Generate a PKCE pair. The TS reference reuses the verifier as the
-//!    OAuth `state`; we do the same so existing Claude OAuth sessions stay
-//!    interchangeable.
+//! 1. Generate a PKCE pair. The verifier doubles as the OAuth `state`
+//!    so Claude OAuth sessions stay interchangeable with other clients
+//!    using the same shared trick.
 //! 2. Spin up a loopback HTTP server on `127.0.0.1:53692/callback`.
 //! 3. Print the authorize URL via `on_open_url` and wait for the browser to
 //!    hit our callback.

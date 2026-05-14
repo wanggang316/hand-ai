@@ -1,7 +1,6 @@
 //! GitHub Copilot OAuth — Device Flow.
 //!
-//! Mirrors `pi-mono/.../oauth/github-copilot.ts`. Differences from the
-//! browser-redirect flows:
+//! Differences from the browser-redirect flows:
 //!
 //! - No loopback server; we exchange a `device_code` for an access token by
 //!   polling.

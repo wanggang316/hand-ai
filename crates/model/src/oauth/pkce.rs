@@ -1,8 +1,7 @@
 //! PKCE (Proof Key for Code Exchange) helpers.
 //!
-//! Mirrors `pi-mono/.../oauth/pkce.ts`. The verifier is a 32-byte random value
-//! base64url-encoded (~43 chars), and the challenge is the base64url-encoded
-//! SHA-256 of the verifier bytes.
+//! The verifier is a 32-byte random value base64url-encoded (~43 chars),
+//! and the challenge is the base64url-encoded SHA-256 of the verifier bytes.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;

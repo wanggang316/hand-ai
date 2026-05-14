@@ -1,7 +1,6 @@
 //! OpenAI Codex (ChatGPT Plus/Pro) OAuth — PKCE + loopback HTTP server.
 //!
-//! Mirrors `pi-mono/.../oauth/openai-codex.ts`. Differs from the Anthropic
-//! flow in two ways:
+//! Differs from the Anthropic flow in two ways:
 //!
 //! - Token endpoint uses `application/x-www-form-urlencoded` (not JSON).
 //! - Access tokens are JWTs whose payload contains the user's
