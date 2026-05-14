@@ -237,6 +237,7 @@ async fn fetch_openrouter_models(client: &reqwest::Client) -> Vec<Model> {
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0)
             * 1_000_000.0;
+        let compat = openrouter_compat(&m.id);
         models.push(Model {
             id: m.id.clone(),
             name: m.name,
@@ -253,7 +254,7 @@ async fn fetch_openrouter_models(client: &reqwest::Client) -> Vec<Model> {
                 .and_then(|t| t.max_completion_tokens)
                 .unwrap_or(4096),
             headers: None,
-            compat: None,
+            compat,
             thinking_level_map: None,
         });
     }
@@ -321,6 +322,25 @@ async fn fetch_ai_gateway_models(client: &reqwest::Client) -> Vec<Model> {
 /// fold them onto the canonical id rather than shipping duplicates.
 fn is_kimi_alias(model_id: &str) -> bool {
     matches!(model_id, "k2p5" | "k2p6")
+}
+
+/// OpenRouter routes DeepSeek V3/V4 reasoning models through OpenAI-compatible
+/// completions but expects DeepSeek's native thinking-format conventions on
+/// the wire (assistant turns must echo `reasoning_content`, reasoning blocks
+/// use the deepseek tag layout). Return the compat block to attach to those
+/// model entries during generation; return `None` for unrelated ids so the
+/// helper stays a pure mapping.
+fn openrouter_compat(model_id: &str) -> Option<Compat> {
+    if !model_id.starts_with("deepseek/deepseek-v3")
+        && !model_id.starts_with("deepseek/deepseek-v4")
+    {
+        return None;
+    }
+    Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
+        thinking_format: Some("deepseek".to_string()),
+        requires_reasoning_content_on_assistant_messages: Some(true),
+        ..Default::default()
+    })))
 }
 
 fn provider_has_tool_call(m: &ModelsDevModel) -> bool {
@@ -1747,5 +1767,42 @@ mod tests {
         assert!(!is_kimi_alias("kimi-k2-thinking"));
         assert!(!is_kimi_alias(""));
         assert!(!is_kimi_alias("k2"));
+    }
+
+    /// OpenRouter routes DeepSeek V3/V4 reasoning through openai-completions
+    /// but the upstream still speaks DeepSeek's wire conventions (echo
+    /// `reasoning_content` on every assistant turn, deepseek-shaped think
+    /// blocks). Without the compat block the model returns reasoning tokens
+    /// the agent can't replay back in context.
+    #[test]
+    fn openrouter_compat_targets_deepseek_v3_and_v4_models() {
+        for id in [
+            "deepseek/deepseek-v3-thinking",
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+        ] {
+            let compat = openrouter_compat(id).unwrap_or_else(|| panic!("{id} should compat"));
+            match compat {
+                Compat::OpenAICompletions(c) => {
+                    assert_eq!(c.thinking_format.as_deref(), Some("deepseek"), "{id}");
+                    assert_eq!(
+                        c.requires_reasoning_content_on_assistant_messages,
+                        Some(true),
+                        "{id}"
+                    );
+                }
+                _ => panic!("{id}: expected OpenAICompletions compat"),
+            }
+        }
+    }
+
+    #[test]
+    fn openrouter_compat_skips_unrelated_models() {
+        assert!(openrouter_compat("openai/gpt-4o").is_none());
+        assert!(openrouter_compat("anthropic/claude-sonnet").is_none());
+        // V2 DeepSeek did not use the same wire conventions — only V3+ get
+        // the compat block.
+        assert!(openrouter_compat("deepseek/deepseek-v2").is_none());
+        assert!(openrouter_compat("").is_none());
     }
 }
