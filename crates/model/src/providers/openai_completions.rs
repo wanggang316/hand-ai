@@ -727,17 +727,21 @@ fn build_params(
     if model.base_url.contains("openrouter.ai")
         && let Some(crate::types::Compat::OpenAICompletions(compat_settings)) = &model.compat
         && let Some(router_routing) = &compat_settings.open_router_routing
-        && (router_routing.only.is_some() || router_routing.order.is_some())
     {
-        let mut extra = HashMap::new();
-        extra.insert(
-            "provider".to_string(),
-            serde_json::json!({
-                "only": router_routing.only,
-                "order": router_routing.order
-            }),
-        );
-        builder = builder.extra_params(extra);
+        // Serialize the whole `OpenRouterRouting` struct: every
+        // `Option` field is `skip_serializing_if = "Option::is_none"`
+        // so unset fields drop out of the JSON. Emit the `provider`
+        // object only if SOMETHING set — otherwise the upstream sees
+        // an empty `provider: {}` which it rejects on some routes.
+        if let Ok(provider_json) = serde_json::to_value(router_routing)
+            && provider_json
+                .as_object()
+                .is_some_and(|obj| !obj.is_empty())
+        {
+            let mut extra = HashMap::new();
+            extra.insert("provider".to_string(), provider_json);
+            builder = builder.extra_params(extra);
+        }
     }
 
     builder.build().map_err(|e| e.to_string())

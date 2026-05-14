@@ -433,19 +433,48 @@ pub struct Model {
     pub thinking_level_map: Option<ThinkingLevelMap>,
 }
 
-/// OpenRouter provider routing preferences.
+/// OpenRouter provider routing preferences. Field names mirror the
+/// OpenRouter API directly so the struct can be serialized straight
+/// into the `provider` object without per-field translation.
+/// Polymorphic fields (`sort`, `max_price`, `preferred_min_throughput`,
+/// `preferred_max_latency`) accept either a primitive or a nested
+/// object and are stored as raw `serde_json::Value` so callers can
+/// pass them through without modeling every variant up front.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenRouterRouting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub only: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "allowFallbacks")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_fallbacks: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "dataCollection")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_parameters: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub data_collection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zdr: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforce_distillable_text: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignore: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantizations: Option<Vec<String>>,
+    /// Sort strategy. Accepts a string (`"price"`, `"throughput"`,
+    /// `"latency"`) or an object with `by` / `partition` fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort: Option<serde_json::Value>,
+    /// Maximum price per million tokens, keyed by modality
+    /// (`prompt`, `completion`, `image`, `audio`, `request`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<serde_json::Value>,
+    /// Preferred minimum throughput (tokens/second). Number or
+    /// percentile-keyed object (`p50`, `p75`, `p90`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_min_throughput: Option<serde_json::Value>,
+    /// Preferred maximum latency. Number or percentile-keyed object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_max_latency: Option<serde_json::Value>,
 }
 
 /// Vercel AI Gateway routing preferences.
@@ -1143,5 +1172,67 @@ mod types_tests {
             let key = provider.as_str();
             assert_eq!(Provider::from_str(key), Some(provider));
         }
+    }
+
+    /// `OpenRouterRouting` serializes every set field with its
+    /// upstream API name. The whole struct goes directly into the
+    /// `provider` object of an OpenRouter request — any field-name
+    /// drift here would silently break routing preferences.
+    #[test]
+    fn open_router_routing_serializes_with_snake_case_api_names() {
+        let routing = super::OpenRouterRouting {
+            only: Some(vec!["anthropic".to_string()]),
+            order: Some(vec!["anthropic".to_string(), "openai".to_string()]),
+            allow_fallbacks: Some(false),
+            require_parameters: Some(true),
+            data_collection: Some("deny".to_string()),
+            zdr: Some(true),
+            enforce_distillable_text: Some(true),
+            ignore: Some(vec!["mistralai".to_string()]),
+            quantizations: Some(vec!["bf16".to_string(), "fp16".to_string()]),
+            sort: Some(serde_json::json!("throughput")),
+            max_price: Some(serde_json::json!({ "prompt": 5, "completion": 10 })),
+            preferred_min_throughput: Some(serde_json::json!(50)),
+            preferred_max_latency: Some(serde_json::json!({ "p90": 500 })),
+        };
+        let body = serde_json::to_value(&routing).expect("serialize ok");
+        // All keys must match OpenRouter's snake_case wire form
+        // (NOT the legacy `allowFallbacks` / `dataCollection`
+        // camelCase that we mistakenly used before).
+        let obj = body.as_object().expect("object");
+        for key in [
+            "only",
+            "order",
+            "allow_fallbacks",
+            "require_parameters",
+            "data_collection",
+            "zdr",
+            "enforce_distillable_text",
+            "ignore",
+            "quantizations",
+            "sort",
+            "max_price",
+            "preferred_min_throughput",
+            "preferred_max_latency",
+        ] {
+            assert!(obj.contains_key(key), "missing key {key}: {body}");
+        }
+        // No camelCase leftovers.
+        for legacy in ["allowFallbacks", "dataCollection"] {
+            assert!(
+                !obj.contains_key(legacy),
+                "legacy camelCase key {legacy} must not be emitted: {body}"
+            );
+        }
+    }
+
+    /// `skip_serializing_if = "Option::is_none"` is on every field,
+    /// so a default (empty) `OpenRouterRouting` must serialize to
+    /// `{}`. Callers can detect "nothing set" and omit the
+    /// `provider` block entirely instead of submitting an empty one.
+    #[test]
+    fn open_router_routing_default_serializes_to_empty_object() {
+        let body = serde_json::to_value(super::OpenRouterRouting::default()).expect("serialize");
+        assert_eq!(body, serde_json::json!({}));
     }
 }
