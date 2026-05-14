@@ -449,6 +449,8 @@ pub(crate) async fn parse_sse_stream(
             Err(_) => continue,
         };
 
+        capture_chunk_response_id(&chunk, &mut output.response_id);
+
         if let Some(candidates) = chunk.get("candidates").and_then(|c| c.as_array())
             && let Some(candidate) = candidates.first()
         {
@@ -728,6 +730,24 @@ pub(crate) fn is_thinking_part(part: &Value) -> bool {
     part.get("thought")
         .and_then(|t| t.as_bool())
         .unwrap_or(false)
+}
+
+/// Capture the first non-empty `responseId` from a streamed Gemini
+/// chunk into `current`. @google/genai documents
+/// `GenerateContentResponse.responseId` as an output-only identifier
+/// for each response; surfacing it on the assistant message lets
+/// downstream observability / replay correlate this turn with
+/// Google's logs. Keeping only the first non-empty value matches the
+/// upstream `??=` semantics — later chunks may repeat the same id.
+pub(crate) fn capture_chunk_response_id(chunk: &Value, current: &mut Option<String>) {
+    if current.is_some() {
+        return;
+    }
+    if let Some(rid) = chunk.get("responseId").and_then(|v| v.as_str())
+        && !rid.is_empty()
+    {
+        *current = Some(rid.to_string());
+    }
 }
 
 pub(crate) fn is_gemini3_pro_model(model_id: &str) -> bool {
@@ -1133,6 +1153,38 @@ mod tests {
             get_google_budget("gemini-2.5-flash", ThinkingLevel::Minimal, None),
             128
         );
+    }
+
+    /// The first non-empty `responseId` from a streamed chunk lands
+    /// in the assistant message's `response_id` field; subsequent
+    /// chunks with the same (or another) id don't overwrite it. An
+    /// empty string in the field is treated as missing so a stray
+    /// empty payload doesn't fool the capture into producing
+    /// `Some("")` (which would mis-signal availability downstream).
+    #[test]
+    fn capture_chunk_response_id_keeps_first_non_empty_only() {
+        let mut current: Option<String> = None;
+
+        // Empty payload: skip.
+        capture_chunk_response_id(
+            &serde_json::json!({ "responseId": "" }),
+            &mut current,
+        );
+        assert!(current.is_none());
+
+        // First real id wins.
+        capture_chunk_response_id(
+            &serde_json::json!({ "responseId": "abc123" }),
+            &mut current,
+        );
+        assert_eq!(current.as_deref(), Some("abc123"));
+
+        // Later non-empty id must not overwrite.
+        capture_chunk_response_id(
+            &serde_json::json!({ "responseId": "def456" }),
+            &mut current,
+        );
+        assert_eq!(current.as_deref(), Some("abc123"));
     }
 
     /// `thought: true` is the definitive marker for thinking parts.
