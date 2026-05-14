@@ -76,13 +76,26 @@ pub fn calculate_cost<'a>(model: &Model, usage: &'a mut Usage) -> &'a UsageCost 
     &usage.cost
 }
 
-/// Model IDs that support xhigh thinking level (e.g. certain OpenAI Codex models).
-const XHIGH_MODEL_IDS: &[&str] = &["gpt-5.1-codex-max", "gpt-5.2", "gpt-5.2-codex"];
+/// Substrings that mark a model id as xhigh-capable. Substring match is
+/// chosen so the full GPT-5.x reasoning family (`gpt-5.2-codex-max`,
+/// `gpt-5.3-mini`, ...) and the namespaced OpenRouter DeepSeek ids
+/// (`deepseek/deepseek-v4-pro`) all match without listing every variant.
+const XHIGH_MODEL_ID_PATTERNS: &[&str] = &[
+    "gpt-5.1-codex-max",
+    "gpt-5.2",
+    "gpt-5.3",
+    "gpt-5.4",
+    "gpt-5.5",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+];
 
 /// Whether this model supports xhigh thinking level.
 #[inline]
 pub fn supports_xhigh(model: &Model) -> bool {
-    XHIGH_MODEL_IDS.contains(&model.id.as_str())
+    XHIGH_MODEL_ID_PATTERNS
+        .iter()
+        .any(|needle| model.id.contains(needle))
 }
 
 /// Compare two models by id and provider. Returns false if either is None.
@@ -175,6 +188,38 @@ mod tests {
         let normal = test_model("gpt-4o", Provider::OpenAI);
         assert!(supports_xhigh(&xhigh));
         assert!(!supports_xhigh(&normal));
+    }
+
+    /// xhigh recognition must extend to the full GPT-5.x reasoning family
+    /// and the DeepSeek V4 reasoning models on every provider, including
+    /// OpenRouter where the id is namespaced (`deepseek/...`). Hardcoded
+    /// exact-match misses both the variant suffixes (`gpt-5.3-mini`,
+    /// `gpt-5.2-codex-max`) and the namespaced OpenRouter ids.
+    #[test]
+    fn supports_xhigh_extends_to_gpt5_family_and_deepseek_v4() {
+        for id in [
+            "gpt-5.2",
+            "gpt-5.2-codex",
+            "gpt-5.3",
+            "gpt-5.3-mini",
+            "gpt-5.4",
+            "gpt-5.5-preview",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+        ] {
+            let m = test_model(id, Provider::OpenAI);
+            assert!(supports_xhigh(&m), "{id} should support xhigh");
+        }
+    }
+
+    #[test]
+    fn supports_xhigh_excludes_unrelated_ids() {
+        for id in ["gpt-4o", "claude-sonnet-4", "deepseek-v3", "gpt-5.0-mini"] {
+            let m = test_model(id, Provider::OpenAI);
+            assert!(!supports_xhigh(&m), "{id} should NOT support xhigh");
+        }
     }
 
     #[test]
