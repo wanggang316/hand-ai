@@ -688,6 +688,21 @@ fn build_params(
             serde_json::json!(options.reasoning_effort.is_some()),
         );
         builder = builder.extra_params(extra);
+    } else if compat.thinking_format.as_deref() == Some("qwen-chat-template") && model.reasoning {
+        // Local Qwen-compatible servers (vLLM, llama.cpp) read the
+        // chat-template knobs nested under `chat_template_kwargs`.
+        // `preserve_thinking: true` keeps prior turns' thinking text
+        // available so multi-turn tool calls don't degrade to empty
+        // `{}` payloads (closes the upstream regression #3325).
+        let mut extra = HashMap::new();
+        extra.insert(
+            "chat_template_kwargs".to_string(),
+            serde_json::json!({
+                "enable_thinking": options.reasoning_effort.is_some(),
+                "preserve_thinking": true,
+            }),
+        );
+        builder = builder.extra_params(extra);
     } else if let Some(effort) = options.reasoning_effort
         && model.reasoning
         && compat.supports_reasoning_effort
@@ -1562,6 +1577,67 @@ mod tests {
             compat: None,
             thinking_level_map: None,
         }
+    }
+
+    /// Local Qwen-compatible servers (vLLM, llama.cpp) read thinking
+    /// knobs nested under `chat_template_kwargs`. The compat hook
+    /// `thinkingFormat: "qwen-chat-template"` opts in to this layout;
+    /// `preserve_thinking: true` keeps prior turns' thinking available
+    /// so multi-turn tool calls don't degrade to empty `{}` payloads.
+    #[test]
+    fn build_params_emits_chat_template_kwargs_for_qwen_chat_template() {
+        use crate::types::{Compat, OpenAICompletionsCompat};
+        let mut model = test_model(Provider::Openrouter);
+        model.reasoning = true;
+        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
+            thinking_format: Some("qwen-chat-template".to_string()),
+            ..Default::default()
+        })));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let mut options = OpenAICompletionsOptions::default();
+        options.reasoning_effort = Some(openai_rust::types::ReasoningEffort::Medium);
+
+        let params = build_params(&model, &context, &options).expect("build_params ok");
+        let body = serde_json::to_value(&params).expect("serialize ok");
+        let kwargs = &body["chat_template_kwargs"];
+        assert_eq!(kwargs["enable_thinking"], serde_json::Value::Bool(true));
+        assert_eq!(kwargs["preserve_thinking"], serde_json::Value::Bool(true));
+    }
+
+    /// When reasoning is disabled (no `reasoning_effort` set), the
+    /// chat-template still emits `enable_thinking: false` so the
+    /// upstream toggles thinking off — without the field the server
+    /// falls back to its default which differs per build.
+    #[test]
+    fn build_params_qwen_chat_template_disables_thinking_without_effort() {
+        use crate::types::{Compat, OpenAICompletionsCompat};
+        let mut model = test_model(Provider::Openrouter);
+        model.reasoning = true;
+        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
+            thinking_format: Some("qwen-chat-template".to_string()),
+            ..Default::default()
+        })));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let options = OpenAICompletionsOptions::default();
+
+        let params = build_params(&model, &context, &options).expect("build_params ok");
+        let body = serde_json::to_value(&params).expect("serialize ok");
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            body["chat_template_kwargs"]["preserve_thinking"],
+            serde_json::Value::Bool(true)
+        );
     }
 
     #[test]
