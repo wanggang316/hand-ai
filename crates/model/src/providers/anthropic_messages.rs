@@ -521,6 +521,13 @@ async fn parse_sse_stream(
     response: reqwest::Response,
     model: &Model,
 ) -> Result<Vec<AssistantMessageEvent>, String> {
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    parse_sse_body(&body, model)
+}
+
+/// Synchronous body parser split out so it is unit-testable without
+/// stubbing a `reqwest::Response`.
+fn parse_sse_body(body: &str, model: &Model) -> Result<Vec<AssistantMessageEvent>, String> {
     let mut events = Vec::new();
     let mut output = AssistantMessage {
         role: "assistant".to_string(),
@@ -539,9 +546,8 @@ async fn parse_sse_stream(
 
     let mut content_blocks: HashMap<usize, ContentBlockState> = HashMap::new();
     let mut current_stop_reason = StopReason::Stop;
-
-    // Read SSE stream
-    let body = response.text().await.map_err(|e| e.to_string())?;
+    let mut saw_message_start = false;
+    let mut saw_message_stop = false;
 
     for line in body.lines() {
         let line = line.trim();
@@ -562,6 +568,7 @@ async fn parse_sse_stream(
 
             match event_type {
                 "message_start" => {
+                    saw_message_start = true;
                     if let Some(msg) = event.get("message") {
                         // Parse usage from message_start
                         if let Some(usage) = msg.get("usage") {
@@ -867,6 +874,7 @@ async fn parse_sse_stream(
                 }
 
                 "message_stop" => {
+                    saw_message_stop = true;
                     // Final message
                     output.stop_reason = current_stop_reason;
 
@@ -897,6 +905,22 @@ async fn parse_sse_stream(
                 _ => {}
             }
         }
+    }
+
+    // A stream that opened with `message_start` but closed before
+    // `message_stop` is an incomplete response — the upstream's
+    // connection dropped mid-message. Surfacing it as a successful
+    // partial silently truncates the assistant turn. Promote to an
+    // Error event so callers can retry or fail loudly.
+    if saw_message_start && !saw_message_stop {
+        output.stop_reason = StopReason::Error;
+        output.error_message = Some("Anthropic stream ended before message_stop".to_string());
+        crate::models::calculate_cost(model, &mut output.usage);
+        events.push(AssistantMessageEvent::Error {
+            reason: StopReason::Error,
+            error: output,
+        });
+        return Ok(events);
     }
 
     // If no Done event was emitted, emit one
@@ -958,6 +982,58 @@ mod tests {
             compat: None,
             thinking_level_map: None,
         }
+    }
+
+    /// A stream that opens with `message_start` and then ends mid-flight
+    /// (no `message_stop`) is an incomplete response. The previous behavior
+    /// synthesized a clean Done event from whatever partial state had
+    /// accumulated, silently truncating the assistant turn. Pin the new
+    /// loud-Error behavior so a retry layer or human can react.
+    #[test]
+    fn parse_sse_body_treats_premature_eof_as_error() {
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+        );
+        let events = parse_sse_body(body, &test_model()).expect("parse should succeed");
+        let last = events.last().expect("at least one event");
+        match last {
+            AssistantMessageEvent::Error { reason, error } => {
+                assert_eq!(*reason, StopReason::Error);
+                assert!(
+                    error
+                        .error_message
+                        .as_deref()
+                        .unwrap_or("")
+                        .contains("message_stop"),
+                    "error message must mention message_stop: {:?}",
+                    error.error_message
+                );
+            }
+            other => panic!("expected Error event, got {other:?}"),
+        }
+    }
+
+    /// A clean stream (`message_start` … `message_stop`) must still finish
+    /// with a normal Done event — the new error path is scoped strictly
+    /// to the missing-stop case.
+    #[test]
+    fn parse_sse_body_emits_done_when_stream_completes_cleanly() {
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        );
+        let events = parse_sse_body(body, &test_model()).expect("parse should succeed");
+        let last = events.last().expect("at least one event");
+        assert!(
+            matches!(last, AssistantMessageEvent::Done { .. }),
+            "expected Done, got {last:?}"
+        );
     }
 
     #[test]
