@@ -283,6 +283,48 @@ fn is_retriable_error(message: &str) -> bool {
     if lower.contains("network connection lost") {
         return true;
     }
+    // SDK / proxy chains sometimes close the connection before any
+    // chunks arrive, surfacing as `request ended without sending any
+    // chunks`. Retrying covers transient upstream queueing or proxy
+    // handshake races. Match the substring `ended without` so related
+    // wordings around the same root cause are treated alike.
+    if lower.contains("ended without") {
+        return true;
+    }
+    // Additional transient tokens. Each maps to a real upstream /
+    // proxy failure mode:
+    // - "overloaded" — Anthropic-style overloaded_error
+    // - "rate limit" / "too many requests" — 429 with a different body
+    // - "fetch failed" — generic SDK transport failure
+    // - "service unavailable" / "internal error" — non-status-numbered
+    //   service blips (some proxies omit the code in their message)
+    // - "socket hang up" — Node-style ECONNRESET wording
+    // - "upstream connect" / "reset before headers" / "other side closed"
+    //   — proxy-layer connectivity blips
+    // - "timed out" / "timeout" — explicit upstream timeout signal that
+    //   isn't always paired with a 504 status string
+    // - "terminated" — Anthropic stream early-EOF wording
+    // - "retry delay" — provider asked for a backoff window
+    for needle in [
+        "overloaded",
+        "rate limit",
+        "too many requests",
+        "fetch failed",
+        "service unavailable",
+        "internal error",
+        "socket hang up",
+        "upstream connect",
+        "reset before headers",
+        "other side closed",
+        "timed out",
+        "timeout",
+        "terminated",
+        "retry delay",
+    ] {
+        if lower.contains(needle) {
+            return true;
+        }
+    }
     false
 }
 
@@ -362,6 +404,50 @@ mod tests {
     fn retriable_still_rejects_other_5xx() {
         assert!(!is_retriable_error("HTTP 501 not implemented"));
         assert!(!is_retriable_error("HTTP 505 http version not supported"));
+    }
+
+    /// SDK / proxy chains sometimes close the connection before any
+    /// chunks arrive. The error surfaces as a string of the form
+    /// "request ended without sending any chunks" (or similar wordings)
+    /// — these are textbook transient failures and the agent should
+    /// retry rather than terminate the loop.
+    #[test]
+    fn retriable_recognizes_request_ended_without_chunks() {
+        assert!(is_retriable_error(
+            "request ended without sending any chunks"
+        ));
+        assert!(is_retriable_error("Stream ended without response body"));
+        // A 500 with similar wording should still be rejected because
+        // 500 isn't in the retriable set.
+        assert!(!is_retriable_error("HTTP 500: handler error"));
+    }
+
+    /// The classifier matches a long list of transient tokens
+    /// (overloaded, rate limit, fetch failed, socket hang up, timeout,
+    /// terminated, retry delay, ...). Pin a handful so a future
+    /// refactor can't silently drop the coverage.
+    #[test]
+    fn retriable_recognizes_transient_provider_tokens() {
+        for msg in [
+            "overloaded_error: please try again",
+            "rate limit exceeded",
+            "Too Many Requests",
+            "fetch failed",
+            "service unavailable",
+            "socket hang up",
+            "upstream connect error",
+            "reset before headers were received",
+            "other side closed",
+            "request timed out after 60s",
+            "AbortError: timeout",
+            "Stream terminated unexpectedly",
+            "retry delay 30 seconds",
+        ] {
+            assert!(
+                is_retriable_error(msg),
+                "expected retriable: {msg}"
+            );
+        }
     }
 
     /// Pi-mono parity (issue #3317): Apple's URLSession surfaces a
