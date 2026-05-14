@@ -932,9 +932,53 @@ fn clipboard_writers() -> &'static [(&'static str, &'static [&'static str])] {
     ]
 }
 
+/// Cap on the base64 payload emitted via OSC 52. Some terminals truncate
+/// very large escape sequences mid-flight (xterm, tmux pass-through),
+/// which leaves the clipboard half-populated. 100 KB encoded ≈ 75 KB
+/// decoded — comfortably above most session-export sizes and well below
+/// the limit shipping terminals enforce.
+const OSC52_MAX_ENCODED_LEN: usize = 100_000;
+
+/// Heuristic: are we running inside an SSH / mosh session? Native
+/// clipboard tools on a remote host write to that host's clipboard, not
+/// the user's local one, so we still need OSC 52 even when a native
+/// writer "succeeded".
+fn is_remote_session() -> bool {
+    ["SSH_CONNECTION", "SSH_CLIENT", "MOSH_CONNECTION"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
+}
+
+/// Render the OSC 52 escape sequence for `text`. Returns `None` when the
+/// base64 payload is over [`OSC52_MAX_ENCODED_LEN`] — emitting an
+/// over-cap sequence usually corrupts the user's terminal session.
+fn osc52_sequence(text: &str) -> Option<String> {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    if encoded.len() > OSC52_MAX_ENCODED_LEN {
+        return None;
+    }
+    Some(format!("\x1b]52;c;{encoded}\x07"))
+}
+
+/// Emit the OSC 52 escape sequence to stdout. Returns whether anything
+/// was written (false when the payload exceeded the cap).
+fn emit_osc52(text: &str) -> bool {
+    match osc52_sequence(text) {
+        Some(seq) => {
+            use std::io::Write as _;
+            let _ = std::io::stdout().write_all(seq.as_bytes());
+            let _ = std::io::stdout().flush();
+            true
+        }
+        None => false,
+    }
+}
+
 fn copy_to_clipboard(text: &str) -> bool {
     use std::process::{Command, Stdio};
 
+    let mut native_ok = false;
     for (cmd, args) in clipboard_writers() {
         let Ok(mut child) = Command::new(cmd).args(*args).stdin(Stdio::piped()).spawn() else {
             continue;
@@ -947,10 +991,22 @@ fn copy_to_clipboard(text: &str) -> bool {
         }
         drop(stdin);
         if child.wait().is_ok_and(|s| s.success()) {
-            return true;
+            native_ok = true;
+            break;
         }
     }
-    false
+
+    // On a remote shell the native writer wrote to the remote host's
+    // clipboard, not the user's. Always also try OSC 52. On a local
+    // shell, only fall back to OSC 52 if no native writer worked.
+    let remote = is_remote_session();
+    let osc52_ok = if remote || !native_ok {
+        emit_osc52(text)
+    } else {
+        false
+    };
+
+    native_ok || osc52_ok
 }
 
 #[cfg(test)]
@@ -978,5 +1034,54 @@ mod tests {
         );
         assert!(table.get("pbcopy").unwrap().is_empty());
         assert!(table.get("wl-copy").unwrap().is_empty());
+    }
+
+    /// OSC 52 escape sequences must wrap the base64 payload exactly:
+    /// `ESC ] 52 ; c ; <base64> BEL`. Terminals parse this strictly —
+    /// any extra bytes leak onto the user's screen.
+    #[test]
+    fn osc52_sequence_has_correct_wrapper() {
+        let seq = osc52_sequence("hi").expect("under cap");
+        assert!(seq.starts_with("\x1b]52;c;"), "bad prefix: {seq:?}");
+        assert!(seq.ends_with('\x07'), "must end with BEL: {seq:?}");
+        // "hi" base64 = "aGk="
+        assert!(seq.contains("aGk="), "must contain base64 payload: {seq:?}");
+    }
+
+    /// Payloads above the cap return `None` so callers can fall back
+    /// to printing the text rather than corrupting the terminal with
+    /// a partial escape sequence.
+    #[test]
+    fn osc52_sequence_rejects_oversize_payload() {
+        // Each input byte → ~1.33 base64 bytes; pick a size that lands
+        // well over OSC52_MAX_ENCODED_LEN encoded.
+        let big = "a".repeat(OSC52_MAX_ENCODED_LEN);
+        assert!(
+            osc52_sequence(&big).is_none(),
+            "payloads larger than the encoded cap must be rejected"
+        );
+    }
+
+    /// SSH_CONNECTION present implies a remote session. The empty-string
+    /// case is treated as "not present" to match how shells unset vars.
+    #[test]
+    fn is_remote_session_detects_ssh_env_vars() {
+        let prev = std::env::var_os("SSH_CONNECTION");
+        // SAFETY: tests in this crate run single-threaded against this env
+        // var pair; no parallel test reads SSH_CONNECTION.
+        unsafe {
+            std::env::set_var("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 1234");
+        }
+        assert!(is_remote_session());
+        unsafe {
+            std::env::set_var("SSH_CONNECTION", "");
+        }
+        assert!(!is_remote_session() || std::env::var_os("SSH_CLIENT").is_some());
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("SSH_CONNECTION", v),
+                None => std::env::remove_var("SSH_CONNECTION"),
+            }
+        }
     }
 }
