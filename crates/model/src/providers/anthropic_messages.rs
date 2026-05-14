@@ -695,11 +695,20 @@ fn convert_assistant_content(asst_msg: &AssistantMessage, model: &Model) -> Vec<
                 }
             }
             AssistantContentBlock::ToolCall(tc) => {
+                // Anthropic rejects `input: null` on `tool_use` blocks; replay
+                // history may carry a Null arguments value when a previous turn
+                // emitted an argless tool call. Default to an empty object so
+                // the wire payload stays well-formed.
+                let input = if tc.arguments.is_null() {
+                    serde_json::Value::Object(serde_json::Map::new())
+                } else {
+                    tc.arguments.clone()
+                };
                 blocks.push(serde_json::json!({
                     "type": "tool_use",
                     "id": normalize_tool_call_id(&tc.id),
                     "name": &tc.name,
-                    "input": &tc.arguments,
+                    "input": input,
                 }));
             }
         }
@@ -1354,6 +1363,43 @@ mod tests {
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "tool_use");
         assert_eq!(content[1]["name"], "read");
+    }
+
+    /// Anthropic rejects `tool_use` blocks whose `input` is `null` (the API
+    /// requires an object). Replay history can carry a Null arguments value
+    /// when a previous turn issued an argless tool call. The converter must
+    /// emit `{}` in that case so the wire payload stays well-formed.
+    #[test]
+    fn test_convert_assistant_tool_call_defaults_null_input_to_empty_object() {
+        let model = test_model();
+        let asst = AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::ToolCall(ToolCall::new(
+                "call_x",
+                "now",
+                serde_json::Value::Null,
+            ))],
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            model: "claude-sonnet-4-20250514".to_string(),
+            usage: crate::types::Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        };
+        let msgs = vec![Message::Assistant(asst)];
+        let result = convert_messages_to_anthropic(&msgs, &model);
+        let content = result[0]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "tool_use");
+        assert!(
+            content[0]["input"].is_object(),
+            "input must be an object, got: {}",
+            content[0]["input"]
+        );
+        assert_eq!(content[0]["input"].as_object().unwrap().len(), 0);
     }
 
     #[test]

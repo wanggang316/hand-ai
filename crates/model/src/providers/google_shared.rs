@@ -272,9 +272,17 @@ pub(crate) fn convert_messages(messages: &[Message], model: &Model) -> Vec<Value
                             }
                         }
                         AssistantContentBlock::ToolCall(tc) => {
+                            // Gemini rejects `args: null` on function calls;
+                            // default Null arguments to an empty object so
+                            // argless tool-call history replays cleanly.
+                            let args = if tc.arguments.is_null() {
+                                serde_json::Value::Object(serde_json::Map::new())
+                            } else {
+                                tc.arguments.clone()
+                            };
                             let mut fc = serde_json::json!({
                                 "name": tc.name,
-                                "args": tc.arguments,
+                                "args": args,
                             });
                             if requires_tool_call_id(&model.id) {
                                 fc.as_object_mut()
@@ -964,6 +972,40 @@ mod tests {
             part.get("thoughtSignature").is_none(),
             "unsigned Gemini-3 tool call must not carry sentinel signature: {part}"
         );
+    }
+
+    /// Gemini rejects `functionCall.args = null` (the field must be an
+    /// object). Replay history may carry a Null arguments value when a
+    /// previous turn issued an argless tool call. The converter must emit
+    /// `{}` in that case so the wire payload stays well-formed.
+    #[test]
+    fn google_argless_tool_call_defaults_args_to_empty_object() {
+        let model = gemini3_model("gemini-2.5-flash");
+        // Build an assistant message with a Null arguments value (mimics
+        // history serialized from a model that emitted no arguments).
+        let mut tc = ToolCall::new("call-x", "now", serde_json::Value::Null);
+        tc.thought_signature = None;
+        let msg = Message::Assistant(AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::ToolCall(tc)],
+            api: Api::GoogleGenerativeAi,
+            provider: Provider::Google,
+            model: "gemini-2.5-flash".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        });
+        let contents = convert_messages(&[msg], &model);
+        let fc = contents[0]["parts"][0]
+            .get("functionCall")
+            .expect("functionCall present");
+        let args = fc.get("args").expect("args present");
+        assert!(args.is_object(), "args must be an object, got: {args}");
+        assert_eq!(args.as_object().unwrap().len(), 0);
     }
 
     /// A real, valid base64 thought signature from the same provider/
