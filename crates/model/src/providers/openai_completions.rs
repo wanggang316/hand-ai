@@ -726,6 +726,25 @@ fn build_params(
             }),
         );
         builder = builder.extra_params(extra);
+    } else if compat.thinking_format.as_deref() == Some("openrouter") && model.reasoning {
+        // OpenRouter normalizes reasoning across upstreams via a
+        // nested `reasoning` object. When the caller explicitly
+        // asked for an effort, forward the mapped value; when they
+        // didn't, emit `effort: "none"` so the router doesn't burn
+        // thinking tokens by default. The SDK's top-level
+        // `reasoning_effort` field is the wrong shape for OpenRouter
+        // — fall through to extra_params for the nested form.
+        let effort_str = match options.reasoning_effort {
+            Some(openai_rust::types::ReasoningEffort::Minimal) => "minimal",
+            Some(openai_rust::types::ReasoningEffort::Low) => "low",
+            Some(openai_rust::types::ReasoningEffort::Medium) => "medium",
+            Some(openai_rust::types::ReasoningEffort::High) => "high",
+            None => "none",
+        };
+        builder = builder.insert_extra_param(
+            "reasoning",
+            serde_json::json!({ "effort": effort_str }),
+        );
     } else if let Some(effort) = options.reasoning_effort
         && model.reasoning
         && compat.supports_reasoning_effort
@@ -1712,6 +1731,90 @@ mod tests {
         let compat = affinity_compat(true);
         assert!(resolve_session_affinity_headers(&compat, None, None).is_empty());
         assert!(resolve_session_affinity_headers(&compat, Some(""), None).is_empty());
+    }
+
+    /// OpenRouter normalizes reasoning across providers via a nested
+    /// `reasoning: { effort: ... }` object. When the caller passes an
+    /// effort, hand-ai must forward the mapped value; when they don't,
+    /// emit `effort: "none"` so the router doesn't burn thinking
+    /// tokens by default. The SDK's top-level `reasoning_effort`
+    /// field is the wrong shape and must NOT be emitted.
+    #[test]
+    fn build_params_emits_openrouter_reasoning_object_when_effort_set() {
+        let mut model = test_model(Provider::Openrouter);
+        model.reasoning = true;
+        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let mut options = OpenAICompletionsOptions::default();
+        options.reasoning_effort = Some(openai_rust::types::ReasoningEffort::High);
+
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(
+            body["reasoning"],
+            serde_json::json!({ "effort": "high" }),
+            "openrouter expects nested reasoning object: {body}"
+        );
+        // The top-level `reasoning_effort` field would be the wrong
+        // shape for OpenRouter and must NOT appear in the body.
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "openrouter must not emit top-level reasoning_effort: {body}"
+        );
+    }
+
+    /// Explicit-off: when reasoning is unset on an openrouter
+    /// reasoning model, send `{ effort: "none" }` so the router
+    /// doesn't burn thinking tokens by default. Without this, the
+    /// router would use its own default (often "high") and the user
+    /// pays for unwanted thinking output.
+    #[test]
+    fn build_params_emits_openrouter_reasoning_none_when_effort_off() {
+        let mut model = test_model(Provider::Openrouter);
+        model.reasoning = true;
+        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let options = OpenAICompletionsOptions::default();
+
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(
+            body["reasoning"],
+            serde_json::json!({ "effort": "none" }),
+            "openrouter explicit-off must emit effort: none: {body}"
+        );
+    }
+
+    /// Non-reasoning OpenRouter models must NOT carry a `reasoning`
+    /// field at all — the upstream rejects it on models that don't
+    /// support thinking.
+    #[test]
+    fn build_params_omits_openrouter_reasoning_on_non_reasoning_models() {
+        let mut model = test_model(Provider::Openrouter);
+        model.reasoning = false;
+        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let mut options = OpenAICompletionsOptions::default();
+        options.reasoning_effort = Some(openai_rust::types::ReasoningEffort::High);
+
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert!(
+            body.get("reasoning").is_none(),
+            "non-reasoning model must not emit reasoning: {body}"
+        );
     }
 
     /// Z.ai exposes incremental tool-call streaming via a top-level
