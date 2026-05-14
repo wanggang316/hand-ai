@@ -26,6 +26,13 @@ pub(crate) fn build_request_body(
     let mut body = serde_json::json!({
         "model": model.id,
         "stream": true,
+        // Default to `store: false` so OpenAI doesn't keep a
+        // server-side copy of the request / response. Callers that
+        // want history retention (replay, audit, ...) can re-enable
+        // it on the model.compat side. The Codex Responses variant
+        // also overwrites this to false explicitly because that
+        // backend rejects `store: true`.
+        "store": false,
     });
 
     body["input"] = convert_to_input_for_model(context, model);
@@ -1104,6 +1111,22 @@ mod tests {
             }
             other => panic!("expected Error event, got {other:?}"),
         }
+    }
+
+    /// OpenAI's Responses API stores the request / response on the
+    /// server unless the caller sets `store: false`. Pinning it off
+    /// by default avoids surprising server-side history logging.
+    #[test]
+    fn build_request_body_pins_store_false_by_default() {
+        let body = build_request_body(
+            &responses_test_model(),
+            &responses_test_context(),
+            &StreamOptions::default(),
+        );
+        assert_eq!(
+            body["store"], serde_json::Value::Bool(false),
+            "store must default to false: {body}"
+        );
     }
 
     /// `call_id` on a Responses request must be alphanumeric, `_`,
