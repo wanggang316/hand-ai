@@ -163,6 +163,29 @@ mod tests {
         assert!(models.iter().any(|m| m.id == model_id));
     }
 
+    /// Kimi's upstream API gates traffic on a recognised `User-Agent`
+    /// string. Without it the SDK is rejected as an unknown client.
+    /// Every Kimi-for-coding model in the catalog must therefore
+    /// carry the `KimiCLI/1.5` UA header in its baked-in metadata.
+    #[test]
+    fn kimi_coding_models_carry_user_agent_header() {
+        let kimi_models = get_models("kimi-coding");
+        assert!(
+            !kimi_models.is_empty(),
+            "expected at least one kimi-coding model in the catalog"
+        );
+        for m in kimi_models {
+            let headers = m
+                .headers
+                .as_ref()
+                .unwrap_or_else(|| panic!("kimi model {} missing headers", m.id));
+            let ua = headers
+                .get("User-Agent")
+                .unwrap_or_else(|| panic!("kimi model {} missing User-Agent header", m.id));
+            assert_eq!(ua, "KimiCLI/1.5", "model {} has wrong UA: {ua}", m.id);
+        }
+    }
+
     #[test]
     fn calculate_cost_sets_breakdown_and_total() {
         let model = test_model("cost-test", Provider::OpenAI);

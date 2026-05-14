@@ -324,6 +324,15 @@ fn is_kimi_alias(model_id: &str) -> bool {
     matches!(model_id, "k2p5" | "k2p6")
 }
 
+/// Static headers attached to every Kimi-for-coding request. The
+/// upstream Kimi API gates traffic on a recognised `User-Agent`
+/// string — without it the SDK is rejected as an unknown client.
+fn kimi_static_headers() -> std::collections::HashMap<String, String> {
+    let mut h = std::collections::HashMap::new();
+    h.insert("User-Agent".to_string(), "KimiCLI/1.5".to_string());
+    h
+}
+
 /// OpenRouter routes DeepSeek V3/V4 reasoning models through OpenAI-compatible
 /// completions but expects DeepSeek's native thinking-format conventions on
 /// the wire (assistant turns must echo `reasoning_content`, reasoning blocks
@@ -916,7 +925,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 cost: cost_from_model(m),
                 context_window: limit_context(m),
                 max_tokens: limit_output(m),
-                headers: None,
+                headers: Some(kimi_static_headers()),
                 compat: None,
                 thinking_level_map: None,
             });
@@ -1499,7 +1508,7 @@ fn static_kimi_coding_models() -> Vec<Model> {
             cost: cost(0.0, 0.0, 0.0, 0.0),
             context_window: 262144,
             max_tokens: 32768,
-            headers: None,
+            headers: Some(kimi_static_headers()),
             compat: None,
             thinking_level_map: None,
         },
@@ -1514,7 +1523,7 @@ fn static_kimi_coding_models() -> Vec<Model> {
             cost: cost(0.0, 0.0, 0.0, 0.0),
             context_window: 262144,
             max_tokens: 32768,
-            headers: None,
+            headers: Some(kimi_static_headers()),
             compat: None,
             thinking_level_map: None,
         },

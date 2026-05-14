@@ -1238,7 +1238,10 @@
         "cacheWrite": 0.0
       },
       "contextWindow": 262144,
-      "maxTokens": 32768
+      "maxTokens": 32768,
+      "headers": {
+        "User-Agent": "KimiCLI/1.5"
+      }
     },
     "kimi-k2-thinking": {
       "id": "kimi-k2-thinking",
@@ -1257,7 +1260,10 @@
         "cacheWrite": 0.0
       },
       "contextWindow": 262144,
-      "maxTokens": 32768
+      "maxTokens": 32768,
+      "headers": {
+        "User-Agent": "KimiCLI/1.5"
+      }
     }
   },
   "anthropic": {
