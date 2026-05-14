@@ -1664,6 +1664,52 @@ mod tests {
         assert!(err.contains("must specify"), "got: {err}");
     }
 
+    /// A per-model `baseUrl` inside a custom-models block must beat the
+    /// provider-level `baseUrl`. Splitting traffic per-model is the whole
+    /// point of #4063 (one provider, two endpoints — e.g. a routing
+    /// gateway in front of one model and direct API for another).
+    #[test]
+    fn per_model_base_url_overrides_provider_base_url() {
+        let dir = TempDir::new().unwrap();
+        let body = r#"{
+          "providers": {
+            "openai": {
+              "baseUrl": "https://default.example.com",
+              "apiKey": "test-key",
+              "api": "openai-responses",
+              "models": [
+                { "id": "default-model", "name": "Default" },
+                {
+                  "id": "special-model",
+                  "name": "Special",
+                  "baseUrl": "https://special.example.com"
+                }
+              ]
+            }
+          }
+        }"#;
+        let registry = registry_with_models_json(&dir, body);
+        assert!(
+            registry.error().is_none(),
+            "load error: {:?}",
+            registry.error()
+        );
+        let default = registry
+            .all()
+            .iter()
+            .find(|m| m.id == "default-model")
+            .cloned()
+            .expect("default-model must register");
+        let special = registry
+            .all()
+            .iter()
+            .find(|m| m.id == "special-model")
+            .cloned()
+            .expect("special-model must register");
+        assert_eq!(default.base_url, "https://default.example.com");
+        assert_eq!(special.base_url, "https://special.example.com");
+    }
+
     #[test]
     fn provider_override_replaces_base_url_for_built_in_models() {
         let dir = TempDir::new().unwrap();
