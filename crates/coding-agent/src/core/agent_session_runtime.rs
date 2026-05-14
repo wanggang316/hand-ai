@@ -1,21 +1,21 @@
 //! High-level session orchestrator.
 //!
-//! TypeScript reference (`pi-mono`): `core/agent-session-runtime.ts`. The TS
-//! `AgentSessionRuntime` owns the current [`crate::core::agent_session::AgentSession`]
-//! plus its cwd-bound [`AgentSessionServices`] and exposes
-//! `switchSession` / `newSession` / `fork` / `importFromJsonl` / `dispose`
-//! that all follow the same teardown-then-rebuild pattern: emit lifecycle
-//! events, dispose the previous session, create a new one via the supplied
-//! factory, and rebind host UI.
+//! [`AgentSessionRuntime`] owns the current
+//! [`crate::core::agent_session::AgentSession`] plus its cwd-bound
+//! [`AgentSessionServices`] and exposes `switch_session` /
+//! `new_session` / `fork` / `import_from_jsonl` / `dispose` that all
+//! follow the same teardown-then-rebuild pattern: emit lifecycle
+//! events, dispose the previous session, create a new one via the
+//! supplied factory, and rebind host UI.
 //!
-//! The Rust port carries the **structural** scaffolding: the runtime struct,
-//! the factory type, the diagnostic carrier, and the import-error type. The
-//! lifecycle methods that depend on Rust pieces still in flight
-//! (`ExtensionRunner` events, persistence-aware `SessionManager` helpers
-//! such as `createBranchedSession` / `newSession` / `getSessionFile`,
-//! `assertSessionCwdExists`, `AgentSession::dispose`,
-//! `AgentSession::createReplacedSessionContext`) are tracked with
-//! `TODO(parity)` markers and are not exposed here yet.
+//! The current implementation carries the **structural** scaffolding:
+//! the runtime struct, the factory type, the diagnostic carrier, and
+//! the import-error type. Lifecycle methods that depend on pieces
+//! still in flight (`ExtensionRunner` events, persistence-aware
+//! `SessionManager` helpers such as `create_branched_session` /
+//! `new_session` / `get_session_file`, `assert_session_cwd_exists`,
+//! `AgentSession::dispose`, `AgentSession::create_replaced_session_context`)
+//! are tracked with `TODO` markers and are not exposed here yet.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};

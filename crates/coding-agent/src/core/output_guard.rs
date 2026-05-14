@@ -1,17 +1,14 @@
 //! Stdout containment for protocol modes (RPC / print).
 //!
-//! Mirrors `pi-mono/packages/coding-agent/src/core/output-guard.ts`. In TS,
-//! Node lets a process monkey-patch `process.stdout.write` so that every
-//! ambient `console.log` or third-party stdout write is silently rerouted
-//! to stderr. This protects modes whose stdout is a structured JSONL
-//! channel (RPC, `--print`) from being corrupted by stray prints.
+//! Protects modes whose stdout is a structured JSONL channel (RPC,
+//! `--print`) from being corrupted by stray prints from arbitrary code.
 //!
-//! ## Rust adaptation
+//! ## Approach
 //!
 //! Rust does not let us swap `std::io::stdout()`'s writer at runtime:
 //! `println!` and `Stdout` go through a global, non-replaceable handle.
-//! Rather than fight the runtime, this module provides the same API
-//! surface as the TS reference but defines it as a *protocol contract*:
+//! Rather than fight the runtime, this module defines a *protocol
+//! contract*:
 //!
 //! - In RPC / print mode, code that emits protocol bytes calls
 //!   [`write_raw_stdout`] (or [`flush_raw_stdout`]). General logging

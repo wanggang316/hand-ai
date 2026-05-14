@@ -1,22 +1,20 @@
 //! Custom message types and LLM-context transformer.
 //!
-//! Mirrors `pi-mono/packages/coding-agent/src/core/messages.ts`. The TS
-//! file extends `AgentMessage` (declaration-merged into `pi-agent-core`)
-//! with four coding-agent–specific variants — `bashExecution`,
-//! `custom`, `branchSummary`, `compactionSummary` — and provides a
-//! `convertToLlm` transformer that flattens an agent-message stream
-//! down to the LLM's `Message` shape.
+//! Defines four coding-agent–specific message variants
+//! (`bashExecution`, `custom`, `branchSummary`, `compactionSummary`)
+//! and a [`convert_to_llm`] transformer that flattens an agent-message
+//! stream down to the LLM's `Message` shape.
 //!
-//! ## Rust adaptation
+//! ## Current shape
 //!
-//! There is no Rust port of `pi-agent-core::AgentMessage` yet (the
-//! `rpc::types::MessagesData` carries opaque JSON until that lands).
-//! Until it does, this module owns the four custom variants directly
-//! as a Rust enum, with the same on-the-wire shape so a future
-//! `AgentMessage` port can adopt these variants verbatim.
+//! Until the full agent-message type ships through the RPC layer
+//! (`rpc::types::MessagesData` carries opaque JSON for now), this
+//! module owns the four custom variants directly as a Rust enum. The
+//! on-the-wire shape is stable so a future generic agent-message
+//! surface can adopt these variants verbatim.
 //!
-//! [`convert_to_llm`] performs the same flattening as the TS reference
-//! into `Vec<model::Message>`:
+//! [`convert_to_llm`] flattens an agent-message stream into
+//! `Vec<model::Message>`:
 //!
 //! - `bashExecution` → `User { text: bashExecutionToText }`, dropped
 //!   when `exclude_from_context == true`.

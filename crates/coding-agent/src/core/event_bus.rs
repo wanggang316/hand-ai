@@ -1,12 +1,10 @@
 //! Typed broadcast event bus.
 //!
-//! TypeScript reference (`pi-mono`): `core/event-bus.ts`. The reference uses a
-//! Node `EventEmitter` keyed by free-form string channels with `unknown`
-//! payloads. Per the conversion guidelines (§14, §15) we replace that pattern
-//! with a typed [`tokio::sync::broadcast`] channel wrapper instead of
-//! `Box<dyn Fn>` callbacks. Each [`EventBus`] instance is therefore parametrised
-//! over a single event type `E` — different channels become different bus
-//! instances or different enum variants.
+//! Wraps [`tokio::sync::broadcast`] in a typed channel. Each
+//! [`EventBus`] instance is parametrised over a single event type `E`
+//! — different channels become different bus instances or different
+//! enum variants, which keeps subscriber types explicit and avoids the
+//! `Box<dyn Fn>` callback pattern.
 
 use tokio::sync::broadcast;
 

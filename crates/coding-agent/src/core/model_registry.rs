@@ -1,11 +1,11 @@
 //! Model registry — manages built-in and custom models.
 //!
-//! Mirrors `pi-mono/packages/coding-agent/src/core/model-registry.ts`. Owns
-//! the catalog of models available to a session: built-in models from the
-//! `model` crate's static catalog, plus custom models / per-provider /
-//! per-model overrides loaded from `~/.hand/agent/models.json`. Provides
-//! auth-aware queries used by [`crate::core::model_resolver`] and the RPC
-//! dispatcher to surface a usable subset of the catalog.
+//! Owns the catalog of models available to a session: built-in models
+//! from the `model` crate's static catalog, plus custom models /
+//! per-provider / per-model overrides loaded from
+//! `~/.hand/agent/models.json`. Provides auth-aware queries used by
+//! [`crate::core::model_resolver`] and the RPC dispatcher to surface a
+//! usable subset of the catalog.
 //!
 //! ## Iteration order
 //!

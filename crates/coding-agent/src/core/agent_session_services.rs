@@ -1,18 +1,18 @@
 //! Cwd-bound runtime services for an agent session.
 //!
-//! TypeScript reference (`pi-mono`): `core/agent-session-services.ts`. The
-//! reference exposes [`AgentSessionServices`] as the service container
-//! (auth, settings, model registry, resource loader, diagnostics) that an
-//! [`crate::core::agent_session::AgentSession`] is later constructed against.
-//! That separation lets a runtime swap services for a different effective
-//! `cwd` without rebuilding the session immediately.
+//! [`AgentSessionServices`] is the service container — auth, settings,
+//! model registry, resource loader, diagnostics — that an
+//! [`crate::core::agent_session::AgentSession`] is later constructed
+//! against. That separation lets a runtime swap services for a
+//! different effective `cwd` without rebuilding the session
+//! immediately.
 //!
-//! The Rust port is intentionally narrow: it holds the subset of services
-//! the existing Rust [`crate::core::agent_session::AgentSession`] already
-//! understands. Pieces that depend on Rust-side parity not yet ported
-//! (extension runner-driven flag values, dynamic provider registration via
-//! the resource loader) are tracked with `TODO(parity)` markers and surface
-//! as no-ops here.
+//! The current implementation is intentionally narrow: it holds the
+//! subset of services that [`crate::core::agent_session::AgentSession`]
+//! already understands. Pieces still in flight (extension
+//! runner-driven flag values, dynamic provider registration via the
+//! resource loader) are tracked with `TODO` markers and surface as
+//! no-ops here.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

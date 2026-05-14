@@ -1,9 +1,8 @@
 //! Resolve configuration values that may be shell commands, environment variables, or literals.
 //!
-//! Mirrors `pi-mono/packages/coding-agent/src/core/resolve-config-value.ts`.
-//! Used by [`crate::core::model_registry`] (and, in the TS reference, by
-//! `auth-storage.ts`) to resolve user-supplied config strings such as API keys
-//! and header values.
+//! Used by [`crate::core::model_registry`] (and the auth-storage layer)
+//! to resolve user-supplied config strings such as API keys and header
+//! values.
 //!
 //! ## Resolution rules
 //!

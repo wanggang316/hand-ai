@@ -1,17 +1,16 @@
 //! Detect and report sessions whose stored working directory no longer
 //! exists.
 //!
-//! Mirrors `pi-mono/packages/coding-agent/src/core/session-cwd.ts`. When
-//! the user resumes a session whose original cwd has been deleted (or
-//! the session is opened on a different machine), we surface a clear
-//! error with both the stored cwd and the current cwd, so the caller
+//! When the user resumes a session whose original cwd has been deleted
+//! (or the session is opened on a different machine), surface a clear
+//! error with both the stored cwd and the current cwd so the caller
 //! can decide whether to abort or fall back to the current directory.
 //!
-//! ## Rust adaptation
+//! ## Source abstraction
 //!
-//! TS exposes a small structural type `SessionCwdSource` so it can be
-//! satisfied by both the real `SessionManager` and lightweight test
-//! doubles. We mirror that with the [`SessionCwdSource`] trait, which
+//! The module exposes a [`SessionCwdSource`] trait so the lookup can
+//! be satisfied by both the real `SessionManager` and lightweight test
+//! doubles. The real [`crate::core::session_manager::SessionManager`]
 //! the real [`crate::core::session_manager::SessionManager`] does
 //! **not** auto-implement (its `cwd` and session-file accessors have
 //! different signatures); callers wire it up at the call site, e.g.

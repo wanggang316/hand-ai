@@ -1,27 +1,26 @@
 //! Top-level SDK assembly.
 //!
-//! TypeScript reference (`pi-mono`): `core/sdk.ts`. The reference exports
-//! [`CreateAgentSessionOptions`] / [`CreateAgentSessionResult`], a curated set
-//! of re-exports, and the `createAgentSession` factory that wires every
-//! cwd-bound piece (auth, model registry, settings, resource loader,
-//! extensions, agent runtime) into a runnable [`AgentSession`].
+//! Exports [`CreateAgentSessionOptions`] / [`CreateAgentSessionResult`],
+//! a curated set of re-exports, and the
+//! [`build_default_runtime`] factory that wires every cwd-bound piece
+//! (auth, model registry, settings, resource loader, extensions, agent
+//! runtime) into a runnable [`AgentSession`].
 //!
-//! The Rust port is intentionally light:
+//! The module today is intentionally light:
 //!
-//! 1. Re-exports for the curated public surface — `lib.rs` already re-exports
-//!    most of these at the crate root, so `core::sdk` exists primarily as
-//!    a one-stop import for callers that prefer the TS-style namespace.
-//! 2. The parity types ([`CreateAgentSessionOptions`],
-//!    [`CreateAgentSessionResult`]) so consumers can write code against the
-//!    same shape that will eventually be honored once
+//! 1. Re-exports for the curated public surface — `lib.rs` already
+//!    re-exports most of these at the crate root, so `core::sdk` exists
+//!    primarily as a one-stop import.
+//! 2. The public option/result types so consumers can write code
+//!    against the shape that will be honoured once
 //!    [`build_default_runtime`] becomes meaningful.
 //! 3. A [`build_default_runtime`] entry-point that returns an explicit
-//!    "not yet wired" error today. The factory cannot be implemented until
-//!    [`crate::core::agent_session_runtime::CreateAgentSessionRuntimeFactory`]
-//!    has counterparts for `findInitialModel`, the extension runner, the
-//!    full `ResourceLoader` facade, and the cwd-bound `Agent` builder. Each
-//!    missing dependency is tracked in `agent_session_services.rs` and
-//!    `agent_session_runtime.rs`.
+//!    "not yet wired" error today. The factory cannot be implemented
+//!    until [`crate::core::agent_session_runtime::CreateAgentSessionRuntimeFactory`]
+//!    has counterparts for `findInitialModel`, the extension runner,
+//!    the full `ResourceLoader` facade, and the cwd-bound `Agent`
+//!    builder. Each missing dependency is tracked in
+//!    `agent_session_services.rs` and `agent_session_runtime.rs`.
 
 use std::path::{Path, PathBuf};
 

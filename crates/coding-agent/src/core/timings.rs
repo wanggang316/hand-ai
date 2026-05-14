@@ -1,5 +1,4 @@
-//! Startup-profiling helper. Mirrors
-//! `pi-mono/packages/coding-agent/src/core/timings.ts`.
+//! Startup-profiling helper.
 //!
 //! A tiny global checkpoint log used to profile process startup. Each call
 //! to [`time`] records the label and the milliseconds elapsed since the

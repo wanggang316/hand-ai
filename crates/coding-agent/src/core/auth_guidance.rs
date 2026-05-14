@@ -1,40 +1,28 @@
 //! User-facing CLI hints for missing / invalid model credentials.
 //!
-//! Mirrors `pi-mono/packages/coding-agent/src/core/auth-guidance.ts`. The TS
-//! file is a small set of formatting helpers used by the model-selection and
+//! A small set of formatting helpers used by the model-selection and
 //! request-auth paths to build error messages that point the user at the
 //! `/login` slash command and the bundled provider docs.
 //!
-//! ## Scope (matches TS exactly)
+//! ## Scope
 //!
-//! The TS reference contains four pure functions and a single
-//! `UNKNOWN_PROVIDER = "unknown"` sentinel. It does **not** branch on
-//! provider id, OAuth-vs-API-key, expiry, or [`crate::core::auth_storage`]
-//! state. This port preserves that responsibility 1:1; provider-specific
-//! OAuth advice and credential-expiry checks belong elsewhere if/when they
-//! are introduced upstream.
+//! Four pure functions plus a single `UNKNOWN_PROVIDER = "unknown"`
+//! sentinel. The module does **not** branch on provider id,
+//! OAuth-vs-API-key, expiry, or [`crate::core::auth_storage`] state —
+//! provider-specific OAuth advice and credential-expiry checks belong
+//! elsewhere.
 //!
-//! ## Rebrand notes
+//! ## docs_path parameterisation
 //!
-//! User-facing copy is held verbatim from TS. The TS reference resolves
-//! `getDocsPath()` (the `docs/` directory bundled with the npm package) at
-//! call time. Rust has no equivalent ambient package layout, so this port
-//! takes `docs_path: &Path` as a pure parameter — the caller resolves the
-//! path against whatever distribution layout is in play and passes it in.
-//! That keeps the helpers deterministic for tests and avoids embedding a
-//! filesystem assumption into the module.
-//!
-//! Apart from the `docs_path` parameterisation, the only deviation from TS
-//! is the `pi` → `hand` rebrand where the binary name appears. The TS
-//! reference does not actually mention the `pi` binary by name in this file
-//! (it only references the `/login` and `/model` slash commands and the
-//! docs paths), so in practice the on-disk strings are byte-identical to
-//! TS.
+//! The functions take `docs_path: &Path` as a pure parameter — the caller
+//! resolves the path against whatever distribution layout is in play and
+//! passes it in. That keeps the helpers deterministic for tests and
+//! avoids embedding a filesystem assumption into the module.
 
 use std::path::Path;
 
-/// Sentinel provider id that means "we don't know which provider was
-/// requested" — matches `UNKNOWN_PROVIDER` in the TS reference.
+/// Sentinel provider id used when the caller has no concrete provider
+/// in hand.
 pub const UNKNOWN_PROVIDER: &str = "unknown";
 
 /// Common 3-line login pointer used by every other helper.

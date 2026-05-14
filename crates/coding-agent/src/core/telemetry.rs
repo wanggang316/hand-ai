@@ -1,9 +1,8 @@
-//! Install-telemetry gate. Mirrors `pi-mono/packages/coding-agent/src/core/telemetry.ts`.
+//! Install-telemetry gate.
 //!
 //! The single responsibility of this module is to answer one question:
-//! "should the agent attach install-telemetry attribution headers when calling
-//! upstream model providers?". The TS reference is a 14-line, single-function
-//! file (`isInstallTelemetryEnabled`) and this module is its 1:1 port.
+//! "should the agent attach install-telemetry attribution headers when
+//! calling upstream model providers?".
 //!
 //! Resolution order:
 //!   1. `HAND_TELEMETRY` env var. If present, parsed as truthy

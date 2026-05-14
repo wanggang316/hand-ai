@@ -1,22 +1,14 @@
 //! Default constants for coding-agent settings.
 //!
-//! Mirrors `pi-mono/packages/coding-agent/src/core/defaults.ts`. The TS
-//! file is a single-symbol module:
-//!
-//! ```ts
-//! export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
-//! ```
-//!
-//! Today the Rust [`crate::core::settings::Settings::defaults`] leaves
+//! Today [`crate::core::settings::Settings::defaults`] leaves
 //! `default_thinking_level` as `None` and the request-time logic falls
 //! back to the model's intrinsic default. This module exposes the same
-//! constant on the Rust side so downstream code (and a future
-//! `Settings::defaults` change) can opt into the TS-matching default
-//! without re-deriving it.
+//! "medium" baseline that the project ships with so downstream code (and
+//! a future `Settings::defaults` change) can opt into it without
+//! re-deriving the value.
 //!
-//! Keeping this in a tiny dedicated module — rather than inlining the
-//! value into `settings.rs` — preserves the 1:1 parity with TS so the
-//! port is greppable, and makes the migration to a non-`None`
+//! Keeping this in a tiny dedicated module — rather than inlining it
+//! into `settings.rs` — makes the migration to a non-`None`
 //! `default_thinking_level` a single-line edit elsewhere.
 
 use crate::core::settings::ThinkingLevelSetting;
