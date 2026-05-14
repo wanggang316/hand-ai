@@ -461,11 +461,29 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
     // older Claude 4 models — UIs that surface the thinking trace
     // depend on it; the encrypted signature is unaffected either way.
     if supports_adaptive {
+        // xhigh maps to two different effort names across the
+        // adaptive-thinking generations:
+        // - Opus 4.6 uses the legacy `max` effort (highest tier).
+        // - Opus 4.7+ exposes `xhigh` natively; sending `max` on 4.7
+        //   is rejected with "invalid effort".
+        // Other adaptive-thinking models (Sonnet 4.6, ...) don't
+        // support either xhigh OR max; clamp to `high` so the request
+        // still passes validation.
+        let is_opus_4_6 = model.id.contains("opus-4-6") || model.id.contains("opus-4.6");
+        let is_opus_4_7 = model.id.contains("opus-4-7") || model.id.contains("opus-4.7");
         let effort = match level {
             ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
             ThinkingLevel::Medium => "medium",
             ThinkingLevel::High => "high",
-            ThinkingLevel::Xhigh => "max",
+            ThinkingLevel::Xhigh => {
+                if is_opus_4_6 {
+                    "max"
+                } else if is_opus_4_7 {
+                    "xhigh"
+                } else {
+                    "high"
+                }
+            }
         };
 
         serde_json::json!({
@@ -1373,6 +1391,46 @@ mod tests {
             config["display"], "summarized",
             "adaptive thinking must pin display: summarized: {config}"
         );
+    }
+
+    /// `xhigh` maps to different adaptive effort names across the
+    /// Opus generations:
+    /// - Opus 4.6 uses the legacy `"max"` effort (highest tier).
+    /// - Opus 4.7 exposes `"xhigh"` natively; sending `"max"` on 4.7
+    ///   would be rejected as an invalid effort name.
+    #[test]
+    fn thinking_config_xhigh_maps_to_max_on_opus_4_6() {
+        let model = Model {
+            id: "claude-opus-4-6-20251022".to_string(),
+            ..test_model()
+        };
+        let config = build_thinking_config(ThinkingLevel::Xhigh, &model);
+        assert_eq!(config["type"], "adaptive");
+        assert_eq!(config["effort"], "max");
+    }
+
+    #[test]
+    fn thinking_config_xhigh_maps_to_xhigh_on_opus_4_7() {
+        let model = Model {
+            id: "claude-opus-4-7-20260101".to_string(),
+            ..test_model()
+        };
+        let config = build_thinking_config(ThinkingLevel::Xhigh, &model);
+        assert_eq!(config["type"], "adaptive");
+        assert_eq!(config["effort"], "xhigh");
+    }
+
+    /// Other adaptive-thinking models (Sonnet 4.6, ...) don't accept
+    /// xhigh OR max. Clamp to `high` so the request stays valid.
+    #[test]
+    fn thinking_config_xhigh_clamps_to_high_on_sonnet_4_6() {
+        let model = Model {
+            id: "claude-sonnet-4-6-20251022".to_string(),
+            ..test_model()
+        };
+        let config = build_thinking_config(ThinkingLevel::Xhigh, &model);
+        assert_eq!(config["type"], "adaptive");
+        assert_eq!(config["effort"], "high");
     }
 
     /// Anthropic's newer Claudes (Opus 4.7, Mythos Preview) run

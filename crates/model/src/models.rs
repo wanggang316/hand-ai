@@ -88,13 +88,15 @@ const XHIGH_MODEL_ID_PATTERNS: &[&str] = &[
     "gpt-5.5",
     "deepseek-v4-pro",
     "deepseek-v4-flash",
-    // Anthropic Opus 4.6 maps xhigh to adaptive effort "max" on the
+    // Anthropic Opus 4.6 and 4.7 map xhigh to adaptive effort on the
     // Anthropic Messages API. Match by id (both dashed and dotted
     // variants are seen across catalogs / proxies) so OpenRouter's
     // `anthropic/claude-opus-4.6` and the direct
     // `claude-opus-4-6-20251001` ids both surface as xhigh-capable.
     "opus-4-6",
     "opus-4.6",
+    "opus-4-7",
+    "opus-4.7",
 ];
 
 /// Whether this model supports xhigh thinking level.
@@ -266,6 +268,23 @@ mod tests {
             "claude-opus-4.6",
             "claude-opus-4.6-thinking",
             "anthropic/claude-opus-4.6",
+        ] {
+            let m = test_model(id, Provider::Anthropic);
+            assert!(supports_xhigh(&m), "{id} should support xhigh");
+        }
+    }
+
+    /// Opus 4.7 also supports xhigh — adaptive thinking on the newer
+    /// Anthropic generation, with `xhigh` as the native effort name
+    /// (not `max` like 4.6). Recognition must cover both dashed and
+    /// dotted ids and the namespaced OpenRouter form.
+    #[test]
+    fn supports_xhigh_recognises_opus_4_7_variants() {
+        for id in [
+            "claude-opus-4-7",
+            "claude-opus-4-7-20260101",
+            "claude-opus-4.7",
+            "anthropic/claude-opus-4.7",
         ] {
             let m = test_model(id, Provider::Anthropic);
             assert!(supports_xhigh(&m), "{id} should support xhigh");
