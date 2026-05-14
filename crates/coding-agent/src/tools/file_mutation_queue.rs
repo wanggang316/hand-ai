@@ -1,12 +1,9 @@
 //! Per-file mutation serialiser.
 //!
-//! Ported from `pi-mono` `core/tools/file-mutation-queue.ts`. The TS
-//! original chains promises in a `Map<path, Promise<void>>` so callers
-//! that target the same file run sequentially while different files run
-//! in parallel.
-//!
-//! The Rust port reaches for a global `HashMap<PathBuf, Arc<Mutex<()>>>`.
-//! Each [`with_file_mutation_queue`] call:
+//! Callers targeting the same on-disk file run sequentially while
+//! different files run in parallel. The implementation keeps a global
+//! `HashMap<PathBuf, Arc<Mutex<()>>>`; each [`with_file_mutation_queue`]
+//! call:
 //!
 //! 1. canonicalises the target path so two callers that resolve to the
 //!    same on-disk file (e.g. via symlink) share a queue;
@@ -15,10 +12,9 @@
 //! 3. acquires the per-path lock asynchronously and runs the closure.
 //!
 //! The registry is intentionally not cleaned up on drop — a future
-//! caller for the same path will simply find the existing entry. This
-//! mirrors the TS original, which also accumulates entries (it deletes
-//! a key only when the last queued promise was the most recent one,
-//! which races with new arrivals).
+//! caller for the same path simply finds the existing entry. A
+//! cleanup-on-last-release strategy would race with new arrivals, so
+//! the registry accumulates entries instead.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

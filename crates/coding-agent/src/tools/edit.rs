@@ -82,13 +82,12 @@ fn run_edit(path: &Path, old_string: &str, new_string: &str, replace_all: bool) 
         Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
     };
 
-    // Pi-mono parity: tolerate LF-vs-CRLF mismatches between the
-    // model-supplied old_string and the file on disk. Try the literal
-    // match first; if that fails AND the line endings of the two
-    // strings differ, normalize the old_string to the file's line
-    // ending style and retry. Same for new_string so the replacement
-    // doesn't introduce mixed endings. See pi-mono edit tool CRLF
-    // tests.
+    // Tolerate LF-vs-CRLF mismatches between the model-supplied
+    // old_string and the file on disk. Try the literal match first;
+    // if that fails AND the line endings of the two strings differ,
+    // normalize the old_string to the file's line ending style and
+    // retry. Same for new_string so the replacement doesn't
+    // introduce mixed endings.
     let file_has_crlf = content.contains("\r\n");
     let crlf_old_owned: String;
     let crlf_new_owned: String;
@@ -167,10 +166,9 @@ fn run_edit(path: &Path, old_string: &str, new_string: &str, replace_all: bool) 
 
 /// Normalize a string for fuzzy edit-tool matching: smart quotes →
 /// ASCII, Unicode dashes → ASCII hyphen, NBSP/wide spaces → space.
-/// Mirrors pi-mono's `normalizeForFuzzyMatch` minus NFKC (we don't
-/// pull a full Unicode normalization dependency for the common case;
-/// users hitting NFKC-only edge cases can still rely on the literal-
-/// match fast path).
+/// NFKC is deliberately omitted to avoid a Unicode-normalization
+/// dependency for the common case; users hitting NFKC-only edge
+/// cases can still rely on the literal-match fast path.
 pub fn normalize_for_fuzzy_match(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {

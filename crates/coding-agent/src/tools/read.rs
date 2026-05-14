@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 /// Default max lines to read.
 const DEFAULT_MAX_LINES: usize = 2000;
-/// Default max bytes to read (pi-mono parity: 50 KB).
+/// Default max bytes to read before truncation kicks in (50 KB).
 const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 
 fn format_size(bytes: usize) -> String {

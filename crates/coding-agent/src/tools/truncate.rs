@@ -1,7 +1,7 @@
 //! Shared truncation utilities for tool outputs.
 //!
-//! Ported from `pi-mono` `core/tools/truncate.ts`. Truncation is governed
-//! by two independent limits — whichever is hit first wins:
+//! Truncation is governed by two independent limits — whichever is hit
+//! first wins:
 //!
 //! - line limit (default `DEFAULT_MAX_LINES` = 2000)
 //! - byte limit (default `DEFAULT_MAX_BYTES` = 50 KB)
@@ -16,7 +16,7 @@
 //! `first_line_exceeds_limit = true` — the caller is expected to render
 //! the limit hint instead of any payload.
 
-/// Default line cap (mirrors TS `DEFAULT_MAX_LINES`).
+/// Default line cap before truncation kicks in.
 pub const DEFAULT_MAX_LINES: usize = 2000;
 
 /// Default byte cap (mirrors TS `DEFAULT_MAX_BYTES`).

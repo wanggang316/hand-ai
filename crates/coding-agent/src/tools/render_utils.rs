@@ -1,7 +1,6 @@
 //! Display-side helpers for tool output rendering.
 //!
-//! Ported from `pi-mono` `core/tools/render-utils.ts`. The TS module
-//! provides three display utilities used across the various tool
+//! Provides four display utilities used across the various tool
 //! renderers:
 //!
 //! - [`shorten_path`]: replace `$HOME` with `~` for cosmetics in chat
@@ -16,13 +15,13 @@
 //!   text-only, image blocks are summarised with [`hand_tui::image_fallback`]
 //!   placeholders rather than dropped silently.
 //!
-//! Mirrors pi-mono's `sanitizeBinaryOutput`: drops C0 control characters
-//! (everything below 0x20 except `\t \n \r`) and the U+FFF9..U+FFFB
-//! Unicode format characters that crash terminal-width libraries. Bash
-//! tool output can carry BEL, VT, FF, or other binary garbage from
-//! poorly-behaved processes; we sanitise it in [`get_text_output`] so
-//! the TUI scrollback never has to render it (and so an attacker
-//! cannot smuggle terminal-control sequences into the chat log).
+//! Binary-output sanitisation drops C0 control characters (everything
+//! below 0x20 except `\t \n \r`) and the U+FFF9..U+FFFB Unicode format
+//! characters that crash terminal-width libraries. Bash tool output
+//! can carry BEL, VT, FF, or other binary garbage from poorly-behaved
+//! processes; [`get_text_output`] scrubs it so the TUI scrollback never
+//! has to render it (and so an attacker cannot smuggle terminal-control
+//! sequences into the chat log).
 
 use hand_tui::utils::strip_ansi;
 use hand_tui::{

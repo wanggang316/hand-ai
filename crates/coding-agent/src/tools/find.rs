@@ -318,7 +318,8 @@ mod tests {
         std::fs::write(dir.path().join("normal.txt"), "x").unwrap();
         let result = execute_find(dir.path(), json!({"pattern": "--help"}));
         let text = get_text(&result);
-        // No files match — same outcome pi-mono asserts.
+        // `--help` is taken as a literal glob pattern, not a CLI flag,
+        // so it must produce a no-match result.
         assert!(
             text.contains("No files found") || text.contains("no files"),
             "expected no-match for --help glob, got: {text}"

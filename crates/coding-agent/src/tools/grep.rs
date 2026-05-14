@@ -287,10 +287,10 @@ mod tests {
         assert!(text.contains("Missing required parameter"));
     }
 
-    /// Pi-mono parity: each match line is capped at GREP_MAX_LINE_LENGTH
-    /// chars so a minified JS file containing the pattern cannot dump a
-    /// 50KB single line into the LLM context. The trailing
-    /// `... [truncated]` suffix mirrors pi-mono's wording.
+    /// Each match line is capped at GREP_MAX_LINE_LENGTH chars so a
+    /// minified JS file containing the pattern cannot dump a 50KB
+    /// single line into the LLM context. The clip is signalled with a
+    /// trailing `... [truncated]` suffix.
     #[test]
     fn test_grep_clips_long_match_lines() {
         let dir = TempDir::new().unwrap();

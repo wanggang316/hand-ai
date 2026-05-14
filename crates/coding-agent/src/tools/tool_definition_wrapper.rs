@@ -1,28 +1,19 @@
 //! Wrap a [`ToolDefinition`] into the runtime [`AgentTool`] type.
 //!
-//! Ported from `pi-mono` `core/tools/tool-definition-wrapper.ts`. The TS
-//! source separates a "definition" (name, schema, prompt metadata,
-//! optional render hooks) from the runtime tool the agent loop actually
-//! invokes. The wrapper bridges the two.
+//! A "definition" carries a tool's name, schema, prompt metadata, and
+//! optional render hooks; the runtime [`AgentTool`] is what the agent
+//! loop actually invokes. This wrapper bridges the two.
 //!
-//! ## Scope of this port
+//! ## Current scope
 //!
-//! The Rust extension API in `core::extensions::api` does not yet model
-//! the full TS `ToolDefinition` — fields like `promptSnippet`,
-//! `promptGuidelines`, `renderShell`, `renderCall`, and `renderResult`
-//! belong to the interactive-mode UI surface that has not yet been
-//! ported. We expose a [`ToolDefinition`] struct that carries the
-//! *runtime* subset (the fields needed to actually execute the tool) so
-//! callers in this crate can register tools through the same mental
-//! model as upstream, even before the UI surface lands.
-//!
-//! ## TODO(parity-M6+)
-//!
-//! When the UI extension surface is ported, extend [`ToolDefinition`]
-//! to mirror the upstream shape. The wrapper will then start dropping
-//! UI-only fields when projecting onto [`AgentTool`], same as the TS
-//! reference does today (TS just discards the renderers because the
-//! runtime never reads them either).
+//! The extension API in `core::extensions::api` does not yet model the
+//! interactive-mode UI surface (`prompt_snippet`, `prompt_guidelines`,
+//! `render_shell`, `render_call`, `render_result`). The
+//! [`ToolDefinition`] struct here carries the *runtime* subset (the
+//! fields needed to actually execute the tool) so callers can register
+//! tools today; UI-only fields will be added once the interactive-mode
+//! surface lands, and the wrapper will drop them when projecting onto
+//! [`AgentTool`].
 
 use std::path::PathBuf;
 use std::sync::Arc;

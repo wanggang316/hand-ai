@@ -1,9 +1,8 @@
 //! Streaming output accumulator with bounded memory and a temp-file
 //! spill path.
 //!
-//! Ported from `pi-mono` `core/tools/output-accumulator.ts`. Tools that
-//! stream long output (most notably `bash`) feed bytes into an
-//! [`OutputAccumulator`] as they arrive. The accumulator:
+//! Tools that stream long output (most notably `bash`) feed bytes into
+//! an [`OutputAccumulator`] as they arrive. The accumulator:
 //!
 //! - decodes incrementally with a streaming UTF-8 decoder so multi-byte
 //!   characters that straddle chunk boundaries don't get mangled;
@@ -16,17 +15,15 @@
 //! - exposes a [`snapshot`] that pairs a tail-truncated string with the
 //!   full counts and the path to the spilled file (when present).
 //!
-//! ## Differences from the TS reference
+//! ## Implementation notes
 //!
-//! - TS uses Node's `TextDecoder` (`stream: true`) which tracks the
-//!   pending continuation bytes between calls. The Rust port keeps a
-//!   small `pending` buffer and re-attempts decoding on each `append`
-//!   call. This produces identical visible output for valid UTF-8 input
-//!   and replaces invalid sequences with U+FFFD just like the TS one.
-//! - TS writes to the temp file via a Node `WriteStream`. We use the
-//!   blocking `std::fs::File` writer. `bash`'s execute path runs the
-//!   accumulator on a `tokio::task::spawn_blocking` thread, so this is
-//!   safe; if a future caller wires it into an async context, swap to
+//! - A small `pending` buffer holds incomplete UTF-8 continuation bytes
+//!   between calls, so multi-byte characters that straddle chunk
+//!   boundaries decode correctly. Invalid sequences fall back to
+//!   U+FFFD.
+//! - Spill writes use the blocking `std::fs::File` writer. The `bash`
+//!   tool runs the accumulator on a `tokio::task::spawn_blocking`
+//!   thread, so this is safe; an async caller should swap to
 //!   `tokio::fs::File`.
 
 use std::fs::File;

@@ -1,7 +1,6 @@
 //! Path-resolution helpers shared by the read-side tools.
 //!
-//! Ported from `pi-mono` `core/tools/path-utils.ts`. The TS module exists to
-//! deal with two real-world quirks:
+//! The module addresses real-world path-input quirks:
 //!
 //! - macOS screenshot filenames use a U+202F NARROW NO-BREAK SPACE before
 //!   `AM`/`PM`, but users typing the path use a regular space.
@@ -12,11 +11,10 @@
 //!   default screenshot names like `Capture d’écran` instead of the ASCII
 //!   apostrophe a user is likely to type.
 //!
-//! When the literal path resolves we return it untouched. Only on a miss do
-//! we probe the four variants (AM/PM, NFD, curly, NFD+curly) in the same
-//! order as the TS reference.
+//! When the literal path resolves we return it untouched. Only on a miss
+//! do we probe the four variants (AM/PM, NFD, curly, NFD+curly).
 //!
-//! Other normalizations the TS reference performs:
+//! Other normalizations:
 //!
 //! - All exotic Unicode space code points (U+00A0, U+2000..U+200A, U+202F,
 //!   U+205F, U+3000) collapse to a regular space *before* tilde expansion.
