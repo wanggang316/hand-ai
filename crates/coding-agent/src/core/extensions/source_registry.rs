@@ -1,12 +1,12 @@
-//! Pi-extension package-source registry.
+//! Extension package-source registry.
 //!
-//! Ports the public surface of the TS `core/package-manager.ts` module
-//! from pi-mono. This is **not** the same thing as
-//! [`crate::core::package_manager`] — that module detects programming
-//! languages from file extensions and is unrelated. The TS file is named
-//! "package manager" in the sense of "manages packages of pi-extension
-//! resources" (extensions, skills, prompts, themes); this module renames
-//! it to `SourceRegistry` to avoid the collision.
+//! Resolves npm/git/local "sources" into on-disk extension packages and
+//! manages installation, updates, and lookups across them.
+//!
+//! Not to be confused with [`crate::core::package_manager`], which
+//! detects programming languages from file extensions and is unrelated.
+//! The naming `SourceRegistry` keeps the two concepts visually distinct
+//! at every call site.
 //!
 //! ## Scope of the current port (Tier S2 happy-path)
 //!

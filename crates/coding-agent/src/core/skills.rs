@@ -28,10 +28,9 @@ const MAX_DESCRIPTION_LENGTH: usize = 1024;
 
 /// Parsed YAML frontmatter on a SKILL.md.
 ///
-/// Unknown fields are tolerated to match the TypeScript reference
-/// (`SkillFrontmatter` in `pi-mono/packages/coding-agent/src/core/skills.ts`
-/// uses an open object schema). Fixtures such as `unknown-field/` rely on
-/// this lenient behaviour.
+/// Unknown fields are tolerated so skills can carry forward-compatible
+/// metadata without tripping the loader. Fixtures such as
+/// `unknown-field/` rely on this lenient behaviour.
 #[derive(Debug, Deserialize, Clone, Default, PartialEq)]
 struct SkillMetadata {
     #[serde(default)]

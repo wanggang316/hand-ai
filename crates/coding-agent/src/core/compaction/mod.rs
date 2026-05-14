@@ -1,8 +1,7 @@
 //! Context compaction — summarizes older session messages so the active
 //! conversation stays under the model's context window.
 //!
-//! This module is the Rust port of pi-mono's `core/compaction/` directory.
-//! It is split into:
+//! Split into:
 //!
 //! - [`utils`]: pure helpers — token estimation, file-operation tracking,
 //!   conversation serialization, and the legacy helpers

@@ -1,9 +1,8 @@
 //! Shared utilities for compaction and branch summarization.
 //!
-//! Rust port of pi-mono `core/compaction/utils.ts` (170 lines). Adds the
-//! pi-mono `read` / `written` / `edited` `BTreeSet`-backed file-operation
-//! tracking, deterministic XML formatting, and the message serializer used
-//! by the summarizer prompts.
+//! Provides `read` / `written` / `edited` `BTreeSet`-backed
+//! file-operation tracking, deterministic XML formatting, and the
+//! message serializer used by the summarizer prompts.
 //!
 //! The legacy public surface (`CompactionResult`, `should_compact`,
 //! `split_for_compaction`, `build_compaction_prompt`, `extract_file_operations`,
@@ -22,9 +21,8 @@ use std::collections::BTreeSet;
 
 /// Result of a compaction operation.
 ///
-/// This is the legacy `agent_session`-facing shape; the pi-mono
-/// `CompactionResult<T>` adds an `details` payload that the entry-tree port
-/// will introduce.
+/// Legacy `agent_session`-facing shape; a richer details payload will
+/// land alongside the entry-tree port.
 #[derive(Debug, Clone)]
 pub struct CompactionResult {
     /// Summary of compacted messages.
@@ -41,7 +39,6 @@ pub struct CompactionResult {
 
 /// File operations tracked during compaction.
 ///
-/// Rust mirror of pi-mono's `FileOperations`:
 /// - `read`: files opened by `read` / `grep` / `find` / `ls`-style tools.
 /// - `written`: files created/overwritten by a `write`-style tool.
 /// - `edited`: files mutated by an `edit`-style tool.
@@ -65,8 +62,8 @@ impl FileOperations {
 
 /// Extract file operations from tool calls in a single assistant message.
 ///
-/// Mirrors pi-mono `extractFileOpsFromMessage`: only inspects assistant
-/// messages, only tool-call blocks, and only the `path` argument.
+/// Only inspects assistant messages, only tool-call blocks, and only
+/// the `path` argument.
 pub fn extract_file_ops_from_message(message: &Message, file_ops: &mut FileOperations) {
     let Message::Assistant(assistant) = message else {
         return;
@@ -261,8 +258,7 @@ pub fn serialize_conversation(messages: &[Message]) -> String {
 // Summarization System Prompt
 // ============================================================================
 
-/// System prompt installed for summarization calls. Mirrors pi-mono's
-/// `SUMMARIZATION_SYSTEM_PROMPT` verbatim.
+/// System prompt installed for summarization calls.
 pub const SUMMARIZATION_SYSTEM_PROMPT: &str = "You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.
 
 Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.";
@@ -378,10 +374,10 @@ pub fn build_compaction_prompt(messages: &[Message], file_ops: &FileOperations) 
 
 /// Extract file operations from a slice of messages.
 ///
-/// Rebuilt on top of the per-message helper. The legacy aliases (`grep`,
-/// `find`, `ls`) treated as reads are no longer expanded — pi-mono itself
-/// only recognises `read` / `write` / `edit` here, and the higher-level
-/// tool routing is responsible for normalising names.
+/// Built on top of the per-message helper. Only the canonical
+/// `read` / `write` / `edit` tool names are recognised here; the
+/// higher-level tool routing is responsible for normalising any
+/// aliases (`grep`, `find`, `ls`) before they reach this layer.
 pub fn extract_file_operations(messages: &[Message]) -> FileOperations {
     let mut ops = FileOperations::default();
     for msg in messages {

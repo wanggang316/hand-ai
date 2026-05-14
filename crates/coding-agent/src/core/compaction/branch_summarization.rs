@@ -1,21 +1,19 @@
 //! Branch summarization — message-list path.
 //!
-//! Rust port of pi-mono `core/compaction/branch-summarization.ts`. When the
-//! user navigates to a different point in the session tree, this module
-//! generates a summary of the branch being left so context isn't lost.
+//! When the user navigates to a different point in the session tree,
+//! this module generates a summary of the branch being left so context
+//! isn't lost.
 //!
-//! The TS reference walks `SessionEntry`s through helpers like
-//! `collectEntriesForBranchSummary` and `prepareBranchEntries`. The current
-//! Rust [`crate::core::session_manager::SessionEntry`] is strictly less
-//! expressive (no `branch_summary` / `custom_message` / `bash_execution` /
-//! `thinking_level_change` variants and no parent-id tree), so the
-//! entry-tree-walking helpers are deliberately left as TODOs and only the
-//! message-list-oriented path is ported here. See the controller's brief
-//! and the master parity plan (§A4) for the follow-up work.
+//! The current [`crate::core::session_manager::SessionEntry`] does not
+//! yet model `branch_summary` / `custom_message` / `bash_execution` /
+//! `thinking_level_change` variants or a parent-id tree, so the
+//! entry-tree-walking helpers are deliberately left as TODOs and only
+//! the message-list path is implemented here.
 //!
-//! [`generate_branch_summary`] takes a flat `&[Message]` slice plus already
-//! computed [`super::utils::FileOperations`] and goes straight to the LLM
-//! through a [`SummarizationClient`], which lets tests stub the network.
+//! [`generate_branch_summary`] takes a flat `&[Message]` slice plus an
+//! already-computed [`super::utils::FileOperations`] and goes straight
+//! to the LLM through a [`SummarizationClient`], which lets tests stub
+//! the network.
 
 use crate::core::compaction::utils::{
     FileOperations, SUMMARIZATION_SYSTEM_PROMPT, compute_file_lists, format_file_operations,
@@ -33,11 +31,10 @@ use std::sync::Arc;
 // ============================================================================
 
 /// Default token budget reserved for the summarization prompt + LLM
-/// response. Matches the pi-mono default (`reserveTokens = 16384`).
+/// response.
 pub const DEFAULT_BRANCH_RESERVE_TOKENS: u64 = 16_384;
 
 /// Fallback context window when [`Model::context_window`] is missing/zero.
-/// Mirrors pi-mono's `model.contextWindow || 128000` guard.
 pub const FALLBACK_CONTEXT_WINDOW: u64 = 128_000;
 
 const BRANCH_SUMMARY_PREAMBLE: &str = "The user explored a different conversation branch before returning here.\nSummary of that exploration:\n\n";
@@ -75,10 +72,10 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 // Types
 // ============================================================================
 
-/// Outcome of a branch-summary generation. Matches pi-mono's
-/// `BranchSummaryResult`: at most one of `summary` / `aborted` / `error` is
-/// populated, and `read_files` / `modified_files` are populated alongside a
-/// successful `summary`.
+/// Outcome of a branch-summary generation. At most one of
+/// `summary` / `aborted` / `error` is populated, and
+/// `read_files` / `modified_files` are populated alongside a successful
+/// `summary`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BranchSummaryResult {
     pub summary: Option<String>,
@@ -88,8 +85,8 @@ pub struct BranchSummaryResult {
     pub error: Option<String>,
 }
 
-/// Persistable payload mirroring pi-mono's `BranchSummaryDetails`. Stored
-/// alongside a `branch_summary` entry once that variant is added to
+/// Persistable payload for a branch summary. Stored alongside a
+/// `branch_summary` entry once that variant is added to
 /// [`crate::core::session_manager::SessionEntry`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BranchSummaryDetails {
@@ -99,9 +96,8 @@ pub struct BranchSummaryDetails {
     pub modified_files: Vec<String>,
 }
 
-/// Options passed to [`generate_branch_summary`]. The shape mirrors pi-mono's
-/// `GenerateBranchSummaryOptions` minus the `signal` (cancellation flows
-/// through [`SimpleStreamOptions`] when callers wire it).
+/// Options passed to [`generate_branch_summary`]. Cancellation flows
+/// through [`SimpleStreamOptions`] when callers wire it.
 #[derive(Debug, Clone, Default)]
 pub struct GenerateBranchSummaryOptions {
     /// Optional custom focus appended to (or replacing) the default prompt.
@@ -127,9 +123,10 @@ pub struct GenerateBranchSummaryOptions {
 #[async_trait]
 pub trait SummarizationClient: Send + Sync {
     /// Run a non-streaming completion and return the assistant message.
-    /// Implementations should mirror pi-mono's `completeSimple` semantics:
-    /// errors and aborts are returned as an [`AssistantMessage`] with the
-    /// matching [`StopReason`] rather than as `Err`.
+    /// Errors and aborts are returned as an [`AssistantMessage`] with
+    /// the matching [`StopReason`] rather than as `Err`, so the caller
+    /// can branch on outcome without distinguishing transport failures
+    /// from in-band stop reasons.
     async fn complete(
         &self,
         model: &Model,
@@ -144,14 +141,12 @@ pub trait SummarizationClient: Send + Sync {
 
 /// Generate a branch summary from an already-prepared message slice.
 ///
-/// This is the message-list-oriented half of pi-mono's
-/// `generateBranchSummary`. Callers are expected to have already walked
-/// the session tree, computed [`FileOperations`], and produced the flat
-/// `messages` slice in chronological order. The entry-tree-walking
-/// helpers (`collectEntriesForBranchSummary`, `prepareBranchEntries`,
-/// `getMessageFromEntry`) cannot be ported 1:1 until
+/// Callers are expected to have already walked the session tree,
+/// computed [`FileOperations`], and produced the flat `messages`
+/// slice in chronological order. The entry-tree-walking helpers
+/// cannot be implemented until
 /// [`crate::core::session_manager::SessionEntry`] grows the missing
-/// variants — see the module-level docs and the §A4 follow-up.
+/// variants — see the module-level docs.
 ///
 /// Returns a [`BranchSummaryResult`]:
 /// - `summary` populated on success (with [`BRANCH_SUMMARY_PREAMBLE`] and
@@ -196,7 +191,8 @@ pub async fn generate_branch_summary(
         tools: None,
     };
 
-    // pi-mono uses `maxTokens: 2048` for branch summaries.
+    // Branch summaries cap at 2048 output tokens — the summary itself is
+    // short and the surrounding context is already large.
     let mut stream_options = SimpleStreamOptions::default();
     stream_options.base.max_tokens = Some(2048);
 
@@ -264,13 +260,11 @@ fn extract_text(msg: &AssistantMessage) -> String {
 // Entry-tree path — placeholder.
 // ============================================================================
 
-// TODO(parity): the pi-mono entry-tree path
-// (`collectEntriesForBranchSummary`, `prepareBranchEntries`,
-// `getMessageFromEntry`) requires extending
-// `crate::core::session_manager::SessionEntry` with `branch_summary`,
-// `custom_message`, `thinking_level_change`, and `bash_execution`
-// variants plus a `parent_id` tree. Tracked in
-// `docs/exec-plans/parity-completion.md` §A4.
+// TODO: the entry-tree path (collecting, preparing, and projecting
+// session entries to messages for branch summarization) requires
+// extending `crate::core::session_manager::SessionEntry` with
+// `branch_summary`, `custom_message`, `thinking_level_change`, and
+// `bash_execution` variants plus a `parent_id` tree.
 
 #[cfg(test)]
 mod tests {

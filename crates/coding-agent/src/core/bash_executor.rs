@@ -209,10 +209,10 @@ fn truncate_tail_bytes(output: &str, max_bytes: usize) -> String {
 
 /// Sanitize output by stripping problematic characters.
 ///
-/// Mirrors pi-mono's `sanitizeBinaryOutput`: strips ANSI escapes, all C0 control
-/// characters except `\t \n \r`, and Unicode format characters U+FFF9-U+FFFB
-/// (which crash terminal width calculators). Embedded control sequences can be
-/// used by an attacker to fake terminal output or smuggle prompt-injection
+/// Strips ANSI escapes, all C0 control characters except `\t \n \r`,
+/// and the Unicode format characters U+FFF9-U+FFFB (which crash
+/// terminal-width calculators). Embedded control sequences can be used
+/// by an attacker to fake terminal output or smuggle prompt-injection
 /// instructions to the LLM through bash tool results.
 pub fn sanitize_output(output: &str) -> String {
     let ansi_re = regex_lite::Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap();
