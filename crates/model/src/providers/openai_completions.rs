@@ -677,6 +677,15 @@ fn build_params(
         ToolsField::NonEmpty(tools) => {
             let openai_tools: Vec<OpenAiTool> = tools.iter().map(convert_tool).collect();
             builder = builder.tools(openai_tools);
+            // Z.ai (and newer GLM models) expose tool-call streaming
+            // via a top-level `tool_stream: true` flag. The detector
+            // sets `zai_tool_stream` from the model id / provider;
+            // emit the flag only when tools are actually present in
+            // the request, never on history-only / empty-tools
+            // shapes that synthesize an empty `tools: []`.
+            if compat.zai_tool_stream {
+                builder = builder.insert_extra_param("tool_stream", serde_json::Value::Bool(true));
+            }
         }
         ToolsField::EmptyArrayForHistory => {
             builder = builder.tools(vec![]);
@@ -1703,6 +1712,91 @@ mod tests {
         let compat = affinity_compat(true);
         assert!(resolve_session_affinity_headers(&compat, None, None).is_empty());
         assert!(resolve_session_affinity_headers(&compat, Some(""), None).is_empty());
+    }
+
+    /// Z.ai exposes incremental tool-call streaming via a top-level
+    /// `tool_stream: true` flag. The flag must fire when the compat
+    /// detector flags the model AND the request carries tools — but
+    /// NOT on history-only / no-tools shapes where the request only
+    /// synthesizes an empty `tools: []` for proxy parity.
+    #[test]
+    fn build_params_emits_tool_stream_for_zai_when_tools_present() {
+        use crate::types::{Compat, OpenAICompletionsCompat, Tool};
+        let mut model = test_model(Provider::Zai);
+        model.base_url = "https://api.z.ai/api/coding/paas/v4".to_string();
+        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
+            zai_tool_stream: Some(true),
+            ..Default::default()
+        })));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: Some(vec![Tool::new(
+                "read",
+                "Read a file",
+                serde_json::json!({"type": "object", "properties": {}}),
+            )]),
+        };
+        let options = OpenAICompletionsOptions::default();
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(
+            body["tool_stream"],
+            serde_json::Value::Bool(true),
+            "zai_tool_stream + tools must emit tool_stream: true: {body}"
+        );
+    }
+
+    /// Without `zai_tool_stream` (the default for non-z.ai compat),
+    /// the flag must NOT appear in the request body even with tools
+    /// present. Most upstreams reject unknown top-level fields.
+    #[test]
+    fn build_params_omits_tool_stream_when_zai_compat_off() {
+        use crate::types::Tool;
+        let model = test_model(Provider::OpenAI);
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: Some(vec![Tool::new(
+                "read",
+                "Read a file",
+                serde_json::json!({"type": "object", "properties": {}}),
+            )]),
+        };
+        let options = OpenAICompletionsOptions::default();
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert!(
+            body.get("tool_stream").is_none(),
+            "non-zai compat must NOT emit tool_stream: {body}"
+        );
+    }
+
+    /// `tool_stream` is meaningless when there's nothing to stream;
+    /// suppress it on history-only requests that send `tools: []`
+    /// to satisfy proxy parity, otherwise the upstream may reject
+    /// the request as malformed.
+    #[test]
+    fn build_params_omits_tool_stream_when_no_tools_in_request() {
+        use crate::types::{Compat, OpenAICompletionsCompat};
+        let mut model = test_model(Provider::Zai);
+        model.base_url = "https://api.z.ai/api/coding/paas/v4".to_string();
+        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
+            zai_tool_stream: Some(true),
+            ..Default::default()
+        })));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let options = OpenAICompletionsOptions::default();
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert!(
+            body.get("tool_stream").is_none(),
+            "zai_tool_stream without tools must NOT emit tool_stream: {body}"
+        );
     }
 
     /// Local Qwen-compatible servers (vLLM, llama.cpp) read thinking
