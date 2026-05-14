@@ -7,7 +7,8 @@ use crate::types::{AssistantMessage, StopReason};
 
 /// Regex-like patterns for context overflow error messages from various providers.
 const OVERFLOW_PATTERNS: &[&str] = &[
-    "prompt is too long",                    // Anthropic
+    "prompt is too long",                    // Anthropic token-count overflow
+    "request_too_large",                     // Anthropic HTTP 413 byte-size overflow
     "input is too long for requested model", // Amazon Bedrock
     "exceeds the context window",            // OpenAI (Completions & Responses API)
     "input token count", // Google (Gemini) - partial, checked with "exceeds the maximum"
@@ -110,6 +111,21 @@ mod tests {
     #[test]
     fn test_anthropic_overflow() {
         let msg = make_error_message("prompt is too long: 213462 tokens > 200000 maximum");
+        assert!(is_context_overflow(&msg, None));
+    }
+
+    /// Anthropic returns HTTP 413 with a `request_too_large` error code
+    /// when the WIRE size of the request (after caching / image
+    /// expansion) exceeds the per-request byte cap, even when the
+    /// token count is under the model's context window. This is a
+    /// separate overflow path from the token-count "prompt is too
+    /// long" message and must be classified as a context-overflow
+    /// error so callers can trim and retry.
+    #[test]
+    fn test_anthropic_request_too_large_overflow() {
+        let msg = make_error_message(
+            "HTTP 413: {\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum size\"}}",
+        );
         assert!(is_context_overflow(&msg, None));
     }
 
