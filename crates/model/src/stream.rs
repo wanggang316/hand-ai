@@ -320,6 +320,11 @@ fn is_retriable_error(message: &str) -> bool {
         "timeout",
         "terminated",
         "retry delay",
+        // Smithy / AWS SDK HTTP/2 transport surface for Bedrock and
+        // similar providers — the HTTP/2 stream dies before the
+        // response body lands, so the SDK throws `http2 request did
+        // not get a response`. Transient — retry.
+        "http2 request did not get a response",
     ] {
         if lower.contains(needle) {
             return true;
@@ -442,6 +447,9 @@ mod tests {
             "AbortError: timeout",
             "Stream terminated unexpectedly",
             "retry delay 30 seconds",
+            // Bedrock / Smithy HTTP/2 transport blips
+            "http2 request did not get a response",
+            "HTTP2 Request did not get a response within deadline",
         ] {
             assert!(
                 is_retriable_error(msg),
