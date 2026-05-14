@@ -1,15 +1,13 @@
 //! Per-session resource pools shared across providers.
 //!
-//! Mirrors the role of `pi-mono/packages/ai/src/session-resources.ts`:
-//! providers can stash session-scoped state (today, idle WebSocket
-//! connections used by the OpenAI Codex Responses provider) here and the
-//! controller can reach in to release it when a session ends.
+//! Providers stash session-scoped state here (today, idle WebSocket
+//! connections used by the OpenAI Codex Responses provider) and the
+//! controller releases it when a session ends.
 //!
-//! The TS reference exposes a generic cleanup-callback registry. The Rust
-//! port keeps things concrete: a single typed pool keyed by
-//! `(session_id, transport)` is enough for the WebSocket-cached transport
-//! that motivated the module. As more session-scoped resources land we can
-//! generalize without churning every call site.
+//! The current implementation keeps things concrete: a single typed pool
+//! keyed by `(session_id, transport)` is enough for the WebSocket-cached
+//! transport that motivated the module. As more session-scoped resources
+//! land we can generalize without churning every call site.
 
 use std::collections::HashMap;
 use std::sync::Arc;

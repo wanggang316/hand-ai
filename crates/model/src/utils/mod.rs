@@ -1,8 +1,8 @@
-//! Utility modules ported from `pi-mono/packages/ai/src/utils/`.
+//! Utility modules used across the model crate.
 //!
-//! This module groups small, dependency-free helpers used across the model
-//! crate: streaming primitives, diagnostics, JSON repair, Unicode sanitization,
-//! request validation, header merging, hashing, and context-overflow detection.
+//! This module groups small, dependency-free helpers: streaming primitives,
+//! diagnostics, JSON repair, Unicode sanitization, request validation, header
+//! merging, hashing, and context-overflow detection.
 
 pub mod diagnostics;
 pub mod event_stream;
