@@ -311,6 +311,18 @@ fn build_codex_request_body(model: &Model, context: &Context, options: &StreamOp
         }
     }
 
+    // Forward `service_tier` from caller metadata. The codex backend
+    // accepts `auto` / `default` / `flex` / `scale` / `priority`; the
+    // dedicated Rust options struct only exposes the common base today,
+    // so callers thread the value through `StreamOptions.metadata`
+    // under the `service_tier` key.
+    if let Some(metadata) = options.metadata.as_ref()
+        && let Some(value) = metadata.get("service_tier")
+        && !value.is_null()
+    {
+        body["service_tier"] = value.clone();
+    }
+
     body
 }
 
@@ -938,6 +950,63 @@ mod tests {
         assert!(
             entries.contains(&"reasoning.encrypted_content"),
             "include must request encrypted reasoning content: {body}"
+        );
+    }
+
+    /// The dedicated codex options struct only surfaces the common
+    /// `base: StreamOptions` today, so callers pass codex-specific
+    /// knobs (service tier, reasoning effort, verbosity) through
+    /// `metadata`. The body builder must forward
+    /// `metadata.service_tier` to the request body so priority /
+    /// flex pricing is actually applied; missing or `null` metadata
+    /// must leave the field unset.
+    #[test]
+    fn codex_body_forwards_service_tier_from_metadata() {
+        use std::collections::HashMap;
+        let mut metadata: HashMap<String, Value> = HashMap::new();
+        metadata.insert(
+            "service_tier".to_string(),
+            Value::String("priority".to_string()),
+        );
+        let mut options = StreamOptions::default();
+        options.metadata = Some(metadata);
+        let body = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(Some("You are pi.")),
+            &options,
+        );
+        assert_eq!(
+            body["service_tier"].as_str(),
+            Some("priority"),
+            "service_tier must be forwarded from metadata: {body}"
+        );
+    }
+
+    #[test]
+    fn codex_body_omits_service_tier_when_metadata_missing_or_null() {
+        use std::collections::HashMap;
+        let no_meta = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(Some("You are pi.")),
+            &StreamOptions::default(),
+        );
+        assert!(
+            no_meta.get("service_tier").is_none(),
+            "service_tier must be absent when metadata is unset: {no_meta}"
+        );
+
+        let mut metadata: HashMap<String, Value> = HashMap::new();
+        metadata.insert("service_tier".to_string(), Value::Null);
+        let mut options = StreamOptions::default();
+        options.metadata = Some(metadata);
+        let null_meta = build_codex_request_body(
+            &codex_test_model(),
+            &codex_user_context(Some("You are pi.")),
+            &options,
+        );
+        assert!(
+            null_meta.get("service_tier").is_none(),
+            "explicit null metadata must not produce a service_tier field: {null_meta}"
         );
     }
 
