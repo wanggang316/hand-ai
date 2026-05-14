@@ -430,18 +430,42 @@ pub(crate) fn dispatch_responses_event(
                 }));
         }
 
-        "response.completed" => {
-            if let Some(response) = data.get("response")
-                && let Some(usage) = response.get("usage")
+        // `response.created` is the first event in a stream and
+        // carries the upstream's stable response identifier
+        // (`resp_...`). Capture it eagerly so callers can correlate
+        // the turn even when the stream is aborted before
+        // `response.completed`.
+        "response.created" => {
+            if let Some(rid) = data
+                .get("response")
+                .and_then(|r| r.get("id"))
+                .and_then(|v| v.as_str())
+                && !rid.is_empty()
             {
-                output.usage.input = usage
-                    .get("input_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                output.usage.output = usage
-                    .get("output_tokens")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                output.response_id = Some(rid.to_string());
+            }
+        }
+
+        "response.completed" => {
+            if let Some(response) = data.get("response") {
+                // Re-capture the id on completion in case
+                // `response.created` was missed (some proxies skip
+                // the open event when they replay a cached response).
+                if let Some(rid) = response.get("id").and_then(|v| v.as_str())
+                    && !rid.is_empty()
+                {
+                    output.response_id = Some(rid.to_string());
+                }
+                if let Some(usage) = response.get("usage") {
+                    output.usage.input = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    output.usage.output = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                }
             }
         }
 
@@ -637,6 +661,65 @@ mod tests {
         }
         finalize_responses_output(state, &mut output);
         output
+    }
+
+    /// `response.created` carries the upstream's stable response id
+    /// (`resp_...`). Capture it eagerly on the first event so callers
+    /// can correlate the turn even when the stream is aborted before
+    /// `response.completed`.
+    #[test]
+    fn response_created_captures_response_id() {
+        let output = run_events(&[(
+            "response.created",
+            json!({ "response": { "id": "resp_abc123" } }),
+        )]);
+        assert_eq!(output.response_id.as_deref(), Some("resp_abc123"));
+    }
+
+    /// Some proxies skip `response.created` (especially when replaying
+    /// a cached response). `response.completed` must re-capture the id
+    /// in that case so the assistant message still carries a value.
+    #[test]
+    fn response_completed_captures_response_id_when_created_missed() {
+        let output = run_events(&[(
+            "response.completed",
+            json!({
+                "response": {
+                    "id": "resp_xyz789",
+                    "usage": { "input_tokens": 5, "output_tokens": 7 }
+                }
+            }),
+        )]);
+        assert_eq!(output.response_id.as_deref(), Some("resp_xyz789"));
+        assert_eq!(output.usage.input, 5);
+        assert_eq!(output.usage.output, 7);
+    }
+
+    /// When both events arrive, the `created` value wins — it lands
+    /// first and a later `completed` with the same id should be a
+    /// no-op (in practice the upstream sends matching ids).
+    #[test]
+    fn response_created_value_survives_completed() {
+        let output = run_events(&[
+            ("response.created", json!({ "response": { "id": "resp_first" } })),
+            (
+                "response.completed",
+                json!({ "response": { "id": "resp_first" } }),
+            ),
+        ]);
+        assert_eq!(output.response_id.as_deref(), Some("resp_first"));
+    }
+
+    /// Empty / missing ids must not produce `Some("")` — downstream
+    /// observability uses presence of the field to decide whether
+    /// to log a correlation hint.
+    #[test]
+    fn response_created_skips_empty_id() {
+        let output = run_events(&[(
+            "response.created",
+            json!({ "response": { "id": "" } }),
+        )]);
+        assert!(output.response_id.is_none());
     }
 
     /// LM Studio and other Responses-compatible servers emit
