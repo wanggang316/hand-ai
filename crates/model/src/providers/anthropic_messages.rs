@@ -150,15 +150,32 @@ async fn stream_anthropic_inner(
     );
     headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
 
-    // Add beta features
-    let mut betas = vec!["fine-grained-tool-streaming-2025-05-14"];
+    // Add beta features.
+    //
+    // The `fine-grained-tool-streaming-2025-05-14` beta is the legacy
+    // opt-in for eager tool argument streaming. When the model's compat
+    // block opts in to per-tool `eager_input_streaming` (default on
+    // direct Anthropic), the beta header is redundant and is omitted —
+    // we only set it for legacy proxies that flip
+    // `supportsEagerToolInputStreaming: false` and still need eager
+    // streaming via the header.
+    let mut betas: Vec<&'static str> = Vec::new();
+    let has_tools = context
+        .tools
+        .as_ref()
+        .is_some_and(|tools| !tools.is_empty());
+    if has_tools && !crate::transform::supports_eager_tool_input_streaming(&model) {
+        betas.push("fine-grained-tool-streaming-2025-05-14");
+    }
     if reasoning.is_some() {
         betas.push("interleaved-thinking-2025-05-14");
     }
-    headers.insert(
-        "anthropic-beta",
-        HeaderValue::from_str(&betas.join(",")).map_err(|e| e.to_string())?,
-    );
+    if !betas.is_empty() {
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_str(&betas.join(",")).map_err(|e| e.to_string())?,
+        );
+    }
 
     // Add custom headers from options
     if let Some(opts) = &options
@@ -282,21 +299,34 @@ fn build_request_body(
     // is enabled. Anthropic uses the last cache breakpoint as the boundary
     // for what gets cached; placing it on the tool list lets tool schemas
     // be cached independently from the (frequently-changing) transcript.
+    //
+    // Also opt each tool into `eager_input_streaming: true` when the
+    // model supports it (default on api.anthropic.com). Eager streaming
+    // delivers partial tool arguments mid-stream so the agent can begin
+    // dispatch as soon as `tool_use` is fully decoded; the legacy
+    // `fine-grained-tool-streaming` beta is the older opt-in for the
+    // same capability and is now expressed per-tool instead of via beta
+    // header.
     if let Some(tools) = &context.tools
         && !tools.is_empty()
     {
         let cache_control = resolve_anthropic_cache_control(model, options.as_ref());
+        let eager_streaming = crate::transform::supports_eager_tool_input_streaming(model);
         let last_idx = tools.len() - 1;
         let tool_defs: Vec<Value> = tools
             .iter()
             .enumerate()
             .map(|(idx, t)| {
                 let mut tool_obj = convert_tool_to_anthropic(t);
-                if idx == last_idx
-                    && let Some(cc) = &cache_control
-                    && let Some(obj) = tool_obj.as_object_mut()
-                {
-                    obj.insert("cache_control".to_string(), cc.clone());
+                if let Some(obj) = tool_obj.as_object_mut() {
+                    if eager_streaming {
+                        obj.insert("eager_input_streaming".to_string(), Value::Bool(true));
+                    }
+                    if idx == last_idx
+                        && let Some(cc) = &cache_control
+                    {
+                        obj.insert("cache_control".to_string(), cc.clone());
+                    }
                 }
                 tool_obj
             })
@@ -1112,7 +1142,10 @@ fn current_timestamp_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AssistantContentBlock, Cost, InputType, ToolResultMessage, UserMessage};
+    use crate::types::{
+        AnthropicMessagesCompat, AssistantContentBlock, Compat, Cost, InputType, ToolResultMessage,
+        UserMessage,
+    };
 
     fn test_model() -> Model {
         Model {
@@ -1495,6 +1528,55 @@ mod tests {
         };
         let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
         assert!(body["tools"][0].get("cache_control").is_none());
+    }
+
+    /// Direct Anthropic supports per-tool `eager_input_streaming`, which
+    /// delivers partial tool arguments mid-stream. The default model
+    /// (no compat overrides, AnthropicMessages api) opts in to it, so
+    /// every tool definition in the request body must carry the flag.
+    #[test]
+    fn every_tool_carries_eager_input_streaming_by_default() {
+        let model = test_model();
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: Some(vec![tool_def("a"), tool_def("b")]),
+        };
+        let body = build_request_body(&model, &context, 4096, None, &None).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        for (i, t) in tools.iter().enumerate() {
+            assert_eq!(
+                t["eager_input_streaming"], serde_json::Value::Bool(true),
+                "tool {i} missing eager_input_streaming: {t:?}"
+            );
+        }
+    }
+
+    /// Models that opt out of eager streaming via
+    /// `AnthropicMessagesCompat.supportsEagerToolInputStreaming = false`
+    /// (e.g. legacy proxies) must NOT carry the per-tool flag on the
+    /// request body. The TS reference flips to a `fine-grained-tool-
+    /// streaming` beta header in that case; verifying the body-level
+    /// flag is dropped is the stable contract on the Rust side.
+    #[test]
+    fn no_eager_input_streaming_when_compat_opts_out() {
+        let mut model = test_model();
+        model.compat = Some(Compat::AnthropicMessages(AnthropicMessagesCompat {
+            supports_eager_tool_input_streaming: Some(false),
+            ..Default::default()
+        }));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: Some(vec![tool_def("a")]),
+        };
+        let body = build_request_body(&model, &context, 4096, None, &None).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert!(
+            tools[0].get("eager_input_streaming").is_none(),
+            "compat opt-out must drop eager_input_streaming: {tools:?}"
+        );
     }
 
     #[test]
