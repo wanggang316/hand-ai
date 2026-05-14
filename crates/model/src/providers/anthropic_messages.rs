@@ -402,7 +402,7 @@ fn supports_long_cache_retention(model: &Model) -> bool {
 /// for Anthropic prompt caching. Returns `None` when caching is
 /// disabled, so callers can skip emitting the field entirely.
 ///
-/// Caching policy mirrors pi-mono:
+/// Caching policy:
 /// - `CacheRetention::None` → never emit `cache_control`.
 /// - any other retention → emit `{type: ephemeral}`; when the resolved
 ///   value is `Long` *and* the model supports long retention, add
@@ -1096,8 +1096,7 @@ fn parse_sse_body(body: &str, model: &Model) -> Result<Vec<AssistantMessageEvent
                                 // backslash escapes inside `input_json_delta`
                                 // payloads; fall back to the repair pass so
                                 // we don't silently drop the entire tool call
-                                // to `{}`. See pi-mono issue #1022 /
-                                // anthropic-sse-parsing.test.ts.
+                                // to `{}`.
                                 if !args_buf.is_empty() {
                                     tc.arguments = crate::transform::parse_json_with_repair(
                                         &args_buf,

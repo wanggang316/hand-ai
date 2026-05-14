@@ -790,7 +790,7 @@ pub(crate) fn get_gemini3_thinking_level(
     } else if is_gemma4_model(model_id) {
         // Gemma 4 collapses the four-level effort surface onto just
         // MINIMAL / HIGH. Map low and below to MINIMAL, medium and up
-        // to HIGH — the same two-bucket layout pi-mono uses.
+        // to HIGH so the four-tier callers still produce a valid value.
         match effort {
             ThinkingLevel::Minimal | ThinkingLevel::Low => GoogleThinkingLevel::Minimal,
             ThinkingLevel::Medium | ThinkingLevel::High | ThinkingLevel::Xhigh => {

@@ -322,8 +322,7 @@ fn capture_chunk_metadata(
 
 /// Apply a single SSE delta to `output`, returning the events to yield.
 ///
-/// Mirrors pi-mono's `openai-completions.ts` streaming behaviour: on each
-/// delta we (1) start a content block if the modality changed (text /
+/// On each delta we (1) start a content block if the modality changed (text /
 /// thinking / tool call), (2) append the delta to both the `current_block`
 /// scratch buffer **and** the corresponding entry in `output.content`, and
 /// (3) emit a `*_start` / `*_delta` event so subscribers can render the
@@ -884,7 +883,7 @@ pub fn convert_messages(
                 // shape is non-standard for `role: "assistant"` and
                 // triggers mirrored-structure output on some hosted
                 // gateways (e.g. DeepSeek V3.2 via NVIDIA NIM echoes the
-                // wrapper as literal text in the reply). pi-mono #3387.
+                // wrapper as literal text in the reply).
                 let assistant_content = if !text_blocks.is_empty() {
                     let joined: String = text_blocks
                         .iter()
@@ -1065,8 +1064,7 @@ pub fn convert_messages(
                 // Skip past the consecutive ToolResults the inner loop just
                 // consumed. Without this the outer loop would re-enter the
                 // second tool result and emit it (with its image batch)
-                // twice — see pi-mono parity test
-                // openai-completions-tool-result-images.test.ts.
+                // twice.
                 i = j;
                 continue;
             }
@@ -1135,9 +1133,8 @@ pub(crate) fn decide_tools_field<'a>(
 
 /// Decision for OpenAI's prompt-cache fields. Direct OpenAI requests
 /// only — other openai-compatible providers either don't support these
-/// fields at all (DashScope, vLLM) or use their own naming. The pi-mono
-/// reference scopes the same way, gating on `model.baseUrl.includes
-/// ("api.openai.com")`.
+/// fields at all (DashScope, vLLM) or use their own naming, so the
+/// helper gates on `model.base_url.contains("api.openai.com")`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct PromptCacheDecision {
     /// Value for `prompt_cache_key`. `None` means omit the field.
@@ -1253,8 +1250,9 @@ fn parse_streaming_json(input: &str) -> Value {
     if let Ok(v) = serde_json::from_str::<Value>(input) {
         return v;
     }
-    // Retry with pi-mono's repair pass — fixes raw control bytes and
-    // invalid backslash escapes inside string literals (pi-mono #1022).
+    // Retry with the shared repair pass — escapes raw control bytes
+    // and doubles invalid backslash escapes inside string literals so
+    // a malformed tool-call payload doesn't collapse to `{}`.
     if let Some(v) = crate::transform::parse_json_with_repair(input) {
         return v;
     }
@@ -1342,8 +1340,7 @@ pub struct ResolvedCompat {
     /// `true` when the upstream rejects assistant messages on replay that
     /// omit a `reasoning_content` field (deepseek native API). When set,
     /// `convert_messages` injects an empty `reasoning_content: ""` on any
-    /// assistant turn that doesn't already carry one. Mirrors pi-mono's
-    /// `requiresReasoningContentOnAssistantMessages`.
+    /// assistant turn that doesn't already carry one.
     pub requires_reasoning_content_on_assistant_messages: bool,
     /// `true` when the upstream uses three known session-affinity
     /// headers (`session_id`, `x-client-request-id`,
@@ -2150,8 +2147,8 @@ mod tests {
     /// Tool-call argument streams sometimes contain raw control bytes or
     /// invalid backslash escapes from the model. Plain `from_str` rejects
     /// them and historically dropped the entire payload to `{}`, silently
-    /// breaking the tool call. The repair pass (mirrors pi-mono #1022) lets
-    /// us still recover the structured args.
+    /// breaking the tool call. The shared repair pass lets us recover the
+    /// structured args instead.
     #[test]
     fn parse_streaming_json_recovers_malformed_payload_via_repair() {
         // Raw tab inside the string + invalid `\H` escape.
@@ -2427,12 +2424,12 @@ mod tests {
         }
     }
 
-    /// Parity with pi-mono openai-completions-tool-result-images.test.ts:
-    /// when an assistant turn produces multiple tool_use calls and each tool
-    /// result returns text + image, the converter must emit each result as
-    /// its own `tool` role message (text only) and then batch every image
-    /// into a single trailing synthetic `user` message with `image_url`
-    /// parts — OpenAI Completions rejects images inside `tool` role.
+    /// When an assistant turn produces multiple tool_use calls and each
+    /// tool result returns text + image, the converter must emit each
+    /// result as its own `tool` role message (text only) and then batch
+    /// every image into a single trailing synthetic `user` message with
+    /// `image_url` parts — OpenAI Completions rejects images inside
+    /// the `tool` role.
     #[test]
     fn convert_messages_batches_tool_result_images_after_consecutive_tools() {
         use crate::types::{

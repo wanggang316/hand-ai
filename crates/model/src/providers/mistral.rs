@@ -1,7 +1,6 @@
 //! Mistral conversations API provider.
 //!
-//! Implements streaming chat completions for Mistral. Mirrors
-//! `pi-mono/packages/ai/src/providers/mistral.ts`.
+//! Implements streaming chat completions for Mistral.
 //!
 //! Key Mistral specifics:
 //!
@@ -1080,8 +1079,9 @@ fn parse_streaming_json(input: &str) -> Value {
     if let Ok(v) = serde_json::from_str::<Value>(input) {
         return v;
     }
-    // Retry with pi-mono's repair pass — fixes raw control bytes and
-    // invalid backslash escapes inside string literals (pi-mono #1022).
+    // Retry with the shared repair pass — escapes raw control bytes
+    // and doubles invalid backslash escapes inside string literals so
+    // a malformed tool-call payload doesn't collapse to `{}`.
     if let Some(v) = crate::transform::parse_json_with_repair(input) {
         return v;
     }
