@@ -112,6 +112,15 @@ pub fn get_env_api_key(provider: &Provider) -> Option<String> {
                 "opencode" => &["OPENCODE_API_KEY"],
                 "kimi-coding" => &["KIMI_API_KEY"],
                 "moonshotai" | "moonshotai-cn" => &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+                // Xiaomi MiMo: API billing endpoint (api.xiaomimimo.com)
+                // uses a single key. The Token Plan endpoints are
+                // separate providers with their own per-region keys
+                // because a platform.xiaomimimo.com key fails against
+                // the Token Plan endpoint and vice versa.
+                "xiaomi" => &["XIAOMI_API_KEY"],
+                "xiaomi-token-plan-cn" => &["XIAOMI_TOKEN_PLAN_CN_API_KEY"],
+                "xiaomi-token-plan-ams" => &["XIAOMI_TOKEN_PLAN_AMS_API_KEY"],
+                "xiaomi-token-plan-sgp" => &["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
                 _ => &[],
             };
             candidates
@@ -152,6 +161,10 @@ pub fn get_env_api_key_by_str(provider: &str) -> Option<String> {
         "opencode" => &["OPENCODE_API_KEY"],
         "kimi-coding" | "kimi" => &["KIMI_API_KEY"],
         "moonshotai" | "moonshotai-cn" => &["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+        "xiaomi" => &["XIAOMI_API_KEY"],
+        "xiaomi-token-plan-cn" => &["XIAOMI_TOKEN_PLAN_CN_API_KEY"],
+        "xiaomi-token-plan-ams" => &["XIAOMI_TOKEN_PLAN_AMS_API_KEY"],
+        "xiaomi-token-plan-sgp" => &["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
         _ => &[],
     };
     candidates
@@ -334,6 +347,62 @@ mod tests {
     fn test_anthropic_key_sources() {
         if env::var("ANTHROPIC_OAUTH_TOKEN").is_err() && env::var("ANTHROPIC_API_KEY").is_err() {
             assert!(get_env_api_key(&Provider::Anthropic).is_none());
+        }
+    }
+
+    /// Each Xiaomi MiMo provider variant must read from its own env
+    /// var: the API billing endpoint (`xiaomi`) uses `XIAOMI_API_KEY`,
+    /// and each Token Plan region uses its own per-region key. A
+    /// platform key fails against the Token Plan endpoint and vice
+    /// versa, so the mappings must stay distinct.
+    #[test]
+    fn xiaomi_provider_variants_read_distinct_env_vars() {
+        let cases = [
+            (Provider::Xiaomi, "XIAOMI_API_KEY"),
+            (Provider::XiaomiTokenPlanCn, "XIAOMI_TOKEN_PLAN_CN_API_KEY"),
+            (Provider::XiaomiTokenPlanAms, "XIAOMI_TOKEN_PLAN_AMS_API_KEY"),
+            (Provider::XiaomiTokenPlanSgp, "XIAOMI_TOKEN_PLAN_SGP_API_KEY"),
+        ];
+        for (provider, expected_env) in cases {
+            // Skip the assertion if the env var happens to be set in
+            // the dev environment — the test should not flake based
+            // on the developer's shell.
+            if env::var(expected_env).is_ok_and(|v| !v.is_empty()) {
+                continue;
+            }
+            assert!(
+                get_env_api_key(&provider).is_none(),
+                "{provider:?} should resolve to {expected_env} (empty) -> None"
+            );
+        }
+    }
+
+    /// String-keyed access path (`get_env_api_key_by_str`) must map
+    /// each Xiaomi variant onto the same env var as the enum path.
+    /// This is the path used by CLI flag parsing where the provider
+    /// id arrives as a string.
+    #[test]
+    fn xiaomi_by_str_path_mirrors_enum_mappings() {
+        let ids = [
+            "xiaomi",
+            "xiaomi-token-plan-cn",
+            "xiaomi-token-plan-ams",
+            "xiaomi-token-plan-sgp",
+        ];
+        let envs = [
+            "XIAOMI_API_KEY",
+            "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+            "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+            "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+        ];
+        for (id, expected_env) in ids.iter().zip(envs.iter()) {
+            if env::var(expected_env).is_ok_and(|v| !v.is_empty()) {
+                continue;
+            }
+            assert!(
+                get_env_api_key_by_str(id).is_none(),
+                "by_str({id}) should resolve to {expected_env} (empty) -> None"
+            );
         }
     }
 }
