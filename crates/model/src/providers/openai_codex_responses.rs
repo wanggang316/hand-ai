@@ -356,6 +356,20 @@ fn extract_account_id(token: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Whether to emit the `session_id` cache-affinity header. Strict
+/// OpenAI-compatible proxies reject the underscore-bearing header name;
+/// they opt out via `OpenAIResponsesCompat.sendSessionIdHeader = false`.
+/// `x-client-request-id` is unaffected and always rides along when a
+/// session id is present.
+pub(crate) fn should_send_session_id_header(compat: Option<&crate::types::Compat>) -> bool {
+    match compat {
+        Some(crate::types::Compat::OpenAIResponses(c)) => {
+            c.send_session_id_header.unwrap_or(true)
+        }
+        _ => true,
+    }
+}
+
 /// Build the SSE headers for a Codex request.
 fn build_sse_headers(
     builder: reqwest::RequestBuilder,
@@ -363,6 +377,7 @@ fn build_sse_headers(
     extra_headers: Option<&std::collections::HashMap<String, String>>,
     token: &str,
     session_id: Option<&str>,
+    send_session_id_header: bool,
 ) -> reqwest::RequestBuilder {
     let mut b = builder
         .header("Content-Type", "application/json")
@@ -376,9 +391,10 @@ fn build_sse_headers(
     }
 
     if let Some(sid) = session_id {
-        b = b
-            .header("session_id", sid)
-            .header("x-client-request-id", sid);
+        if send_session_id_header {
+            b = b.header("session_id", sid);
+        }
+        b = b.header("x-client-request-id", sid);
     }
 
     if let Some(headers) = model_headers {
@@ -562,12 +578,14 @@ fn stream_openai_codex_responses(
         let builder = client
             .post(&url)
             .body(serde_json::to_string(&body).unwrap_or_default());
+        let send_session_id = should_send_session_id_header(model.compat.as_ref());
         let builder = build_sse_headers(
             builder,
             model.headers.as_ref(),
             options.headers.as_ref(),
             &token,
             options.session_id.as_deref(),
+            send_session_id,
         );
 
         let response = match builder.send().await {
@@ -808,6 +826,44 @@ mod tests {
             &StreamOptions::default(),
         );
         assert_eq!(body["store"], serde_json::Value::Bool(false));
+    }
+
+    /// Strict OpenAI-compatible proxies reject the `session_id` header
+    /// (underscore-bearing name fails their HTTP/2 validators). Models
+    /// served by such proxies must be able to opt out via
+    /// `OpenAIResponsesCompat.sendSessionIdHeader = false`.
+    #[test]
+    fn should_send_session_id_header_honors_responses_compat_flag() {
+        use crate::types::{Compat, OpenAIResponsesCompat};
+        assert!(should_send_session_id_header(None), "default is on");
+        assert!(should_send_session_id_header(Some(&Compat::OpenAIResponses(
+            OpenAIResponsesCompat {
+                send_session_id_header: None,
+                ..Default::default()
+            }
+        ))));
+        assert!(should_send_session_id_header(Some(&Compat::OpenAIResponses(
+            OpenAIResponsesCompat {
+                send_session_id_header: Some(true),
+                ..Default::default()
+            }
+        ))));
+        assert!(!should_send_session_id_header(Some(&Compat::OpenAIResponses(
+            OpenAIResponsesCompat {
+                send_session_id_header: Some(false),
+                ..Default::default()
+            }
+        ))));
+    }
+
+    /// A non-Responses compat block (e.g. OpenAICompletions on a model
+    /// served as Codex) must not interfere — the helper defaults to
+    /// sending the header.
+    #[test]
+    fn should_send_session_id_header_ignores_unrelated_compat() {
+        use crate::types::{Compat, OpenAICompletionsCompat};
+        let other = Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat::default()));
+        assert!(should_send_session_id_header(Some(&other)));
     }
 
     /// Codex defaults to `text.verbosity: "low"` so the backend returns
