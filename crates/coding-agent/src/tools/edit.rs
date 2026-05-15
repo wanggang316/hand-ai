@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 pub fn create_edit_tool(cwd: PathBuf) -> AgentTool {
     AgentTool::simple(
         "edit",
-        "Edit a file by replacing an exact string match. The old_string must appear \
-         exactly once in the file. Returns a unified diff of the changes.",
+        "Edit a file by replacing an exact string match. Use either single-edit \
+         shape (`old_string`/`new_string`/`replace_all`) for a one-shot replacement, \
+         or multi-edit shape (`edits: [{oldText, newText}]`) to apply several \
+         disjoint replacements atomically. Returns a unified diff of all changes.",
         json!({
             "type": "object",
             "properties": {
@@ -22,18 +24,39 @@ pub fn create_edit_tool(cwd: PathBuf) -> AgentTool {
                 },
                 "old_string": {
                     "type": "string",
-                    "description": "The exact string to find and replace"
+                    "description": "Single-edit: the exact string to find and replace. \
+                                    Ignored when `edits` is supplied."
                 },
                 "new_string": {
                     "type": "string",
-                    "description": "The replacement string"
+                    "description": "Single-edit: the replacement string. Ignored when \
+                                    `edits` is supplied."
                 },
                 "replace_all": {
                     "type": "boolean",
-                    "description": "If true, replace all occurrences. Default: false"
+                    "description": "Single-edit: if true, replace all occurrences of \
+                                    old_string. Default: false. Ignored when \
+                                    `edits` is supplied."
+                },
+                "edits": {
+                    "type": "array",
+                    "description": "Multi-edit: apply several disjoint replacements \
+                                    against the original file content. Each entry \
+                                    has `oldText` and `newText`. Matches the upstream \
+                                    pi-mono shape. When supplied, the single-edit \
+                                    parameters are ignored and the call is atomic — \
+                                    a failure in any entry rolls back the whole batch.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "oldText": { "type": "string" },
+                            "newText": { "type": "string" }
+                        },
+                        "required": ["oldText", "newText"]
+                    }
                 }
             },
-            "required": ["file_path", "old_string", "new_string"]
+            "required": ["file_path"]
         }),
         "Edit",
         move |_tool_call_id, args| {
@@ -48,6 +71,22 @@ async fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
         Some(p) => p,
         None => return ToolResult::error("Missing required parameter: file_path"),
     };
+    let path = resolve_to_cwd(file_path, cwd);
+    let path_for_async = path.clone();
+
+    // Multi-edit shape: `edits: [{oldText, newText}]`. Takes priority
+    // over the single-edit parameters when present.
+    if let Some(edits_value) = args.get("edits") {
+        let edits = match parse_edits_array(edits_value) {
+            Ok(v) => v,
+            Err(e) => return ToolResult::error(e),
+        };
+        return with_file_mutation_queue(&path, async move {
+            run_multi_edit(&path_for_async, &edits)
+        })
+        .await;
+    }
+
     let old_string = match args.get("old_string").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => return ToolResult::error("Missing required parameter: old_string"),
@@ -61,10 +100,8 @@ async fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let path = resolve_to_cwd(file_path, cwd);
     let old_string = old_string.to_string();
     let new_string = new_string.to_string();
-    let path_for_async = path.clone();
 
     // Serialise the read-modify-write against the same file. Two
     // parallel edits to the same path would otherwise both observe the
@@ -74,6 +111,235 @@ async fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
         run_edit(&path_for_async, &old_string, &new_string, replace_all)
     })
     .await
+}
+
+/// A single (oldText → newText) replacement in the multi-edit array.
+#[derive(Debug, Clone)]
+struct EditEntry {
+    old_text: String,
+    new_text: String,
+}
+
+fn parse_edits_array(value: &serde_json::Value) -> Result<Vec<EditEntry>, String> {
+    let arr = value
+        .as_array()
+        .ok_or_else(|| "edits must be an array of {oldText, newText} objects".to_string())?;
+    if arr.is_empty() {
+        return Err("edits must contain at least one replacement".to_string());
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, entry) in arr.iter().enumerate() {
+        let old_text = entry
+            .get("oldText")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("edits[{}].oldText must be a string", i))?
+            .to_string();
+        let new_text = entry
+            .get("newText")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("edits[{}].newText must be a string", i))?
+            .to_string();
+        out.push(EditEntry { old_text, new_text });
+    }
+    Ok(out)
+}
+
+/// Apply a batch of edits atomically against the file's original
+/// content. Semantics:
+///   1. Read the file once. Strip a leading UTF-8 BOM for matching;
+///      restore it on write so callers don't lose it.
+///   2. CRLF tolerance — if any entry's oldText uses LF but the file
+///      is CRLF (or vice versa), rewrite that entry's line endings
+///      to match the file before resolving.
+///   3. Locate each `oldText` in the (BOM-stripped, CRLF-aligned)
+///      original; reject when missing or ambiguous.
+///   4. If literal matching fails for any entry, retry the whole
+///      batch under fuzzy Unicode normalisation (smart quotes,
+///      dashes, NBSP collapsed to ASCII). Same side-effect as the
+///      single-edit path: fuzzy mode rewrites the matched span to
+///      its normalised form.
+///   5. Detect overlapping byte ranges across the batch.
+///   6. Apply replacements against the ORIGINAL content (not
+///      incrementally), then re-prepend the BOM if present and
+///      write once.
+///
+/// On any failure the file is NOT modified.
+fn run_multi_edit(path: &Path, edits: &[EditEntry]) -> ToolResult {
+    let raw_content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            let code = match e.kind() {
+                std::io::ErrorKind::NotFound => "ENOENT",
+                std::io::ErrorKind::PermissionDenied => "EACCES",
+                std::io::ErrorKind::AlreadyExists => "EEXIST",
+                std::io::ErrorKind::InvalidInput => "EINVAL",
+                _ => "EIO",
+            };
+            return ToolResult::error(format!(
+                "Could not edit file: {}. Error code: {}.",
+                path.display(),
+                code
+            ));
+        }
+    };
+
+    // BOM handling: strip a leading U+FEFF for matching, remember the
+    // byte length to re-prepend it on write.
+    let (bom, content): (&str, String) = if let Some(stripped) = raw_content.strip_prefix('\u{FEFF}')
+    {
+        ("\u{FEFF}", stripped.to_string())
+    } else {
+        ("", raw_content.clone())
+    };
+
+    // CRLF tolerance per-edit. Same rules as the single-edit path.
+    let file_has_crlf = content.contains("\r\n");
+    let crlf_aligned: Vec<(String, String)> = edits
+        .iter()
+        .map(|e| {
+            let old = if file_has_crlf
+                && !e.old_text.contains("\r\n")
+                && e.old_text.contains('\n')
+            {
+                e.old_text.replace('\n', "\r\n")
+            } else if !file_has_crlf && e.old_text.contains("\r\n") {
+                e.old_text.replace("\r\n", "\n")
+            } else {
+                e.old_text.clone()
+            };
+            let new = if file_has_crlf
+                && !e.new_text.contains("\r\n")
+                && e.new_text.contains('\n')
+            {
+                e.new_text.replace('\n', "\r\n")
+            } else if !file_has_crlf && e.new_text.contains("\r\n") {
+                e.new_text.replace("\r\n", "\n")
+            } else {
+                e.new_text.clone()
+            };
+            (old, new)
+        })
+        .collect();
+
+    // Pick the work-space: literal CRLF-aligned, or Unicode-normalised
+    // fuzzy. We try literal first and only fall back to fuzzy when at
+    // least one edit's oldText isn't present literally.
+    let needs_fuzzy = crlf_aligned
+        .iter()
+        .any(|(o, _)| !content.contains(o.as_str()));
+    let (work_content, work_edits): (String, Vec<(String, String)>) = if needs_fuzzy {
+        let nc = normalize_for_fuzzy_match(&content);
+        let ne: Vec<(String, String)> = crlf_aligned
+            .iter()
+            .map(|(o, n)| {
+                (
+                    normalize_for_fuzzy_match(o),
+                    normalize_for_fuzzy_match(n),
+                )
+            })
+            .collect();
+        (nc, ne)
+    } else {
+        (content.clone(), crlf_aligned)
+    };
+
+    // Resolve each edit's byte range in the work content. Reject
+    // missing / ambiguous before any byte is written.
+    struct Resolved {
+        start: usize,
+        end: usize,
+        new: String,
+    }
+    let mut resolved: Vec<Resolved> = Vec::with_capacity(work_edits.len());
+    for (i, (old, new)) in work_edits.iter().enumerate() {
+        let match_count = work_content.matches(old.as_str()).count();
+        if match_count == 0 {
+            return ToolResult::error(format!(
+                "Could not find the exact text for edits[{}] in {}: {:?}",
+                i,
+                path.display(),
+                truncate_for_display(old)
+            ));
+        }
+        if match_count > 1 {
+            return ToolResult::error(format!(
+                "Found {} occurrences of edits[{}] oldText in {}; supply more \
+                 context to make it unique.",
+                match_count,
+                i,
+                path.display()
+            ));
+        }
+        let start = work_content.find(old.as_str()).expect("just counted");
+        let end = start + old.len();
+        resolved.push(Resolved {
+            start,
+            end,
+            new: new.clone(),
+        });
+    }
+
+    // Sort by start offset so overlap detection is a linear scan.
+    resolved.sort_by_key(|r| r.start);
+    for window in resolved.windows(2) {
+        if window[0].end > window[1].start {
+            return ToolResult::error(format!(
+                "edits overlap in {}: byte range [{}, {}) collides with [{}, {})",
+                path.display(),
+                window[0].start,
+                window[0].end,
+                window[1].start,
+                window[1].end
+            ));
+        }
+    }
+
+    // Build the new content by stitching work-content slices with the
+    // new texts in offset order.
+    let mut new_content = String::with_capacity(work_content.len());
+    let mut cursor = 0;
+    for r in &resolved {
+        new_content.push_str(&work_content[cursor..r.start]);
+        new_content.push_str(&r.new);
+        cursor = r.end;
+    }
+    new_content.push_str(&work_content[cursor..]);
+
+    // Diff once across the whole batch so the model sees a single
+    // unified diff covering every change.
+    let diff = generate_diff(&work_content, &new_content, &path.display().to_string());
+
+    // Re-prepend the BOM (if any) before writing so we don't drop it.
+    let final_bytes = if bom.is_empty() {
+        new_content.clone()
+    } else {
+        let mut s = String::with_capacity(bom.len() + new_content.len());
+        s.push_str(bom);
+        s.push_str(&new_content);
+        s
+    };
+    if let Err(e) = std::fs::write(path, &final_bytes) {
+        return ToolResult::error(format!("Failed to write file: {}", e));
+    }
+
+    let summary = if resolved.len() == 1 {
+        "Successfully replaced 1 block".to_string()
+    } else {
+        format!("Successfully replaced {} block(s)", resolved.len())
+    };
+    let body = format!("{summary}\n\n{diff}");
+    let result = ToolResult::text(body);
+    result.with_details(json!({ "diff": diff, "edits_applied": resolved.len() }))
+}
+
+/// Render a short preview of an `oldText` for inclusion in error
+/// messages. Long strings are clipped so the error stays readable.
+fn truncate_for_display(s: &str) -> String {
+    if s.len() <= 80 {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..80])
+    }
 }
 
 fn run_edit(path: &Path, old_string: &str, new_string: &str, replace_all: bool) -> ToolResult {
@@ -733,5 +999,270 @@ mod tests {
         let valid =
             after.starts_with("WRITE_") || after.starts_with("EDIT_") || after.contains("EDIT_");
         assert!(valid, "unexpected final content: {after:?}");
+    }
+
+    // ---------------- Multi-edit array surface ----------------
+
+    /// UC-edit-005 — a batch `edits: [{oldText, newText}, ...]` array
+    /// replaces multiple disjoint regions in a single call. The
+    /// response reports a `Successfully replaced N block(s)` summary
+    /// and a unified diff covering every change.
+    #[tokio::test]
+    async fn test_edit_multi_edit_replaces_disjoint_regions() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("multi.txt");
+        std::fs::write(&file, "alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "edits": [
+                    { "oldText": "alpha", "newText": "ALPHA" },
+                    { "oldText": "gamma", "newText": "GAMMA" }
+                ]
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("Successfully replaced 2 block(s)"),
+            "expected 2-block summary, got: {text}"
+        );
+        assert!(text.contains("-alpha"));
+        assert!(text.contains("+ALPHA"));
+        assert!(text.contains("-gamma"));
+        assert!(text.contains("+GAMMA"));
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(after, "ALPHA\nbeta\nGAMMA\ndelta\n");
+    }
+
+    /// UC-edit-007 — every entry resolves against the ORIGINAL file
+    /// content, not the file as mutated by previous entries. If a
+    /// `newText` happens to recreate a later entry's `oldText`, the
+    /// later entry should still match its original site, not the
+    /// freshly-written one.
+    #[tokio::test]
+    async fn test_edit_multi_edit_matches_against_original_not_incremental() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("orig.txt");
+        // `bar` appears once in the original. The first edit rewrites
+        // `foo` → `foo bar`, which would create a second `bar` if we
+        // matched incrementally. The second edit `bar` → `BAR` must
+        // therefore see only the ORIGINAL single `bar`, not the one
+        // the first edit synthesised.
+        std::fs::write(&file, "foo\nbar\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "edits": [
+                    { "oldText": "foo", "newText": "foo bar" },
+                    { "oldText": "bar", "newText": "BAR" }
+                ]
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("Successfully replaced 2 block(s)"),
+            "expected both edits to land, got: {text}"
+        );
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(after, "foo bar\nBAR\n");
+    }
+
+    /// UC-edit-008 — empty `edits` arrays are rejected at parse time.
+    #[tokio::test]
+    async fn test_edit_multi_edit_empty_array_rejected() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("empty-edits.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "edits": []
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("at least one replacement"),
+            "expected empty-array rejection, got: {text}"
+        );
+        // File untouched.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello\n");
+    }
+
+    /// UC-edit-009 — two entries whose resolved byte ranges overlap
+    /// are rejected before any write.
+    #[tokio::test]
+    async fn test_edit_multi_edit_overlapping_regions_rejected() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("overlap.txt");
+        std::fs::write(&file, "abcdefg\n").unwrap();
+
+        // Both anchors are nested inside `abcdef` — they share bytes.
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "edits": [
+                    { "oldText": "abcd", "newText": "X" },
+                    { "oldText": "bcde", "newText": "Y" }
+                ]
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("overlap"),
+            "expected overlap rejection, got: {text}"
+        );
+        // File untouched — atomic rollback.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "abcdefg\n");
+    }
+
+    /// UC-edit-010 — when one entry in the batch fails (oldText not
+    /// found), the whole batch rolls back. No partial application.
+    #[tokio::test]
+    async fn test_edit_multi_edit_no_partial_application_on_failure() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("rollback.txt");
+        let original = "alpha\nbeta\n";
+        std::fs::write(&file, original).unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "edits": [
+                    { "oldText": "alpha", "newText": "ALPHA" },
+                    { "oldText": "NEVER-EXISTS", "newText": "X" }
+                ]
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("Could not find the exact text"),
+            "expected per-edit miss error, got: {text}"
+        );
+        // File untouched — the first edit must NOT have landed.
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            original,
+            "atomic rollback: file content must equal pre-call snapshot"
+        );
+    }
+
+    /// UC-edit-025 — fuzzy matching applies in multi-edit mode too.
+    /// One entry that requires smart-quote → ASCII normalisation
+    /// triggers fuzzy mode for the whole batch.
+    #[tokio::test]
+    async fn test_edit_multi_edit_fuzzy_matching_applies() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("fuzzy-multi.txt");
+        std::fs::write(
+            &file,
+            "name = \u{201C}widget\u{201D};\nrange: 1\u{2013}5\n",
+        )
+        .unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "edits": [
+                    { "oldText": "name = \"widget\";", "newText": "name = \"gadget\";" },
+                    { "oldText": "range: 1-5", "newText": "range: 10-50" }
+                ]
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("Successfully replaced 2 block(s)"),
+            "expected both fuzzy edits to land, got: {text}"
+        );
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("gadget"));
+        assert!(after.contains("range: 10-50"));
+    }
+
+    /// UC-edit-031 — preserve UTF-8 BOM and CRLF line endings across
+    /// a multi-edit batch. BOM stays at the file head; CRLF endings
+    /// remain wherever they were in the original.
+    #[tokio::test]
+    async fn test_edit_multi_edit_preserves_bom_and_crlf() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("bom-crlf.txt");
+        let original = "\u{FEFF}alpha\r\nbeta\r\ngamma\r\n";
+        std::fs::write(&file, original.as_bytes()).unwrap();
+
+        // Caller supplies LF in the entries; CRLF normalisation must
+        // re-align so the matches land.
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "edits": [
+                    { "oldText": "alpha\nbeta", "newText": "ALPHA\nBETA" },
+                    { "oldText": "gamma", "newText": "GAMMA" }
+                ]
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("Successfully replaced 2 block(s)"),
+            "expected both edits to land, got: {text}"
+        );
+        let after = std::fs::read(&file).unwrap();
+        // BOM intact at byte 0.
+        assert_eq!(&after[..3], &[0xEF, 0xBB, 0xBF], "BOM preserved");
+        let after_str = String::from_utf8(after).unwrap();
+        assert!(
+            after_str.contains("ALPHA\r\nBETA"),
+            "CRLF preserved between rewritten lines: {after_str:?}"
+        );
+        assert!(after_str.contains("GAMMA\r\n"));
+        // No stray LF-only sequences.
+        assert_eq!(
+            after_str.matches('\n').count(),
+            after_str.matches("\r\n").count(),
+            "all line breaks remain CRLF"
+        );
+    }
+
+    /// `edits` array entries missing `oldText` or `newText` keys are
+    /// rejected with a precise per-index error message — this is the
+    /// schema-validation contract callers see when their JSON is
+    /// malformed.
+    #[tokio::test]
+    async fn test_edit_multi_edit_rejects_missing_fields() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("bad-edits.txt");
+        std::fs::write(&file, "hello\n").unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "edits": [
+                    { "oldText": "hello" }
+                ]
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("edits[0].newText must be a string"),
+            "expected per-index error, got: {text}"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello\n");
     }
 }
