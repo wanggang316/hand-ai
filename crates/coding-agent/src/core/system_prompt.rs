@@ -53,6 +53,18 @@ pub struct BuildSystemPromptOptions<'a> {
     pub cwd: &'a Path,
     /// Available tool names.
     pub tools: &'a [String],
+    /// Optional per-tool description snippets. When supplied, the
+    /// `# Available Tools` section renders each entry as
+    /// `- <name>: <snippet>` (vs `- <name>` alone). Tools NOT in the
+    /// map fall back to their bare-name rendering OR — for the seven
+    /// builtin tool names — to hand's hard-coded usage guidelines
+    /// further down the section.
+    ///
+    /// Used by extensions and dynamic tool registries to advertise
+    /// the tool surface to the model without needing the prompt
+    /// builder to know each tool's purpose. `None` falls back to the
+    /// bare-name listing (no per-tool annotations).
+    pub tool_snippets: Option<&'a std::collections::HashMap<String, String>>,
     /// Discovered skills to advertise to the model.
     pub skills: &'a [Skill],
     /// Custom guidelines to append.
@@ -98,7 +110,16 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
     } else {
         tool_section.push_str("Available tools:\n");
         for tool in options.tools {
-            tool_section.push_str(&format!("- {}\n", tool));
+            if let Some(snippet) = options
+                .tool_snippets
+                .and_then(|m| m.get(tool))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                tool_section.push_str(&format!("- {}: {}\n", tool, snippet));
+            } else {
+                tool_section.push_str(&format!("- {}\n", tool));
+            }
         }
         tool_section.push('\n');
     }
@@ -291,6 +312,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp/test"),
             tools: &["read".into(), "bash".into(), "edit".into()],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: None,
             context_files: vec![],
@@ -313,6 +335,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: None,
             context_files: vec![],
@@ -332,6 +355,7 @@ mod tests {
         let prompt_empty_tools = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: None,
             context_files: vec![],
@@ -344,6 +368,7 @@ mod tests {
         let prompt_with_tools = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &["read".into()],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: None,
             context_files: vec![],
@@ -360,6 +385,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: None,
             context_files: vec![],
@@ -377,6 +403,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: Some("Always include M_TOKEN."),
             context_files: vec![],
@@ -396,6 +423,59 @@ mod tests {
         );
     }
 
+    /// When `tool_snippets` supplies a description for a custom tool,
+    /// the tool surfaces as `- <name>: <snippet>` in the Available
+    /// Tools section so the model sees what the tool does without
+    /// hand needing to know the tool's purpose at compile time.
+    #[test]
+    fn tool_snippets_render_custom_tool_with_description() {
+        let mut snippets = std::collections::HashMap::new();
+        snippets.insert(
+            "dynamic_tool".to_string(),
+            "Run dynamic test behaviour".to_string(),
+        );
+        let prompt = build_system_prompt(BuildSystemPromptOptions {
+            cwd: &PathBuf::from("/tmp"),
+            tools: &["read".into(), "dynamic_tool".into()],
+            tool_snippets: Some(&snippets),
+            skills: &[],
+            custom_guidelines: None,
+            context_files: vec![],
+            custom_prompt: None,
+        });
+        assert!(
+            prompt.contains("- dynamic_tool: Run dynamic test behaviour"),
+            "missing annotated custom tool, got: {prompt}"
+        );
+    }
+
+    /// When NO `tool_snippets` are provided, custom tool names still
+    /// surface — just as bare `- <name>` lines, without per-tool
+    /// description text. The model still sees the tool is available;
+    /// it just doesn't get an annotation.
+    #[test]
+    fn tool_snippets_absent_falls_back_to_bare_name_listing() {
+        let prompt = build_system_prompt(BuildSystemPromptOptions {
+            cwd: &PathBuf::from("/tmp"),
+            tools: &["read".into(), "dynamic_tool".into()],
+            tool_snippets: None,
+            skills: &[],
+            custom_guidelines: None,
+            context_files: vec![],
+            custom_prompt: None,
+        });
+        assert!(
+            prompt.contains("- dynamic_tool\n"),
+            "bare name should still surface, got: {prompt}"
+        );
+        // Without a snippet there must NOT be a colon-prefixed
+        // description following the name.
+        assert!(
+            !prompt.contains("- dynamic_tool:"),
+            "annotated form leaked, got: {prompt}"
+        );
+    }
+
     /// Each `--append-system-prompt` entry renders as its own bulleted
     /// line under `# Project Guidelines`. session_setup.rs joins the
     /// flag's repeated values with `\n\n` before passing them through
@@ -406,6 +486,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: Some("First entry.\n\nSecond entry."),
             context_files: vec![],
@@ -439,6 +520,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: Some(raw),
             context_files: vec![],
@@ -458,6 +540,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: None,
             context_files: vec![],
@@ -471,6 +554,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: Some("Always use TypeScript."),
             context_files: vec![],
@@ -484,6 +568,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: None,
             context_files: vec!["This project uses Rust.".into()],
@@ -505,6 +590,7 @@ mod tests {
                 "find".into(),
                 "ls".into(),
             ],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: None,
             context_files: vec![],
@@ -575,6 +661,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &["read".into()],
+            tool_snippets: None,
             skills: &[],
             custom_guidelines: None,
             context_files: vec![],
@@ -591,6 +678,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &["read".into()],
+            tool_snippets: None,
             skills: std::slice::from_ref(&skill),
             custom_guidelines: None,
             context_files: vec![],
@@ -613,6 +701,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &["read".into()],
+            tool_snippets: None,
             skills: &skills,
             custom_guidelines: None,
             context_files: vec![],
@@ -633,6 +722,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &["read".into()],
+            tool_snippets: None,
             skills: &skills,
             custom_guidelines: None,
             context_files: vec![],
@@ -654,6 +744,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &["read".into()],
+            tool_snippets: None,
             skills: &skills,
             custom_guidelines: None,
             context_files: vec![],
@@ -673,6 +764,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &["read".into()],
+            tool_snippets: None,
             skills: &skills,
             custom_guidelines: None,
             context_files: vec![],
@@ -693,6 +785,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &["bash".into(), "edit".into()],
+            tool_snippets: None,
             skills: std::slice::from_ref(&skill),
             custom_guidelines: None,
             context_files: vec![],
@@ -709,6 +802,7 @@ mod tests {
         let prompt = build_system_prompt(BuildSystemPromptOptions {
             cwd: &PathBuf::from("/tmp"),
             tools: &[],
+            tool_snippets: None,
             skills: std::slice::from_ref(&skill),
             custom_guidelines: None,
             context_files: vec![],

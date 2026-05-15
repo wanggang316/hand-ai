@@ -39,8 +39,8 @@ UC-sysp-004..007.
 | UC-sysp-001 | ✅ pass | `empty_tools_emits_none_placeholder` |
 | UC-sysp-002 | ✅ pass | `show_file_paths_guideline_always_present` |
 | UC-sysp-003 | ✅ pass | `test_build_system_prompt_basic`, `test_tool_guidelines_generated` |
-| UC-sysp-004 | ❌ fail | hand has no `tool_snippets` map; tool descriptions are baked into the template by name |
-| UC-sysp-005 | ❌ fail | same — custom tools with no snippet are absent regardless because there's no snippet channel |
+| UC-sysp-004 | ✅ pass | `tool_snippets_render_custom_tool_with_description` |
+| UC-sysp-005 | ✅ pass | `tool_snippets_absent_falls_back_to_bare_name_listing` |
 | UC-sysp-006 | ✅ pass | `append_system_prompt_entries_render_as_separate_bullets` |
 | UC-sysp-007 | ✅ pass | `append_system_prompt_dedups_and_trims` |
 

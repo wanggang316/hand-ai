@@ -277,6 +277,7 @@ impl AgentSession {
         let system_prompt = system_prompt::build_system_prompt(BuildSystemPromptOptions {
             cwd: &config.cwd,
             tools: &tool_names,
+            tool_snippets: None,
             skills: &skills_discovered,
             custom_guidelines: config.custom_guidelines.as_deref(),
             context_files,
