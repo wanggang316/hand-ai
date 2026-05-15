@@ -928,4 +928,35 @@ mod tests {
         let at_labels: Vec<&str> = at_items.iter().map(|i| i.label.as_str()).collect();
         assert!(at_labels.contains(&"alpha.txt"), "got: {at_labels:?}");
     }
+
+    /// Hidden files (dotfiles like `.gitignore`, `.env.local`) are
+    /// surfaced by the path provider — the user may legitimately want
+    /// to `@`-attach them. The `.git` directory itself is still
+    /// dropped: it's noise that never adds value to a prompt.
+    #[tokio::test]
+    async fn test_path_provider_includes_dotfiles_excludes_git() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "visible").unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git").join("HEAD"), "ref").unwrap();
+
+        let provider = PathAutocompleteProvider::new(dir.path());
+        let items = provider
+            .query_sync(&ctx("", AutocompleteTrigger::At))
+            .expect("at trigger yields Some");
+        let labels: Vec<String> = items.iter().map(|i| i.label.clone()).collect();
+        assert!(
+            labels.iter().any(|l| l == ".gitignore"),
+            "dotfile must surface, got: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l == "visible.txt"),
+            "regular file must surface, got: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.starts_with(".git/")),
+            ".git/ contents must be dropped, got: {labels:?}"
+        );
+    }
 }

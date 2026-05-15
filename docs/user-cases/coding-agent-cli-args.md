@@ -113,9 +113,9 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-054 | ✅ pass | `positional_plain_text_lands_in_messages` |
 | UC-args-055 | ✅ pass | `positional_at_file_lands_in_file_args` |
 | UC-args-056 | ✅ pass | `positional_mixed_messages_and_file_args` |
-| UC-args-057 | ❌ fail | hand rejects unknown flags via clap; pi captures them into `unknownFlags` |
-| UC-args-058 | ❌ fail | same — boolean unknown |
-| UC-args-059 | ❌ fail | same — `--unknown-flag=value` syntax |
+| UC-args-057 | 🚫 N/A | hand's clap rejects unknown flags by design (typo-safe UX); pi's lenient capture into `unknownFlags` would break hand's strict-parsing contract |
+| UC-args-058 | 🚫 N/A | same |
+| UC-args-059 | 🚫 N/A | same |
 | UC-args-060 | ⚠️ pending | complex combo — most components covered; needs end-to-end probe |
 
 ## Cases

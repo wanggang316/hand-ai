@@ -36,9 +36,9 @@ change agents would need to re-learn.
 | UC-edit-009 | fail when multi-edit regions overlap | ❌ blocked on UC-edit-005 |
 | UC-edit-010 | no partial application when one edit fails | ❌ blocked on UC-edit-005 |
 | UC-edit-011 | include EACCES for read-only files | ✅ `test_edit_readonly_file_surfaces_eacces_code` |
-| UC-edit-012 | include original error message for unknown access errors | ⚠️ pending |
-| UC-edit-013 | include ENOENT in diff preview for missing files | ❌ hand has no computeEditsDiff equivalent |
-| UC-edit-014 | include EACCES in diff preview for unreadable files | ❌ same |
+| UC-edit-012 | include original error message for unknown access errors | 🚫 N/A — hand maps every io::ErrorKind to a named code in UC-edit-003/011; the "unknown access error pass-through" is pi's escape hatch for kinds it doesn't recognize, redundant in hand. |
+| UC-edit-013 | include ENOENT in diff preview for missing files | 🚫 N/A — hand has no preview API; edit operations are atomic apply-or-error. |
+| UC-edit-014 | include EACCES in diff preview for unreadable files | 🚫 N/A — same: no preview API. |
 | UC-edit-015 | match text with trailing whitespace stripped (fuzzy) | ⚠️ pending — verify hand's fuzzy normalisation does this |
 | UC-edit-016 | match fullwidth punctuation in Chinese text | ⚠️ pending |
 | UC-edit-017 | match compatibility-equivalent Unicode forms (NFKC) | ⚠️ pending |

@@ -23,7 +23,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-core-system-prompt.md | pi-mono/packages/coding-agent/test/system-prompt.test.ts | coding-agent | 7 | 7 | 0 | 0 |
 | model-stream-retry.md | hand parity contract (pi has no dedicated retry-classification test file) | model | 8 | 8 | 0 | 0 |
 | tui-keys.md | pi-mono/packages/tui/test/keys.test.ts | tui | 59 | 59 | 0 | 0 |
-| tui-autocomplete.md | pi-mono/packages/tui/test/autocomplete.test.ts | tui | 25 | 1 | 10 | 14 |
+| tui-autocomplete.md | pi-mono/packages/tui/test/autocomplete.test.ts | tui | 25 | 2 | 10 | 13 |
 
 A `—` in any column means "not yet measured" — the file hasn't been
 authored yet, or the count hasn't been recomputed since the last edit.
@@ -31,10 +31,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 256
-- **Fail:** 22
-- **Pending:** 54
-- **N/A (architectural divergence):** 6
+- **Pass:** 257
+- **Fail:** 18
+- **Pending:** 51
+- **N/A (architectural divergence):** 12
 
 ### Known failures (drive remediation)
 

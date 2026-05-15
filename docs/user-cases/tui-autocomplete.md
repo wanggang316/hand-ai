@@ -46,7 +46,7 @@ small auto-ignore list. The functional surface diverges:
 | UC-ac-011 | @-fd: dir-in-middle match (`--full-path`) | ❌ fail — hand has no equivalent flag |
 | UC-ac-012 | @-fd: scopes to relative dirs, searches recursively | ⚠️ pending |
 | UC-ac-013 | @-fd: quotes paths with spaces | ❌ fail — hand emits paths unquoted |
-| UC-ac-014 | @-fd: includes hidden but excludes .git | ⚠️ pending — verify against auto-ignore list |
+| UC-ac-014 | @-fd: includes hidden but excludes .git | ✅ pass — `test_path_provider_includes_dotfiles_excludes_git` |
 | UC-ac-015 | @-fd: follows symlinked directories | ❌ fail — hand's BFS does not traverse symlinks |
 | UC-ac-016 | @-fd: returns symlinked dirs matched by name | ❌ fail (same) |
 | UC-ac-017 | @-fd: returns symlinked files without `type l` | ❌ fail (same) |
