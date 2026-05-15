@@ -89,31 +89,58 @@ authored yet, or the count hasn't been recomputed since the last edit.
 - **UC-as-005..008** — no `reload`/`drain_errors`, no `get_auth_status`
   redactor, no runtime-override layer.
 
-## Next-batch backlog
+## Phase 1 complete — suite breadth landed
 
-Authored ordered by ascending case count so the suite breadths first.
-Each batch ends with a passing build + a commit + a MODULES update.
+All 18 originally-scheduled modules now have a `.md` file in
+`docs/user-cases/`. Phase 2 splits into two parallel tracks:
 
-1. **cli/args** (~18 cases) — `pi-mono/.../test/args.test.ts`
-2. **bash_executor** — `bash-execution-width.test.ts` + the `bash tool`
-   subset of `tools.test.ts` (~16 cases together)
-3. **model_resolver** (~33 cases) — `model-resolver.test.ts`
-4. **auth_storage** (~6 cases) — `auth-storage.test.ts`
-5. **resolve_config_value** (~8 cases) — derived from
-   `auth-storage.test.ts` `!command` subset + the dedicated test file
-6. **tools/edit** (~31 cases) — `tools.test.ts` edit-tool + edit-tool
-   fuzzy matching + edit-tool CRLF describes; `edit-tool-legacy-input`,
-   `edit-tool-no-full-redraw`
-7. **bash tool** (~16 cases) — `tools.test.ts` bash-tool describe
-8. **session_manager** (~26 cases) — `session-*.test.ts` family
-9. **stream / retry** — `pi-mono/.../packages/ai/test/retry-*.test.ts`
-10. **tui/keys** — `pi-mono/.../packages/tui/test/keys*.test.ts`
-11. **tui/autocomplete** — `pi-mono/.../packages/tui/test/autocomplete*.test.ts`
+### Track A: Phase-2 module breadth (remaining pi suites)
 
-After the suite breadth is complete (every module has a `.md` file),
-the failing UC cluster drives a remediation milestone:
+Smaller pi test files not yet translated. Each is < 20 cases.
 
-- gitignore-aware find tool (UC-find-002)
-- grep API alignment (UC-grep-002)
-- read tool output format alignment (UC-read-001..010)
-- system_prompt API surface alignment (UC-sysp-*)
+- `compaction*.test.ts` (compaction core, extensions, serialization,
+  summary-reasoning) — ~50 cases together
+- `extensions-*.test.ts` (discovery, runner, input-event) — ~62 cases
+- `settings-manager*.test.ts` — ~18 cases
+- `session-selector-*.test.ts` — ~19 cases (tui interaction)
+- `agent-session-*.test.ts` — ~30 cases (concurrency, branching,
+  retry, runtime events)
+- `package-manager*.test.ts` — ~103 cases
+- `prompt-templates.test.ts`, `resource-loader.test.ts`,
+  `skills.test.ts`, `frontmatter.test.ts` — runtime-asset loaders
+- `interactive-mode-*.test.ts` — TUI driver cases
+- Various smaller files (rpc-*, paths, plan-mode-utils, theme-export,
+  initial-message, version-check, etc.)
+
+### Track B: ❌ remediation
+
+The 77 failing UC items already enumerated under "Known failures"
+above drive concrete fixes:
+
+1. **find/.gitignore** (UC-find-002) — switch to `ignore::WalkBuilder`
+2. **grep API alignment** (UC-grep-002) — rename `max_matches`→`limit`
+3. **read output format** (UC-read-001/003/004/006/009/010) — drop
+   line-number prefix; align truncation wording; add structured
+   `details.truncation`; add image-magic detection
+4. **system_prompt** (UC-sysp-001/004..007) — add `tool_snippets` map,
+   switch `custom_guidelines` to dedup'd list, emit `(none)` placeholder
+5. **cli/args** (UC-args-002/012/013/026/028..057) — many small clap
+   adjustments; biggest is unifying positional `prompt` →
+   `messages: Vec<String>` and adding `@<file>` recognition + the
+   `--extension/--skill/--prompt-template/--theme` family
+6. **bash full-output persistence** (UC-bash-004/015/016) — persist
+   truncated payloads to tempfile, surface path in footer + `details`
+7. **bash command_prefix** (UC-bash-008/009) — add config option
+8. **auth_storage** (UC-as-001/005..008) — add `get_api_key` async
+   with OAuth refresh + lock recovery, `reload`+`drain_errors`,
+   `get_auth_status` redactor, runtime-override layer
+9. **tools/edit edits array** (UC-edit-005..010, 025, 031) — schema
+   change to support multi-edit atomicity
+10. **autocomplete fd parity** (UC-ac-* cluster) — `ignore::WalkBuilder`
+    with symlink follow, quoted-path support
+11. **model_resolver default-table drift** (UC-mr-027/028/029) —
+    snapshot-equality test against pi's `defaultModelPerProvider`
+
+Each remediation item is scoped small enough to be one commit. The
+loop runs them one at a time, re-verifies the affected user-cases
+flip from ❌ to ✅, and commits.
