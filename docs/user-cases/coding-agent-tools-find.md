@@ -12,7 +12,7 @@ auto-ignore list. The behavioural delta is captured in UC-find-002 below.
 | ID | Status | Verified-by |
 |----|--------|-------------|
 | UC-find-001 | ✅ pass | `test_find_files`, `test_find_recursive`, `test_find_basename_pattern_matches_at_any_depth` |
-| UC-find-002 | ❌ fail | hand does not honour `.gitignore` (no fd backing) — known gap |
+| UC-find-002 | ✅ pass | `test_find_respects_gitignore` |
 | UC-find-003 | ✅ pass | `test_find_invalid_glob_returns_error` |
 | UC-find-004 | ✅ pass | `test_find_flag_pattern_treated_as_glob_literal` |
 | UC-find-005 | ✅ pass | `test_find_auto_ignores_node_modules_and_git_and_target` |
@@ -37,7 +37,7 @@ hidden `.secret/hidden.txt`.
   `dist`, `build`, `.next`, `.cache`. Other dotdirs (`.secret`,
   `.config`, etc.) are kept by design — see UC-find-005.
 
-### UC-find-002 — `.gitignore` should suppress matched files (FAILING under hand)
+### UC-find-002 — `.gitignore` suppresses matched files
 
 **Given** a test directory containing `.gitignore` with `ignored.txt`,
 plus `ignored.txt` and `kept.txt`.
@@ -46,15 +46,14 @@ plus `ignored.txt` and `kept.txt`.
 
 - Assertion: `kept.txt` appears in the output.
 - Assertion: `ignored.txt` does NOT appear in the output.
-- Probe (FAILS): no current hand test enforces gitignore awareness. A
-  fresh validator running this case would see hand return BOTH files.
-- Gap: pi delegates to the `fd` binary which natively reads
-  `.gitignore`. hand uses pure-Rust `glob` and does not read
-  `.gitignore` at all. Closing this gap means either pulling in the
-  `ignore` crate (used by `ripgrep`) or shelling out to `fd`.
-- Resolution proposal: add an `ignore::WalkBuilder` based scanner in
-  `tools/find.rs` and gate the existing auto-ignore list on top of it.
-  This change MUST keep UC-find-005 green.
+- Probe: `cargo test -p hand-coding-agent test_find_respects_gitignore -- --exact`.
+- Resolution: `tools/find.rs` now walks the tree via
+  `ignore::WalkBuilder` (the same crate ripgrep uses). The walker
+  reads `.gitignore`, `.ignore`, `.git/info/exclude`, and the global
+  git ignore. `require_git(false)` is set so `.gitignore` is honoured
+  even when the tree isn't a git repo. The hard-coded auto-ignore
+  list (UC-find-005) layers on top for build outputs that may not
+  appear in any `.gitignore`.
 
 ### UC-find-003 — invalid glob patterns surface a clean error, not a panic
 

@@ -86,7 +86,7 @@ fn execute_find(cwd: &Path, args: serde_json::Value) -> ToolResult {
         .and_then(|v| v.as_u64())
         .unwrap_or(DEFAULT_MAX_RESULTS as u64) as usize;
 
-    // Build the full glob pattern.
+    // Build the glob pattern.
     //
     // A basename-only pattern with no `/` (e.g. `*.spec.ts`) should
     // match at ANY depth in the search tree.
@@ -99,44 +99,86 @@ fn execute_find(cwd: &Path, args: serde_json::Value) -> ToolResult {
     } else {
         pattern.to_string()
     };
-    let full_pattern = if normalized.starts_with('/') || normalized.contains(":/") {
-        normalized
-    } else {
-        format!("{}/{}", search_path.display(), normalized)
+
+    // Parse the pattern up-front so an invalid glob surfaces a clean
+    // error to the model rather than being treated as a no-match.
+    let matcher = match glob::Pattern::new(&normalized) {
+        Ok(p) => p,
+        Err(e) => return ToolResult::error(format!("Invalid glob pattern: {}", e)),
     };
 
-    match glob::glob(&full_pattern) {
-        Ok(paths) => {
-            let mut results: Vec<String> = Vec::new();
-            for entry in paths {
-                if results.len() >= max_results {
-                    break;
-                }
-                if let Ok(path) = entry {
-                    let relative = path
-                        .strip_prefix(&search_path)
-                        .unwrap_or(&path)
-                        .display()
-                        .to_string();
-                    if is_auto_ignored(&relative) {
-                        continue;
-                    }
-                    results.push(relative);
-                }
-            }
+    // Walk the tree with the `ignore` crate so `.gitignore`, `.ignore`,
+    // and global git excludes are honoured the same way `fd` and
+    // ripgrep honour them. The hard-coded auto-ignore list still
+    // applies on top so build outputs that aren't in `.gitignore`
+    // (rare but possible) still get suppressed.
+    let mut walker = ignore::WalkBuilder::new(&search_path);
+    walker
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .ignore(true)
+        .hidden(false) // Keep dotfiles like .gitignore visible to the model.
+        .parents(true)
+        // The `ignore` crate only consults `.gitignore` files inside an
+        // actual git repository by default (it walks up looking for
+        // `.git/`). `require_git(false)` makes the walker honour
+        // `.gitignore` files even when the tree isn't initialised as a
+        // git repo — this matches how `fd --no-require-git` and pi
+        // behave (pi cares about the file's intent, not whether the
+        // tree was `git init`-ed).
+        .require_git(false);
 
-            if results.is_empty() {
-                ToolResult::text("No files found matching the pattern.")
-            } else {
-                let truncated = results.len() >= max_results;
-                let mut output = results.join("\n");
-                if truncated {
-                    output.push_str(&format!("\n[Results truncated at {} entries]", max_results));
-                }
-                ToolResult::text(output)
-            }
+    let mut results: Vec<String> = Vec::new();
+    let mut truncated = false;
+    for entry in walker.build() {
+        if results.len() >= max_results {
+            truncated = true;
+            break;
         }
-        Err(e) => ToolResult::error(format!("Invalid glob pattern: {}", e)),
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        // Skip the search root itself and any directory entry — we list
+        // files only (matches the upstream contract: `find **/*.rs`
+        // surfaces files, not dirs).
+        if entry.depth() == 0 {
+            continue;
+        }
+        let path = entry.path();
+        let relative_path = match path.strip_prefix(&search_path) {
+            Ok(p) => p,
+            Err(_) => path,
+        };
+        let relative = relative_path.display().to_string();
+        // The hard-coded auto-ignore covers paths the `.gitignore`
+        // walker wouldn't catch (e.g. when there's no .gitignore at all).
+        if is_auto_ignored(&relative) {
+            continue;
+        }
+        // Only emit files. Directories surface in the walk but the
+        // tool's user-visible contract is "find files".
+        if !entry
+            .file_type()
+            .map(|t| t.is_file() || t.is_symlink())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if matcher.matches_path(relative_path) {
+            results.push(relative);
+        }
+    }
+
+    if results.is_empty() {
+        ToolResult::text("No files found matching the pattern.")
+    } else {
+        let mut output = results.join("\n");
+        if truncated {
+            output.push_str(&format!("\n[Results truncated at {} entries]", max_results));
+        }
+        ToolResult::text(output)
     }
 }
 
@@ -337,6 +379,50 @@ mod tests {
         assert!(
             text.contains("No files found") || text.contains("no files"),
             "expected no-match for --help glob, got: {text}"
+        );
+    }
+
+    /// `.gitignore` entries are honoured: a file matched by both the
+    /// user's pattern AND `.gitignore` is suppressed. A file matched
+    /// only by the pattern (not ignored) surfaces normally. pi achieves
+    /// this through `fd`; hand uses the `ignore` crate's `WalkBuilder`
+    /// which reads `.gitignore`, `.ignore`, `.git/info/exclude`, and
+    /// the global git ignore the same way.
+    #[test]
+    fn test_find_respects_gitignore() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "ignored").unwrap();
+        std::fs::write(dir.path().join("kept.txt"), "kept").unwrap();
+
+        let result = execute_find(dir.path(), json!({"pattern": "**/*.txt"}));
+        let text = get_text(&result);
+        assert!(text.contains("kept.txt"), "kept must surface: {text}");
+        assert!(
+            !text.contains("ignored.txt"),
+            "ignored.txt must be suppressed by .gitignore: {text}"
+        );
+    }
+
+    /// A hidden directory NOT in the auto-ignore list (e.g. `.secret/`)
+    /// AND not in `.gitignore` is walked normally. pi's fd surfaces
+    /// these the same way (`fd --hidden` is the default for the tool).
+    #[test]
+    fn test_find_includes_non_ignored_hidden_dirs() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join(".secret")).unwrap();
+        std::fs::write(dir.path().join(".secret/hidden.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "y").unwrap();
+
+        let result = execute_find(dir.path(), json!({"pattern": "**/*.txt"}));
+        let text = get_text(&result);
+        assert!(
+            text.contains("visible.txt"),
+            "visible must surface: {text}"
+        );
+        assert!(
+            text.contains(".secret/hidden.txt") || text.contains(".secret\\hidden.txt"),
+            "hidden but non-gitignored file must surface: {text}"
         );
     }
 }

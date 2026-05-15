@@ -7,7 +7,7 @@ and current coverage health. Updated as each module's UC file lands.
 |-------------|----------|---------------|-----------:|-----:|-----:|--------:|
 | coding-agent-tools-path-utils.md | pi-mono/packages/coding-agent/test/path-utils.test.ts | coding-agent | 12 | 12 | 0 | 0 |
 | coding-agent-tools-file-mutation-queue.md | pi-mono/packages/coding-agent/test/file-mutation-queue.test.ts | coding-agent | 7 | 7 | 0 | 0 |
-| coding-agent-tools-find.md | pi-mono/packages/coding-agent/test/tools.test.ts (find describe) | coding-agent | 8 | 7 | 1 | 0 |
+| coding-agent-tools-find.md | pi-mono/packages/coding-agent/test/tools.test.ts (find describe) | coding-agent | 8 | 8 | 0 | 0 |
 | coding-agent-tools-read.md | pi-mono/packages/coding-agent/test/tools.test.ts (read describe) | coding-agent | 11 | 8 | 3 | 0 |
 | coding-agent-tools-grep.md | pi-mono/packages/coding-agent/test/tools.test.ts (grep describe) | coding-agent | 6 | 6 | 0 | 0 |
 | coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 10 | 11 | 10 |
@@ -31,14 +31,16 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 212
-- **Fail:** 71
+- **Pass:** 213
+- **Fail:** 70
 - **Pending:** 55
 
 ### Known failures (drive remediation)
 
-- **UC-find-002** — hand's find tool does not honour `.gitignore` (no fd
-  backing). Resolution: pull in the `ignore` crate or shell out to `fd`.
+- ~~UC-find-002~~ ✅ FIXED — find tool now walks via `ignore::WalkBuilder`
+  with `require_git(false)`. `.gitignore`, `.ignore`,
+  `.git/info/exclude`, and the global git ignore are all honoured.
+  Hard-coded auto-ignore list layers on top for build outputs.
 - ~~UC-grep-002~~ ✅ FIXED — grep schema now accepts `limit` (canonical)
   with `max_matches` as a deprecated alias; the truncation footer
   emits the pi-aligned `[N matches limit reached. ...]` wording when
