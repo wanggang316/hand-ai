@@ -13,17 +13,17 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 21 | 0 | 10 |
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-tools-ls.md | pi-mono/packages/coding-agent/test/tools.test.ts (ls describe) | coding-agent | 5 | 5 | 0 | 0 |
-| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 41 | 5 | 14 |
+| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 44 | 0 | 16 |
 | coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (API-key + caching subset) | coding-agent | 16 | 16 | 0 | 0 |
 | coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 14 | 0 | 17 |
 | coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 9 | 1 | 1 |
-| coding-agent-core-session-manager.md | pi-mono/packages/coding-agent/test/{session-info-modified-timestamp,session-cwd,sdk-session-manager}.test.ts | coding-agent | 7 | 1 | 1 | 5 |
+| coding-agent-core-session-manager.md | pi-mono/packages/coding-agent/test/{session-info-modified-timestamp,session-cwd,sdk-session-manager}.test.ts | coding-agent | 7 | 2 | 0 | 5 |
 | coding-agent-tools-bash.md | pi-mono/packages/coding-agent/test/tools.test.ts (bash describe) + bash-execution-width.test.ts | coding-agent | 17 | 13 | 0 | 4 |
 | coding-agent-tools-render-utils.md | hand parity contract (pi has no dedicated test file) | coding-agent | 12 | 12 | 0 | 0 |
 | coding-agent-core-system-prompt.md | pi-mono/packages/coding-agent/test/system-prompt.test.ts | coding-agent | 7 | 7 | 0 | 0 |
 | model-stream-retry.md | hand parity contract (pi has no dedicated retry-classification test file) | model | 8 | 8 | 0 | 0 |
 | tui-keys.md | pi-mono/packages/tui/test/keys.test.ts | tui | 59 | 59 | 0 | 0 |
-| tui-autocomplete.md | pi-mono/packages/tui/test/autocomplete.test.ts | tui | 25 | 2 | 10 | 13 |
+| tui-autocomplete.md | pi-mono/packages/tui/test/autocomplete.test.ts | tui | 25 | 9 | 0 | 16 |
 
 A `—` in any column means "not yet measured" — the file hasn't been
 authored yet, or the count hasn't been recomputed since the last edit.
@@ -31,10 +31,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 267
-- **Fail:** 8
+- **Pass:** 269
+- **Fail:** 1
 - **Pending:** 51
-- **N/A (architectural divergence):** 12
+- **N/A (architectural divergence):** 15
 
 ### Known failures (drive remediation)
 
@@ -117,9 +117,11 @@ authored yet, or the count hasn't been recomputed since the last edit.
   against pi's `defaultModelPerProvider` map. The values already
   matched at the time of this lockstep; the test prevents future
   drift.
-- **UC-as-001** — no `get_api_key` async with OAuth refresh + lock
-  compromise recovery on `AuthStorage` (sync get_api_key landed; the
-  OAuth-refresh dance + lock recovery still missing).
+- **UC-as-001** (only remaining ❌) — no `get_api_key` async with OAuth
+  refresh + lock compromise recovery on `AuthStorage` (sync
+  `get_api_key` landed; the OAuth-refresh dance + lock recovery still
+  missing). Requires a state machine around in-memory token storage,
+  not a one-shot fix.
 - ~~UC-as-005~~ ✅ FIXED — `AuthStorage::reload()` re-reads disk into
   an in-memory cache; failures leave the previous snapshot intact
   and append a parse error to a rolling buffer drainable via

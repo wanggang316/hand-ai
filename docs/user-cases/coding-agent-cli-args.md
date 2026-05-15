@@ -109,7 +109,7 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-050 | ✅ pass | `parses_tools_csv` (long form; pi takes the same CSV) |
 | UC-args-051 | ✅ pass | `parses_tools_short_t` |
 | UC-args-052 | ⚠️ pending | combination — needs both `--no-tools` and `--tools` together; clap may enforce mutual exclusion |
-| UC-args-053 | ❌ fail | hand has no `--no-builtin-tools` |
+| UC-args-053 | ✅ pass | duplicate of UC-args-048 — `parses_no_builtin_tools_flag` |
 | UC-args-054 | ✅ pass | `positional_plain_text_lands_in_messages` |
 | UC-args-055 | ✅ pass | `positional_at_file_lands_in_file_args` |
 | UC-args-056 | ✅ pass | `positional_mixed_messages_and_file_args` |
