@@ -13,7 +13,12 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
     name = "hand",
     about = "Hand — AI coding agent",
     version = VERSION,
-    long_about = "Hand is an interactive AI coding agent that helps you write, edit, and understand code."
+    long_about = "Hand is an interactive AI coding agent that helps you write, edit, and understand code.",
+    // Disable clap's auto-generated `-V/--version` so we can rebind
+    // `-v` to version (pi convention) without it colliding with
+    // `-v/--verbose`. The replacement is declared as an explicit
+    // `Args::version_flag` field below using ArgAction::Version.
+    disable_version_flag = true,
 )]
 pub struct Args {
     /// Initial prompt (non-interactive mode). Accepts values that start
@@ -43,8 +48,15 @@ pub struct Args {
     pub base_url: Option<String>,
 
     /// Resume a previous session by ID (or path). `--session` is an
-    /// alias for the same behavior.
-    #[arg(short, long, alias = "session")]
+    /// alias for the same behaviour. Accepts a bare `--resume` or
+    /// `-r` (no value) — that resolves to "resume the most recent
+    /// session" downstream, matching upstream pi semantics. With a
+    /// value, the value is the session id or path.
+    ///
+    /// Wire shape: `Option<String>` where `Some("")` means "bare
+    /// --resume invoked, pick latest" and `Some(<id>)` means an
+    /// explicit id/path was supplied.
+    #[arg(short, long, alias = "session", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
 
     /// Continue the most recent session
@@ -144,9 +156,17 @@ pub struct Args {
     #[arg(long, value_delimiter = ',')]
     pub models: Vec<String>,
 
-    /// Enable verbose logging
-    #[arg(short, long)]
+    /// Enable verbose logging. Note: there is NO `-v` short binding —
+    /// `-v` is reserved for `--version` (matches upstream pi
+    /// convention). Use `--verbose` (the long form) to enable verbose
+    /// logging.
+    #[arg(long)]
     pub verbose: bool,
+
+    /// Print the binary version and exit. Bound to `-v` and
+    /// `--version`; `-V` is also accepted for cargo-style invocations.
+    #[arg(short = 'v', short_alias = 'V', long = "version", action = clap::ArgAction::Version)]
+    pub version_flag: Option<bool>,
 
     /// Print system diagnostics and exit
     #[arg(long)]
@@ -513,5 +533,35 @@ mod tests {
         let args =
             Args::try_parse_from(["hand", "--no-builtin-tools"]).expect("--no-builtin-tools");
         assert!(args.no_builtin_tools);
+    }
+
+    /// Bare `--resume` (no value following) is now accepted; it
+    /// resolves to `Some("")` which downstream code interprets as
+    /// "resume the most recent session". Matches upstream pi's
+    /// boolean-style `--resume` invocation.
+    #[test]
+    fn parses_bare_resume_without_value() {
+        let args = Args::try_parse_from(["hand", "--resume"]).expect("--resume bare");
+        assert_eq!(
+            args.resume.as_deref(),
+            Some(""),
+            "bare --resume should land as Some empty string"
+        );
+    }
+
+    /// Bare `-r` (no value following) mirrors the long-form bare
+    /// `--resume`.
+    #[test]
+    fn parses_bare_resume_short_without_value() {
+        let args = Args::try_parse_from(["hand", "-r"]).expect("-r bare");
+        assert_eq!(args.resume.as_deref(), Some(""));
+    }
+
+    /// `-r <id>` still works — a value following the short flag binds
+    /// as the session id/path.
+    #[test]
+    fn parses_resume_short_with_value_still_works() {
+        let args = Args::try_parse_from(["hand", "-r", "session-42"]).unwrap();
+        assert_eq!(args.resume.as_deref(), Some("session-42"));
     }
 }

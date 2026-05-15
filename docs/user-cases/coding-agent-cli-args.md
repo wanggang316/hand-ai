@@ -58,7 +58,7 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | ID | Status | Verified-by |
 |----|--------|-------------|
 | UC-args-001 | ⚠️ pending | `--version` — clap auto prints+exits, doesn't set a field |
-| UC-args-002 | ⚠️ pending | `-v` — clap maps `-v` to `--verbose`, not `--version` |
+| UC-args-002 | ✅ pass | `version_flag` rebound to `-v` via ArgAction::Version; `--verbose` no longer has a short |
 | UC-args-003 | ⚠️ pending | `--version` precedence — clap exits before parsing rest |
 | UC-args-004 | ⚠️ pending | `--help` — clap auto |
 | UC-args-005 | ⚠️ pending | `-h` — clap auto |
@@ -68,8 +68,8 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-009 | ✅ pass | `parses_long_prompt_with_yaml_frontmatter` (covers post-`-p` flag handling) |
 | UC-args-010 | ✅ pass | `parses_continue_short_and_long` |
 | UC-args-011 | ✅ pass | `parses_continue_short_and_long` |
-| UC-args-012 | ❌ fail | hand's `--resume` requires a value; pi accepts a bare `--resume` boolean |
-| UC-args-013 | ❌ fail | same — `-r` bare |
+| UC-args-012 | ✅ pass | `parses_bare_resume_without_value` |
+| UC-args-013 | ✅ pass | `parses_bare_resume_short_without_value` |
 | UC-args-014 | ✅ pass | `parses_provider_flag` |
 | UC-args-015 | ✅ pass | `parses_model` |
 | UC-args-016 | ✅ pass | `parses_api_key_flag` |

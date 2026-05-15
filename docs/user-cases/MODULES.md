@@ -13,7 +13,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 10 | 11 | 10 |
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-tools-ls.md | pi-mono/packages/coding-agent/test/tools.test.ts (ls describe) | coding-agent | 5 | 5 | 0 | 0 |
-| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 28 | 24 | 8 |
+| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 31 | 21 | 8 |
 | coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (API-key + caching subset) | coding-agent | 16 | 16 | 0 | 0 |
 | coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 14 | 0 | 17 |
 | coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 8 | 2 | 1 |
@@ -31,8 +31,8 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 232
-- **Fail:** 52
+- **Pass:** 235
+- **Fail:** 49
 - **Pending:** 54
 
 ### Known failures (drive remediation)
@@ -76,9 +76,12 @@ authored yet, or the count hasn't been recomputed since the last edit.
 - ~~UC-as-007/008~~ ✅ FIXED — runtime-override layer added.
   `set_runtime_api_key` / `remove_runtime_api_key` mutate a shared
   in-memory map; `get_api_key` resolves runtime → disk → None.
-- **UC-args-002** — hand binds `-v` to `--verbose`, not `--version`.
-- **UC-args-012/013** — `--resume` / `-r` bare (no value) not allowed
-  by hand's clap derive.
+- ~~UC-args-002~~ ✅ FIXED — `-v` rebound to `--version` via
+  `disable_version_flag` + explicit `ArgAction::Version`. `--verbose`
+  drops its short (use the long form).
+- ~~UC-args-012/013~~ ✅ FIXED — `--resume` / `-r` accept a bare
+  invocation (no value); resolves to `Some("")` which downstream
+  reads as "resume latest".
 - ~~UC-args-026~~ ✅ FIXED — `--models <csv>` flag added (clap
   value_delimiter = ',' → Vec<String>).
 - ~~UC-args-043/047/048/049/051~~ ✅ FIXED — `-nc`, `-nt`, `-nbt`
