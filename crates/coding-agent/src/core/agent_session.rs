@@ -246,7 +246,7 @@ impl AgentSession {
             SessionManager::open(&path)?
         } else if config.no_session {
             // --no-session: pure in-memory, no JSONL file under
-            // .hand/sessions. Pi-mono parity.
+            // .hand/sessions.
             SessionManager::in_memory()
         } else if let Some(dir) = &config.session_dir {
             SessionManager::create_in(&config.cwd, dir)?
@@ -562,10 +562,9 @@ impl AgentSession {
     ///
     /// Persists a `ModelChange` entry to the session journal so a
     /// resume picks up the user's switch instead of replaying with the
-    /// session's original model. Pi-mono parity: `setModel` calls
-    /// `appendModelChange` for the same reason — without it, switching
-    /// from `claude-haiku` to `gpt-4o` mid-session would silently
-    /// revert to claude on every `--continue`.
+    /// session's original model. Without this, switching from
+    /// `claude-haiku` to `gpt-4o` mid-session would silently revert to
+    /// claude on every `--continue`.
     ///
     /// Errors from the journal append are intentionally swallowed
     /// (with a tracing warn) so a write failure doesn't prevent the
@@ -910,7 +909,7 @@ impl AgentSession {
     /// Persists the new label as a `Label` entry in the session JSONL
     /// and emits [`AgentSessionEvent::SessionInfoChanged`] so
     /// subscribers (extensions, UI, RPC clients) see the change
-    /// immediately without polling. Pi-mono parity: see issue #3686.
+    /// immediately without polling.
     pub fn set_label(&mut self, label: &str) -> Result<(), CodingAgentError> {
         self.session_manager.append_label(label)?;
         let new_name = self.session_manager.label().map(|s| s.to_string());
@@ -1103,8 +1102,8 @@ impl AgentSession {
         };
 
         // Flip the in-flight flag inside an RAII guard so it always
-        // clears on completion, abort, panic, or future-drop. Pi-mono's
-        // `isBashRunning` test expects strict bracketing.
+        // clears on completion, abort, panic, or future-drop. The
+        // `is_bash_running` test expects strict bracketing.
         struct InFlightGuard(Arc<std::sync::atomic::AtomicBool>);
         impl Drop for InFlightGuard {
             fn drop(&mut self) {
@@ -1506,20 +1505,19 @@ mod tests {
         assert!(session.session_id().starts_with("s_"));
     }
 
-    /// Pi-mono parity: `is_bash_running` starts false on a fresh
-    /// session. The flag only flips during an active `run_bash` call.
+    /// `is_bash_running` starts false on a fresh session. The flag
+    /// only flips during an active `run_bash` call.
     #[test]
     fn is_bash_running_starts_false() {
         let session = AgentSession::in_memory(test_model(), vec![]);
         assert!(!session.is_bash_running());
     }
 
-    /// Pi-mono parity: `run_bash` flips `is_bash_running` true for the
-    /// duration of the call and back to false on completion. We use a
-    /// fast `true` command so the test exercises the bracket without
-    /// any timing race — the RAII guard ensures the post-state is
-    /// observed even if the future is cancelled or panics, but a
-    /// successful return path is the most common case to pin.
+    /// `run_bash` flips `is_bash_running` true for the duration of the
+    /// call and back to false on completion. A fast `true` command
+    /// exercises the bracket without timing races — the RAII guard
+    /// ensures the post-state is observed even on cancel or panic,
+    /// but the success path is the common case to pin.
     #[tokio::test]
     async fn run_bash_brackets_is_bash_running_flag() {
         let session = AgentSession::in_memory(test_model(), vec![]);
@@ -1532,11 +1530,11 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: `drain_queue` in `OneAtATime` mode pops exactly
-    /// one message from the front of the queue, preserving insertion
-    /// order for subsequent drains. Used by the steer/follow-up
-    /// dispatcher mid-turn to deliver one queued message per agent loop
-    /// iteration without stalling on a big batch.
+    /// `drain_queue` in `OneAtATime` mode pops exactly one message
+    /// from the front of the queue, preserving insertion order for
+    /// subsequent drains. Used by the steer/follow-up dispatcher
+    /// mid-turn to deliver one queued message per agent loop iteration
+    /// without stalling on a big batch.
     #[test]
     fn drain_queue_one_at_a_time_pops_front_only() {
         let queue = Mutex::new(vec![
@@ -1557,9 +1555,9 @@ mod tests {
         assert_eq!(queue.lock().unwrap().len(), 2);
     }
 
-    /// Pi-mono parity: `drain_queue` in `All` mode drains everything in
-    /// one shot — used when the consumer wants to bulk-deliver every
-    /// queued message at the next turn boundary.
+    /// `drain_queue` in `All` mode drains everything in one shot —
+    /// used when the consumer wants to bulk-deliver every queued
+    /// message at the next turn boundary.
     #[test]
     fn drain_queue_all_takes_full_queue_in_order() {
         let queue = Mutex::new(vec![
@@ -1592,11 +1590,11 @@ mod tests {
         assert!(drain_queue(&queue, crate::rpc::types::QueueMode::OneAtATime).is_empty());
     }
 
-    /// Pi-mono parity (issue #3686): `set_label` must emit a
-    /// `SessionInfoChanged` event so subscribers see the new name
-    /// without polling. Hand previously only persisted the label entry
-    /// to disk; extensions and UI components had no signal that the
-    /// display name had changed.
+    /// `set_label` must emit a `SessionInfoChanged` event so
+    /// subscribers see the new name without polling. An earlier
+    /// implementation only persisted the label entry to disk;
+    /// extensions and UI components had no signal that the display
+    /// name had changed.
     #[test]
     fn set_label_emits_session_info_changed() {
         let dir = TempDir::new().unwrap();
@@ -1629,18 +1627,17 @@ mod tests {
         assert_eq!(session.label(), Some("hello world"));
     }
 
-    /// Pi-mono parity: abort_bash on a session with no in-flight bash
-    /// must return false (nothing to cancel) and leave is_bash_running
-    /// at false. Hand had this contract but no test pinned it after
-    /// the flag accessor landed.
+    /// abort_bash on a session with no in-flight bash must return
+    /// false (nothing to cancel) and leave is_bash_running at false.
+    /// The contract was always there but no test pinned it after the
+    /// flag accessor landed.
     #[test]
     fn abort_bash_no_inflight_returns_false_and_flag_stays_false() {
         let session = AgentSession::in_memory(test_model(), vec![]);
         assert!(!session.is_bash_running());
         // First call: cancel-able token is uncancelled, so cancel
-        // *something* and return true. (Pi's behaviour treats this
-        // identically to "the next run_bash will be aborted before
-        // it starts".)
+        // *something* and return true. (Semantically equivalent to
+        // "the next run_bash will be aborted before it starts".)
         let first = session.abort_bash();
         assert!(first, "first abort_bash flips the token");
         // Second back-to-back call: token already cancelled → false.
@@ -1659,9 +1656,9 @@ mod tests {
         assert_eq!(session.model().id, "new-model");
     }
 
-    /// Pi-mono parity: set_model must append a ModelChange entry to the
-    /// session journal so a resume picks up the user's switch. Without
-    /// it, `hand --model claude --continue` after the user had switched
+    /// set_model must append a ModelChange entry to the session
+    /// journal so a resume picks up the user's switch. Without it,
+    /// `hand --model claude --continue` after the user had switched
     /// to `gpt-4o` mid-session would silently revert.
     #[test]
     fn set_model_appends_model_change_to_journal() {

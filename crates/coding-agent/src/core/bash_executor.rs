@@ -130,8 +130,8 @@ pub async fn execute_bash(
         wait_future.await?
     };
 
-    // Pi-mono parity: strip ANSI escapes, C0 controls, Unicode format chars,
-    // then drop bare `\r` (progress-bar overwrites garble captured streams).
+    // Strip ANSI escapes, C0 controls, Unicode format chars, then
+    // drop bare `\r` (progress-bar overwrites garble captured streams).
     let mut output = sanitize_output(&String::from_utf8_lossy(&raw_output));
     output = output.replace('\r', "");
 
@@ -177,9 +177,9 @@ pub fn resolve_shell() -> String {
 
 /// Truncate output keeping the TAIL (end) within `max_bytes`.
 ///
-/// Pi-mono parity: bash output is tail-truncated because errors, exit
-/// summaries, and final results live at the end. Head-truncating hides the
-/// useful information under compiler banners and progress logs.
+/// Bash output is tail-truncated because errors, exit summaries, and
+/// final results live at the end. Head-truncating hides the useful
+/// information under compiler banners and progress logs.
 ///
 /// Prefers to start at a line boundary so the LLM does not see a chopped
 /// first line. Always lands on a UTF-8 char boundary so we never panic and
@@ -197,7 +197,7 @@ fn truncate_tail_bytes(output: &str, max_bytes: usize) -> String {
     // Prefer to align to a newline so the first surviving line is whole.
     // Only do this when it would leave at least half the budget intact —
     // otherwise the whole final line is bigger than the budget itself and
-    // we have to return a partial line (pi's "lastLinePartial" edge case).
+    // we return a partial line (the "last line partial" edge case).
     if let Some(nl_offset) = output[start..].find('\n') {
         let aligned = start + nl_offset + 1;
         if output.len() - aligned >= max_bytes / 2 {
@@ -324,9 +324,9 @@ mod tests {
         assert!(result.output.contains("line3"));
     }
 
-    /// Pi-mono parity: `execute_bash` must actually apply `sanitize_output`
-    /// to captured stdout/stderr. Embedded ANSI escapes, BEL bytes, and
-    /// Unicode format chars from bash output must not reach the LLM.
+    /// `execute_bash` must apply `sanitize_output` to captured
+    /// stdout/stderr. Embedded ANSI escapes, BEL bytes, and Unicode
+    /// format chars from bash output must not reach the LLM.
     #[tokio::test]
     async fn test_execute_sanitizes_bash_output() {
         let dir = TempDir::new().unwrap();
@@ -345,9 +345,9 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: bare `\r` (without trailing `\n`) is stripped from
-    /// bash output. Programs use `\r` for progress-bar overwrites; in a
-    /// captured non-interactive stream this just produces garbled lines.
+    /// Bare `\r` (without trailing `\n`) is stripped from bash output.
+    /// Programs use `\r` for progress-bar overwrites; in a captured
+    /// non-interactive stream this just produces garbled lines.
     #[tokio::test]
     async fn test_execute_strips_bare_carriage_returns() {
         let dir = TempDir::new().unwrap();
@@ -371,9 +371,10 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: when bash output exceeds the byte budget, keep the
-    /// TAIL (end of output). The tail is where errors and final results live;
-    /// head-truncation hides them under compiler boilerplate or progress logs.
+    /// When bash output exceeds the byte budget, keep the TAIL (end
+    /// of output). The tail is where errors and final results live;
+    /// head-truncation hides them under compiler boilerplate or
+    /// progress logs.
     #[tokio::test]
     async fn test_execute_truncates_from_tail_not_head() {
         let dir = TempDir::new().unwrap();
@@ -467,8 +468,8 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: drop C0 control characters except `\t \n \r`. Bash
-    /// output can contain BEL (0x07), VT (0x0B), or other control bytes that
+    /// Drop C0 control characters except `\t \n \r`. Bash output can
+    /// contain BEL (0x07), VT (0x0B), or other control bytes that
     /// confuse terminal width calculators and can be used to smuggle
     /// instructions into LLM-rendered tool results.
     #[test]
@@ -479,12 +480,13 @@ mod tests {
         assert_eq!(sanitize_output("a\x07b"), "ab");
         assert_eq!(sanitize_output("a\x0Bb\x0Cc"), "abc");
         assert_eq!(sanitize_output("\x01\x02\x03hello\x1F"), "hello");
-        // DEL (0x7F) is not C0 — pi keeps it
+        // DEL (0x7F) is not C0 — keep it
         assert_eq!(sanitize_output("a\x7Fb"), "a\x7Fb");
     }
 
-    /// Pi-mono parity: drop Unicode format characters U+FFF9..U+FFFB. These
-    /// crash `string-width`-style libraries; pi filters them, so we do too.
+    /// Drop Unicode format characters U+FFF9..U+FFFB. These crash
+    /// `string-width`-style libraries and we filter them out before
+    /// they reach any renderer.
     #[test]
     fn test_sanitize_strips_unicode_format_chars() {
         assert_eq!(sanitize_output("a\u{FFF9}b\u{FFFA}c\u{FFFB}d"), "abcd");

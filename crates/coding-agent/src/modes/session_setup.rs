@@ -35,10 +35,10 @@ pub struct SessionSetup {
     /// `--no-context-files`: skip auto-loading project context files.
     pub no_context_files: bool,
     /// `--session-dir <dir>`: override the default `<cwd>/.hand/sessions`
-    /// storage directory. Pi-mono parity.
+    /// storage directory.
     pub session_dir: Option<PathBuf>,
     /// `--no-skills`: skip skill discovery for a reproducible system
-    /// prompt. Pi-mono parity.
+    /// prompt.
     pub no_skills: bool,
 }
 
@@ -123,9 +123,9 @@ impl SessionSetup {
         if let Some(level) = thinking_level {
             stream_options.reasoning = Some(level);
         }
-        // `--api-key` is an explicit override; it must win over env vars
-        // / OAuth resolution so users debugging auth issues can pin the
-        // exact key going on the wire. Pi-mono parity.
+        // `--api-key` is an explicit override; it must win over env
+        // vars / OAuth resolution so users debugging auth issues can
+        // pin the exact key going on the wire.
         if let Some(key) = args.api_key.as_deref()
             && !key.is_empty()
         {
@@ -213,11 +213,11 @@ impl SessionSetup {
     }
 }
 
-/// Pi-mono `resolvePromptInput` parity: if `input` resolves to an
-/// existing file on disk, return that file's contents; otherwise return
-/// `input` verbatim as the literal prompt text. A read error (e.g.
-/// permission denied on an existing path) emits a stderr warning and
-/// falls through to the literal value rather than aborting setup.
+/// Resolve a prompt input string. If `input` resolves to an existing
+/// file on disk, return that file's contents; otherwise return `input`
+/// verbatim as the literal prompt text. A read error (e.g. permission
+/// denied on an existing path) emits a stderr warning and falls
+/// through to the literal value rather than aborting setup.
 ///
 /// Used for both `--system-prompt` and `--append-system-prompt` so
 /// users can pin guidelines/prompts in a file and feed the path on
@@ -317,11 +317,10 @@ mod tests {
         );
     }
 
-    /// Pi-mono `--no-session` parity: the flag must propagate from CLI
-    /// args through SessionSetup into AgentSessionConfig so the session
-    /// manager runs in-memory and no JSONL file is written under
-    /// `.hand/sessions/`. The default (flag absent) must keep persistence
-    /// on.
+    /// `--no-session` must propagate from CLI args through SessionSetup
+    /// into AgentSessionConfig so the session manager runs in-memory
+    /// and no JSONL file is written under `.hand/sessions/`. The
+    /// default (flag absent) keeps persistence on.
     #[test]
     fn no_session_flag_propagates_to_config() {
         let args = Args::try_parse_from(["hand", "--no-session"]).expect("parse");
@@ -331,10 +330,10 @@ mod tests {
         assert!(cfg.no_session, "to_config must propagate the flag");
     }
 
-    /// Pi-mono `--api-key` parity: an explicit override must flow into
-    /// `stream_options.base.api_key` so the request hits the wire with
-    /// the user-supplied credential. Previously parsed but never used
-    /// — `hand --api-key bogus` silently fell back to env vars / stored
+    /// `--api-key` must flow into `stream_options.base.api_key` so the
+    /// request hits the wire with the user-supplied credential. An
+    /// earlier implementation parsed the flag but never wired it up —
+    /// `hand --api-key bogus` silently fell back to env vars / stored
     /// creds, masking the user's intent.
     #[test]
     fn api_key_flag_populates_stream_options() {
@@ -356,9 +355,9 @@ mod tests {
         assert!(!cfg.no_session);
     }
 
-    /// Pi-mono `--no-context-files` parity: the flag must propagate so
-    /// that AgentSession skips HAND.md / .hand/context.md loading at
-    /// system-prompt build time. Default keeps the load-everything behavior.
+    /// `--no-context-files` must propagate so that AgentSession skips
+    /// HAND.md / .hand/context.md loading at system-prompt build time.
+    /// Default keeps the load-everything behavior.
     #[test]
     fn no_context_files_flag_propagates() {
         let args = Args::try_parse_from(["hand", "--no-context-files"]).expect("parse");
@@ -377,9 +376,9 @@ mod tests {
         assert!(!cfg.no_context_files);
     }
 
-    /// Pi-mono `--session-dir <dir>` parity: an explicit override must
-    /// flow into AgentSessionConfig.session_dir so SessionManager
-    /// writes/reads under the override path instead of the default
+    /// `--session-dir <dir>` must flow into
+    /// AgentSessionConfig.session_dir so SessionManager writes/reads
+    /// under the override path instead of the default
     /// `<cwd>/.hand/sessions`.
     #[test]
     fn session_dir_flag_propagates() {
@@ -397,9 +396,9 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: --system-prompt and --append-system-prompt
-    /// auto-load file contents when the value resolves to an existing
-    /// file. Non-file values pass through as literal text.
+    /// --system-prompt and --append-system-prompt auto-load file
+    /// contents when the value resolves to an existing file. Non-file
+    /// values pass through as literal text.
     #[test]
     fn resolve_prompt_input_reads_existing_file() {
         let path = std::env::temp_dir().join(format!(
@@ -499,9 +498,8 @@ mod tests {
         assert_eq!(args.resume.as_deref(), Some("abc123"));
     }
 
-    /// Pi-mono `--no-skills` parity: the flag must propagate so that
-    /// AgentSession skips skill discovery entirely. Default keeps the
-    /// auto-discover behavior.
+    /// `--no-skills` must propagate so that AgentSession skips skill
+    /// discovery entirely. Default keeps the auto-discover behavior.
     #[test]
     fn no_skills_flag_propagates() {
         let args = Args::try_parse_from(["hand", "--no-skills"]).expect("parse");
