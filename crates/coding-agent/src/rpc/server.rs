@@ -114,9 +114,9 @@ enum WireSessionEvent {
     Error {
         message: String,
     },
-    /// Pi-mono parity: session metadata changed (currently the display
-    /// name). RPC clients listen on this so a UI rendering the session
-    /// list can refresh after a `/name` command without polling.
+    /// Session metadata changed (currently the display name). RPC
+    /// clients listen on this so a UI rendering the session list can
+    /// refresh after a `/name` command without polling.
     SessionInfoChanged {
         name: Option<String>,
     },

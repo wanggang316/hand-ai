@@ -168,9 +168,9 @@ mod tests {
         assert!(dir_pos < file_pos, "Directories should come first");
     }
 
-    /// Pi-mono parity: ls must include dotfiles AND dot-directories.
-    /// Hidden entries are content the LLM legitimately needs to see
-    /// (e.g., .gitignore, .hand/, .env.local), and Unix `ls -a` is the
+    /// `ls` must include dotfiles AND dot-directories. Hidden entries
+    /// are content the LLM legitimately needs to see (e.g.,
+    /// .gitignore, .hand/, .env.local), and Unix `ls -a` is the
     /// expected default for tool surfaces.
     #[test]
     fn test_ls_lists_dotfiles_and_dotdirs() {

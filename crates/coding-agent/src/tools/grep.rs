@@ -7,7 +7,7 @@ use std::process::Command;
 
 /// Default max matches.
 const DEFAULT_MAX_MATCHES: usize = 100;
-/// Pi-mono parity: cap each match line to this many characters so a single
+/// Cap each match line to this many characters so a single
 /// minified-bundle line cannot dump megabytes into the model context.
 const GREP_MAX_LINE_LENGTH: usize = 500;
 

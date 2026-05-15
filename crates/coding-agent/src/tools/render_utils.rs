@@ -55,14 +55,13 @@ pub fn normalize_display_text(text: &str) -> String {
     text.replace('\r', "")
 }
 
-/// Pi-mono parity: drop C0 control characters (except `\t \n \r`) and
-/// Unicode format characters U+FFF9..U+FFFB. These come from
-/// poorly-behaved subprocesses and either crash terminal-width
-/// libraries or smuggle terminal-control sequences into the chat log.
+/// Drop C0 control characters (except `\t \n \r`) and Unicode format
+/// characters U+FFF9..U+FFFB. These come from poorly-behaved
+/// subprocesses and either crash terminal-width libraries or smuggle
+/// terminal-control sequences into the chat log.
 ///
 /// Centralised here because both the bash executor and the tool-result
-/// renderer need the same filter; pi calls the equivalent
-/// `sanitizeBinaryOutput` from both paths.
+/// renderer need the same filter applied to their output.
 pub fn sanitize_binary_output(text: &str) -> String {
     text.chars()
         .filter(|&c| {
@@ -110,8 +109,10 @@ pub fn get_text_output(
     for block in content {
         match block {
             ToolResultContent::Text(t) => {
-                // Pi parity: sanitize_binary_output → strip ANSI → drop \r.
-                // Order matches pi's `sanitizeBinaryOutput(stripAnsi(text)).replace(/\r/g, "")`.
+                // Pipeline: sanitize_binary_output → strip ANSI → drop \r.
+                // The strip step has to follow sanitize so the C0 filter
+                // sees the bare bytes; \r is dropped last because some
+                // ANSI escapes carry CR as part of their payload.
                 let cleaned = sanitize_binary_output(&strip_ansi(&t.text)).replace('\r', "");
                 text_parts.push(cleaned);
             }
@@ -241,10 +242,10 @@ mod tests {
         assert_eq!(result, "red text");
     }
 
-    /// Pi-mono parity: tool result rendering must also strip C0 control
-    /// chars (BEL etc.) and Unicode format chars from text blocks. Before
-    /// this fix the TUI scrollback could render raw 0x07 or 0xFFF9, which
-    /// a misbehaving tool could exploit to corrupt the user's terminal
+    /// Tool result rendering must also strip C0 control chars (BEL
+    /// etc.) and Unicode format chars from text blocks. Without this,
+    /// the TUI scrollback could render raw 0x07 or 0xFFF9, which a
+    /// misbehaving tool could exploit to corrupt the user's terminal
     /// or embed prompt-injection sequences in the model's view.
     #[test]
     fn get_text_output_strips_c0_controls_and_format_chars() {

@@ -552,12 +552,11 @@ impl ModelRegistry {
         )
     }
 
-    /// Pi-mono parity (issue #3686-adjacent): whether the credential
-    /// configured for `model.provider` is an Anthropic Claude.ai
-    /// SUBSCRIPTION credential rather than an API key. Pi-mono uses
-    /// this to render a one-time "you're using a subscription token
-    /// for API calls — that violates Anthropic's TOS" warning in
-    /// interactive mode.
+    /// Whether the credential configured for `model.provider` is an
+    /// Anthropic Claude.ai SUBSCRIPTION credential rather than an API
+    /// key. Used to render a one-time "you're using a subscription
+    /// token for API calls — that violates Anthropic's TOS" warning
+    /// in interactive mode.
     ///
     /// Wider net than [`Self::is_using_oauth`]: this also catches the
     /// case where a user pasted an `sk-ant-oat...` OAuth token into
@@ -1869,9 +1868,8 @@ mod tests {
         assert!(!registry.is_using_oauth(m));
     }
 
-    /// Pi-mono parity: `is_anthropic_subscription_credential` flags an
-    /// OAuth record under `anthropic` — the canonical Claude.ai
-    /// subscription path.
+    /// `is_anthropic_subscription_credential` flags an OAuth record
+    /// under `anthropic` — the canonical Claude.ai subscription path.
     #[test]
     fn is_anthropic_subscription_credential_flags_oauth_under_anthropic() {
         let dir = TempDir::new().unwrap();

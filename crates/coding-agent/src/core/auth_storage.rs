@@ -130,8 +130,7 @@ impl AuthRecord {
 /// Detect whether a raw token string looks like a Claude.ai SUBSCRIPTION
 /// OAuth token rather than an API key.
 ///
-/// Pi-mono parity. Anthropic ships two token shapes for the `anthropic`
-/// provider:
+/// Anthropic ships two token shapes for the `anthropic` provider:
 /// - `sk-ant-api...` — programmatic API keys, intended for SDK / API use.
 /// - `sk-ant-oat...` — OAuth tokens issued by the Claude.ai subscription
 ///   flow, intended for the official Claude.ai UI ONLY. Using them for

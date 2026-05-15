@@ -21,10 +21,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Args::parse();
     timings::time("parse_args");
 
-    // Pi-mono parity: `--offline` flips on the same env-var guard the
-    // tools-manager already honors. Setting the env var here means every
-    // downstream caller (binary fetcher, version checker) sees offline
-    // mode without needing to thread an explicit flag.
+    // `--offline` flips on the same env-var guard the tools-manager
+    // already honors. Setting the env var here means every downstream
+    // caller (binary fetcher, version checker) sees offline mode
+    // without needing to thread an explicit flag.
     if cli.offline {
         // SAFETY: single-threaded at this point — main() hasn't spawned
         // any tasks yet. std::env::set_var is otherwise multi-thread
@@ -72,8 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     // Headless RPC dispatch loop: takes precedence over interactive/print modes.
-    // Pi-mono parity: `--mode rpc` is an alias for `--rpc` so scripts written
-    // against pi's CLI surface (`pi --mode rpc`) work on hand unchanged.
+    // `--mode rpc` is an alias for `--rpc`.
     if cli.rpc || cli.mode == "rpc" {
         timings::print();
         return run_rpc(cli).await;
@@ -158,9 +157,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 AgentSession::new(config, agent_tools)?
             }
             Err(_) => {
-                // Pi-mono parity: an explicit --fork <id> that can't be
-                // resolved must surface a clear error and exit 1, not
-                // silently start a fresh session.
+                // An explicit --fork <id> that can't be resolved must
+                // surface a clear error and exit 1, not silently start
+                // a fresh session.
                 eprintln!("Error: No session found matching '{fork_source}'");
                 std::process::exit(1);
             }

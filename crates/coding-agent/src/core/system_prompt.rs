@@ -262,10 +262,10 @@ mod tests {
         assert_eq!(prompt, "You are a custom bot.");
     }
 
-    /// Pi-mono parity: `--system-prompt X --append-system-prompt Y`
-    /// must produce a prompt containing BOTH. Previously the custom
-    /// prompt short-circuited the builder before guidelines were
-    /// appended, silently dropping --append-system-prompt.
+    /// `--system-prompt X --append-system-prompt Y` must produce a
+    /// prompt containing BOTH. Previously the custom prompt short-
+    /// circuited the builder before guidelines were appended,
+    /// silently dropping --append-system-prompt.
     #[test]
     fn test_custom_prompt_composes_with_guidelines() {
         let prompt = build_system_prompt(BuildSystemPromptOptions {

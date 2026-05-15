@@ -56,8 +56,8 @@ async fn execute_write(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let line_count = content.lines().count();
     let content = content.to_string();
     let path_for_async = path.clone();
-    // Pi-mono parity: serialise mutations against the same file so that
-    // parallel tool_use blocks targeting one path don't race.
+    // Serialise mutations against the same file so that parallel
+    // tool_use blocks targeting one path don't race.
     with_file_mutation_queue(&path, async move {
         let existed = path_for_async.exists();
         match std::fs::write(&path_for_async, &content) {
@@ -157,10 +157,10 @@ mod tests {
         assert!(text.contains("Missing required parameter: content"));
     }
 
-    /// Pi-mono parity: `~/...` paths must expand to $HOME on write too.
-    /// Without it, a write to `~/output.txt` lands in `<cwd>/~/output.txt`
-    /// (a literal tilde directory) — which silently succeeds and leaves
-    /// the user wondering where the file went.
+    /// `~/...` paths must expand to $HOME on write too. Without it, a
+    /// write to `~/output.txt` lands in `<cwd>/~/output.txt` (a literal
+    /// tilde directory) — which silently succeeds and leaves the user
+    /// wondering where the file went.
     #[tokio::test]
     async fn test_write_expands_tilde() {
         let dir = TempDir::new().unwrap();

@@ -448,10 +448,10 @@ impl InteractiveMode {
         }));
 
         // Ctrl+G listener: open the editor's current buffer in `$VISUAL`
-        // / `$EDITOR` and read the result back. Pi-mono parity item
-        // M4.1. The actual edit runs in a worker thread because we
-        // can't block the Tui input loop on `wait()`; the result is
-        // applied to the editor via its Arc handle.
+        // / `$EDITOR` and read the result back. The actual edit runs in
+        // a worker thread because we can't block the Tui input loop on
+        // `wait()`; the result is applied to the editor via its Arc
+        // handle.
         let chat_for_ext = Arc::clone(&chat);
         let editor_for_ext = Arc::clone(&editor);
         tui.add_input_listener(Box::new(move |event: &InputEvent| {

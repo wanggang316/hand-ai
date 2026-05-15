@@ -318,10 +318,11 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: lowercase `am`/`pm` (en_AU and similar locales)
-    /// must also probe the narrow-no-break-space variant. Hand's matcher
-    /// already case-insensitively checks A/a + M/m; this test pins that
-    /// surface so a refactor can't quietly tighten it to uppercase only.
+    /// Lowercase `am`/`pm` (en_AU and similar locales) must also probe
+    /// the narrow-no-break-space variant. The matcher already
+    /// case-insensitively checks A/a + M/m; this test pins that
+    /// surface so a refactor can't quietly tighten it to uppercase
+    /// only.
     #[test]
     fn resolve_read_path_probes_lowercase_am_pm_variant() {
         let dir = TempDir::new().unwrap();
@@ -335,10 +336,11 @@ mod tests {
         assert_eq!(result, dir.path().join(&real));
     }
 
-    /// Pi-mono parity: standalone curly-quote variant (no NFD needed).
-    /// A filename that uses U+2019 RIGHT SINGLE QUOTATION MARK on disk
-    /// must resolve from a typed ASCII apostrophe. Different from the
-    /// NFD+curly French screenshot case, which combines two normalisations.
+    /// Standalone curly-quote variant (no NFD needed). A filename
+    /// that uses U+2019 RIGHT SINGLE QUOTATION MARK on disk must
+    /// resolve from a typed ASCII apostrophe. Different from the
+    /// NFD+curly French screenshot case, which combines two
+    /// normalisations.
     #[test]
     fn resolve_read_path_probes_curly_quote_alone() {
         let dir = TempDir::new().unwrap();
@@ -354,10 +356,10 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: NFC vs NFD probing must work even without a curly-
-    /// quote complication. macOS HFS+/APFS may store filenames in NFD
-    /// (decomposed) form; a user typing an NFC string (e.g. from a chat
-    /// client) must still find the file.
+    /// NFC vs NFD probing must work even without a curly-quote
+    /// complication. macOS HFS+/APFS may store filenames in NFD
+    /// (decomposed) form; a user typing an NFC string (e.g. from a
+    /// chat client) must still find the file.
     #[test]
     fn resolve_read_path_probes_nfd_alone() {
         let dir = TempDir::new().unwrap();

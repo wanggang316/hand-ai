@@ -174,10 +174,10 @@ mod tests {
         assert_eq!(v, "ok");
     }
 
-    /// Pi-mono parity: two paths that resolve to the same on-disk file
-    /// through a symlink MUST share the queue. Without canonical-path
-    /// keying, `link.txt` and `real.txt` would land in two different
-    /// `Mutex` cells and race.
+    /// Two paths that resolve to the same on-disk file through a
+    /// symlink MUST share the queue. Without canonical-path keying,
+    /// `link.txt` and `real.txt` would land in two different `Mutex`
+    /// cells and race.
     #[cfg(unix)]
     #[tokio::test]
     async fn same_path_via_symlink_shares_queue() {

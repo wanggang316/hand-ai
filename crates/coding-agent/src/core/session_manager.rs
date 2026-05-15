@@ -1421,9 +1421,9 @@ mod tests {
         assert!(listed[0].modified > 0);
     }
 
-    /// Pi-mono parity: `SessionInfo.modified` MUST prefer the latest
-    /// message timestamp over the file's mtime. Listing UIs sort by
-    /// "last activity" — using mtime would be wrong because:
+    /// `SessionInfo.modified` MUST prefer the latest message
+    /// timestamp over the file's mtime. Listing UIs sort by "last
+    /// activity" — using mtime would be wrong because:
     ///   - merely loading a session updates atime/mtime on some FSes;
     ///   - sync engines (Dropbox, iCloud) and backup tools rewrite mtime;
     ///   - a `touch` would silently reshuffle the picker.
@@ -1445,8 +1445,8 @@ mod tests {
         // are distinct enough to make the source-of-truth obvious.
         //
         // Hand's on-disk shape uses the `{"type": <tag>, "data": {...}}`
-        // envelope from serde's adjacent tagging — flat pi-style shapes
-        // won't parse here.
+        // envelope from serde's adjacent tagging — flat object shapes
+        // without the envelope won't parse here.
         let header = r#"{"type":"session","data":{"version":3,"id":"sid-frozen","timestamp":1000,"cwd":"/tmp"}}"#;
         let message = r#"{"type":"message","data":{"id":"mid1","message":{"role":"user","content":"hi","timestamp":2000},"timestamp":2000}}"#;
         std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
@@ -1465,10 +1465,9 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity tail case: when a session has no messages, fall
-    /// back to file mtime (which is what hand currently does) — never
-    /// the header creation timestamp. The picker should still surface
-    /// recently-touched empty sessions.
+    /// Tail case: when a session has no messages, fall back to file
+    /// mtime — never the header creation timestamp. The picker should
+    /// still surface recently-touched empty sessions.
     #[test]
     fn test_session_info_modified_falls_back_to_mtime_when_no_messages() {
         let dir = TempDir::new().unwrap();
