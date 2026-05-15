@@ -36,8 +36,8 @@ UC-sysp-004..007.
 
 | ID | Status | Verified-by |
 |----|--------|-------------|
-| UC-sysp-001 | ❌ fail | hand renders an empty `tools` slice with no Available-tools section (no `(none)` placeholder) |
-| UC-sysp-002 | ⚠️ pending | "Show file paths clearly" guideline string — text not currently in hand's template |
+| UC-sysp-001 | ✅ pass | `empty_tools_emits_none_placeholder` |
+| UC-sysp-002 | ✅ pass | `show_file_paths_guideline_always_present` |
 | UC-sysp-003 | ✅ pass | `test_build_system_prompt_basic`, `test_tool_guidelines_generated` |
 | UC-sysp-004 | ❌ fail | hand has no `tool_snippets` map; tool descriptions are baked into the template by name |
 | UC-sysp-005 | ❌ fail | same — custom tools with no snippet are absent regardless because there's no snippet channel |

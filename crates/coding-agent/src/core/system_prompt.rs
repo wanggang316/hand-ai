@@ -47,14 +47,24 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
             .to_string(),
     );
 
-    // Tool instructions
-    if !options.tools.is_empty() {
-        let mut tool_section = String::from("# Available Tools\n\n");
-        tool_section.push_str("You have access to the following tools:\n");
+    // Tool instructions. Always emit the section header — even when no
+    // tools are selected — so the model sees an explicit "no tools"
+    // signal rather than silently inferring it from absence. An empty
+    // list renders as `Available tools:\n(none)`.
+    let mut tool_section = String::from("# Available Tools\n\n");
+    if options.tools.is_empty() {
+        tool_section.push_str("Available tools:\n(none)\n\n");
+    } else {
+        tool_section.push_str("Available tools:\n");
         for tool in options.tools {
             tool_section.push_str(&format!("- {}\n", tool));
         }
-        tool_section.push_str("\n## Tool Usage Guidelines\n\n");
+        tool_section.push('\n');
+    }
+    tool_section.push_str("## Tool Usage Guidelines\n\n");
+    tool_section
+        .push_str("- Show file paths clearly when referring to code locations in responses.\n");
+    if !options.tools.is_empty() {
 
         let has_read = options.tools.iter().any(|t| t == "read");
         let has_bash = options.tools.iter().any(|t| t == "bash");
@@ -88,9 +98,8 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
                 "- Use `bash` for running tests, builds, git commands, and other shell tasks.\n",
             );
         }
-
-        sections.push(tool_section);
     }
+    sections.push(tool_section);
 
     // Custom guidelines
     if let Some(guidelines) = options.custom_guidelines {
@@ -247,6 +256,59 @@ mod tests {
         assert!(prompt.contains("read"));
         assert!(prompt.contains("bash"));
         assert!(prompt.contains("/tmp/test"));
+    }
+
+    /// Empty `tools` slice MUST still emit the Available-tools section
+    /// with `(none)` as the explicit no-tools placeholder. Silently
+    /// dropping the whole section forces the model to infer absence
+    /// from a non-existent header, which has produced confused
+    /// behaviour in the past (model assumed tools were forthcoming).
+    /// pi anchors this contract in its parse-time tests.
+    #[test]
+    fn empty_tools_emits_none_placeholder() {
+        let prompt = build_system_prompt(BuildSystemPromptOptions {
+            cwd: &PathBuf::from("/tmp"),
+            tools: &[],
+            skills: &[],
+            custom_guidelines: None,
+            context_files: vec![],
+            custom_prompt: None,
+        });
+        assert!(
+            prompt.contains("Available tools:\n(none)"),
+            "must show `Available tools:\\n(none)` for empty tools, got: {prompt}"
+        );
+    }
+
+    /// The `Show file paths clearly` guideline is anchored regardless
+    /// of which tools are in scope; it's a global UX rule for the
+    /// model's responses, not a per-tool tip.
+    #[test]
+    fn show_file_paths_guideline_always_present() {
+        let prompt_empty_tools = build_system_prompt(BuildSystemPromptOptions {
+            cwd: &PathBuf::from("/tmp"),
+            tools: &[],
+            skills: &[],
+            custom_guidelines: None,
+            context_files: vec![],
+            custom_prompt: None,
+        });
+        assert!(
+            prompt_empty_tools.contains("Show file paths clearly"),
+            "missing guideline on empty-tools prompt: {prompt_empty_tools}"
+        );
+        let prompt_with_tools = build_system_prompt(BuildSystemPromptOptions {
+            cwd: &PathBuf::from("/tmp"),
+            tools: &["read".into()],
+            skills: &[],
+            custom_guidelines: None,
+            context_files: vec![],
+            custom_prompt: None,
+        });
+        assert!(
+            prompt_with_tools.contains("Show file paths clearly"),
+            "missing guideline on tools-listed prompt: {prompt_with_tools}"
+        );
     }
 
     #[test]
