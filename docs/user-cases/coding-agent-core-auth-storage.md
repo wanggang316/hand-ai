@@ -39,9 +39,9 @@ proposal.
 | UC-as-003 | ✅ pass | `remove_drops_provider` (covers the remove half of "preserves unrelated external edits") |
 | UC-as-004 | ⚠️ pending | "malformed file is not overwritten after load error" — hand reloads on every read but does NOT write back on parse failure (load returns the error); behaviour believed correct, needs explicit test |
 | UC-as-005 | ❌ fail | hand has no `reload` / `drainErrors` buffer; parse errors surface as a single returned `Result::Err` from `load()`, no rolling error queue |
-| UC-as-006 | ❌ fail | hand has no `getAuthStatus` redactor; callers see the raw `AuthRecord` |
-| UC-as-007 | ❌ fail | hand has no `setRuntimeApiKey` runtime-override layer |
-| UC-as-008 | ❌ fail | same — no `removeRuntimeApiKey` |
+| UC-as-006 | ✅ pass | `get_auth_status_redacts_secrets`, `get_auth_status_unconfigured_provider_has_no_source` |
+| UC-as-007 | ✅ pass | `runtime_override_beats_stored_api_key` |
+| UC-as-008 | ✅ pass | `remove_runtime_override_reverts_to_stored` |
 | UC-as-009 | ✅ pass | `is_anthropic_subscription_token_matches_oat_prefix` (OAT detection — subscription-token guardrail) |
 | UC-as-010 | ✅ pass | `is_anthropic_subscription_token_rejects_api_keys` |
 | UC-as-011 | ✅ pass | `record_is_anthropic_subscription_flags_oauth_under_anthropic` + `record_is_anthropic_subscription_flags_oat_api_key_under_anthropic` |

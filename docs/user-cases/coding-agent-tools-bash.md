@@ -42,8 +42,8 @@ implementation:
 | UC-bash-005 | ✅ pass | `test_execute_errors_when_cwd_missing` |
 | UC-bash-006 | ⚠️ pending | "process spawn errors" — needs explicit hand test for nonexistent shell path |
 | UC-bash-007 | ⚠️ pending | custom `shellPath` per-call config |
-| UC-bash-008 | ❌ fail | hand has no `command_prefix` option |
-| UC-bash-009 | ❌ fail | same — prefix+command joint output |
+| UC-bash-008 | ✅ pass | `test_command_prefix_sets_env_visible_to_command` |
+| UC-bash-009 | ✅ pass | `test_command_prefix_output_precedes_command_output` |
 | UC-bash-010 | ✅ pass | running without prefix is hand's default |
 | UC-bash-011 | ⚠️ pending | streaming coalescing — hand has no per-update callback |
 | UC-bash-012 | ✅ pass | UTF-8 chunk-boundary handling (`test_execute_multiline_output` family) |

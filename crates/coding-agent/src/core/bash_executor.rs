@@ -31,6 +31,14 @@ pub struct BashExecutorOptions {
     pub timeout_secs: u64,
     /// Maximum output bytes.
     pub max_bytes: usize,
+    /// Optional shell snippet prepended to every command in the same
+    /// `sh -c` invocation. Use this to set env vars (e.g.
+    /// `export PATH=...`) or `source` a setup file that every user
+    /// command should inherit. Both prefix and command run in the same
+    /// shell, so vars defined in the prefix are visible to the command
+    /// and the combined output (prefix's stdout + command's stdout) is
+    /// returned. None or empty string disables prepending.
+    pub command_prefix: Option<String>,
 }
 
 impl Default for BashExecutorOptions {
@@ -39,6 +47,7 @@ impl Default for BashExecutorOptions {
             on_chunk: None,
             timeout_secs: 120,
             max_bytes: DEFAULT_MAX_BYTES,
+            command_prefix: None,
         }
     }
 }
@@ -60,6 +69,14 @@ pub async fn execute_bash(
             cwd.display()
         )));
     }
+    // Prepend the optional command-prefix in the same `sh -c`
+    // invocation so env vars or shell state set by the prefix carry
+    // through to the user command. A newline separates prefix from
+    // command so the prefix doesn't need to end with a `;` or `&&`.
+    let combined = match options.command_prefix.as_deref() {
+        Some(p) if !p.is_empty() => format!("{p}\n{command}"),
+        _ => command.to_string(),
+    };
     // `kill_on_drop(true)` ensures the child is reaped if this future
     // is dropped — e.g. when an outer `tokio::select!` races us against
     // a cancellation token. Without it, an `abort_bash` would return
@@ -68,7 +85,7 @@ pub async fn execute_bash(
     // future, so it's bypassed too).
     let mut child = Command::new(shell_path)
         .arg("-c")
-        .arg(command)
+        .arg(&combined)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -298,6 +315,63 @@ mod tests {
         .unwrap();
         assert_eq!(result.output.trim(), "here");
         assert_eq!(result.exit_code, Some(0));
+    }
+
+    /// `command_prefix` runs in the same shell as the user command.
+    /// Vars exported by the prefix are visible to the command, and
+    /// the prefix's stdout joins the command's stdout in order.
+    #[tokio::test]
+    async fn test_command_prefix_sets_env_visible_to_command() {
+        let dir = TempDir::new().unwrap();
+        let result = execute_bash(
+            "echo $TEST_PREFIX_VAR",
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions {
+                command_prefix: Some("export TEST_PREFIX_VAR=hello".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.output.trim(), "hello");
+        assert_eq!(result.exit_code, Some(0));
+    }
+
+    /// Output from the prefix's own stdout is interleaved before the
+    /// command's stdout — same shell, same fd, line-buffered order.
+    #[tokio::test]
+    async fn test_command_prefix_output_precedes_command_output() {
+        let dir = TempDir::new().unwrap();
+        let result = execute_bash(
+            "echo command-output",
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions {
+                command_prefix: Some("echo prefix-output".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.output.trim(), "prefix-output\ncommand-output");
+    }
+
+    /// No prefix or empty-string prefix runs the command unchanged.
+    /// Sanity check that the Option<None> path doesn't double-wrap or
+    /// inject leading newlines.
+    #[tokio::test]
+    async fn test_no_command_prefix_runs_command_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let result = execute_bash(
+            "echo no-prefix",
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.output.trim(), "no-prefix");
     }
 
     /// When the working directory has been deleted (or never existed),

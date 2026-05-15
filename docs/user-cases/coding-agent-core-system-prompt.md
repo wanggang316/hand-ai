@@ -41,8 +41,8 @@ UC-sysp-004..007.
 | UC-sysp-003 | ✅ pass | `test_build_system_prompt_basic`, `test_tool_guidelines_generated` |
 | UC-sysp-004 | ❌ fail | hand has no `tool_snippets` map; tool descriptions are baked into the template by name |
 | UC-sysp-005 | ❌ fail | same — custom tools with no snippet are absent regardless because there's no snippet channel |
-| UC-sysp-006 | ❌ fail | hand's `custom_guidelines` is a single string, not a dedup'd list |
-| UC-sysp-007 | ❌ fail | same — no dedup/trim semantics because the input is one string |
+| UC-sysp-006 | ✅ pass | `append_system_prompt_entries_render_as_separate_bullets` |
+| UC-sysp-007 | ✅ pass | `append_system_prompt_dedups_and_trims` |
 
 ## Cases
 

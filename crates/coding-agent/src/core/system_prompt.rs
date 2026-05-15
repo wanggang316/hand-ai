@@ -4,6 +4,49 @@ use crate::core::skills::Skill;
 use chrono::Local;
 use std::path::Path;
 
+/// Render the `# Project Guidelines` section from a single
+/// `custom_guidelines` string. The string is split on blank-line
+/// separators (so callers can pack multiple guideline entries with
+/// `\n\n` between them — that's exactly how
+/// `--append-system-prompt` flags compose in session_setup),
+/// trimmed, deduplicated, and dropped if empty. Returns `None` when
+/// nothing survives the cleanup so the caller can skip emitting the
+/// header entirely.
+///
+/// The rendered shape is a bulleted list under the header so
+/// downstream parsers and human readers see each guideline as a
+/// distinct item:
+///
+/// ```text
+/// # Project Guidelines
+///
+/// - First guideline.
+/// - Second guideline.
+/// ```
+fn render_project_guidelines(custom_guidelines: Option<&str>) -> Option<String> {
+    let raw = custom_guidelines?;
+    let mut seen = std::collections::HashSet::new();
+    let mut bullets: Vec<&str> = Vec::new();
+    for entry in raw.split("\n\n") {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if seen.insert(trimmed) {
+            bullets.push(trimmed);
+        }
+    }
+    if bullets.is_empty() {
+        return None;
+    }
+    let body = bullets
+        .iter()
+        .map(|b| format!("- {b}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!("# Project Guidelines\n\n{body}"))
+}
+
 /// Options for building the system prompt.
 pub struct BuildSystemPromptOptions<'a> {
     /// Working directory.
@@ -29,11 +72,9 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
     // was set.
     if let Some(custom) = options.custom_prompt {
         let mut out = custom.to_string();
-        if let Some(guidelines) = options.custom_guidelines
-            && !guidelines.trim().is_empty()
-        {
-            out.push_str("\n\n# Project Guidelines\n\n");
-            out.push_str(guidelines);
+        if let Some(rendered) = render_project_guidelines(options.custom_guidelines) {
+            out.push_str("\n\n");
+            out.push_str(&rendered);
         }
         return out;
     }
@@ -101,9 +142,12 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
     }
     sections.push(tool_section);
 
-    // Custom guidelines
-    if let Some(guidelines) = options.custom_guidelines {
-        sections.push(format!("# Project Guidelines\n\n{}", guidelines));
+    // Custom guidelines — rendered as a bulleted list under
+    // `# Project Guidelines`. Entries are split on blank-line separators
+    // (mirrors how `--append-system-prompt` flags compose), trimmed of
+    // surrounding whitespace, deduplicated, and dropped if empty.
+    if let Some(rendered) = render_project_guidelines(options.custom_guidelines) {
+        sections.push(rendered);
     }
 
     // Context files
@@ -349,6 +393,61 @@ mod tests {
         assert!(
             prompt.contains("# Project Guidelines"),
             "must label the appended section, got: {prompt}"
+        );
+    }
+
+    /// Each `--append-system-prompt` entry renders as its own bulleted
+    /// line under `# Project Guidelines`. session_setup.rs joins the
+    /// flag's repeated values with `\n\n` before passing them through
+    /// `custom_guidelines`; the system-prompt builder splits on that
+    /// separator and emits one `-` bullet per entry.
+    #[test]
+    fn append_system_prompt_entries_render_as_separate_bullets() {
+        let prompt = build_system_prompt(BuildSystemPromptOptions {
+            cwd: &PathBuf::from("/tmp"),
+            tools: &[],
+            skills: &[],
+            custom_guidelines: Some("First entry.\n\nSecond entry."),
+            context_files: vec![],
+            custom_prompt: None,
+        });
+        assert!(
+            prompt.contains("# Project Guidelines"),
+            "must emit guidelines header, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("- First entry."),
+            "missing first bullet, got: {prompt}"
+        );
+        assert!(
+            prompt.contains("- Second entry."),
+            "missing second bullet, got: {prompt}"
+        );
+    }
+
+    /// Duplicate guideline entries (after trimming surrounding
+    /// whitespace) collapse to one bullet. Whitespace-only entries
+    /// drop entirely.
+    #[test]
+    fn append_system_prompt_dedups_and_trims() {
+        // Three "entries":
+        //   - "Use X for summaries."
+        //   - "  Use X for summaries.  " (whitespace differs only)
+        //   - "   " (whitespace-only)
+        // The first two collapse; the third drops.
+        let raw = "Use X for summaries.\n\n  Use X for summaries.  \n\n   ";
+        let prompt = build_system_prompt(BuildSystemPromptOptions {
+            cwd: &PathBuf::from("/tmp"),
+            tools: &[],
+            skills: &[],
+            custom_guidelines: Some(raw),
+            context_files: vec![],
+            custom_prompt: None,
+        });
+        let bullet_count = prompt.matches("- Use X for summaries.").count();
+        assert_eq!(
+            bullet_count, 1,
+            "duplicate entries must collapse to one bullet, got {bullet_count} occurrences in: {prompt}"
         );
     }
 

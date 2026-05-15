@@ -16,11 +16,11 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 28 | 24 | 8 |
 | coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (API-key + caching subset) | coding-agent | 16 | 16 | 0 | 0 |
 | coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 14 | 0 | 17 |
-| coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 5 | 5 | 1 |
+| coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 8 | 2 | 1 |
 | coding-agent-core-session-manager.md | pi-mono/packages/coding-agent/test/{session-info-modified-timestamp,session-cwd,sdk-session-manager}.test.ts | coding-agent | 7 | 1 | 1 | 5 |
-| coding-agent-tools-bash.md | pi-mono/packages/coding-agent/test/tools.test.ts (bash describe) + bash-execution-width.test.ts | coding-agent | 17 | 8 | 5 | 4 |
+| coding-agent-tools-bash.md | pi-mono/packages/coding-agent/test/tools.test.ts (bash describe) + bash-execution-width.test.ts | coding-agent | 17 | 10 | 3 | 4 |
 | coding-agent-tools-render-utils.md | hand parity contract (pi has no dedicated test file) | coding-agent | 12 | 12 | 0 | 0 |
-| coding-agent-core-system-prompt.md | pi-mono/packages/coding-agent/test/system-prompt.test.ts | coding-agent | 7 | 3 | 4 | 0 |
+| coding-agent-core-system-prompt.md | pi-mono/packages/coding-agent/test/system-prompt.test.ts | coding-agent | 7 | 5 | 2 | 0 |
 | model-stream-retry.md | hand parity contract (pi has no dedicated retry-classification test file) | model | 8 | 8 | 0 | 0 |
 | tui-keys.md | pi-mono/packages/tui/test/keys.test.ts | tui | 59 | 59 | 0 | 0 |
 | tui-autocomplete.md | pi-mono/packages/tui/test/autocomplete.test.ts | tui | 25 | 1 | 10 | 14 |
@@ -31,8 +31,8 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 223
-- **Fail:** 61
+- **Pass:** 232
+- **Fail:** 52
 - **Pending:** 54
 
 ### Known failures (drive remediation)
@@ -63,8 +63,19 @@ authored yet, or the count hasn't been recomputed since the last edit.
   UC-sysp-002.)
 - **UC-sysp-004/005** — hand has no `tool_snippets` channel; custom
   tools can't be advertised at the protocol level.
-- **UC-sysp-006/007** — hand's `custom_guidelines` is a string, not a
-  list; no dedup/trim semantics.
+- ~~UC-sysp-006/007~~ ✅ FIXED — `custom_guidelines` is now split on
+  `\n\n`, trimmed, deduplicated, and rendered as bulleted lines under
+  `# Project Guidelines`. session_setup already joins
+  `--append-system-prompt` entries with the same separator.
+- ~~UC-bash-008/009~~ ✅ FIXED — `command_prefix: Option<String>` added
+  to `BashExecutorOptions`. Prefix and command run in the same shell
+  so env vars compose; combined stdout flows in order.
+- ~~UC-as-006~~ ✅ FIXED — `get_auth_status` returns a redacted
+  `AuthStatus { configured, source }` whose JSON serialisation never
+  contains api keys or OAuth tokens.
+- ~~UC-as-007/008~~ ✅ FIXED — runtime-override layer added.
+  `set_runtime_api_key` / `remove_runtime_api_key` mutate a shared
+  in-memory map; `get_api_key` resolves runtime → disk → None.
 - **UC-args-002** — hand binds `-v` to `--verbose`, not `--version`.
 - **UC-args-012/013** — `--resume` / `-r` bare (no value) not allowed
   by hand's clap derive.
@@ -93,9 +104,9 @@ authored yet, or the count hasn't been recomputed since the last edit.
   matched at the time of this lockstep; the test prevents future
   drift.
 - **UC-as-001** — no `get_api_key` async with OAuth refresh + lock
-  compromise recovery on `AuthStorage`.
-- **UC-as-005..008** — no `reload`/`drain_errors`, no `get_auth_status`
-  redactor, no runtime-override layer.
+  compromise recovery on `AuthStorage` (sync get_api_key landed; the
+  OAuth-refresh dance + lock recovery still missing).
+- **UC-as-005** — no `reload`/`drain_errors` error-buffer API.
 
 ## Phase 1 complete — suite breadth landed
 

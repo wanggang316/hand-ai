@@ -171,9 +171,24 @@ pub fn record_is_anthropic_subscription(provider_id: &str, record: &AuthRecord) 
 /// ([`set`](Self::set), [`remove`](Self::remove)) load, mutate, and save in
 /// one shot; callers that need to batch many edits should use
 /// [`load`](Self::load) + [`save`](Self::save) directly.
+///
+/// The struct also carries a process-local "runtime overrides" layer
+/// — an in-memory map of `provider -> api_key` strings that takes
+/// priority over the disk-backed records. Use
+/// [`set_runtime_api_key`](Self::set_runtime_api_key) to inject a key
+/// for the lifetime of a process (typical use: a hosted dev tool
+/// passing the user's session token down to the agent without ever
+/// writing it to disk). [`remove_runtime_api_key`](Self::remove_runtime_api_key)
+/// drops the override; subsequent reads fall back to disk again.
+///
+/// Runtime overrides are SHARED across `Clone`s of `AuthStorage`
+/// pointed at the same disk path — they live in an `Arc<Mutex<…>>`,
+/// so cloning the storage cheaply still gives the caller the same
+/// view of process-local credentials.
 #[derive(Clone)]
 pub struct AuthStorage {
     path: PathBuf,
+    runtime_overrides: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
 
 impl AuthStorage {
@@ -191,13 +206,17 @@ impl AuthStorage {
     pub fn new() -> Result<Self, AuthStorageError> {
         Ok(Self {
             path: Self::default_path()?,
+            runtime_overrides: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
     /// Construct pointing at an explicit path. Intended for tests and for
     /// callers that override the location via env var.
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            runtime_overrides: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+        }
     }
 
     /// Path of the underlying JSON file.
@@ -335,6 +354,117 @@ impl AuthStorage {
         }
         Ok(())
     }
+
+    /// Look up a redacted status for one provider — `configured: true`
+    /// when a credential exists (runtime override OR disk record),
+    /// `false` otherwise. The `source` discriminator carries which
+    /// layer supplied the credential: `Runtime` when a process-local
+    /// override is set, `Stored` when only the disk record exists.
+    ///
+    /// The returned `AuthStatus` carries NO secret material — its
+    /// JSON serialisation never contains the api key, access token,
+    /// or refresh token. UI consumers can ship the value to a logger
+    /// without leaking credentials.
+    pub fn get_auth_status(&self, provider: &str) -> AuthStatus {
+        if self.has_runtime_override(provider) {
+            return AuthStatus {
+                configured: true,
+                source: Some(AuthSource::Runtime),
+            };
+        }
+        let configured = matches!(self.get(provider), Ok(Some(_)));
+        AuthStatus {
+            configured,
+            source: if configured {
+                Some(AuthSource::Stored)
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Inject a process-local API key override for `provider`. Takes
+    /// priority over any `auth.json` record on subsequent
+    /// [`get_api_key`](Self::get_api_key) calls. Useful for hosted
+    /// integrations that hand the agent a per-request credential
+    /// without persisting it to disk.
+    pub fn set_runtime_api_key(&self, provider: &str, key: impl Into<String>) {
+        let mut overrides = self
+            .runtime_overrides
+            .lock()
+            .expect("runtime_overrides mutex poisoned");
+        overrides.insert(provider.to_string(), key.into());
+    }
+
+    /// Drop a process-local API key override for `provider`. Idempotent
+    /// — removing an absent override is a no-op. Subsequent reads fall
+    /// back to the disk record.
+    pub fn remove_runtime_api_key(&self, provider: &str) {
+        let mut overrides = self
+            .runtime_overrides
+            .lock()
+            .expect("runtime_overrides mutex poisoned");
+        overrides.remove(provider);
+    }
+
+    /// Resolve the effective API key for one provider. Order of
+    /// precedence:
+    /// 1. Process-local runtime override (set via
+    ///    [`set_runtime_api_key`](Self::set_runtime_api_key)).
+    /// 2. The on-disk record's ApiKey field (resolved through the
+    ///    config-value pipeline so `!command` and env-var lookups
+    ///    work transparently).
+    /// 3. None when neither layer has a credential.
+    ///
+    /// OAuth records are NOT resolved by this method — callers handle
+    /// the OAuth refresh dance separately.
+    pub fn get_api_key(&self, provider: &str) -> Option<String> {
+        if let Some(rt) = self
+            .runtime_overrides
+            .lock()
+            .expect("runtime_overrides mutex poisoned")
+            .get(provider)
+            .cloned()
+        {
+            return Some(rt);
+        }
+        match self.get(provider).ok().flatten() {
+            Some(AuthRecord::ApiKey { key }) => {
+                crate::core::resolve_config_value::resolve_config_value(&key)
+            }
+            _ => None,
+        }
+    }
+
+    fn has_runtime_override(&self, provider: &str) -> bool {
+        self.runtime_overrides
+            .lock()
+            .expect("runtime_overrides mutex poisoned")
+            .contains_key(provider)
+    }
+}
+
+/// Redacted view of a provider's credential. Always safe to serialise
+/// into logs or user-facing diagnostics — carries no secret material.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct AuthStatus {
+    /// True iff some credential record exists for the provider.
+    pub configured: bool,
+    /// Which layer supplied the credential (currently only `Stored`
+    /// since hand has no runtime-override or env-resolve layers yet).
+    /// `None` when `configured` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<AuthSource>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthSource {
+    /// Loaded from the on-disk `auth.json` file.
+    Stored,
+    /// Set via [`AuthStorage::set_runtime_api_key`] for the lifetime
+    /// of the process — takes priority over `Stored`.
+    Runtime,
 }
 
 #[cfg(test)]
@@ -573,5 +703,107 @@ mod tests {
         s.set("openai", AuthRecord::api_key("sk-2")).unwrap();
         let mode = fs::metadata(s.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// `get_auth_status` returns a redacted view: `configured: true`
+    /// with `source: stored` when a record exists, and the serialised
+    /// JSON contains NEITHER the api key string NOR the OAuth tokens.
+    /// Callers can log the value safely.
+    #[test]
+    fn get_auth_status_redacts_secrets() {
+        let dir = TempDir::new().unwrap();
+        let s = storage_in(&dir);
+        s.set("anthropic", AuthRecord::api_key("secret-api-key"))
+            .unwrap();
+        s.set(
+            "openai",
+            AuthRecord::oauth("secret-access", "secret-refresh", 1_700_000_000_000),
+        )
+        .unwrap();
+
+        let anthropic = s.get_auth_status("anthropic");
+        let openai = s.get_auth_status("openai");
+        assert!(anthropic.configured);
+        assert_eq!(anthropic.source, Some(AuthSource::Stored));
+        assert!(openai.configured);
+        assert_eq!(openai.source, Some(AuthSource::Stored));
+
+        let anthropic_json = serde_json::to_string(&anthropic).unwrap();
+        let openai_json = serde_json::to_string(&openai).unwrap();
+        assert!(
+            !anthropic_json.contains("secret-api-key"),
+            "API key leaked into auth status JSON: {anthropic_json}"
+        );
+        assert!(
+            !openai_json.contains("secret-access"),
+            "OAuth access token leaked: {openai_json}"
+        );
+        assert!(
+            !openai_json.contains("secret-refresh"),
+            "OAuth refresh token leaked: {openai_json}"
+        );
+    }
+
+    /// Runtime override takes priority over the disk-backed record.
+    /// `get_api_key` returns the override; `get_auth_status` reports
+    /// `source: runtime`.
+    #[test]
+    fn runtime_override_beats_stored_api_key() {
+        let dir = TempDir::new().unwrap();
+        let s = storage_in(&dir);
+        s.set("anthropic", AuthRecord::api_key("stored-key")).unwrap();
+        s.set_runtime_api_key("anthropic", "runtime-key");
+
+        assert_eq!(s.get_api_key("anthropic").as_deref(), Some("runtime-key"));
+        let status = s.get_auth_status("anthropic");
+        assert!(status.configured);
+        assert_eq!(status.source, Some(AuthSource::Runtime));
+    }
+
+    /// Removing a runtime override falls back to the disk-stored
+    /// record on the next read; `get_auth_status` reverts to
+    /// `source: stored`.
+    #[test]
+    fn remove_runtime_override_reverts_to_stored() {
+        let dir = TempDir::new().unwrap();
+        let s = storage_in(&dir);
+        s.set("anthropic", AuthRecord::api_key("stored-key")).unwrap();
+        s.set_runtime_api_key("anthropic", "runtime-key");
+        s.remove_runtime_api_key("anthropic");
+
+        assert_eq!(s.get_api_key("anthropic").as_deref(), Some("stored-key"));
+        let status = s.get_auth_status("anthropic");
+        assert!(status.configured);
+        assert_eq!(status.source, Some(AuthSource::Stored));
+    }
+
+    /// `Clone`s of `AuthStorage` share the runtime-override layer:
+    /// setting an override on one handle is visible from another
+    /// pointed at the same disk path. The override map lives behind
+    /// `Arc<Mutex<…>>`, not the path.
+    #[test]
+    fn runtime_overrides_are_shared_across_clones() {
+        let dir = TempDir::new().unwrap();
+        let a = storage_in(&dir);
+        let b = a.clone();
+        a.set_runtime_api_key("openai", "from-a");
+        assert_eq!(b.get_api_key("openai").as_deref(), Some("from-a"));
+    }
+
+    /// An unconfigured provider returns `{configured: false}` with no
+    /// `source` field (serde skip-if-none keeps the JSON compact).
+    #[test]
+    fn get_auth_status_unconfigured_provider_has_no_source() {
+        let dir = TempDir::new().unwrap();
+        let s = storage_in(&dir);
+        let status = s.get_auth_status("never-set");
+        assert!(!status.configured);
+        assert_eq!(status.source, None);
+        let json = serde_json::to_string(&status).unwrap();
+        // skip_serializing_if for None means `source` should be absent.
+        assert!(
+            !json.contains("\"source\""),
+            "expected `source` to be omitted from JSON for unconfigured, got: {json}"
+        );
     }
 }
