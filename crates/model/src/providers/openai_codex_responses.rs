@@ -894,8 +894,8 @@ mod tests {
     /// sending the header.
     #[test]
     fn should_send_session_id_header_ignores_unrelated_compat() {
-        use crate::types::{Compat, OpenAICompletionsCompat};
-        let other = Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat::default()));
+        use crate::types::Compat;
+        let other = Compat::OpenAICompletions(Box::default());
         assert!(should_send_session_id_header(Some(&other)));
     }
 

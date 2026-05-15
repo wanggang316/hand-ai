@@ -269,7 +269,7 @@ mod tests {
     fn resolve_read_path_probes_am_pm_variant() {
         let dir = TempDir::new().unwrap();
         // Real file uses the narrow no-break space; user input uses a normal space.
-        let real = format!("Screenshot 2024-01-01 at 10.00.00\u{202F}AM.png");
+        let real = "Screenshot 2024-01-01 at 10.00.00\u{202F}AM.png".to_string();
         File::create(dir.path().join(&real)).unwrap();
 
         let typed = "Screenshot 2024-01-01 at 10.00.00 AM.png";
@@ -327,7 +327,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         // Real file uses lowercase `am` with the narrow no-break space —
         // mirrors what macOS produces under the en_AU locale.
-        let real = format!("screenshot 10.00.00\u{202F}am.png");
+        let real = "screenshot 10.00.00\u{202F}am.png".to_string();
         File::create(dir.path().join(&real)).unwrap();
 
         let typed = "screenshot 10.00.00 am.png";

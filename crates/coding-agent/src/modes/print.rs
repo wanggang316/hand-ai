@@ -673,6 +673,30 @@ fn format_assistant_error(
     }
 }
 
+fn resolve_session_path(cwd: &std::path::Path, source: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(source);
+    if path.exists() {
+        return path;
+    }
+    let session_dir = cwd.join(".hand").join("sessions");
+    let candidate = session_dir.join(format!("{}.jsonl", source));
+    if candidate.exists() {
+        return candidate;
+    }
+    if let Ok(entries) = std::fs::read_dir(&session_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Some(name_str) = name.to_str()
+                && name_str.starts_with(source)
+                && name_str.ends_with(".jsonl")
+            {
+                return entry.path();
+            }
+        }
+    }
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1065,7 +1089,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("binary.bin");
-        std::fs::write(&path, &[0xFF, 0xFE, 0xFD, 0x00, 0x01]).unwrap();
+        std::fs::write(&path, [0xFF, 0xFE, 0xFD, 0x00, 0x01]).unwrap();
         let prompt = format!("@{} describe", path.display());
         let err = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap_err();
         assert!(
@@ -1083,28 +1107,4 @@ mod tests {
         // Empty file produces no <file> block; rest of prompt remains.
         assert_eq!(out, "hi");
     }
-}
-
-fn resolve_session_path(cwd: &std::path::Path, source: &str) -> std::path::PathBuf {
-    let path = std::path::PathBuf::from(source);
-    if path.exists() {
-        return path;
-    }
-    let session_dir = cwd.join(".hand").join("sessions");
-    let candidate = session_dir.join(format!("{}.jsonl", source));
-    if candidate.exists() {
-        return candidate;
-    }
-    if let Ok(entries) = std::fs::read_dir(&session_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if let Some(name_str) = name.to_str()
-                && name_str.starts_with(source)
-                && name_str.ends_with(".jsonl")
-            {
-                return entry.path();
-            }
-        }
-    }
-    path
 }
