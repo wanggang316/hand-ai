@@ -126,6 +126,26 @@ pub struct Args {
     #[arg(long)]
     pub no_skills: bool,
 
+    /// Load an extra extension by path (repeatable). Each entry points
+    /// at a subprocess-extension binary or directory. Matches the
+    /// upstream pi-mono surface so scripts can list extensions on the
+    /// CLI without having to write a settings entry.
+    #[arg(short = 'e', long = "extension")]
+    pub extensions: Vec<String>,
+
+    /// Disable all extension loading — both the auto-discovered set
+    /// and any explicit `--extension` entries. The flag does NOT clear
+    /// the explicit list (so it can be inspected for diagnostics) but
+    /// the runtime skips registration entirely.
+    #[arg(long)]
+    pub no_extensions: bool,
+
+    /// Add an extra skill path (repeatable). Each entry points at a
+    /// directory whose `SKILL.md` is loaded alongside the
+    /// auto-discovered set.
+    #[arg(long = "skill")]
+    pub skills: Vec<String>,
+
     /// Non-interactive print mode
     #[arg(long)]
     pub print: bool,
@@ -563,5 +583,43 @@ mod tests {
     fn parses_resume_short_with_value_still_works() {
         let args = Args::try_parse_from(["hand", "-r", "session-42"]).unwrap();
         assert_eq!(args.resume.as_deref(), Some("session-42"));
+    }
+
+    /// `--extension <path>` (and the `-e` short) collects a Vec of
+    /// extension paths. Repeated invocations append in order.
+    #[test]
+    fn parses_extension_single_and_repeated() {
+        let single = Args::try_parse_from(["hand", "--extension", "./my-ext"]).unwrap();
+        assert_eq!(single.extensions, vec!["./my-ext".to_string()]);
+        let short = Args::try_parse_from(["hand", "-e", "./short-ext"]).unwrap();
+        assert_eq!(short.extensions, vec!["./short-ext".to_string()]);
+        let repeated =
+            Args::try_parse_from(["hand", "-e", "./a", "--extension", "./b"]).unwrap();
+        assert_eq!(
+            repeated.extensions,
+            vec!["./a".to_string(), "./b".to_string()]
+        );
+    }
+
+    /// `--no-extensions` is a boolean toggle. It does NOT clear the
+    /// `extensions` Vec (so diagnostics can still inspect what was
+    /// requested), but the runtime is expected to skip registration
+    /// when this flag is set.
+    #[test]
+    fn parses_no_extensions_with_explicit_entries() {
+        let args =
+            Args::try_parse_from(["hand", "--no-extensions", "-e", "a", "-e", "b"]).unwrap();
+        assert!(args.no_extensions);
+        assert_eq!(args.extensions, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// `--skill <path>` collects a Vec of skill paths, repeatable.
+    #[test]
+    fn parses_skill_single_and_repeated() {
+        let single = Args::try_parse_from(["hand", "--skill", "./skill-a"]).unwrap();
+        assert_eq!(single.skills, vec!["./skill-a".to_string()]);
+        let repeated =
+            Args::try_parse_from(["hand", "--skill", "./a", "--skill", "./b"]).unwrap();
+        assert_eq!(repeated.skills, vec!["./a".to_string(), "./b".to_string()]);
     }
 }

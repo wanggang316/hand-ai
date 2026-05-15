@@ -84,13 +84,13 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-025 | ✅ pass | `parses_thinking_flag` |
 | UC-args-026 | ✅ pass | `parses_models_csv` |
 | UC-args-027 | ✅ pass | `parses_no_session_flag` |
-| UC-args-028 | ❌ fail | hand has no `--extension` / `-e` flag |
-| UC-args-029 | ❌ fail | same |
-| UC-args-030 | ❌ fail | same — repeated |
-| UC-args-031 | ❌ fail | hand has no `--no-extensions` |
-| UC-args-032 | ❌ fail | same |
-| UC-args-033 | ❌ fail | hand has no `--skill` flag (`--no-skills` exists but not the `+ skill` variant) |
-| UC-args-034 | ❌ fail | same — repeated |
+| UC-args-028 | ✅ pass | `parses_extension_single_and_repeated` |
+| UC-args-029 | ✅ pass | same (covers `-e` short) |
+| UC-args-030 | ✅ pass | same (covers repeated) |
+| UC-args-031 | ✅ pass | `parses_no_extensions_with_explicit_entries` |
+| UC-args-032 | ✅ pass | same |
+| UC-args-033 | ✅ pass | `parses_skill_single_and_repeated` |
+| UC-args-034 | ✅ pass | same (covers repeated) |
 | UC-args-035 | ❌ fail | hand has no `--prompt-template` flag |
 | UC-args-036 | ❌ fail | same — repeated |
 | UC-args-037 | ❌ fail | hand has no `--theme` flag |
