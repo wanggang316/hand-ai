@@ -1,7 +1,5 @@
 //! RPC wire protocol types.
 //!
-//! Authoritative source: `pi-mono/packages/coding-agent/src/modes/rpc/rpc-types.ts`.
-//!
 //! # Wire format
 //!
 //! - One JSON object per line, **LF terminator only** (the framing codec

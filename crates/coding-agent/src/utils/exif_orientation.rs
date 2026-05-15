@@ -5,10 +5,8 @@
 //! Returns a transform describing the rotation/flip the consumer should
 //! apply when rendering the image upright.
 //!
-//! Algorithm parity with the TypeScript original under
-//! `pi-mono/packages/coding-agent/src/utils/exif-orientation.ts`. Implemented
-//! by hand rather than via a heavy EXIF crate so we can keep the dependency
-//! footprint small and the behaviour byte-for-byte identical.
+//! Implemented by hand rather than via a heavy EXIF crate to keep the
+//! dependency footprint small.
 //!
 //! Supported containers:
 //! - JPEG: `FF D8 FF` SOI + APP1 (`FF E1`) segment carrying `Exif\0\0` + TIFF.

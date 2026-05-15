@@ -42,8 +42,8 @@ pub struct Args {
     #[arg(long)]
     pub base_url: Option<String>,
 
-    /// Resume a previous session by ID (or path). `--session` is a
-    /// pi-mono-compat alias for the same behavior.
+    /// Resume a previous session by ID (or path). `--session` is an
+    /// alias for the same behavior.
     #[arg(short, long, alias = "session")]
     pub resume: Option<String>,
 
@@ -65,8 +65,8 @@ pub struct Args {
 
     /// Append text or file contents to the system prompt. Can be used
     /// multiple times; the values are concatenated in order, joined by
-    /// blank lines. Pi-mono parity: each value is auto-loaded from disk
-    /// when it resolves to an existing file path.
+    /// blank lines. Each value is auto-loaded from disk when it resolves
+    /// to an existing file path.
     #[arg(long, action = clap::ArgAction::Append)]
     pub append_system_prompt: Vec<String>,
 
@@ -87,21 +87,20 @@ pub struct Args {
     pub no_session: bool,
 
     /// Disable auto-loading of project context files (HAND.md,
-    /// .hand/context.md). Pi-mono parity. Useful when scripts need a
-    /// reproducible system prompt that doesn't pick up uncommitted
-    /// local files.
+    /// .hand/context.md). Useful when scripts need a reproducible system
+    /// prompt that doesn't pick up uncommitted local files.
     #[arg(long)]
     pub no_context_files: bool,
 
     /// Override the directory used for session storage. Defaults to
-    /// `<cwd>/.hand/sessions`. Pi-mono parity. Useful for CI runs that
-    /// want sessions written to a tmpfs / artifact directory.
+    /// `<cwd>/.hand/sessions`. Useful for CI runs that want sessions
+    /// written to a tmpfs / artifact directory.
     #[arg(long)]
     pub session_dir: Option<PathBuf>,
 
-    /// Disable skill discovery (project, user, and builtin). Pi-mono
-    /// parity. Useful when scripts need a baseline system prompt that
-    /// doesn't pick up auto-discovered skill files from user dotfiles.
+    /// Disable skill discovery (project, user, and builtin). Useful when
+    /// scripts need a baseline system prompt that doesn't pick up
+    /// auto-discovered skill files from user dotfiles.
     #[arg(long)]
     pub no_skills: bool,
 
@@ -110,10 +109,8 @@ pub struct Args {
     pub print: bool,
 
     /// Output mode. `text` (default, final assistant content only) and
-    /// `json` (JSONL event stream mirroring pi-mono's `--mode json`
-    /// shape) apply to --print. `rpc` is a pi-mono parity alias for
-    /// `--rpc` — handy for scripts written against pi's CLI surface
-    /// (`pi --mode rpc`).
+    /// `json` (JSONL event stream) apply to --print. `rpc` is an alias
+    /// for `--rpc`.
     #[arg(long, default_value = "text", value_parser = ["text", "json", "rpc"])]
     pub mode: String,
 
@@ -137,12 +134,12 @@ pub struct Args {
     #[arg(long)]
     pub diagnostics: bool,
 
-    /// Suppress all auto-download/network operations (mirror of pi-mono
-    /// `--offline`). When set, the binary fetcher (fd/rg auto-install),
-    /// version-check probes, and any other outbound network paths return
-    /// `Ok(None)` instead of reaching out. Equivalent to setting
-    /// `HAND_OFFLINE=1`. Useful in air-gapped CI or when a build needs to
-    /// pin to whatever's already on disk.
+    /// Suppress all auto-download/network operations. When set, the
+    /// binary fetcher (fd/rg auto-install), version-check probes, and
+    /// any other outbound network paths return `Ok(None)` instead of
+    /// reaching out. Equivalent to setting `HAND_OFFLINE=1`. Useful in
+    /// air-gapped CI or when a build needs to pin to whatever's already
+    /// on disk.
     #[arg(long)]
     pub offline: bool,
 }

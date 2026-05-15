@@ -4,17 +4,15 @@
 //! rendering callers feed in whatever the user pasted (JPEG, WebP, GIF, ...)
 //! and need a normalised PNG payload back.
 //!
-//! Behaviour parity with `pi-mono/.../image-convert.ts`:
+//! Behaviour:
 //! - PNG input is short-circuited (no decode/re-encode).
 //! - Decode failures, encode failures, or unsupported MIME types yield
-//!   `Ok(None)` rather than an error — matches the TS `try { ... } catch {
-//!   return null }` pattern. The caller decides how to react (typically:
-//!   render the original bytes verbatim).
+//!   `Ok(None)` rather than an error. The caller decides how to react
+//!   (typically: render the original bytes verbatim).
 //! - EXIF orientation is applied during conversion so the rendered PNG is
 //!   already upright.
 //!
-//! Replaces the photon-WASM round-trip the TypeScript original uses with
-//! native decoding via the `image` crate.
+//! Uses native decoding via the `image` crate.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;

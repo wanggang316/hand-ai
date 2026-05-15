@@ -1,8 +1,5 @@
 //! `Theme` type and its serializable schema.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/theme/theme.ts`.
-//!
 //! The `Theme` struct holds pre-rendered ANSI escape sequences for every
 //! semantic colour slot, so render-hot paths only do a `HashMap` lookup +
 //! string concat. Helpers for bold / italic / etc. emit standard SGR
@@ -248,7 +245,7 @@ impl Theme {
     }
 
     /// Construct a theme and remember the source path it loaded from
-    /// (used by the watcher and diagnostics in pi-mono).
+    /// (used by the file watcher and diagnostics).
     pub fn from_json_with_path(
         json: &ThemeJson,
         mode: Option<ColorMode>,

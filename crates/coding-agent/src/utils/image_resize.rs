@@ -5,18 +5,17 @@
 //! ready to ship: base64-encoded, EXIF-corrected, and always under
 //! `max_bytes` when a fit exists.
 //!
-//! Behaviour parity with `pi-mono/.../image-resize.ts`:
+//! Algorithm:
 //! - First pass: scale to fit `max_width` x `max_height`.
 //! - Try PNG and JPEG (with a quality ladder), pick the first encoding that
 //!   lands under `max_bytes`.
 //! - If still too large, scale dimensions down by 25% and retry until 1x1.
 //! - If the input already fits both the dimension and byte budgets, return
 //!   it verbatim with `was_resized = false`.
-//! - Decode/encode failures yield `None` rather than an error — same
-//!   fall-through the TS version uses.
+//! - Decode/encode failures yield `None` rather than an error so callers
+//!   can fall through to the original bytes.
 //!
-//! Uses the `image` crate's Lanczos3 filter; the TS version used Photon's
-//! identically-named filter so visual output is comparable.
+//! Uses the `image` crate's Lanczos3 filter.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;

@@ -1,22 +1,14 @@
 //! Theme loader: file IO + custom-theme directory discovery.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/theme/theme.ts`
-//! (`getAvailableThemes`, `getAvailableThemesWithPaths`, `loadThemeFromPath`,
-//! `loadTheme`, `getThemeByName`).
+//! Custom themes live in `~/.hand/themes/`.
 //!
-//! Differences from pi-mono:
-//!
-//! - Custom themes live in `~/.hand/themes/` (matching the rest of the
-//!   `hand` workspace), not `~/.config/pi/themes/`.
-//! - There's no in-memory `registeredThemes` registry yet — pi-mono uses it
-//!   for plugin-injected themes; we'll add it back when an extension API
-//!   needs it.
-//! - File watching (`startThemeWatcher`) is intentionally *not* ported;
-//!   that's a follow-up unit once a consumer needs hot-reload.
+//! Not yet implemented:
+//! - In-memory registry for plugin-injected themes — to add when an
+//!   extension API needs it.
+//! - File watching for hot-reload — follow-up once a consumer needs it.
 //
-// TODO(parity): port theme registry (`setRegisteredThemes`).
-// TODO(parity): port hot-reload watcher (`startThemeWatcher`).
+// TODO: theme registry (for plugin-injected themes).
+// TODO: hot-reload watcher.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -227,7 +219,7 @@ mod tests {
     fn available_themes_with_paths_dedupes_builtin() {
         let dir = TempDir::new().unwrap();
         // Even if a user shadows "dark", built-in entry remains and the
-        // custom path is *not* added (matches pi-mono).
+        // custom path is *not* added.
         write_theme(dir.path(), "dark", &minimal_theme_json("dark"));
         let infos = available_themes_with_paths(dir.path());
         let dark_entries: Vec<_> = infos.iter().filter(|t| t.name == "dark").collect();

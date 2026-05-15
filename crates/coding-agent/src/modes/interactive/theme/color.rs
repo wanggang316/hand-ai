@@ -1,8 +1,6 @@
 //! Color utilities for the interactive theme system.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/theme/theme.ts`
-//! (the color-utility section). Handles:
+//! Handles:
 //!
 //! - Detection of the terminal's color capability (`truecolor` vs `256color`).
 //! - Hex string parsing and 256-color quantisation for limited terminals.
@@ -59,7 +57,7 @@ pub enum ColorError {
 
 /// Detect the terminal's colour capability from environment variables.
 ///
-/// Mirrors the heuristics in pi-mono/theme.ts:
+/// Heuristics:
 /// - `COLORTERM=truecolor` / `24bit` -> truecolor
 /// - Windows Terminal (`WT_SESSION`) -> truecolor
 /// - `TERM` empty / `dumb` / `linux` -> 256
@@ -177,7 +175,7 @@ fn closest_gray_index(gray: u32) -> usize {
     min_idx
 }
 
-/// Weighted Euclidean distance favouring green (matches pi-mono).
+/// Weighted Euclidean distance favouring green.
 fn color_distance(r1: u32, g1: u32, b1: u32, r2: u32, g2: u32, b2: u32) -> f64 {
     let dr = r1 as f64 - r2 as f64;
     let dg = g1 as f64 - g2 as f64;

@@ -1695,9 +1695,9 @@ mod tests {
 
         let frames = drain_frames(out_rx).await;
         // Three frames: set_session_name response, the
-        // SessionInfoChanged event (pi-mono #3686 parity), then the
-        // get_state response. Order between the event and the second
-        // response can race, so we identify by type instead of index.
+        // SessionInfoChanged event, then the get_state response. Order
+        // between the event and the second response can race, so we
+        // identify by type instead of index.
         assert_eq!(frames.len(), 3, "frames: {frames:#?}");
         let response_frames: Vec<_> = frames
             .iter()

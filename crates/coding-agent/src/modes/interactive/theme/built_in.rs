@@ -1,11 +1,7 @@
 //! Built-in themes (`dark`, `light`).
 //!
-//! The JSON payloads ship with the binary via `include_str!`. Mirrors the
-//! TS `getBuiltinThemes()` lookup, but loaded eagerly because the data is
-//! tiny.
-//!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/theme/`.
+//! The JSON payloads ship with the binary via `include_str!`. Loaded
+//! eagerly because the data is tiny.
 
 use std::sync::OnceLock;
 

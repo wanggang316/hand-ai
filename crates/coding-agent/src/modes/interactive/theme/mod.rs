@@ -1,8 +1,5 @@
 //! Interactive-mode theme system.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/theme/`.
-//!
 //! Phase-4 surface: a fully-resolved [`Theme`] with semantic colour slots
 //! ([`ThemeColor`] / [`ThemeBg`]), JSON loader (built-in `dark` / `light`
 //! plus `<name>.json` files in `~/.hand/themes/`), and colour-mode

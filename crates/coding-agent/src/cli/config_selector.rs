@@ -1,6 +1,5 @@
-//! One-shot TUI configuration picker, used by `pi config` style invocations.
-//!
-//! Ported from `pi-mono/packages/coding-agent/src/cli/config-selector.ts`.
+//! One-shot TUI configuration picker, used by `config` subcommand
+//! invocations.
 //!
 //! Constructs a self-contained [`Tui`], mounts a
 //! [`ConfigSelectorComponent`] as a centred overlay over an empty root,

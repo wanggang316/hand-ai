@@ -1,16 +1,16 @@
 //! Read images from the system clipboard.
 //!
-//! Mirrors `pi-coding-agent`'s `clipboard-image.ts`. The TS reference walks
-//! a tower of platform-specific tools (`wl-paste`, `xclip`, `powershell.exe`
-//! on WSL, `@mariozechner/clipboard` native addon, BMP→PNG via Photon).
 //! [`arboard`] handles macOS, Windows, X11, and Wayland uniformly through
-//! one API and returns RGBA pixel data. We re-encode to PNG so callers can
-//! treat the bytes as a normal image file.
+//! one API and returns RGBA pixel data — replacing the tower of
+//! platform-specific tools (`wl-paste`, `xclip`, PowerShell on WSL, a
+//! native clipboard addon, BMP→PNG via Photon) that a JS implementation
+//! would need. We re-encode to PNG so callers can treat the bytes as a
+//! normal image file.
 //!
-//! Supported MIME types match the TS reference: PNG, JPEG, WebP, GIF. We
-//! only ever produce PNG (arboard hands us raw RGBA — there's no original
-//! file format to preserve), but the type is exposed in
-//! [`ClipboardImage::mime_type`] so call sites can branch in the future.
+//! Supported MIME types: PNG, JPEG, WebP, GIF. We only ever produce PNG
+//! (arboard hands us raw RGBA — there's no original file format to
+//! preserve), but the type is exposed in [`ClipboardImage::mime_type`] so
+//! call sites can branch in the future.
 
 use std::io::Cursor;
 

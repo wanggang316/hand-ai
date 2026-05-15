@@ -1,18 +1,15 @@
 //! Cross-platform shell helpers.
 //!
-//! Mirrors `pi-coding-agent`'s `shell.ts`, minus the duplicated shell
-//! discovery — that already lives in [`crate::core::bash_executor::resolve_shell`].
-//! What's left is the platform-specific escape rules used to assemble safe
-//! command lines, plus a `which`-style executable lookup.
+//! Shell discovery lives in [`crate::core::bash_executor::resolve_shell`];
+//! this module covers the platform-specific escape rules used to assemble
+//! safe command lines, plus a `which`-style executable lookup.
 //!
 //! ## Escaping
 //!
 //! - On Unix the POSIX rule is: wrap the value in single quotes and replace
 //!   any embedded single quote with `'\''`.
-//! - On Windows we follow the convention used by `cmd.exe` parsing rules
-//!   (which is what pi-mono's `shouldUseWindowsShell` path eventually
-//!   shells out through): wrap in double quotes, escape internal `"` as
-//!   `\"`, and double any preceding backslashes per
+//! - On Windows we follow `cmd.exe` parsing rules: wrap in double quotes,
+//!   escape internal `"` as `\"`, and double any preceding backslashes per
 //!   `CommandLineToArgvW` semantics.
 //!
 //! Both `shell_escape_unix` and `shell_escape_windows` are pure functions

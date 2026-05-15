@@ -1,7 +1,5 @@
 //! One-shot TUI session picker, used by `--resume`.
 //!
-//! Ported from `pi-mono/packages/coding-agent/src/cli/session-picker.ts`.
-//!
 //! Constructs a self-contained [`Tui`], mounts a [`SessionSelectorComponent`]
 //! as a centred overlay on top of an empty root, waits for the user's
 //! choice on the component's events channel, then tears the loop down and

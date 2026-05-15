@@ -1,10 +1,8 @@
 //! Clipboard text helpers.
 //!
-//! Mirrors `pi-coding-agent`'s `clipboard.ts` + `clipboard-native.ts`. The
-//! TS split lived between the JS bridge (`@mariozechner/clipboard`) and a
-//! shell-out fallback. In Rust we let [`arboard`] handle the cross-platform
-//! native path and fall back to OSC 52 for SSH / mosh / Termux sessions
-//! where there is no usable display server.
+//! [`arboard`] handles the cross-platform native path; we fall back to
+//! OSC 52 for SSH / mosh / Termux sessions where there is no usable
+//! display server.
 //!
 //! ## Resolution order
 //!
