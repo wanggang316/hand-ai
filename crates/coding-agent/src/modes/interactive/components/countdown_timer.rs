@@ -1,23 +1,18 @@
 //! Reusable countdown state for dialog components.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/countdown-timer.ts`.
+//! Callers invoke [`CountdownTimer::tick`] from whatever cadence their
+//! driver provides (frame loop, tokio interval, manual test stepping).
+//! Keeping ownership of the cadence on the driver side avoids leaking
+//! a runtime dependency into a UI helper.
 //!
-//! pi-mono drives the timer with `setInterval(..., 1000)` and triggers a TUI
-//! re-render on each tick. The Rust port keeps the same observable behaviour
-//! but inverts ownership: the caller invokes [`CountdownTimer::tick`] from
-//! whatever cadence its driver provides (frame loop, tokio interval, manual
-//! test stepping). This avoids leaking a runtime dependency into a UI helper
-//! and stays compatible with any future driver the interactive mode adopts.
-//!
-//! Callers receive expiry/tick notifications via two callbacks. Both are
-//! `Box<dyn FnMut>` so callers may capture mutable state. Following pi-mono,
-//! the initial remaining-seconds count is reported synchronously from
+//! Callers receive expiry/tick notifications via two callbacks. The
+//! tick callback is `FnMut` so callers may capture mutable state. The
+//! initial remaining-seconds count is reported synchronously from
 //! [`CountdownTimer::new`] before the first tick fires.
 
 use std::time::Duration;
 
-/// Default tick cadence — one second, mirroring pi-mono's `setInterval(_, 1000)`.
+/// Default tick cadence — one second.
 pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Callback fired with the remaining whole seconds (after each tick *and*
@@ -40,8 +35,9 @@ pub struct CountdownTimer {
 }
 
 impl CountdownTimer {
-    /// Construct a timer counting down from `timeout`. The remaining-seconds
-    /// count is computed as `ceil(timeout_ms / 1000)` to match pi-mono.
+    /// Construct a timer counting down from `timeout`. The remaining
+    /// whole-seconds count is computed as `ceil(timeout_ms / 1000)`
+    /// so the first tick reports the user-visible upper bound.
     /// `on_tick` is invoked immediately with that initial count.
     pub fn new(
         timeout: Duration,
@@ -50,7 +46,8 @@ impl CountdownTimer {
     ) -> Self {
         let mut on_tick: TickCallback = Box::new(on_tick);
         let total_ms = timeout.as_millis();
-        // Ceil division to match the TS `Math.ceil(timeoutMs / 1000)` form.
+        // Ceil division so the first tick reports the user-visible
+        // upper bound (a 1.5 s timeout shows "2" on screen first).
         let remaining = total_ms.div_ceil(1000) as i64;
 
         on_tick(remaining);
@@ -84,8 +81,8 @@ impl CountdownTimer {
         }
     }
 
-    /// Stop the timer without firing `on_expire`. Equivalent to pi-mono's
-    /// `dispose()` while the timer is still running.
+    /// Stop the timer without firing `on_expire`. Used when the host
+    /// dialog disposes the timer before its natural expiry.
     pub fn dispose(&mut self) {
         self.expired = true;
         self.on_tick = None;

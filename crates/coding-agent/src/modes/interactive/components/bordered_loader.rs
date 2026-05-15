@@ -1,29 +1,25 @@
 //! Bordered loader component.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/bordered-loader.ts`.
-//!
 //! Wraps a [`hand_tui::CancellableLoaderComponent`] (or a plain
 //! [`hand_tui::LoaderComponent`] when cancellable is off) between two
-//! horizontal border lines, emitting the same visual frame the pi-mono
-//! extensions display while waiting on long-running operations.
+//! horizontal border lines, providing a uniform visual frame for
+//! long-running operations.
 //!
-//! pi-mono's TS source pulls helpers from two sibling components
-//! (`DynamicBorder`, `keybinding-hints`) that are queued for later batches.
-//! To avoid introducing new public surface that the eventual port would
-//! collide with, this file inlines minimal private equivalents:
+//! The component inlines minimal private equivalents of two sibling
+//! helpers so it can ship before they land:
 //!
 //! * [`border_line`] mirrors `DynamicBorder::render`.
-//! * [`format_cancel_hint`] mirrors `keyHint`'s default formatting.
+//! * [`format_cancel_hint`] mirrors the default keybinding-hint
+//!   formatting.
 //!
-//! Theming caveat: the TS component reads `border`, `accent`, `muted`, `dim`
-//! slots from the coding-agent theme. Until the theme port lands, the
-//! defaults below are hardcoded (bright black for borders, cyan for accent,
+//! Theming caveat: the component expects `border`, `accent`, `muted`,
+//! `dim` slots. Until the theme system surfaces them the defaults
+//! below are hardcoded (bright black for borders, cyan for accent,
 //! bright black for muted).
 
 use hand_tui::{CancellableLoaderComponent, Component, LoaderComponent};
 
-/// ANSI prefix for the border line — bright-black, matching pi-mono's
+/// ANSI prefix for the border line — bright-black, matching the
 /// default `border` slot.
 const BORDER_FG: &str = "\x1b[90m";
 /// Reset escape.
@@ -49,9 +45,9 @@ impl BorderedLoaderComponent {
     pub fn new_cancellable(message: impl Into<String>) -> Self {
         let message = message.into();
         let mut loader = CancellableLoaderComponent::new(message);
-        // pi-mono's CancellableLoader doesn't render its own cancel hint —
-        // BorderedLoader supplies it as a separate line. Suppress the inner
-        // hint so we don't double up.
+        // The bordered loader supplies the cancel hint as a separate
+        // line, so suppress the inner CancellableLoader's hint to
+        // avoid doubling up.
         loader.set_cancel_hint("");
         Self {
             inner: Inner::Cancellable(loader),

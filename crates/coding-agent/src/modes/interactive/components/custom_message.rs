@@ -1,39 +1,37 @@
 //! Custom (extension-injected) message renderer.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/custom-message.ts`.
-//!
-//! pi-mono extensions inject "custom" messages with a `customType` tag and a
-//! string-or-block content payload. The TS component supports two paths:
+//! Extensions inject "custom" messages with a `custom_type` tag and a
+//! string-or-block content payload. The full surface supports two
+//! paths:
 //!
 //! 1. A caller-provided custom renderer (returns a fully-styled component).
-//! 2. A default rendering that puts a `[customType]` label above the
+//! 2. A default rendering that puts a `[custom_type]` label above the
 //!    markdown body inside a tinted box.
 //!
-//! This Rust port covers path #2 — the default rendering — which is what
-//! every extension in `pi-mono/extensions/` falls back to. Custom-renderer
-//! injection lives with the extension runtime port (queued).
+//! This module ships path #2 — the default rendering — which is what
+//! every extension falls back to. Custom-renderer injection lands with
+//! the extension runtime port.
 //!
-//! The full `CustomMessage` Rust type belongs with the message-store port
-//! (also queued); the local [`CustomMessageData`] mirrors only the fields
-//! this renderer actually consumes.
+//! The full `CustomMessage` type belongs with the message-store port;
+//! the local [`CustomMessageData`] carries only the fields this
+//! renderer actually consumes.
 //!
-//! Theming caveat: same as other phase-1 components — slot lookups
-//! (`customMessageBg`, `customMessageLabel`, `customMessageText`) are
-//! hardcoded to dark-theme defaults pending the theme port.
+//! Theming caveat: slot lookups (`custom_message_bg`,
+//! `custom_message_label`, `custom_message_text`) are hardcoded to
+//! dark-theme defaults until the theme system surfaces them.
 
 use hand_tui::components::markdown::DefaultTextStyle;
 use hand_tui::{BoxComponent, Color, Component, MarkdownComponent, NamedColor, TextComponent};
 
-/// Default background ANSI for a custom message — a muted purple matching
-/// pi-mono's `customMessageBg` dark slot.
+/// Default background ANSI for a custom message — a muted purple
+/// matching the `custom_message_bg` dark slot.
 const DEFAULT_BG_ANSI: &str = "\x1b[48;5;53m";
 
 /// Local view-model carrying just the fields the renderer needs.
 ///
-/// The full pi-mono `CustomMessage<T>` type also tracks `display`,
-/// `details`, and a timestamp, none of which influence rendering. They will
-/// land with the message-store port.
+/// The full `CustomMessage<T>` type also tracks `display`, `details`,
+/// and a timestamp, none of which influence rendering. They will land
+/// with the message-store port.
 #[derive(Debug, Clone)]
 pub struct CustomMessageData {
     /// Tag shown in the `[bracketed]` label.

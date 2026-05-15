@@ -1,23 +1,17 @@
 //! Search-query parser and session matcher used by the session-selector UI.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/session-selector-search.ts`.
+//! A pure-logic module with no UI dependencies. The interactive
+//! `SessionSelectorComponent` that consumes it is still in flight.
 //!
-//! This is a pure-logic module with no UI dependencies. The TS version is
-//! consumed by the (much larger) interactive `SessionSelectorComponent`,
-//! which is queued for a later batch — see `docs/exec-plans/parity-completion.md`
-//! §A1.
+//! Implementation notes:
 //!
-//! Differences from pi-mono:
-//!
-//! - `fuzzyMatch` in pi-tui returns `{matches, score}` where *lower* is
-//!   better; `hand_tui::fuzzy_match` returns `Option<FuzzyMatch>` where
-//!   *higher* is better. We invert (`-score`) when feeding scores into the
-//!   relevance sort so the composite ordering still picks the best matches
-//!   first.
-//! - `RegExp` becomes `regex_lite::Regex` (case-insensitive).
+//! - [`hand_tui::fuzzy::fuzzy_match`] returns `Option<FuzzyMatch>`
+//!   where *higher* is better. The relevance sort feeds `-score` into
+//!   the comparator so the composite ordering still picks the best
+//!   matches first.
+//! - Date/scope filters use case-insensitive `regex_lite::Regex`.
 //
-// TODO(parity): port the full SessionSelectorComponent interactive UI
+// TODO: port the full SessionSelectorComponent interactive UI
 // alongside the user-message-selector and the main interactive driver.
 
 use hand_tui::fuzzy::fuzzy_match;
@@ -140,12 +134,12 @@ fn normalize_whitespace_lower(text: &str) -> String {
 
 /// Parse a raw query string into a [`ParsedSearchQuery`].
 ///
-/// Mirrors pi-mono's `parseSearchQuery`:
-/// - empty / whitespace-only -> empty token list.
-/// - `re:<pattern>` -> regex mode (case-insensitive).
-/// - otherwise quoted runs become phrase tokens, unquoted whitespace-
-///   separated runs become fuzzy tokens.
-/// - if quotes are unbalanced, fall back to plain whitespace tokenisation.
+/// - empty / whitespace-only → empty token list.
+/// - `re:<pattern>` → regex mode (case-insensitive).
+/// - otherwise quoted runs become phrase tokens, unquoted
+///   whitespace-separated runs become fuzzy tokens.
+/// - if quotes are unbalanced, fall back to plain whitespace
+///   tokenisation.
 pub fn parse_search_query(query: &str) -> ParsedSearchQuery {
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -211,8 +205,8 @@ pub fn parse_search_query(query: &str) -> ParsedSearchQuery {
     }
 
     if had_unclosed_quote {
-        // Fall back to plain whitespace tokenisation; quotes are treated
-        // literally as part of fuzzy tokens (matches pi-mono semantics).
+        // Fall back to plain whitespace tokenisation; quotes are
+        // treated literally as part of fuzzy tokens.
         let tokens = trimmed
             .split_whitespace()
             .map(|t| SearchToken {
@@ -268,9 +262,10 @@ pub fn match_session(session: &SessionInfo, parsed: &ParsedSearchQuery) -> Match
                     }
                     TokenKind::Fuzzy => match fuzzy_match(&token.value, &text) {
                         None => return MatchResult::no_match(),
-                        // pi-tui scores higher = better; pi-mono scores
-                        // lower = better. Invert so smaller composite
-                        // scores still mean better matches.
+                        // The fuzzy matcher returns higher = better.
+                        // Invert so the composite sort can rank by
+                        // ascending score and still pick the best
+                        // matches first.
                         Some(m) => total_score += -(m.score as f64),
                     },
                 }
@@ -283,9 +278,8 @@ pub fn match_session(session: &SessionInfo, parsed: &ParsedSearchQuery) -> Match
     }
 }
 
-/// Combine name-filter + query parsing + sort policy, mirroring pi-mono's
-/// `filterAndSortSessions`. Returns sessions that match in the requested
-/// order.
+/// Combine name-filter + query parsing + sort policy. Returns the
+/// sessions that match, in the order the sort policy requests.
 pub fn filter_and_sort_sessions(
     sessions: &[SessionInfo],
     query: &str,
