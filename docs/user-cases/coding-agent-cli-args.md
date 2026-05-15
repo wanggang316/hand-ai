@@ -91,13 +91,13 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-032 | ✅ pass | same |
 | UC-args-033 | ✅ pass | `parses_skill_single_and_repeated` |
 | UC-args-034 | ✅ pass | same (covers repeated) |
-| UC-args-035 | ❌ fail | hand has no `--prompt-template` flag |
-| UC-args-036 | ❌ fail | same — repeated |
-| UC-args-037 | ❌ fail | hand has no `--theme` flag |
-| UC-args-038 | ❌ fail | same — repeated |
+| UC-args-035 | 🚫 N/A | hand has no prompt-template subsystem |
+| UC-args-036 | 🚫 N/A | same — no subsystem |
+| UC-args-037 | 🚫 N/A | hand has no theme subsystem |
+| UC-args-038 | 🚫 N/A | same — no subsystem |
 | UC-args-039 | ✅ pass | `parses_no_skills_flag` |
-| UC-args-040 | ❌ fail | hand has no `--no-prompt-templates` |
-| UC-args-041 | ❌ fail | hand has no `--no-themes` |
+| UC-args-040 | 🚫 N/A | no prompt-template subsystem to disable |
+| UC-args-041 | 🚫 N/A | no theme subsystem to disable |
 | UC-args-042 | ✅ pass | `parses_no_context_files_flag` |
 | UC-args-043 | ✅ pass | `nc_short_alias_rewrites_to_no_context_files` |
 | UC-args-044 | ⚠️ pending | hand has `verbose` field; verify parse equivalence |

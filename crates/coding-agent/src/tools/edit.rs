@@ -79,7 +79,25 @@ async fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
 fn run_edit(path: &Path, old_string: &str, new_string: &str, replace_all: bool) -> ToolResult {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
+        Err(e) => {
+            // Surface the io::ErrorKind as a named POSIX-style code so
+            // error messages match pi's
+            //   "Could not edit file: <path>. Error code: ENOENT."
+            // shape. Falls back to the raw display when the kind is
+            // not one of the conventional POSIX-mapped variants.
+            let code = match e.kind() {
+                std::io::ErrorKind::NotFound => "ENOENT".to_string(),
+                std::io::ErrorKind::PermissionDenied => "EACCES".to_string(),
+                std::io::ErrorKind::AlreadyExists => "EEXIST".to_string(),
+                std::io::ErrorKind::InvalidInput => "EINVAL".to_string(),
+                _ => format!("{:?}", e.kind()),
+            };
+            return ToolResult::error(format!(
+                "Could not edit file: {}. Error code: {}.",
+                path.display(),
+                code
+            ));
+        }
     };
 
     // Tolerate LF-vs-CRLF mismatches between the model-supplied
@@ -257,6 +275,65 @@ mod tests {
         .await;
         let text = get_text(&result);
         assert!(text.contains("not found"));
+    }
+
+    /// Editing a path that doesn't exist surfaces the pi-aligned
+    /// error wording: `Could not edit file: <path>. Error code: ENOENT.`
+    /// — code is the POSIX-style name, not the raw Display impl.
+    #[tokio::test]
+    async fn test_edit_missing_file_surfaces_enoent_code() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.txt");
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": missing.to_str().unwrap(),
+                "old_string": "x",
+                "new_string": "y"
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("Error code: ENOENT"),
+            "expected ENOENT code, got: {text}"
+        );
+        assert!(
+            text.contains("Could not edit file:"),
+            "expected pi-aligned prefix, got: {text}"
+        );
+    }
+
+    /// Editing a read-only file surfaces `Error code: EACCES.` so the
+    /// model can distinguish missing vs permission-denied paths.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_edit_readonly_file_surfaces_eacces_code() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("readonly.txt");
+        std::fs::write(&file, "hello").unwrap();
+        // Mode 0o000 — neither read nor write — so the read() call
+        // inside run_edit triggers EACCES rather than EPERM.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "hello",
+                "new_string": "world"
+            }),
+        )
+        .await;
+        // Restore perms so TempDir can clean up.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let text = get_text(&result);
+        assert!(
+            text.contains("Error code: EACCES")
+                || text.contains("Error code: PermissionDenied"),
+            "expected EACCES (or platform-named permission code), got: {text}"
+        );
+        assert!(text.contains("Could not edit file:"));
     }
 
     #[tokio::test]

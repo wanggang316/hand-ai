@@ -27,7 +27,7 @@ change agents would need to re-learn.
 |----|---------|-------------|
 | UC-edit-001 | replace text in file | ✅ `test_edit_simple_replace` |
 | UC-edit-002 | fail if text not found | ✅ `test_edit_not_found` |
-| UC-edit-003 | include ENOENT when target missing | ⚠️ wording differs; hand returns "Failed to read file" |
+| UC-edit-003 | include ENOENT when target missing | ✅ `test_edit_missing_file_surfaces_enoent_code` |
 | UC-edit-004 | fail if text appears multiple times | ✅ `test_edit_ambiguous` |
 | UC-edit-005 | replace multiple disjoint regions in one call | ❌ hand has no edits-array surface |
 | UC-edit-006 | collapse large unchanged gaps in multi-edit diff | ❌ blocked on UC-edit-005 |
@@ -35,7 +35,7 @@ change agents would need to re-learn.
 | UC-edit-008 | fail when `edits` is empty | ❌ no edits array → not applicable |
 | UC-edit-009 | fail when multi-edit regions overlap | ❌ blocked on UC-edit-005 |
 | UC-edit-010 | no partial application when one edit fails | ❌ blocked on UC-edit-005 |
-| UC-edit-011 | include EACCES for read-only files | ⚠️ wording differs |
+| UC-edit-011 | include EACCES for read-only files | ✅ `test_edit_readonly_file_surfaces_eacces_code` |
 | UC-edit-012 | include original error message for unknown access errors | ⚠️ pending |
 | UC-edit-013 | include ENOENT in diff preview for missing files | ❌ hand has no computeEditsDiff equivalent |
 | UC-edit-014 | include EACCES in diff preview for unreadable files | ❌ same |

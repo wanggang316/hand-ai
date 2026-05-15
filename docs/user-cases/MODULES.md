@@ -10,10 +10,10 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-find.md | pi-mono/packages/coding-agent/test/tools.test.ts (find describe) | coding-agent | 8 | 8 | 0 | 0 |
 | coding-agent-tools-read.md | pi-mono/packages/coding-agent/test/tools.test.ts (read describe) | coding-agent | 11 | 10 | 1 | 0 |
 | coding-agent-tools-grep.md | pi-mono/packages/coding-agent/test/tools.test.ts (grep describe) | coding-agent | 6 | 6 | 0 | 0 |
-| coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 10 | 11 | 10 |
+| coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 12 | 9 | 10 |
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-tools-ls.md | pi-mono/packages/coding-agent/test/tools.test.ts (ls describe) | coding-agent | 5 | 5 | 0 | 0 |
-| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 41 | 11 | 8 |
+| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 41 | 5 | 14 |
 | coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (API-key + caching subset) | coding-agent | 16 | 16 | 0 | 0 |
 | coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 14 | 0 | 17 |
 | coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 9 | 1 | 1 |
@@ -31,9 +31,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 253
-- **Fail:** 31
+- **Pass:** 256
+- **Fail:** 22
 - **Pending:** 54
+- **N/A (architectural divergence):** 6
 
 ### Known failures (drive remediation)
 
@@ -96,9 +97,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
   `--no-extensions`, `--skill` flags added. Collect into Vec<String>;
   repeatable; `--no-extensions` keeps the explicit list for
   diagnostics but the runtime skips registration when set.
-- **UC-args-035..038** — `--prompt-template`, `--theme` flags
-  pending (hand has no theme/template subsystems yet — these will
-  surface as 🚫 N/A or feature requests).
+- UC-args-035..038/040/041 🚫 N/A — hand has no prompt-template /
+  theme subsystems. Adding the flags without backing subsystems
+  would be misleading. Closing the gap = a separate feature
+  initiative, not a parity fix.
 - **UC-args-040/041** — `--no-prompt-templates` / `--no-themes` missing.
 - **UC-args-043** — `-nc` shorthand missing.
 - **UC-args-047** — `-nt` shorthand missing.
