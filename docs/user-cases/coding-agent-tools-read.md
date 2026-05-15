@@ -12,14 +12,15 @@ how the model thinks about file contents.
 Remaining upstream divergences (after the 2026-05-16 footer-alignment
 fix):
 
-- **Line-number prefix:** hand prepends each line with `{N>6}→` (e.g.
-  `     1→`); pi returns raw content. Visible delta in every read.
-  Tracked under UC-read-001.
-- **Image-magic detection:** hand has no PNG/JPEG/GIF magic check —
-  every read returns a text block regardless of file bytes. UC-read-010.
-- **Result `details` metadata:** hand returns only text; pi populates a
-  structured `result.details.truncation` object the host can render.
-  UC-read-009.
+All previously-tracked divergences are now closed:
+
+- **Line-number prefix:** removed from the tool output. The read tool
+  returns raw content; line numbering is a TUI render-time concern.
+  UC-read-001 ✅.
+- **Image-magic detection:** PNG/JPEG/GIF/WebP magic sniff at offset 0.
+  UC-read-010 ✅.
+- **Result `details` metadata:** structured `details.truncation`
+  emitted whenever truncation fires. UC-read-009 ✅.
 
 Truncation footer wording (UC-read-003/004/006) is now aligned with
 pi.
@@ -28,7 +29,7 @@ pi.
 
 | ID | Status | Verified-by |
 |----|--------|-------------|
-| UC-read-001 | ❌ fail | hand prefixes each line with `{N>6}→`; pi returns raw content |
+| UC-read-001 | ✅ pass | `test_read_small_file_returns_raw_content_no_prefix` — tool now returns raw content; line numbering is a TUI render-time concern |
 | UC-read-002 | ✅ pass | `test_read_missing_file` (error returned as success-shaped ToolResult — observable behaviour equivalent for the model) |
 | UC-read-003 | ✅ pass | `test_read_default_line_cap_footer_matches_pi_wording` |
 | UC-read-004 | ✅ pass | `test_read_byte_cap_footer_matches_pi_wording` |

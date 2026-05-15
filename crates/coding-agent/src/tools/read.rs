@@ -1,4 +1,4 @@
-//! Read tool — read file contents with line numbers.
+//! Read tool — return raw file content.
 
 use crate::tools::path_utils::resolve_read_path;
 use base64::Engine;
@@ -52,7 +52,7 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
 pub fn create_read_tool(cwd: PathBuf) -> AgentTool {
     AgentTool::simple(
         "read",
-        "Read the contents of a file. Returns lines with line numbers. \
+        "Read the contents of a file. Returns the raw file content. \
          Supports offset and limit parameters for reading portions of large files.",
         json!({
             "type": "object",
@@ -170,15 +170,12 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
         }
     }
 
-    for (i, line) in lines[start..end].iter().enumerate() {
-        let line_num = start + i + 1;
-        let prefix = format!("{:>6}→", line_num);
-        let line_bytes = prefix.len() + line.len() + 1; // +1 for trailing \n
+    for line in lines[start..end].iter() {
+        let line_bytes = line.len() + 1; // +1 for trailing \n
         if byte_budget_active && total_bytes + line_bytes > DEFAULT_MAX_BYTES && included > 0 {
             byte_truncated = true;
             break;
         }
-        output.push_str(&prefix);
         output.push_str(line);
         output.push('\n');
         total_bytes += line_bytes;
@@ -272,6 +269,39 @@ mod tests {
         assert!(text.contains("line3"));
     }
 
+    /// UC-read-001 — a small file is returned as raw content, byte for
+    /// byte. No line-number prefix, no truncation banner, no extra
+    /// `details` metadata.
+    #[test]
+    fn test_read_small_file_returns_raw_content_no_prefix() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("hello.txt");
+        let body = "Hello, world!\nLine 2\nLine 3\n";
+        std::fs::write(&file, body).unwrap();
+
+        let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
+        let text = get_text(&result);
+        assert_eq!(
+            text, body,
+            "small file must return its raw bytes verbatim, got: {text:?}"
+        );
+        // No line-number prefix anywhere.
+        assert!(
+            !text.contains('\u{2192}'),
+            "no `→` line-prefix arrow expected, got: {text:?}"
+        );
+        // No truncation footer for a small file.
+        assert!(
+            !text.contains("Use offset="),
+            "small file should not carry a banner, got: {text:?}"
+        );
+        // No details payload.
+        assert!(
+            result.details.is_none(),
+            "small file should not carry details metadata"
+        );
+    }
+
     #[test]
     fn test_read_with_offset_and_limit() {
         let dir = TempDir::new().unwrap();
@@ -285,7 +315,11 @@ mod tests {
         let text = get_text(&result);
         assert!(text.contains("b"));
         assert!(text.contains("c"));
-        assert!(!text.contains("     1→a"));
+        // Line 1 ("a") is below the offset and must not appear at all.
+        assert!(
+            !text.starts_with("a"),
+            "line 1 should be skipped by offset=2, got: {text:?}"
+        );
     }
 
     #[test]
@@ -397,11 +431,11 @@ mod tests {
 
         let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
         let text = get_text(&result);
-        // Output must fit in roughly the byte budget plus banners — ~50KB
-        // payload + a few hundred bytes of line-number prefixes per line.
-        // We assert a generous 80KB upper bound and a truncation notice.
+        // Output must fit in roughly the byte budget plus the footer
+        // banner. We assert a generous 60KB upper bound and a truncation
+        // notice.
         assert!(
-            text.len() < 80 * 1024,
+            text.len() < 60 * 1024,
             "expected byte-budgeted truncation, got {} bytes",
             text.len()
         );
