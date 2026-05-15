@@ -195,6 +195,21 @@ mod tests {
         assert!(text.contains("Missing required parameter"));
     }
 
+    /// An unbalanced glob (e.g. `[`) must surface a clean error rather
+    /// than panic or hang. The model should see an actionable message
+    /// so it can correct its pattern on the next turn.
+    #[test]
+    fn test_find_invalid_glob_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let result = execute_find(dir.path(), json!({"pattern": "["}));
+        let text = get_text(&result);
+        let lower = text.to_lowercase();
+        assert!(
+            lower.contains("invalid glob") || lower.contains("glob pattern"),
+            "expected glob-parse-error text, got: {text}"
+        );
+    }
+
     /// Build-output and VCS directories are auto-ignored.
     /// `**/node_modules/**` and `**/.git/**` are skipped by default,
     /// and we extend with target/dist/build/.next/.cache. The model
