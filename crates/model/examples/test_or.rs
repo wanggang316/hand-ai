@@ -4,7 +4,6 @@
 //! prints the first event (or a timeout) so we can pinpoint where in the
 //! stack the request stalls.
 
-use futures::StreamExt;
 use model::types::{Api, AssistantMessageEvent, Cost, InputType, Message, Provider, UserMessage};
 use model::{ApiProviderRegistry, Context, Model, stream_simple};
 use std::time::{Duration, Instant};
