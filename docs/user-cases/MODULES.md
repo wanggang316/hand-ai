@@ -9,7 +9,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-file-mutation-queue.md | pi-mono/packages/coding-agent/test/file-mutation-queue.test.ts | coding-agent | 7 | 7 | 0 | 0 |
 | coding-agent-tools-find.md | pi-mono/packages/coding-agent/test/tools.test.ts (find describe) | coding-agent | 8 | 7 | 1 | 0 |
 | coding-agent-tools-read.md | pi-mono/packages/coding-agent/test/tools.test.ts (read describe) | coding-agent | 11 | 5 | 6 | 0 |
-| coding-agent-tools-grep.md | pi-mono/packages/coding-agent/test/tools.test.ts (grep describe) | coding-agent | 6 | 5 | 1 | 0 |
+| coding-agent-tools-grep.md | pi-mono/packages/coding-agent/test/tools.test.ts (grep describe) | coding-agent | 6 | 6 | 0 | 0 |
 | coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 10 | 11 | 10 |
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-tools-ls.md | pi-mono/packages/coding-agent/test/tools.test.ts (ls describe) | coding-agent | 5 | 5 | 0 | 0 |
@@ -31,17 +31,18 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 208
-- **Fail:** 75
+- **Pass:** 209
+- **Fail:** 74
 - **Pending:** 55
 
 ### Known failures (drive remediation)
 
 - **UC-find-002** — hand's find tool does not honour `.gitignore` (no fd
   backing). Resolution: pull in the `ignore` crate or shell out to `fd`.
-- **UC-grep-002** — hand exposes `max_matches` instead of `limit`; the
-  truncation footer wording differs from pi. Resolution: align schema
-  + footer text.
+- ~~UC-grep-002~~ ✅ FIXED — grep schema now accepts `limit` (canonical)
+  with `max_matches` as a deprecated alias; the truncation footer
+  emits the pi-aligned `[N matches limit reached. ...]` wording when
+  the per-file cap is hit.
 - **UC-read-001** — hand prepends every output line with `{N>6}→`;
   pi returns raw content. Resolution: drop the prefix at the tool
   surface (or make it opt-in), keep numbering in the TUI renderer.

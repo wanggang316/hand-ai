@@ -13,7 +13,7 @@ to prevent `--pre=…` preprocessor RCE.
 | ID | Status | Verified-by |
 |----|--------|-------------|
 | UC-grep-001 | ✅ pass | `test_grep_basic` |
-| UC-grep-002 | ❌ fail | hand uses `max_matches` not `limit`; truncation footer wording differs |
+| UC-grep-002 | ✅ pass | `test_grep_limit_param_emits_footer`, `test_grep_max_matches_alias_for_limit` |
 | UC-grep-003 | ✅ pass | `test_grep_flag_pattern_does_not_execute_preprocessor` |
 | UC-grep-004 | ✅ pass | `test_grep_clips_long_match_lines`, `test_truncate_long_lines_clips_long_line`, `test_truncate_long_lines_respects_utf8_boundary` |
 | UC-grep-005 | ✅ pass | `test_grep_no_matches` |
@@ -38,7 +38,7 @@ matched text.
 - Assertion: the output text contains `example.txt:2: match line`.
 - Probe: `cargo test -p hand-coding-agent test_grep_basic -- --exact`.
 
-### UC-grep-002 — global limit + context lines (FAILING under hand)
+### UC-grep-002 — global limit + context lines
 
 **Given** a file with two `match` lines and surrounding context:
 ```
@@ -60,17 +60,11 @@ And `match two` does NOT appear.
 
 - Assertion: the four lines above appear in the output.
 - Assertion: `match two` does NOT appear.
-- Probe (FAILS): hand's grep tool exposes `max_matches` (default 100),
-  not `limit`. A user passing `limit=1` against hand sees the parameter
-  silently ignored and gets all matches. The truncation footer text
-  also differs.
-- Gap: align hand's grep tool schema with pi — rename `max_matches` to
-  `limit` (with `max_matches` as a deprecated alias for one release),
-  and emit the `[N matches limit reached. Use limit=M for more, or
-  refine pattern]` footer when capped.
-- Resolution proposal: small schema rename + footer wording update in
-  `crates/coding-agent/src/tools/grep.rs`, plus a new unit test
-  reproducing the upstream scenario.
+- Probe: `cargo test -p hand-coding-agent test_grep_limit_param_emits_footer test_grep_max_matches_alias_for_limit -- --exact`.
+- Resolution: `tools/grep.rs` schema now accepts `limit` (canonical)
+  with `max_matches` as a deprecated alias. The truncation footer
+  emits `[N matches limit reached. Use limit=M for more, or refine
+  pattern]` when the match count reaches the cap.
 
 ### UC-grep-003 — flag-shaped patterns are treated as literal search text, not CLI flags
 

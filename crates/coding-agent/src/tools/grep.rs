@@ -71,9 +71,9 @@ pub fn create_grep_tool(cwd: PathBuf) -> AgentTool {
                     "type": "integer",
                     "description": "Number of context lines before and after each match"
                 },
-                "max_matches": {
+                "limit": {
                     "type": "integer",
-                    "description": "Maximum number of matches to return (default: 100)"
+                    "description": "Maximum number of matches to return per file (default: 100). `max_matches` is accepted as a deprecated alias for the same parameter."
                 },
                 "case_insensitive": {
                     "type": "boolean",
@@ -107,9 +107,15 @@ fn execute_grep(cwd: &Path, args: serde_json::Value) -> ToolResult {
         .get("context")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
-    let max_matches = args
-        .get("max_matches")
+    // Accept `limit` (canonical, matches upstream pi naming) and fall
+    // back to `max_matches` for backwards compatibility with scripts
+    // written against an earlier hand schema. The two name-collide on
+    // a single int so there's no ambiguity if both are supplied —
+    // `limit` wins.
+    let limit = args
+        .get("limit")
         .and_then(|v| v.as_u64())
+        .or_else(|| args.get("max_matches").and_then(|v| v.as_u64()))
         .unwrap_or(DEFAULT_MAX_MATCHES as u64) as usize;
     let case_insensitive = args
         .get("case_insensitive")
@@ -122,7 +128,7 @@ fn execute_grep(cwd: &Path, args: serde_json::Value) -> ToolResult {
         &search_path,
         include,
         context,
-        max_matches,
+        limit,
         case_insensitive,
     )
     .or_else(|| {
@@ -131,7 +137,7 @@ fn execute_grep(cwd: &Path, args: serde_json::Value) -> ToolResult {
             &search_path,
             include,
             context,
-            max_matches,
+            limit,
             case_insensitive,
         )
     });
@@ -142,6 +148,21 @@ fn execute_grep(cwd: &Path, args: serde_json::Value) -> ToolResult {
                 ToolResult::text("No matches found.")
             } else {
                 let (mut clipped, any_truncated) = truncate_long_lines(&output);
+                // Count match lines (not context lines). rg context lines
+                // contain `-LINENUM-` instead of `:LINENUM:` after the path,
+                // so a line containing `:NN:` after a non-empty path
+                // segment counts as a match.
+                let match_count = clipped
+                    .lines()
+                    .filter(|line| is_match_line(line))
+                    .count();
+                if match_count >= limit {
+                    clipped.push_str(&format!(
+                        "\n[{} matches limit reached. Use limit={} for more, or refine pattern]",
+                        match_count,
+                        limit * 2
+                    ));
+                }
                 if any_truncated {
                     clipped.push_str(&format!(
                         "\n[Some lines truncated to {} chars. Use read tool to see full lines.]",
@@ -155,19 +176,48 @@ fn execute_grep(cwd: &Path, args: serde_json::Value) -> ToolResult {
     }
 }
 
+/// A rg/grep output line is a "match line" (not a context line) iff,
+/// after stripping the leading path token (everything up to the first
+/// `:` or `-`), the next character is `:` followed by digits. rg uses
+/// `-NUM-` for context lines and `:NUM:` for matches; grep -C mirrors
+/// that convention. We count match lines to decide whether the result
+/// hit the user-supplied `limit`.
+fn is_match_line(line: &str) -> bool {
+    // Skip the leading path segment by finding the FIRST `:` or `-` from
+    // the right side of the first separator boundary. Simpler: find the
+    // first `:` and check that the char *immediately* after is a digit
+    // followed by `:` — that's the line-number-plus-separator pattern.
+    let bytes = line.as_bytes();
+    // Scan for `:DIGITS:` somewhere after byte 1.
+    let mut i = 1;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b':' && bytes[i + 1].is_ascii_digit() {
+            // Now consume digits.
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            // Expect a `:` immediately after the digit run.
+            return j < bytes.len() && bytes[j] == b':';
+        }
+        i += 1;
+    }
+    false
+}
+
 fn try_ripgrep(
     pattern: &str,
     search_path: &Path,
     include: Option<&str>,
     context: Option<usize>,
-    max_matches: usize,
+    limit: usize,
     case_insensitive: bool,
 ) -> Option<String> {
     let mut cmd = Command::new("rg");
     cmd.arg("--no-heading")
         .arg("--line-number")
         .arg("--max-count")
-        .arg(max_matches.to_string());
+        .arg(limit.to_string());
 
     if case_insensitive {
         cmd.arg("--ignore-case");
@@ -206,14 +256,14 @@ fn try_grep(
     search_path: &Path,
     include: Option<&str>,
     context: Option<usize>,
-    max_matches: usize,
+    limit: usize,
     case_insensitive: bool,
 ) -> Option<String> {
     let mut cmd = Command::new("grep");
     cmd.arg("-r")
         .arg("-n")
         .arg("--max-count")
-        .arg(max_matches.to_string());
+        .arg(limit.to_string());
 
     if case_insensitive {
         cmd.arg("-i");
@@ -407,6 +457,65 @@ mod tests {
             !marker.exists(),
             "RCE: payload executed and wrote {}",
             marker.display()
+        );
+    }
+
+    /// `limit` caps per-file matches and emits a footer pointing at how
+    /// the user can fetch more. The wording matches pi's
+    /// `[N matches limit reached. Use limit=M for more, or refine pattern]`
+    /// so scripts that parse the footer keep working.
+    #[test]
+    fn test_grep_limit_param_emits_footer() {
+        let dir = TempDir::new().unwrap();
+        let lines = (1..=5)
+            .map(|i| format!("match line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("limited.txt"), lines).unwrap();
+
+        let result = execute_grep(
+            dir.path(),
+            json!({"pattern": "match", "limit": 2}),
+        );
+        let text = get_text(&result);
+        assert!(
+            text.contains("matches limit reached"),
+            "expected limit footer, got: {text}"
+        );
+        assert!(
+            text.contains("Use limit="),
+            "footer should suggest a higher limit, got: {text}"
+        );
+        // Exactly the first two match lines should be present.
+        assert!(text.contains("match line 1"));
+        assert!(text.contains("match line 2"));
+        assert!(
+            !text.contains("match line 3"),
+            "third match should be cut by limit=2"
+        );
+    }
+
+    /// The deprecated `max_matches` parameter is still honoured as an
+    /// alias for `limit` so scripts written against an earlier hand
+    /// schema keep working. When both are supplied, `limit` wins.
+    #[test]
+    fn test_grep_max_matches_alias_for_limit() {
+        let dir = TempDir::new().unwrap();
+        let lines = (1..=5)
+            .map(|i| format!("match line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("aliased.txt"), lines).unwrap();
+
+        let result = execute_grep(
+            dir.path(),
+            json!({"pattern": "match", "max_matches": 1}),
+        );
+        let text = get_text(&result);
+        assert!(text.contains("match line 1"));
+        assert!(
+            !text.contains("match line 2"),
+            "max_matches alias should cap at 1, got: {text}"
         );
     }
 }
