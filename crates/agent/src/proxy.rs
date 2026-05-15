@@ -5,13 +5,6 @@
 //! actual provider authentication, and streams events back to the client. As
 //! part of that streaming, it strips the `partial` field from delta events so
 //! that downstream consumers see a normalized event shape.
-//!
-//! Mirrors the TypeScript implementation at
-//! `pi-mono/packages/agent/src/proxy.ts`.
-//!
-//! Reducer and request types are in place; the streaming driver `stream_proxy`
-//! lands in T5 of the agent-proxy port (see
-//! `docs/exec-plans/agent-proxy-port.md`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,10 +57,7 @@ fn strip_url_from_reqwest_err(e: &reqwest::Error) -> String {
 
 /// Wire-format event from a proxy server. The proxy strips the `partial`
 /// field from `AssistantMessageEvent` to save bandwidth; the client
-/// reconstructs `partial` locally (see `process_proxy_event` in T4).
-///
-/// Mirrors `ProxyAssistantMessageEvent` from
-/// `pi-mono/packages/agent/src/proxy.ts:36-57`.
+/// reconstructs `partial` locally via `process_proxy_event`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProxyAssistantMessageEvent {
@@ -146,9 +136,6 @@ pub enum ProxyAssistantMessageEvent {
 /// under `body.options`. All fields are optional; only fields the caller set
 /// are emitted. Field names use camelCase because the proxy server is
 /// implemented in TypeScript.
-///
-/// Mirrors the TS `Pick<SimpleStreamOptions, ...>` at
-/// `pi-mono/packages/agent/src/proxy.ts:59-71`.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyRequestOptions {
@@ -223,8 +210,7 @@ fn build_request_options(opts: &model::SimpleStreamOptions) -> ProxyRequestOptio
 /// the running [`model::AssistantMessage`] and a per-tool streaming-JSON
 /// buffer, producing the corresponding [`model::AssistantMessageEvent`].
 ///
-/// No I/O. Mirrors `processProxyEvent` at
-/// `pi-mono/packages/agent/src/proxy.ts:238-367`.
+/// No I/O.
 ///
 /// `tool_partial_json` accumulates the raw JSON fragments per `content_index`
 /// while a tool call is being streamed; the buffer is removed when the tool
@@ -482,8 +468,6 @@ fn process_proxy_event(
 /// reducer-detected protocol violation — the stream yields exactly one
 /// `AssistantMessageEvent::Error` and ends. On cancellation via
 /// `options.cancel`, an `Error { reason: Aborted, .. }` is yielded.
-///
-/// Mirrors `streamProxy` at `pi-mono/packages/agent/src/proxy.ts:116-233`.
 pub fn stream_proxy(
     model: &model::Model,
     context: model::Context,
@@ -1024,9 +1008,8 @@ mod tests {
     // Reducer tests (T4): `process_proxy_event`.
     // ---------------------------------------------------------------------
 
-    /// Build a fresh `AssistantMessage` analogous to TS' seed at
-    /// `pi-mono/packages/agent/src/proxy.ts:121-137`. Tests don't depend on
-    /// `timestamp`, so `0` is fine.
+    /// Build a fresh `AssistantMessage` to seed the reducer. Tests don't
+    /// depend on `timestamp`, so `0` is fine.
     fn fresh_partial(model: &model::Model) -> model::AssistantMessage {
         model::AssistantMessage {
             role: "assistant".to_string(),

@@ -1,6 +1,6 @@
 //! Hand Agent — core agent runtime with tool calling, event streaming, and cancellation.
 //!
-//! Mirrors the public surface of `@mariozechner/pi-agent-core`:
+//! Public surface:
 //!
 //! - [`Agent`] owns the transcript, dispatches events, and drives the loop.
 //! - [`AgentTool`] is the tool registration shape with optional schema validation.
