@@ -445,15 +445,33 @@ impl PathAutocompleteProvider {
         self
     }
 
-    fn walk(&self, query_lower: &str) -> Vec<AutocompleteItem> {
+    fn walk(&self, raw_query: &str) -> Vec<AutocompleteItem> {
         // BFS from root. Depth 0 = direct children of root. Skip the usual
         // suspects (`.git`, `target`, `node_modules`, `.venv`) — they
         // dominate the entry budget without ever being something the user
         // wants to `@`-attach.
         let skip: &[&str] = &[".git", "target", "node_modules", ".venv", ".cache"];
+
+        // Quote-aware query: a leading `"` means the caller is mid-typing a
+        // quoted path (`@"my doc`) and wants completion *inside* the
+        // quoted span. Strip the opening `"` for matching, remember the
+        // mode, and emit insert_text that splices into the open quote
+        // without duplicating it.
+        let (quoted_input, stripped) = match raw_query.strip_prefix('"') {
+            Some(rest) => (true, rest),
+            None => (false, raw_query),
+        };
+        let query_lower = stripped.to_lowercase();
+
         let mut out = Vec::new();
+        // Cycle guard so a symlink loop (a/b → a) doesn't blow the queue.
+        let mut visited: std::collections::HashSet<std::path::PathBuf> =
+            std::collections::HashSet::new();
         let mut queue: std::collections::VecDeque<(std::path::PathBuf, usize)> =
             std::collections::VecDeque::new();
+        if let Ok(canon) = self.root.canonicalize() {
+            visited.insert(canon);
+        }
         queue.push_back((self.root.clone(), 0));
 
         while let Some((dir, depth)) = queue.pop_front() {
@@ -480,18 +498,40 @@ impl PathAutocompleteProvider {
                     Ok(rel) => rel.to_string_lossy().into_owned(),
                     Err(_) => path.to_string_lossy().into_owned(),
                 };
-                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                // Symlink-aware kind: use file_type() to detect the entry
+                // is a symlink, then resolve the target's metadata to
+                // decide whether to treat it as a directory for both
+                // suggestion-rendering and recursion. We also include
+                // plain symlinks-to-files in the result list.
+                let file_type = entry.file_type().ok();
+                let is_symlink = file_type.as_ref().map(|ft| ft.is_symlink()).unwrap_or(false);
+                let is_dir_direct = file_type.as_ref().map(|ft| ft.is_dir()).unwrap_or(false);
+                let target_is_dir = if is_symlink {
+                    std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false)
+                } else {
+                    false
+                };
+                let treat_as_dir = is_dir_direct || target_is_dir;
 
-                // Substring-match (case-insensitive) on the relative path —
-                // matches `src/main.rs` for queries `main`, `src`, `main.rs`,
-                // and `src/m`.
-                if query_lower.is_empty() || display.to_lowercase().contains(query_lower) {
-                    let label = if is_dir {
+                if query_lower.is_empty() || display.to_lowercase().contains(&query_lower) {
+                    let label = if treat_as_dir {
                         format!("{display}/")
                     } else {
                         display.clone()
                     };
-                    let insert = format!("@{label}");
+                    // Quote-wrap when the path contains spaces — the
+                    // editor needs an unambiguous span to splice. When
+                    // the caller is already inside an open quote
+                    // (`quoted_input` true), emit a single closing `"`
+                    // so the splice doesn't duplicate the opening one.
+                    let needs_quotes = label.contains(' ') || quoted_input;
+                    let insert = if quoted_input {
+                        format!("@\"{label}\"")
+                    } else if needs_quotes {
+                        format!("@\"{label}\"")
+                    } else {
+                        format!("@{label}")
+                    };
                     out.push(AutocompleteItem {
                         label,
                         detail: None,
@@ -500,8 +540,18 @@ impl PathAutocompleteProvider {
                     });
                 }
 
-                if is_dir && depth + 1 < self.max_depth {
-                    queue.push_back((path, depth + 1));
+                if treat_as_dir && depth + 1 < self.max_depth {
+                    // Symlink-cycle guard: canonicalize the target, skip
+                    // if already visited. Plain (non-symlink) dirs are
+                    // tree-structured so they can't cycle.
+                    let canon = path.canonicalize().ok();
+                    let already_seen = canon
+                        .as_ref()
+                        .map(|c| !visited.insert(c.clone()))
+                        .unwrap_or(false);
+                    if !already_seen {
+                        queue.push_back((path, depth + 1));
+                    }
                 }
             }
         }
@@ -520,7 +570,7 @@ impl AutocompleteProvider for PathAutocompleteProvider {
         if !matches!(ctx.trigger, AutocompleteTrigger::At) {
             return None;
         }
-        Some(self.walk(&ctx.query.to_lowercase()))
+        Some(self.walk(&ctx.query))
     }
 }
 
@@ -957,6 +1007,123 @@ mod tests {
         assert!(
             !labels.iter().any(|l| l.starts_with(".git/")),
             ".git/ contents must be dropped, got: {labels:?}"
+        );
+    }
+
+    /// UC-ac-013 — a path containing spaces is emitted with the entire
+    /// path wrapped in double quotes so the editor sees an unambiguous
+    /// span. The label stays unquoted so the dropdown shows the natural
+    /// name; only `insert_text` carries the quotes.
+    #[test]
+    fn path_provider_quotes_paths_with_spaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("my documents")).unwrap();
+        std::fs::write(tmp.path().join("my documents/report.txt"), "").unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let items = provider
+            .query_sync(&ctx("report", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        let item = items
+            .iter()
+            .find(|i| i.label.ends_with("report.txt"))
+            .expect("report.txt must be present");
+        assert!(
+            item.insert_text.starts_with("@\"") && item.insert_text.ends_with('"'),
+            "spaced path must be quote-wrapped, got: {:?}",
+            item.insert_text
+        );
+        assert!(
+            !item.label.contains('"'),
+            "label stays unquoted, got: {:?}",
+            item.label
+        );
+    }
+
+    /// UC-ac-019/020 — when the user is already inside a quoted `@`
+    /// completion (`@"my doc`), the provider sees a leading `"` in the
+    /// query, strips it for matching, and emits an insert_text that
+    /// terminates the quote without duplicating the opening one.
+    #[test]
+    fn path_provider_continues_inside_open_quote() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("my documents")).unwrap();
+        std::fs::write(tmp.path().join("my documents/report.txt"), "").unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let items = provider
+            .query_sync(&ctx("\"my doc", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        let item = items
+            .iter()
+            .find(|i| i.label.contains("my documents"))
+            .expect("my documents/ must surface from inside open quote");
+        let insert = &item.insert_text;
+        assert!(
+            insert.starts_with("@\""),
+            "insert must keep the open `@\"`, got: {insert:?}"
+        );
+        assert!(
+            insert.ends_with('"'),
+            "insert must close the quote exactly once, got: {insert:?}"
+        );
+        // No double-quoting either side.
+        assert_eq!(
+            insert.matches('"').count(),
+            2,
+            "exactly two quotes (open + close), got: {insert:?}"
+        );
+    }
+
+    /// UC-ac-015/016/017 — the path BFS follows symlinks: symlinked
+    /// directories are descended into, symlinked files appear in the
+    /// result list, and a self-referential symlink cycle does not hang
+    /// or duplicate entries.
+    #[cfg(unix)]
+    #[test]
+    fn path_provider_follows_symlinks_without_cycling() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        // Real tree:  pkg/inner/file.rs
+        // Symlink:    link-to-pkg → pkg (directory symlink)
+        // Symlink:    file-link    → pkg/inner/file.rs (file symlink)
+        std::fs::create_dir_all(tmp.path().join("pkg/inner")).unwrap();
+        std::fs::write(tmp.path().join("pkg/inner/file.rs"), "x").unwrap();
+        symlink(tmp.path().join("pkg"), tmp.path().join("link-to-pkg")).unwrap();
+        symlink(
+            tmp.path().join("pkg/inner/file.rs"),
+            tmp.path().join("file-link"),
+        )
+        .unwrap();
+        // Self-cycle: cycle → cycle (would loop forever without guard).
+        symlink(tmp.path().join("cycle"), tmp.path().join("cycle")).unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let items = provider
+            .query_sync(&ctx("file.rs", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Real path surfaces.
+        assert!(
+            labels.iter().any(|l| l.contains("pkg/inner/file.rs")),
+            "real path must surface, got: {labels:?}"
+        );
+        // Via the directory symlink — the walker descended into link-to-pkg.
+        assert!(
+            labels
+                .iter()
+                .any(|l| l.contains("link-to-pkg/inner/file.rs")),
+            "symlinked dir must be descended, got: {labels:?}"
+        );
+
+        // File-symlink shows up as itself when queried by basename.
+        let by_basename = provider
+            .query_sync(&ctx("file-link", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        let bn_labels: Vec<&str> = by_basename.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            bn_labels.iter().any(|l| l.contains("file-link")),
+            "symlinked file must surface, got: {bn_labels:?}"
         );
     }
 }

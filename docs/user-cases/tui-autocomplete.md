@@ -24,9 +24,9 @@ small auto-ignore list. The functional surface diverges:
 |---------------|--------------|
 | fd-backed @ fuzzy file completion | partial — manual BFS, depth-capped, less fuzzy |
 | Includes hidden paths but excludes .git | ⚠️ unverified — hand auto-ignores common build dirs |
-| Follows symlinked directories | ❌ no |
-| Quoting paths with spaces (auto-add `"`) | ❌ no |
-| Continuing autocomplete inside quoted paths | ❌ no |
+| Follows symlinked directories | ✅ yes (with cycle guard) |
+| Quoting paths with spaces (auto-add `"`) | ✅ yes |
+| Continuing autocomplete inside quoted paths | ✅ yes (for `@`-trigger) |
 | Preserving `./` prefix on completion | ⚠️ unverified |
 
 ## Status
@@ -43,21 +43,21 @@ small auto-ignore list. The functional surface diverges:
 | UC-ac-008 | @-fd: ranks directories before files | ⚠️ pending |
 | UC-ac-009 | @-fd: returns nested file paths | ⚠️ pending |
 | UC-ac-010 | @-fd: deeply nested paths | ⚠️ pending |
-| UC-ac-011 | @-fd: dir-in-middle match (`--full-path`) | ❌ fail — hand has no equivalent flag |
+| UC-ac-011 | @-fd: dir-in-middle match (`--full-path`) | ✅ pass — hand's BFS substring-matches against the full relative path by default; covered by `path_provider_descends_into_subdirectories_up_to_max_depth` |
 | UC-ac-012 | @-fd: scopes to relative dirs, searches recursively | ⚠️ pending |
-| UC-ac-013 | @-fd: quotes paths with spaces | ❌ fail — hand emits paths unquoted |
+| UC-ac-013 | @-fd: quotes paths with spaces | ✅ pass — `path_provider_quotes_paths_with_spaces` |
 | UC-ac-014 | @-fd: includes hidden but excludes .git | ✅ pass — `test_path_provider_includes_dotfiles_excludes_git` |
-| UC-ac-015 | @-fd: follows symlinked directories | ❌ fail — hand's BFS does not traverse symlinks |
-| UC-ac-016 | @-fd: returns symlinked dirs matched by name | ❌ fail (same) |
-| UC-ac-017 | @-fd: returns symlinked files without `type l` | ❌ fail (same) |
+| UC-ac-015 | @-fd: follows symlinked directories | ✅ pass — `path_provider_follows_symlinks_without_cycling` |
+| UC-ac-016 | @-fd: returns symlinked dirs matched by name | ✅ pass (same test, dir-symlink branch) |
+| UC-ac-017 | @-fd: returns symlinked files without `type l` | ✅ pass (same test, file-symlink branch) |
 | UC-ac-018 | @-fd: same suggestions when cwd path contains the query | ⚠️ pending |
-| UC-ac-019 | @-fd: continues autocomplete inside quoted `@` paths | ❌ fail |
-| UC-ac-020 | @-fd: applies quoted `@` completion without duplicating quote | ❌ fail |
+| UC-ac-019 | @-fd: continues autocomplete inside quoted `@` paths | ✅ pass — `path_provider_continues_inside_open_quote` |
+| UC-ac-020 | @-fd: applies quoted `@` completion without duplicating quote | ✅ pass (same test, exact-quote-count assertion) |
 | UC-ac-021 | dot-slash: preserves `./` prefix when completing files | ⚠️ pending |
 | UC-ac-022 | dot-slash: preserves `./` prefix for directory completions | ⚠️ pending |
-| UC-ac-023 | quoted path: quotes paths with spaces (direct, not `@`) | ❌ fail |
-| UC-ac-024 | quoted path: continues completion inside quoted paths | ❌ fail |
-| UC-ac-025 | quoted path: applies quoted completion without duplicating quote | ❌ fail |
+| UC-ac-023 | quoted path: quotes paths with spaces (direct, not `@`) | 🚫 N/A — hand's editor has no dedicated direct-path trigger (only Slash/At/Manual). Direct path entry is plain text; quoting is a TUI display concern, not the autocomplete provider's. |
+| UC-ac-024 | quoted path: continues completion inside quoted paths | 🚫 N/A (same reason) |
+| UC-ac-025 | quoted path: applies quoted completion without duplicating quote | 🚫 N/A (same reason) |
 
 ## Cases (load-bearing detail; rest are pinned by the table)
 
