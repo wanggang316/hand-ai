@@ -13,7 +13,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/edit-tool*.test.ts | coding-agent | — | — | — | — |
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-tools-ls.md | pi-mono/packages/coding-agent/test/tools.test.ts (ls describe) | coding-agent | 5 | 5 | 0 | 0 |
-| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | — | — | — | — |
+| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 22 | 30 | 8 |
 | coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (subset) | coding-agent | — | — | — | — |
 | coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | — | — | — | — |
 | coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts | coding-agent | — | — | — | — |
@@ -30,10 +30,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
 
 ## Rollup
 
-- **Total cases authored:** 73
-- **Pass:** 59
-- **Fail:** 13
-- **Pending:** 1
+- **Total cases authored:** 133
+- **Pass:** 81
+- **Fail:** 43
+- **Pending:** 9
 
 ### Known failures (drive remediation)
 
@@ -64,6 +64,23 @@ authored yet, or the count hasn't been recomputed since the last edit.
   tools can't be advertised at the protocol level.
 - **UC-sysp-006/007** — hand's `custom_guidelines` is a string, not a
   list; no dedup/trim semantics.
+- **UC-args-002** — hand binds `-v` to `--verbose`, not `--version`.
+- **UC-args-012/013** — `--resume` / `-r` bare (no value) not allowed
+  by hand's clap derive.
+- **UC-args-026** — `--models <csv>` flag missing.
+- **UC-args-028..038** — `--extension`, `--no-extensions`, `--skill`,
+  `--prompt-template`, `--theme` (and their `-e` short forms) all
+  missing.
+- **UC-args-040/041** — `--no-prompt-templates` / `--no-themes` missing.
+- **UC-args-043** — `-nc` shorthand missing.
+- **UC-args-047** — `-nt` shorthand missing.
+- **UC-args-048/049** — `--no-builtin-tools` / `-nbt` missing.
+- **UC-args-051** — `-t` shorthand missing.
+- **UC-args-054** — positional args bind to a single `prompt`, not a
+  `messages: Vec<String>`.
+- **UC-args-055/056** — `@<path>` arg recognition missing.
+- **UC-args-057..059** — unknown-flag capture (instead of parse error)
+  missing.
 
 ## Next-batch backlog
 
