@@ -178,7 +178,7 @@ pub fn clamp_thinking_level(
     requested: Option<crate::types::ThinkingLevel>,
 ) -> Option<crate::types::ThinkingLevel> {
     let available = get_supported_thinking_levels(model);
-    if available.iter().any(|l| *l == requested) {
+    if available.contains(&requested) {
         return requested;
     }
     let Some(requested_index) = EXTENDED_THINKING_LEVELS.iter().position(|l| *l == requested)

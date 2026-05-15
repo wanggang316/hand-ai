@@ -242,13 +242,6 @@ impl ApiProvider for OpenAICodexResponsesProvider {
 // URL & header helpers
 // =============================================================================
 
-/// Resolve the SSE endpoint URL.
-///
-/// Treats `base` as either:
-/// - The Codex backend root (e.g. `https://chatgpt.com/backend-api`) →
-///   appends `/codex/responses`.
-/// - A `.../codex` path → appends `/responses`.
-/// - A fully-qualified `.../codex/responses` URL → returns as-is.
 /// Build the request body for the Codex `/codex/responses` endpoint.
 ///
 /// Codex requires two fields that the shared Responses builder does not
