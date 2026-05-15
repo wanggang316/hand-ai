@@ -13,7 +13,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 10 | 11 | 10 |
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-tools-ls.md | pi-mono/packages/coding-agent/test/tools.test.ts (ls describe) | coding-agent | 5 | 5 | 0 | 0 |
-| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 38 | 14 | 8 |
+| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 41 | 11 | 8 |
 | coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (API-key + caching subset) | coding-agent | 16 | 16 | 0 | 0 |
 | coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 14 | 0 | 17 |
 | coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 8 | 2 | 1 |
@@ -31,8 +31,8 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 247
-- **Fail:** 37
+- **Pass:** 250
+- **Fail:** 34
 - **Pending:** 54
 
 ### Known failures (drive remediation)
@@ -100,9 +100,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
 - **UC-args-047** — `-nt` shorthand missing.
 - **UC-args-048/049** — `--no-builtin-tools` / `-nbt` missing.
 - **UC-args-051** — `-t` shorthand missing.
-- **UC-args-054** — positional args bind to a single `prompt`, not a
-  `messages: Vec<String>`.
-- **UC-args-055/056** — `@<path>` arg recognition missing.
+- ~~UC-args-054/055/056~~ ✅ FIXED — positional args collect into
+  `Args.positional: Vec<String>`. Helper methods `Args::messages()`
+  return plain-text positionals; `Args::file_args()` returns
+  `@<path>` entries with the leading `@` stripped.
 - **UC-args-057..059** — unknown-flag capture (instead of parse error)
   missing.
 - ~~UC-mr-027/028/029~~ ✅ FIXED — snapshot test

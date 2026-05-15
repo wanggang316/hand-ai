@@ -110,9 +110,9 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-051 | ✅ pass | `parses_tools_short_t` |
 | UC-args-052 | ⚠️ pending | combination — needs both `--no-tools` and `--tools` together; clap may enforce mutual exclusion |
 | UC-args-053 | ❌ fail | hand has no `--no-builtin-tools` |
-| UC-args-054 | ❌ fail | hand consumes positional args as `prompt` only (single); pi collects into `messages: string[]` |
-| UC-args-055 | ❌ fail | hand has no `@file` arg recognition |
-| UC-args-056 | ❌ fail | same — mixed |
+| UC-args-054 | ✅ pass | `positional_plain_text_lands_in_messages` |
+| UC-args-055 | ✅ pass | `positional_at_file_lands_in_file_args` |
+| UC-args-056 | ✅ pass | `positional_mixed_messages_and_file_args` |
 | UC-args-057 | ❌ fail | hand rejects unknown flags via clap; pi captures them into `unknownFlags` |
 | UC-args-058 | ❌ fail | same — boolean unknown |
 | UC-args-059 | ❌ fail | same — `--unknown-flag=value` syntax |

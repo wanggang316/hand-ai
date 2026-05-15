@@ -192,6 +192,20 @@ pub struct Args {
     #[arg(long)]
     pub diagnostics: bool,
 
+    /// Trailing positional arguments. Each entry is either:
+    /// - a `@<path>` reference — the leading `@` is stripped and the
+    ///   remainder lands in `file_args()` (the file's contents are
+    ///   loaded into the prompt at run time).
+    /// - any other string — plain prompt text that lands in
+    ///   `messages()`.
+    ///
+    /// Use [`Args::messages`] / [`Args::file_args`] to read the
+    /// already-classified split. The raw vector is preserved here so
+    /// the model can audit exactly what shell-supplied arguments were
+    /// seen (helpful when debugging clap behaviour against pi-mono).
+    #[arg(trailing_var_arg = true)]
+    pub positional: Vec<String>,
+
     /// Suppress all auto-download/network operations. When set, the
     /// binary fetcher (fd/rg auto-install), version-check probes, and
     /// any other outbound network paths return `Ok(None)` instead of
@@ -200,6 +214,29 @@ pub struct Args {
     /// on disk.
     #[arg(long)]
     pub offline: bool,
+}
+
+impl Args {
+    /// The plain-text subset of positional arguments — entries that
+    /// do NOT start with `@`. Matches upstream pi's `messages` field
+    /// shape.
+    pub fn messages(&self) -> Vec<String> {
+        self.positional
+            .iter()
+            .filter(|s| !s.starts_with('@'))
+            .cloned()
+            .collect()
+    }
+
+    /// The `@<path>` subset of positional arguments — entries that
+    /// start with `@`, with the leading `@` stripped. Matches
+    /// upstream pi's `file_args` field shape.
+    pub fn file_args(&self) -> Vec<String> {
+        self.positional
+            .iter()
+            .filter_map(|s| s.strip_prefix('@').map(|p| p.to_string()))
+            .collect()
+    }
 }
 
 /// Rewrite pi-mono-style multi-character short flags (`-nc`, `-nt`,
@@ -611,6 +648,41 @@ mod tests {
             Args::try_parse_from(["hand", "--no-extensions", "-e", "a", "-e", "b"]).unwrap();
         assert!(args.no_extensions);
         assert_eq!(args.extensions, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    /// Plain-text positional arguments land in `messages()` —
+    /// matches upstream pi's `messages: string[]`.
+    #[test]
+    fn positional_plain_text_lands_in_messages() {
+        let args = Args::try_parse_from(["hand", "hello", "world"]).unwrap();
+        assert_eq!(args.messages(), vec!["hello".to_string(), "world".to_string()]);
+        assert!(args.file_args().is_empty());
+    }
+
+    /// `@<path>` positionals land in `file_args()` with the leading
+    /// `@` stripped — matches upstream pi's `file_args: string[]`.
+    #[test]
+    fn positional_at_file_lands_in_file_args() {
+        let args =
+            Args::try_parse_from(["hand", "@README.md", "@src/main.ts"]).unwrap();
+        assert_eq!(
+            args.file_args(),
+            vec!["README.md".to_string(), "src/main.ts".to_string()]
+        );
+        assert!(args.messages().is_empty());
+    }
+
+    /// Mixed positional invocation splits correctly: plain text lands
+    /// in `messages()`, `@`-prefixed entries land in `file_args()`.
+    #[test]
+    fn positional_mixed_messages_and_file_args() {
+        let args = Args::try_parse_from(["hand", "@file.txt", "explain this", "@image.png"])
+            .unwrap();
+        assert_eq!(
+            args.file_args(),
+            vec!["file.txt".to_string(), "image.png".to_string()]
+        );
+        assert_eq!(args.messages(), vec!["explain this".to_string()]);
     }
 
     /// `--skill <path>` collects a Vec of skill paths, repeatable.
