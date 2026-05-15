@@ -5,15 +5,15 @@ use hand_agent::types::{AgentTool, ToolResult};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
-/// Default max results. Pi-mono ships 1000 — keep parity.
+/// Default max results.
 const DEFAULT_MAX_RESULTS: usize = 1000;
 
-/// Path-component names auto-ignored by every find call. Pi-mono's `fd`-
-/// backed tool skips `**/node_modules/**` and `**/.git/**`; we extend with
-/// the common Rust/JS build outputs because find is meant to surface
-/// *source* files for the model, not vendored or generated noise. A match
-/// whose relative path begins with one of these names (followed by `/` or
-/// EOL) is dropped.
+/// Path-component names auto-ignored by every find call. We skip
+/// `**/node_modules/**` and `**/.git/**` like an `fd`-backed tool and
+/// extend with the common Rust/JS build outputs because find is meant
+/// to surface *source* files for the model, not vendored or generated
+/// noise. A match whose relative path begins with one of these names
+/// (followed by `/` or EOL) is dropped.
 const AUTO_IGNORE_NAMES: &[&str] = &[
     "node_modules",
     ".git",
@@ -88,8 +88,8 @@ fn execute_find(cwd: &Path, args: serde_json::Value) -> ToolResult {
 
     // Build the full glob pattern.
     //
-    // Pi-mono parity (issue #3302): a basename-only pattern with no `/`
-    // (e.g. `*.spec.ts`) should match at ANY depth in the search tree.
+    // A basename-only pattern with no `/` (e.g. `*.spec.ts`) should
+    // match at ANY depth in the search tree.
     // Without the auto-prepend a model that runs `find *.rs` only sees
     // top-level matches and misses the entire src/ subtree. Path-shaped
     // patterns (containing a `/`) stay anchored at the search root so
@@ -195,9 +195,9 @@ mod tests {
         assert!(text.contains("Missing required parameter"));
     }
 
-    /// Pi-mono parity: build-output and VCS directories are auto-ignored.
-    /// Pi's `fd` skips `**/node_modules/**` and `**/.git/**` by default;
-    /// hand extends with target/dist/build/.next/.cache. The model
+    /// Build-output and VCS directories are auto-ignored.
+    /// `**/node_modules/**` and `**/.git/**` are skipped by default,
+    /// and we extend with target/dist/build/.next/.cache. The model
     /// expects clean source-only results from `**/*.rs` etc.
     #[test]
     fn test_find_auto_ignores_node_modules_and_git_and_target() {
@@ -261,13 +261,12 @@ mod tests {
         assert!(!is_auto_ignored("git/log"));
     }
 
-    /// Pi-mono parity (issue #3302): basename-only patterns like
-    /// `*.spec.ts` must match files at ANY depth in the search tree.
-    /// Pi-mono auto-prepends `**/` to patterns that don't contain a `/`
-    /// so users get the conventional "find by basename" behavior without
-    /// having to write `**/*.spec.ts` explicitly. Without this fix a
-    /// model that does `find *.rs` only sees top-level files and misses
-    /// the entire src/ tree.
+    /// Basename-only patterns like `*.spec.ts` must match files at ANY
+    /// depth in the search tree. We auto-prepend `**/` to patterns
+    /// that don't contain a `/` so users get the conventional "find by
+    /// basename" behavior without having to write `**/*.spec.ts`
+    /// explicitly. Without this a model that does `find *.rs` only
+    /// sees top-level files and misses the entire src/ tree.
     #[test]
     fn test_find_basename_pattern_matches_at_any_depth() {
         let dir = TempDir::new().unwrap();
@@ -307,11 +306,11 @@ mod tests {
         );
     }
 
-    /// Pi-mono test: a flag-shaped pattern (`--help`) must be treated as
-    /// a literal glob, not as a subprocess flag. Hand's find uses
-    /// pure-Rust glob (no subprocess), so a `--`-prefixed pattern
-    /// simply doesn't match any normal filename. This test pins that
-    /// the surface stays glob-only and never silently shells out.
+    /// A flag-shaped pattern (`--help`) must be treated as a literal
+    /// glob, not as a subprocess flag. Find uses pure-Rust glob (no
+    /// subprocess), so a `--`-prefixed pattern simply doesn't match
+    /// any normal filename. This test pins that the surface stays
+    /// glob-only and never silently shells out.
     #[test]
     fn test_find_flag_pattern_treated_as_glob_literal() {
         let dir = TempDir::new().unwrap();

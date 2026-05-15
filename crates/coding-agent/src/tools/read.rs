@@ -75,8 +75,8 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
-    // Pi-mono parity: an offset past the last line is an error the model
-    // should see explicitly, not a silently-empty read.
+    // An offset past the last line is an error the model should see
+    // explicitly, not a silently-empty read.
     let start_zero_based = offset.saturating_sub(1);
     if start_zero_based >= total_lines && total_lines > 0 {
         return ToolResult::error(format!(
@@ -89,11 +89,11 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let start = start_zero_based.min(total_lines);
     let end = (start + limit).min(total_lines);
 
-    // Pi-mono parity: when no explicit user limit was given, ALSO enforce
-    // a byte budget (50 KB). A 2000-line file of long lines (minified JS,
-    // generated bundles) can blow the context window even though the line
-    // count fits. We accumulate complete lines until either the line
-    // window or the byte budget is hit.
+    // When no explicit user limit was given, ALSO enforce a byte
+    // budget (50 KB). A 2000-line file of long lines (minified JS,
+    // generated bundles) can blow the context window even though the
+    // line count fits. We accumulate complete lines until either the
+    // line window or the byte budget is hit.
     let byte_budget_active = user_limit.is_none();
     let mut output = String::new();
     let mut included = 0usize; // number of lines actually emitted
@@ -223,11 +223,11 @@ mod tests {
         assert!(text.contains("Missing required parameter"));
     }
 
-    /// Pi-mono parity: a `~/...` path in the read tool must expand to
-    /// the user's home directory. Hand was passing the literal `~/foo`
-    /// through `cwd.join("~/foo")`, which on POSIX produces an absolute
-    /// path joined-then-discarded but never actually reaches the home
-    /// directory — so reads of `~/something` silently fail.
+    /// A `~/...` path in the read tool must expand to the user's home
+    /// directory. An earlier implementation passed the literal `~/foo`
+    /// through `cwd.join("~/foo")`, which on POSIX produces a path
+    /// that never actually reaches the home directory — so reads of
+    /// `~/something` silently failed.
     #[test]
     fn test_read_expands_tilde() {
         // Pick a file that virtually always exists in $HOME and that we
@@ -262,10 +262,10 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: an explicit offset past the end of the file is a
-    /// programming error from the model side, not a silently-empty read.
-    /// Pi raises "Offset N is beyond end of file"; hand was silently
-    /// returning empty output, leaving the model confused as to whether
+    /// An explicit offset past the end of the file is a programming
+    /// error from the model side, not a silently-empty read. We raise
+    /// "Offset N is beyond end of file"; an earlier implementation
+    /// returned empty output, leaving the model confused as to whether
     /// the file truly had no content past that line or it had skipped
     /// past EOF.
     #[test]
@@ -285,10 +285,10 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: when no user-supplied limit is given, the read tool
-    /// must cap output at BOTH 2000 lines AND 50KB. A file of short lines
-    /// well under the line limit can still blow the context window if the
-    /// payload bytes are large (minified JS, vendored CSS).
+    /// When no user-supplied limit is given, the read tool must cap
+    /// output at BOTH 2000 lines AND 50KB. A file of short lines
+    /// well under the line limit can still blow the context window
+    /// if the payload bytes are large (minified JS, vendored CSS).
     #[test]
     fn test_read_applies_byte_limit_when_no_user_limit() {
         let dir = TempDir::new().unwrap();
@@ -323,10 +323,10 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: if the first line alone exceeds the byte budget,
-    /// return a special error pointing at a `sed | head -c` fallback so
-    /// the LLM has an actionable next step. Pi calls this the
-    /// `firstLineExceedsLimit` edge case.
+    /// If the first line alone exceeds the byte budget, return a
+    /// special error pointing at a `sed | head -c` fallback so the
+    /// LLM has an actionable next step. This is the
+    /// "first line exceeds limit" edge case.
     #[test]
     fn test_read_first_line_exceeds_byte_limit() {
         let dir = TempDir::new().unwrap();

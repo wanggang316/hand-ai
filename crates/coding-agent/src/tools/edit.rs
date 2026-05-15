@@ -66,10 +66,10 @@ async fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let new_string = new_string.to_string();
     let path_for_async = path.clone();
 
-    // Pi-mono parity: serialise the read-modify-write against the same
-    // file. Two parallel edits to the same path would otherwise both
-    // observe the original content and the later writer would clobber
-    // the earlier edit silently.
+    // Serialise the read-modify-write against the same file. Two
+    // parallel edits to the same path would otherwise both observe the
+    // original content and the later writer would clobber the earlier
+    // edit silently.
     with_file_mutation_queue(&path, async move {
         run_edit(&path_for_async, &old_string, &new_string, replace_all)
     })
@@ -107,11 +107,11 @@ fn run_edit(path: &Path, old_string: &str, new_string: &str, replace_all: bool) 
         }
     };
 
-    // Pi-mono parity stage 2: Unicode fuzzy match. If the CRLF-tolerant
-    // version still doesn't find the old_string in the file, try
-    // matching in a normalized space where smart quotes / Unicode
-    // dashes / NBSP collapse to their ASCII equivalents. When the
-    // fuzzy match succeeds, the replacement happens in the normalized
+    // Stage 2: Unicode fuzzy match. If the CRLF-tolerant version
+    // still doesn't find the old_string in the file, try matching in
+    // a normalized space where smart quotes / Unicode dashes / NBSP
+    // collapse to their ASCII equivalents. When the fuzzy match
+    // succeeds, the replacement happens in the normalized
     // content — same side effect as pi: smart quotes in the file get
     // rewritten to ASCII as part of the edit. Documented behavior.
     let (content, old_string, new_string): (String, String, String) = if content.contains(crlf_old)
@@ -327,10 +327,10 @@ mod tests {
         assert!(content.contains("goodbye"));
     }
 
-    /// Pi-mono CRLF parity: a multi-line `old_string` supplied with LF
-    /// separators must still match a CRLF-ended file. The replacement
-    /// preserves the file's existing CRLF endings (no mixed line
-    /// endings introduced).
+    /// A multi-line `old_string` supplied with LF separators must
+    /// still match a CRLF-ended file. The replacement preserves the
+    /// file's existing CRLF endings (no mixed line endings
+    /// introduced).
     #[tokio::test]
     async fn test_edit_lf_old_string_matches_crlf_file() {
         let dir = TempDir::new().unwrap();
@@ -390,11 +390,10 @@ mod tests {
         assert!(!after.contains("\r\n"), "result stays LF: {after:?}");
     }
 
-    /// Pi-mono fuzzy-match parity: smart curly double quotes (U+201C/D)
-    /// in the file must accept ASCII `"` in the model's old_string.
-    /// The replacement happens in the normalized space, so the file's
-    /// curly quotes get rewritten to ASCII as part of the edit
-    /// (documented side effect, mirrors pi).
+    /// Smart curly double quotes (U+201C/D) in the file must accept
+    /// ASCII `"` in the model's old_string. The replacement happens in
+    /// the normalized space, so the file's curly quotes get rewritten
+    /// to ASCII as part of the edit (documented side effect).
     #[tokio::test]
     async fn test_edit_fuzzy_smart_double_quotes() {
         let dir = TempDir::new().unwrap();
@@ -516,11 +515,11 @@ mod tests {
         assert_eq!(after, "hello rust\r\n");
     }
 
-    /// Pi-mono parity: parallel edits to the same file must serialise
-    /// through the mutation queue. Without the queue, two concurrent
-    /// edits both observe the original content and the later writer
-    /// silently clobbers the earlier edit. With the queue, both edits
-    /// land deterministically.
+    /// Parallel edits to the same file must serialise through the
+    /// mutation queue. Without the queue, two concurrent edits both
+    /// observe the original content and the later writer silently
+    /// clobbers the earlier edit. With the queue, both edits land
+    /// deterministically.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_edit_serialises_concurrent_calls_to_same_file() {
         let dir = TempDir::new().unwrap();
@@ -581,8 +580,8 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: edit and write tools must SHARE the mutation queue.
-    /// A concurrent `write` to a file currently being `edit`-ed would
+    /// Edit and write tools must SHARE the mutation queue. A
+    /// concurrent `write` to a file currently being `edit`-ed would
     /// otherwise interleave and either:
     /// - the write clobbers the edit's mid-flight read-modify-write, OR
     /// - the edit reads original content, write completes, edit writes
