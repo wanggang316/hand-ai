@@ -75,12 +75,20 @@ pub struct Args {
     pub thinking: Option<String>,
 
     /// Comma-separated tools to enable (read,write,edit,bash,grep,find,ls)
-    #[arg(long)]
+    #[arg(short = 't', long)]
     pub tools: Option<String>,
 
-    /// Disable all tools
+    /// Disable all tools. `-nt` is accepted as a short-form alias via
+    /// the [`expand_pi_short_aliases`] argv rewrite — clap can't
+    /// natively bind multi-char tokens to a single `-` prefix, so the
+    /// rewrite happens before clap sees argv.
     #[arg(long)]
     pub no_tools: bool,
+
+    /// Disable hand's built-in tools, leaving only extension-provided
+    /// tools registered. `-nbt` is the short-form alias.
+    #[arg(long)]
+    pub no_builtin_tools: bool,
 
     /// Run in ephemeral mode (don't save session)
     #[arg(long)]
@@ -88,7 +96,9 @@ pub struct Args {
 
     /// Disable auto-loading of project context files (HAND.md,
     /// .hand/context.md). Useful when scripts need a reproducible system
-    /// prompt that doesn't pick up uncommitted local files.
+    /// prompt that doesn't pick up uncommitted local files. The
+    /// short-form alias `-nc` is rewritten by [`expand_pi_short_aliases`]
+    /// before clap parses argv.
     #[arg(long)]
     pub no_context_files: bool,
 
@@ -126,6 +136,14 @@ pub struct Args {
     #[arg(long)]
     pub list_models: Option<Option<String>>,
 
+    /// Comma-separated list of model patterns to enable for the
+    /// session (e.g. `--models gpt-4o,claude-sonnet,gemini-pro`). The
+    /// list is split on `,` and each entry resolves through the
+    /// normal model registry rules. Distinct from `--list-models`,
+    /// which only prints what's available without selecting any.
+    #[arg(long, value_delimiter = ',')]
+    pub models: Vec<String>,
+
     /// Enable verbose logging
     #[arg(short, long)]
     pub verbose: bool,
@@ -142,6 +160,27 @@ pub struct Args {
     /// on disk.
     #[arg(long)]
     pub offline: bool,
+}
+
+/// Rewrite pi-mono-style multi-character short flags (`-nc`, `-nt`,
+/// `-nbt`) into their canonical long forms before clap parses argv.
+///
+/// clap can bind `-X` (single char) or `--name` (long) but not `-Xyz`
+/// (multi-char single-dash), so a user scripting `hand -nc` against
+/// clap's native parser would see `-n -c` interpreted as two separate
+/// short flags — neither of which exists. Pre-rewriting argv keeps
+/// the canonical clap shape AND lets user scripts keep working.
+///
+/// Returns a new Vec; the input is consumed.
+pub fn expand_pi_short_aliases(argv: impl IntoIterator<Item = String>) -> Vec<String> {
+    argv.into_iter()
+        .map(|arg| match arg.as_str() {
+            "-nc" => "--no-context-files".to_string(),
+            "-nt" => "--no-tools".to_string(),
+            "-nbt" => "--no-builtin-tools".to_string(),
+            _ => arg,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -409,5 +448,70 @@ mod tests {
     fn mode_rejects_unknown_value() {
         let res = Args::try_parse_from(["hand", "--mode", "binary"]);
         assert!(res.is_err(), "--mode binary should be rejected");
+    }
+
+    /// `-t` is the short form of `--tools` (CSV-shaped value), matching
+    /// upstream pi-mono.
+    #[test]
+    fn parses_tools_short_t() {
+        let args = Args::try_parse_from(["hand", "-t", "read,bash"]).unwrap();
+        assert_eq!(args.tools.as_deref(), Some("read,bash"));
+    }
+
+    /// `-nt` is the short-form alias for `--no-tools`. Because clap
+    /// can't bind multi-char tokens to a single `-`, the argv rewrite
+    /// `expand_pi_short_aliases` translates `-nt`→`--no-tools` before
+    /// clap parses.
+    #[test]
+    fn nt_short_alias_rewrites_to_no_tools() {
+        let argv =
+            expand_pi_short_aliases(vec!["hand".to_string(), "-nt".to_string()]);
+        let args = Args::try_parse_from(argv).expect("-nt should rewrite to --no-tools");
+        assert!(args.no_tools);
+    }
+
+    /// `-nbt` is the short-form alias for `--no-builtin-tools`.
+    #[test]
+    fn nbt_short_alias_rewrites_to_no_builtin_tools() {
+        let argv =
+            expand_pi_short_aliases(vec!["hand".to_string(), "-nbt".to_string()]);
+        let args =
+            Args::try_parse_from(argv).expect("-nbt should rewrite to --no-builtin-tools");
+        assert!(args.no_builtin_tools);
+    }
+
+    /// `-nc` is the short-form alias for `--no-context-files`.
+    #[test]
+    fn nc_short_alias_rewrites_to_no_context_files() {
+        let argv =
+            expand_pi_short_aliases(vec!["hand".to_string(), "-nc".to_string()]);
+        let args =
+            Args::try_parse_from(argv).expect("-nc should rewrite to --no-context-files");
+        assert!(args.no_context_files);
+    }
+
+    /// `--models <csv>` splits on `,` and yields a Vec<String> so the
+    /// downstream caller can iterate.
+    #[test]
+    fn parses_models_csv() {
+        let args =
+            Args::try_parse_from(["hand", "--models", "gpt-4o,claude-sonnet,gemini-pro"])
+                .unwrap();
+        assert_eq!(
+            args.models,
+            vec![
+                "gpt-4o".to_string(),
+                "claude-sonnet".to_string(),
+                "gemini-pro".to_string(),
+            ]
+        );
+    }
+
+    /// `--no-builtin-tools` parses on its own.
+    #[test]
+    fn parses_no_builtin_tools_flag() {
+        let args =
+            Args::try_parse_from(["hand", "--no-builtin-tools"]).expect("--no-builtin-tools");
+        assert!(args.no_builtin_tools);
     }
 }

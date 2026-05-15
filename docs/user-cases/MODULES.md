@@ -13,7 +13,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 10 | 11 | 10 |
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-tools-ls.md | pi-mono/packages/coding-agent/test/tools.test.ts (ls describe) | coding-agent | 5 | 5 | 0 | 0 |
-| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 22 | 30 | 8 |
+| coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 28 | 24 | 8 |
 | coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (API-key + caching subset) | coding-agent | 16 | 16 | 0 | 0 |
 | coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 11 | 3 | 17 |
 | coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 5 | 5 | 1 |
@@ -31,8 +31,8 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 213
-- **Fail:** 70
+- **Pass:** 219
+- **Fail:** 64
 - **Pending:** 55
 
 ### Known failures (drive remediation)
@@ -68,7 +68,12 @@ authored yet, or the count hasn't been recomputed since the last edit.
 - **UC-args-002** — hand binds `-v` to `--verbose`, not `--version`.
 - **UC-args-012/013** — `--resume` / `-r` bare (no value) not allowed
   by hand's clap derive.
-- **UC-args-026** — `--models <csv>` flag missing.
+- ~~UC-args-026~~ ✅ FIXED — `--models <csv>` flag added (clap
+  value_delimiter = ',' → Vec<String>).
+- ~~UC-args-043/047/048/049/051~~ ✅ FIXED — `-nc`, `-nt`, `-nbt`
+  short aliases now rewrite to their long forms via
+  `expand_pi_short_aliases` before clap parses argv. `-t` for
+  `--tools` bound directly. `--no-builtin-tools` added.
 - **UC-args-028..038** — `--extension`, `--no-extensions`, `--skill`,
   `--prompt-template`, `--theme` (and their `-e` short forms) all
   missing.

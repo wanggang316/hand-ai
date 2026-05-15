@@ -18,7 +18,12 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     timings::reset();
-    let cli = Args::parse();
+    // Rewrite pi-style multi-char short flags (`-nc`, `-nt`, `-nbt`)
+    // before clap sees argv. Without this, scripts written against
+    // pi-mono would see clap reject `-nc` as `-n -c` (two unknown
+    // shorts).
+    let argv = hand_coding_agent::cli::args::expand_pi_short_aliases(std::env::args());
+    let cli = Args::parse_from(argv);
     timings::time("parse_args");
 
     // `--offline` flips on the same env-var guard the tools-manager

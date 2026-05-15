@@ -82,7 +82,7 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-023 | ✅ pass | `parses_fork_flag` |
 | UC-args-024 | ✅ pass | `parses_export_flag` |
 | UC-args-025 | ✅ pass | `parses_thinking_flag` |
-| UC-args-026 | ❌ fail | hand has no `--models` (plural, comma-split list); only `--list-models` |
+| UC-args-026 | ✅ pass | `parses_models_csv` |
 | UC-args-027 | ✅ pass | `parses_no_session_flag` |
 | UC-args-028 | ❌ fail | hand has no `--extension` / `-e` flag |
 | UC-args-029 | ❌ fail | same |
@@ -99,15 +99,15 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-040 | ❌ fail | hand has no `--no-prompt-templates` |
 | UC-args-041 | ❌ fail | hand has no `--no-themes` |
 | UC-args-042 | ✅ pass | `parses_no_context_files_flag` |
-| UC-args-043 | ❌ fail | hand has no `-nc` shorthand |
+| UC-args-043 | ✅ pass | `nc_short_alias_rewrites_to_no_context_files` |
 | UC-args-044 | ⚠️ pending | hand has `verbose` field; verify parse equivalence |
 | UC-args-045 | ✅ pass | `parses_offline_flag` |
 | UC-args-046 | ✅ pass | `parses_no_tools_flag` |
-| UC-args-047 | ❌ fail | hand has no `-nt` shorthand |
-| UC-args-048 | ❌ fail | hand has no `--no-builtin-tools` |
-| UC-args-049 | ❌ fail | same — `-nbt` shorthand |
+| UC-args-047 | ✅ pass | `nt_short_alias_rewrites_to_no_tools` |
+| UC-args-048 | ✅ pass | `parses_no_builtin_tools_flag` |
+| UC-args-049 | ✅ pass | `nbt_short_alias_rewrites_to_no_builtin_tools` |
 | UC-args-050 | ✅ pass | `parses_tools_csv` (long form; pi takes the same CSV) |
-| UC-args-051 | ❌ fail | hand has no `-t` shorthand |
+| UC-args-051 | ✅ pass | `parses_tools_short_t` |
 | UC-args-052 | ⚠️ pending | combination — needs both `--no-tools` and `--tools` together; clap may enforce mutual exclusion |
 | UC-args-053 | ❌ fail | hand has no `--no-builtin-tools` |
 | UC-args-054 | ❌ fail | hand consumes positional args as `prompt` only (single); pi collects into `messages: string[]` |
