@@ -1,21 +1,16 @@
 //! Horizontal border that adapts to viewport width.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/dynamic-border.ts`.
-//!
 //! Renders a single line of `─` glyphs spanning the rendered width, with an
-//! optional ANSI color prefix. pi-mono parameterises the line color via a
-//! closure that reaches into the global theme; the Rust port accepts a static
-//! ANSI prefix instead, which keeps the component `Send + 'static` and avoids
-//! lifetime gymnastics for callers (each call site's color is a small string
-//! literal anyway).
+//! optional ANSI color prefix. The component accepts a static ANSI prefix
+//! (rather than a theme closure), which keeps it `Send + 'static` and avoids
+//! lifetime gymnastics for callers — each call site's color is a small
+//! string literal anyway.
 //!
-//! Theming caveat: the TS source resolves `theme.fg("border", ...)` by
-//! default. Until the coding-agent theme port lands (see parent module docs)
-//! the default color is bright black (`\x1b[90m`), matching the dark theme's
-//! `border` slot.
+//! Theming caveat: until the coding-agent theme port lands (see parent
+//! module docs) the default color is bright black (`\x1b[90m`), matching
+//! the dark theme's `border` slot.
 //!
-//! TODO(parity): theme integration deferred — see
+//! TODO: theme integration deferred — see
 //! docs/exec-plans/parity-completion.md §A1.
 
 use hand_tui::Component;
@@ -62,7 +57,7 @@ impl Default for DynamicBorderComponent {
 
 impl Component for DynamicBorderComponent {
     fn render(&self, width: u16) -> Vec<String> {
-        // pi-mono guarantees at least one glyph even when width is 0.
+        // Guarantee at least one glyph even when width is 0.
         let cells = width.max(1) as usize;
         let line = if self.fg_ansi.is_empty() {
             "─".repeat(cells)

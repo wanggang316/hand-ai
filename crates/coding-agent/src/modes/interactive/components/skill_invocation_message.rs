@@ -1,29 +1,26 @@
 //! Skill-invocation message renderer.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/skill-invocation-message.ts`.
+//! Renders a parsed `<skill>` block from an assistant message in one
+//! of two shapes:
 //!
-//! Renders a parsed `<skill>` block from an assistant message in one of two
-//! shapes:
+//! * **Collapsed** (default) — a single line
+//!   `[skill] <name> (<key> to expand)` echoing the bracketed-label
+//!   style used by [`super::custom_message`].
+//! * **Expanded** — the same `[skill]` label followed by a markdown
+//!   body built from `**<name>**\n\n<content>`.
 //!
-//! * **Collapsed** (default) — a single line `[skill] <name> (<key> to expand)`
-//!   echoing the bracketed-label style used by [`super::custom_message`].
-//! * **Expanded** — the same `[skill]` label followed by a markdown body
-//!   built from `**<name>**\n\n<content>`.
+//! [`ParsedSkillBlockData`] is a local view-model carrying only the
+//! fields the renderer consumes; the agent-session port supplies a
+//! richer parsed-block type with span metadata and the original raw
+//! text.
 //!
-//! The full `ParsedSkillBlock` type belongs with the agent-session port and
-//! is not yet on the Rust side; the local [`ParsedSkillBlockData`] mirrors
-//! only the fields the renderer needs and will be replaced by the eventual
-//! shared type. This pattern matches [`super::custom_message`].
+//! Theming caveat: the component expects `custom_message_bg`,
+//! `custom_message_label`, `custom_message_text`, and `dim` slots.
+//! Until the theme system surfaces them we hardcode ANSI defaults
+//! that match the dark-theme spirit and reuse the same background as
+//! `custom_message` for visual consistency.
 //!
-//! Theming caveat: pi-mono reads `customMessageBg`, `customMessageLabel`,
-//! `customMessageText`, and `dim` slots from the coding-agent theme. Until
-//! that theme system is ported (see parent module docs) we hardcode ANSI
-//! defaults matching the dark-theme spirit and reusing the same background
-//! used by `custom_message` for visual consistency.
-//!
-//! TODO(parity): theme integration deferred — see
-//! docs/exec-plans/parity-completion.md §A1.
+//! TODO: theme integration deferred until the theme slot wiring lands.
 
 use hand_tui::components::markdown::DefaultTextStyle;
 use hand_tui::{BoxComponent, Color, Component, MarkdownComponent, NamedColor, TextComponent};
@@ -37,8 +34,8 @@ const DEFAULT_BG_ANSI: &str = "\x1b[48;5;53m";
 
 /// Local view-model carrying the fields the renderer consumes.
 ///
-/// The full pi-mono `ParsedSkillBlock` also carries `raw` text and span
-/// metadata; those land with the agent-session port.
+/// The richer parsed-block type produced by the agent-session port also
+/// carries `raw` text and span metadata; those land with that port.
 #[derive(Debug, Clone)]
 pub struct ParsedSkillBlockData {
     /// Skill name shown in the collapsed line and the expanded header.

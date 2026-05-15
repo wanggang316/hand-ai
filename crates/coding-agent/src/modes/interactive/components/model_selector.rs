@@ -1,14 +1,10 @@
 //! Searchable picker for the active model.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/model-selector.ts`.
-//!
-//! pi-mono's component pulls the model list from `ModelRegistry`, filters
-//! against `SettingsManager`'s scoped list, and persists the picked model
-//! via `setDefaultModelAndProvider`. To keep the renderer pure (and aligned
-//! with the Phase-2 footer port), the Rust component takes both lists as
-//! constructor inputs and emits the chosen [`model::Model`] on a channel —
-//! the driver remains responsible for the registry refresh and persistence.
+//! The renderer is intentionally pure: it takes the model list (and a
+//! "scoped" subset) as constructor inputs and emits the chosen
+//! [`model::Model`] on a channel. The driver remains responsible for
+//! pulling the list from the registry, applying the user's scoping rules,
+//! and persisting the picked model.
 //!
 //! The selector supports:
 //! * fuzzy filtering against `provider/id` and `id provider`,
@@ -17,11 +13,11 @@
 //! * up/down with wrap-around,
 //! * Enter to confirm, Esc to cancel.
 //!
-//! Theming caveat: the TS source reaches into the coding-agent theme for
-//! `accent`, `muted`, `success`, `warning`, `error`. Until the theme port
-//! lands the renderer hardcodes ANSI defaults that match the dark palette.
+//! Theming caveat: until the coding-agent theme port lands the renderer
+//! hardcodes ANSI defaults that match the dark palette (`accent`, `muted`,
+//! `success`, `warning`, `error`).
 //!
-//! TODO(parity): theme integration deferred — see
+//! TODO: theme integration deferred — see
 //! docs/exec-plans/parity-completion.md §A1.
 
 use std::cmp::Reverse;
@@ -103,7 +99,7 @@ impl ModelSelectorComponent {
         };
         let mut all_models = all_models;
         if let Some(cur) = current_model.as_ref() {
-            // pi-mono sorts: current model first, then by provider name.
+            // Sort: current model first, then by provider name.
             all_models.sort_by(|a, b| {
                 let a_cur = models_equal(a, cur);
                 let b_cur = models_equal(b, cur);

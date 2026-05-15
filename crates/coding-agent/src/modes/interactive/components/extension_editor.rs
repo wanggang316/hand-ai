@@ -1,28 +1,23 @@
 //! Multi-line editor dialog used by extensions.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/extension-editor.ts`.
+//! ## Surface notes
 //!
-//! ## Surface differences from the TS source
+//! 1. **Composition.** The component owns its children explicitly —
+//!    top border, title, embedded [`EditorComponent`], hint, bottom
+//!    border — and renders them in sequence.
 //!
-//! 1. **Composition over inheritance.** The TS class extends `Container` and
-//!    inherits child rendering from pi-tui. The Rust port owns the children
-//!    explicitly — top border, title, embedded [`EditorComponent`], hint,
-//!    bottom border — and renders them in sequence, mirroring the layout.
+//! 2. **TUI start/stop is the driver's job.** Opening an external
+//!    `$EDITOR` requires suspending the TUI. Rather than reach into the
+//!    rendering lifecycle, the component emits
+//!    [`ExtensionEditorEvent::ExternalEditorRequested`] with the
+//!    current text; the driver is expected to suspend the TUI, run
+//!    the editor, and feed the new text back via
+//!    [`ExtensionEditorComponent::set_text`].
 //!
-//! 2. **`tui.start()` / `tui.stop()` is the driver's job.** pi-mono's
-//!    `openExternalEditor` calls `this.tui.stop()` before spawning `$EDITOR`
-//!    and `this.tui.start()` after. The Rust port surfaces that hook as an
-//!    [`ExtensionEditorEvent::ExternalEditorRequested`] event with the
-//!    current text — the driver is expected to suspend the TUI, run the
-//!    editor, and feed the new text back via
-//!    [`ExtensionEditorComponent::set_text`]. This keeps the component pure
-//!    and lets the driver manage the rendering lifecycle (per the
-//!    conversion guidelines: channels over `Box<dyn Fn>`).
-//!
-//! 3. **Submit / cancel through a channel.** Instead of constructor
-//!    callbacks, the component takes an [`mpsc::Sender`] and emits
-//!    [`ExtensionEditorEvent::Submit`] / `Cancel`.
+//! 3. **Submit / cancel through a channel.** The component takes an
+//!    [`mpsc::Sender`] and emits
+//!    [`ExtensionEditorEvent::Submit`] / `Cancel` — channels over
+//!    `Box<dyn Fn>` for cross-component signalling.
 
 use std::sync::mpsc::Sender;
 
@@ -112,9 +107,8 @@ impl ExtensionEditorComponent {
         &mut self.editor
     }
 
-    /// Replace the editor's text. Mirrors `editor.setText()` in pi-mono;
-    /// callers (or the driver) use it to restore content after the external
-    /// editor flow completes.
+    /// Replace the editor's text. Callers (or the driver) use this to
+    /// restore content after the external-editor flow completes.
     pub fn set_text(&mut self, text: &str) {
         self.editor.set_text(text);
     }

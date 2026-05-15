@@ -1,8 +1,5 @@
 //! Assistant message renderer.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/assistant-message.ts`.
-//!
 //! Walks an [`AssistantMessage`]'s content blocks and renders each one:
 //!
 //! * `Text` blocks → markdown body.
@@ -16,13 +13,12 @@
 //! appended (tool-call frames carry their own error UI).
 //!
 //! OSC 133 zone markers wrap the rendered output unless tool calls are
-//! present, mirroring pi-mono's behaviour where the tool-execution component
-//! owns the closing zone marker for its own block.
+//! present — when they are, the tool-execution component owns the closing
+//! zone marker for its own block.
 //!
-//! Theming caveat: the TS source consumes coding-agent theme slots
-//! (`thinkingText`, `error`, etc.). Until that theme system is ported (see
-//! parent module docs) the implementation hardcodes ANSI defaults that match
-//! pi-mono's dark theme spirit.
+//! Theming caveat: until the coding-agent theme system is ported (see
+//! parent module docs) the implementation hardcodes ANSI defaults that
+//! match the dark-theme spirit (`thinkingText`, `error`, etc.).
 
 use hand_tui::components::markdown::DefaultTextStyle;
 use hand_tui::{Color, Component, Container, MarkdownComponent, NamedColor, TextComponent};

@@ -1,17 +1,13 @@
 //! Selector for forking sessions from a chosen user message.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/user-message-selector.ts`.
+//! Renders a header + a scrolling list of past user messages (10
+//! visible at a time, two lines per message). Up / down wrap around.
+//! Confirm emits [`UserMessageSelectorEvent::Select`] with the entry
+//! id; cancel emits [`UserMessageSelectorEvent::Cancel`].
 //!
-//! Renders a header + a scrolling list of past user messages (10 visible
-//! at a time, two lines per message). Up / down wrap around. Confirm
-//! emits [`UserMessageSelectorEvent::Select`] with the entry id; cancel
-//! emits [`UserMessageSelectorEvent::Cancel`].
-//!
-//! pi-mono auto-cancels via `setTimeout(..., 100)` when the message list
-//! is empty. The Rust port surfaces the same outcome by emitting `Cancel`
-//! eagerly during construction; the driver can short-circuit the dialog
-//! the same way it would on user input.
+//! When the message list is empty the component emits `Cancel`
+//! eagerly during construction so the driver can short-circuit the
+//! dialog the same way it would on user input.
 
 use std::sync::mpsc::Sender;
 
@@ -46,8 +42,7 @@ pub enum UserMessageSelectorEvent {
     Cancel,
 }
 
-/// Maximum visible rows in the scrolling list (matches pi-mono's
-/// `maxVisible = 10`).
+/// Maximum visible rows in the scrolling list.
 const MAX_VISIBLE: usize = 10;
 
 /// Selector dialog implementing fork-from-message UX.

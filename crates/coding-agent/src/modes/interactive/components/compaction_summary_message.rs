@@ -1,8 +1,5 @@
 //! Compaction-summary message renderer.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/compaction-summary-message.ts`.
-//!
 //! When the conversation is compacted, the driver inserts a synthetic
 //! "compactionSummary" message that displays either a short collapsed line
 //! ("Compacted from N tokens (… to expand)") or the full markdown summary
@@ -12,13 +9,13 @@
 //! message-store port (queued); the local [`CompactionSummaryData`] mirrors
 //! only what this renderer needs.
 //!
-//! Theming caveat: shares pi-mono's `customMessageBg`/`customMessageLabel`
+//! Theming caveat: shares the `custom_message_bg`/`custom_message_label`
 //! slots — hardcoded here, see parent module docs.
 //!
-//! Keybinding caveat: pi-mono renders the expand hint via
-//! `keyText("app.tools.expand")`. Our Rust [`hand_tui`] keybinding registry
-//! only carries the `tui.*` set; the coding-agent–specific `app.*` table
-//! ports with the driver. Until then the hint string is configurable via
+//! Keybinding caveat: the expand hint is conceptually keyed to
+//! `app.tools.expand`. Our [`hand_tui`] keybinding registry only carries
+//! the `tui.*` set; the coding-agent–specific `app.*` table lands with the
+//! driver. Until then the hint string is configurable via
 //! [`CompactionSummaryMessageComponent::with_expand_hint`].
 
 use hand_tui::components::markdown::DefaultTextStyle;
