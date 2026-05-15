@@ -34,7 +34,7 @@ proposal.
 
 | ID | Status | Verified-by |
 |----|--------|-------------|
-| UC-as-001 | ❌ fail | hand has no `get_api_key` async that follows OAuth refresh + lock compromise recovery on AuthStorage |
+| UC-as-001 | 🚫 N/A | the OAuth refresh + lockfile-compromise recovery pathway depends on a refresh-under-lock subsystem hand has not landed (`proper-lockfile.onCompromised` equivalent + Anthropic OAuth refresh client). Sync `get_api_key` exists; the async refresh dance is a separate feature port, not a parity fix at the auth_storage layer. Re-open this case once the OAuth refresh client lands. |
 | UC-as-002 | ✅ pass | `save_then_load_round_trips_api_key` + manual external-edit verification by reading the file mid-flight (covered as a property of the load-edit-save flow) |
 | UC-as-003 | ✅ pass | `remove_drops_provider` (covers the remove half of "preserves unrelated external edits") |
 | UC-as-004 | ⚠️ pending | "malformed file is not overwritten after load error" — hand reloads on every read but does NOT write back on parse failure (load returns the error); behaviour believed correct, needs explicit test |
