@@ -1,10 +1,8 @@
-//! Integration test: deserialize a pi-mono-flavoured `settings.json` via
-//! [`Settings::from_json_str`] and assert representative fields land in the
-//! expected places.
+//! Integration test: deserialize a camelCase `settings.json` via
+//! [`Settings::from_json_str`] and assert representative fields land in
+//! the expected places.
 //!
-//! Source of truth for the camelCase shape:
-//! `pi-mono/packages/coding-agent/src/core/settings-manager.ts`. The fixture
-//! at `tests/fixtures/pi-mono-settings.json` exercises one entry per
+//! The fixture at `tests/fixtures/settings.json` exercises one entry per
 //! Settings field that M2 added so the camelCase aliases stay honest.
 
 use hand_coding_agent::core::settings::{
@@ -12,10 +10,10 @@ use hand_coding_agent::core::settings::{
     TransportSetting, TreeFilterMode,
 };
 
-const FIXTURE: &str = include_str!("fixtures/pi-mono-settings.json");
+const FIXTURE: &str = include_str!("fixtures/settings.json");
 
 #[test]
-fn pi_mono_settings_json_deserializes_into_settings() {
+fn camelcase_settings_json_deserializes_into_settings() {
     let s = Settings::from_json_str(FIXTURE).expect("fixture parses");
 
     // Top-level scalars (camelCase → snake_case via serde alias).
@@ -42,7 +40,7 @@ fn pi_mono_settings_json_deserializes_into_settings() {
     assert_eq!(s.branch_summary.reserve_tokens(), 16384);
 
     assert_eq!(s.retry.max_retries(), 5);
-    // pi-mono uses `baseDelayMs`; we alias it onto `initial_delay_ms`.
+    // `baseDelayMs` is aliased onto `initial_delay_ms`.
     assert_eq!(s.retry.initial_delay_ms(), 2500);
     assert_eq!(s.retry.provider.max_retry_delay_ms(), 60_000);
     assert_eq!(s.retry.provider.timeout_ms, Some(30_000));
@@ -105,7 +103,7 @@ fn pi_mono_settings_json_deserializes_into_settings() {
     // `PathBuf`.
     assert_eq!(
         s.session_dir.as_deref(),
-        Some(std::path::Path::new("~/.local/share/pi-mono/sessions")),
+        Some(std::path::Path::new("~/.local/share/hand/sessions")),
     );
     assert_eq!(s.shell_path.as_deref(), Some(std::path::Path::new("/bin/zsh")));
 }

@@ -73,5 +73,5 @@
   "warnings": {
     "anthropicExtraUsage": false
   },
-  "sessionDir": "~/.local/share/pi-mono/sessions"
+  "sessionDir": "~/.local/share/hand/sessions"
 }
