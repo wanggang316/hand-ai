@@ -135,6 +135,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
     }
 
     let last_shown = start + included;
+    let mut truncated_by: Option<&'static str> = None;
     if byte_truncated {
         // Byte-cap truncation: a single chunk hit the 50 KB byte budget
         // before the line cap. pi's wording is
@@ -147,6 +148,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
             format_size(DEFAULT_MAX_BYTES),
             last_shown + 1
         ));
+        truncated_by = Some("bytes");
     } else if last_shown < total_lines {
         if user_limit.is_some() {
             // User supplied `limit` and we hit it. pi's wording counts
@@ -158,6 +160,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
                 remaining,
                 last_shown + 1
             ));
+            truncated_by = Some("limit");
         } else {
             // Default 2000-line cap path: no user limit was supplied,
             // and the byte budget did not fire. pi wording:
@@ -169,10 +172,28 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
                 total_lines,
                 last_shown + 1
             ));
+            truncated_by = Some("lines");
         }
     }
 
-    ToolResult::text(output)
+    let result = ToolResult::text(output);
+    if let Some(by) = truncated_by {
+        // Surface a structured `details.truncation` payload alongside
+        // the text footer so hosts (UI, log consumers, agent
+        // self-prompts) can render the truncation banner natively
+        // without parsing the text. pi exposes the same shape under
+        // `result.details.truncation` — keep field names in lockstep.
+        result.with_details(json!({
+            "truncation": {
+                "truncated": true,
+                "truncated_by": by,
+                "total_lines": total_lines,
+                "output_lines": included,
+            }
+        }))
+    } else {
+        result
+    }
 }
 
 #[cfg(test)]
@@ -464,5 +485,65 @@ mod tests {
     /// payload.
     fn regex_like(text: &str) -> String {
         text[text.len().saturating_sub(300)..].to_string()
+    }
+
+    /// Truncated reads carry structured `details.truncation` metadata
+    /// — pi exposes this so hosts can render the truncation banner
+    /// natively without parsing the human-readable text footer.
+    /// Schema: `{ truncated, truncated_by, total_lines, output_lines }`.
+    #[test]
+    fn test_read_truncation_emits_structured_details() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("big.txt");
+        let content: String = (1..=2500)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&file, &content).unwrap();
+
+        let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
+        let details = result.details.as_ref().expect("details should be populated");
+        let truncation = details
+            .get("truncation")
+            .expect("details.truncation expected");
+        assert_eq!(truncation.get("truncated"), Some(&json!(true)));
+        assert_eq!(truncation.get("truncated_by"), Some(&json!("lines")));
+        assert_eq!(truncation.get("total_lines"), Some(&json!(2500)));
+        assert_eq!(truncation.get("output_lines"), Some(&json!(2000)));
+    }
+
+    /// Un-truncated reads do NOT carry a `details` payload so hosts
+    /// reliably see "no truncation" as the absence of the field.
+    #[test]
+    fn test_read_no_truncation_no_details() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("small.txt");
+        std::fs::write(&file, "hi\nthere\n").unwrap();
+        let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
+        assert!(
+            result.details.is_none(),
+            "details should be None when the read fits cleanly"
+        );
+    }
+
+    /// User-limit truncation also surfaces details with
+    /// `truncated_by: "limit"`.
+    #[test]
+    fn test_read_user_limit_truncation_emits_limit_kind() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("limited.txt");
+        let content: String = (1..=100).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(&file, &content).unwrap();
+        let result = execute_read(
+            dir.path(),
+            json!({"path": file.to_str().unwrap(), "limit": 10}),
+        );
+        let truncation = result
+            .details
+            .as_ref()
+            .and_then(|d| d.get("truncation"))
+            .expect("truncation details expected");
+        assert_eq!(truncation.get("truncated_by"), Some(&json!("limit")));
+        assert_eq!(truncation.get("output_lines"), Some(&json!(10)));
     }
 }

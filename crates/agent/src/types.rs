@@ -94,6 +94,17 @@ impl ToolResult {
         self.terminate = Some(terminate);
         self
     }
+
+    /// Builder helper that attaches a structured `details` payload to
+    /// the result. Hosts (the TUI, CLI loggers, RPC clients) read this
+    /// field for non-text affordances — truncation metadata,
+    /// rate-limit info, side-channel hints — without parsing the
+    /// human-readable content blocks. The value is treated opaquely
+    /// by the agent loop and forwarded to the consumer verbatim.
+    pub fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
+    }
 }
 
 /// Callback used by tools to stream partial execution updates.
