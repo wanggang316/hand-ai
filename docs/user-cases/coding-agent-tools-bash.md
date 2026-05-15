@@ -39,7 +39,7 @@ implementation:
 | UC-bash-002 | ✅ pass | `test_execute_failing_command`, `test_bash_exit_code` |
 | UC-bash-003 | ✅ pass | `test_execute_with_timeout` |
 | UC-bash-004 | ❌ fail | hand's truncation lacks `Full output: <path>` persistence |
-| UC-bash-005 | ⚠️ pending | "cwd does not exist" — hand surfaces a different error string |
+| UC-bash-005 | ✅ pass | `test_execute_errors_when_cwd_missing` |
 | UC-bash-006 | ⚠️ pending | "process spawn errors" — needs explicit hand test for nonexistent shell path |
 | UC-bash-007 | ⚠️ pending | custom `shellPath` per-call config |
 | UC-bash-008 | ❌ fail | hand has no `command_prefix` option |

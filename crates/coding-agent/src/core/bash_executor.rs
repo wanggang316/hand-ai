@@ -50,6 +50,16 @@ pub async fn execute_bash(
     shell_path: &str,
     options: BashExecutorOptions,
 ) -> Result<BashResult, CodingAgentError> {
+    // Surface a clean, named error when the working directory is gone.
+    // Without this, the spawn falls through with a low-level ENOENT
+    // that doesn't tell the model whether it was the cwd, the shell
+    // binary, or the command itself that was missing.
+    if !cwd.exists() {
+        return Err(CodingAgentError::Tool(format!(
+            "Working directory does not exist: {}",
+            cwd.display()
+        )));
+    }
     // `kill_on_drop(true)` ensures the child is reaped if this future
     // is dropped — e.g. when an outer `tokio::select!` races us against
     // a cancellation token. Without it, an `abort_bash` would return
@@ -288,6 +298,29 @@ mod tests {
         .unwrap();
         assert_eq!(result.output.trim(), "here");
         assert_eq!(result.exit_code, Some(0));
+    }
+
+    /// When the working directory has been deleted (or never existed),
+    /// surface a clean, named error rather than letting the shell
+    /// spawn surface a low-level ENOENT that doesn't tell the model
+    /// whether it was the cwd, the shell binary, or the command
+    /// itself that was missing.
+    #[tokio::test]
+    async fn test_execute_errors_when_cwd_missing() {
+        let bogus = Path::new("/this/directory/definitely/does/not/exist/zzz_xyz");
+        let err = execute_bash(
+            "echo test",
+            bogus,
+            "/bin/bash",
+            BashExecutorOptions::default(),
+        )
+        .await
+        .expect_err("missing cwd should error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Working directory does not exist"),
+            "expected named cwd-missing error, got: {msg}"
+        );
     }
 
     #[tokio::test]

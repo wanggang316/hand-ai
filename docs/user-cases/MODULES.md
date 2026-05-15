@@ -18,7 +18,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 14 | 0 | 17 |
 | coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 5 | 5 | 1 |
 | coding-agent-core-session-manager.md | pi-mono/packages/coding-agent/test/{session-info-modified-timestamp,session-cwd,sdk-session-manager}.test.ts | coding-agent | 7 | 1 | 1 | 5 |
-| coding-agent-tools-bash.md | pi-mono/packages/coding-agent/test/tools.test.ts (bash describe) + bash-execution-width.test.ts | coding-agent | 17 | 7 | 5 | 5 |
+| coding-agent-tools-bash.md | pi-mono/packages/coding-agent/test/tools.test.ts (bash describe) + bash-execution-width.test.ts | coding-agent | 17 | 8 | 5 | 4 |
 | coding-agent-tools-render-utils.md | hand parity contract (pi has no dedicated test file) | coding-agent | 12 | 12 | 0 | 0 |
 | coding-agent-core-system-prompt.md | pi-mono/packages/coding-agent/test/system-prompt.test.ts | coding-agent | 7 | 3 | 4 | 0 |
 | model-stream-retry.md | hand parity contract (pi has no dedicated retry-classification test file) | model | 8 | 8 | 0 | 0 |
@@ -31,9 +31,9 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 222
+- **Pass:** 223
 - **Fail:** 61
-- **Pending:** 55
+- **Pending:** 54
 
 ### Known failures (drive remediation)
 
