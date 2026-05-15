@@ -16,7 +16,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 41 | 11 | 8 |
 | coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (API-key + caching subset) | coding-agent | 16 | 16 | 0 | 0 |
 | coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 14 | 0 | 17 |
-| coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 8 | 2 | 1 |
+| coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 9 | 1 | 1 |
 | coding-agent-core-session-manager.md | pi-mono/packages/coding-agent/test/{session-info-modified-timestamp,session-cwd,sdk-session-manager}.test.ts | coding-agent | 7 | 1 | 1 | 5 |
 | coding-agent-tools-bash.md | pi-mono/packages/coding-agent/test/tools.test.ts (bash describe) + bash-execution-width.test.ts | coding-agent | 17 | 13 | 0 | 4 |
 | coding-agent-tools-render-utils.md | hand parity contract (pi has no dedicated test file) | coding-agent | 12 | 12 | 0 | 0 |
@@ -31,8 +31,8 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 252
-- **Fail:** 32
+- **Pass:** 253
+- **Fail:** 31
 - **Pending:** 54
 
 ### Known failures (drive remediation)
@@ -118,7 +118,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
 - **UC-as-001** — no `get_api_key` async with OAuth refresh + lock
   compromise recovery on `AuthStorage` (sync get_api_key landed; the
   OAuth-refresh dance + lock recovery still missing).
-- **UC-as-005** — no `reload`/`drain_errors` error-buffer API.
+- ~~UC-as-005~~ ✅ FIXED — `AuthStorage::reload()` re-reads disk into
+  an in-memory cache; failures leave the previous snapshot intact
+  and append a parse error to a rolling buffer drainable via
+  `drain_errors()`. `set` / `remove` keep cache in lockstep.
 
 ## Phase 1 complete — suite breadth landed
 

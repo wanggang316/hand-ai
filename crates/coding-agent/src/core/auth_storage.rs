@@ -189,6 +189,16 @@ pub fn record_is_anthropic_subscription(provider_id: &str, record: &AuthRecord) 
 pub struct AuthStorage {
     path: PathBuf,
     runtime_overrides: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
+    /// Cached in-memory snapshot of the on-disk records. Populated by
+    /// `reload()` and surfaced by `get()` on cache hits. When the cache
+    /// is `None`, reads fall through to a fresh disk load. When the
+    /// cache is `Some(map)`, the map is the in-memory shadow — used so
+    /// a reload that fails to parse the file keeps the previously
+    /// successful snapshot visible to callers (matches pi semantics).
+    cached: std::sync::Arc<std::sync::Mutex<Option<HashMap<String, AuthRecord>>>>,
+    /// Buffer of parse / IO errors encountered by `reload()`. Drained
+    /// via `drain_errors()` so the caller can surface them once each.
+    errors: std::sync::Arc<std::sync::Mutex<Vec<AuthStorageError>>>,
 }
 
 impl AuthStorage {
@@ -207,6 +217,8 @@ impl AuthStorage {
         Ok(Self {
             path: Self::default_path()?,
             runtime_overrides: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cached: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            errors: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
 
@@ -216,6 +228,8 @@ impl AuthStorage {
         Self {
             path: path.into(),
             runtime_overrides: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            cached: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            errors: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -330,7 +344,21 @@ impl AuthStorage {
 
     /// Look up the record for one provider. `Ok(None)` if the file is
     /// missing or the provider isn't present.
+    ///
+    /// When `reload()` has been called and the in-memory cache is
+    /// populated, the cache wins — even if the file has since been
+    /// mutated. Callers wanting fresh disk state must invoke
+    /// `reload()` first; uncached callers see fresh state on every
+    /// call.
     pub fn get(&self, provider: &str) -> Result<Option<AuthRecord>, AuthStorageError> {
+        if let Some(map) = self
+            .cached
+            .lock()
+            .expect("cached mutex poisoned")
+            .as_ref()
+        {
+            return Ok(map.get(provider).cloned());
+        }
         Ok(self.load()?.remove(provider))
     }
 
@@ -341,7 +369,14 @@ impl AuthStorage {
     pub fn set(&self, provider: &str, record: AuthRecord) -> Result<(), AuthStorageError> {
         let mut records = self.load()?;
         records.insert(provider.to_string(), record);
-        self.save(&records)
+        self.save(&records)?;
+        // If a reload-backed cache is populated, keep it in lockstep
+        // with the disk write so a subsequent `get` doesn't return
+        // stale data.
+        if let Some(cached) = self.cached.lock().expect("cached mutex poisoned").as_mut() {
+            *cached = records;
+        }
+        Ok(())
     }
 
     /// Drop the record for one provider. Idempotent — removing an absent
@@ -351,6 +386,11 @@ impl AuthStorage {
         let mut records = self.load()?;
         if records.remove(provider).is_some() {
             self.save(&records)?;
+            if let Some(cached) =
+                self.cached.lock().expect("cached mutex poisoned").as_mut()
+            {
+                *cached = records;
+            }
         }
         Ok(())
     }
@@ -441,6 +481,41 @@ impl AuthStorage {
             .lock()
             .expect("runtime_overrides mutex poisoned")
             .contains_key(provider)
+    }
+
+    /// Re-read the on-disk auth.json and refresh the in-memory cache.
+    ///
+    /// On success, the cache is replaced with the new snapshot.
+    /// On parse / IO failure, the previously-cached snapshot is
+    /// preserved (so callers reading concurrently don't see an empty
+    /// map mid-flight) and the error lands in the rolling buffer
+    /// drainable via `drain_errors`.
+    pub fn reload(&self) {
+        match self.load() {
+            Ok(map) => {
+                *self
+                    .cached
+                    .lock()
+                    .expect("cached mutex poisoned") = Some(map);
+            }
+            Err(e) => {
+                self.errors
+                    .lock()
+                    .expect("errors mutex poisoned")
+                    .push(e);
+            }
+        }
+    }
+
+    /// Drain (return + clear) the rolling error buffer populated by
+    /// `reload()`. Each error is yielded exactly once — re-draining
+    /// after a successful drain returns an empty `Vec`.
+    pub fn drain_errors(&self) -> Vec<AuthStorageError> {
+        let mut buf = self
+            .errors
+            .lock()
+            .expect("errors mutex poisoned");
+        std::mem::take(&mut *buf)
     }
 }
 
@@ -742,6 +817,72 @@ mod tests {
             !openai_json.contains("secret-refresh"),
             "OAuth refresh token leaked: {openai_json}"
         );
+    }
+
+    /// `reload()` re-reads the disk file and refreshes the in-memory
+    /// cache. A subsequent `get()` returns the freshly-loaded values
+    /// without touching the disk.
+    #[test]
+    fn reload_refreshes_cache_from_disk() {
+        let dir = TempDir::new().unwrap();
+        let s = storage_in(&dir);
+        s.set("anthropic", AuthRecord::api_key("v1")).unwrap();
+        s.reload();
+        // External writer mutates the file out-of-band.
+        let raw =
+            r#"{"anthropic": {"type": "api_key", "key": "v2"}}"#;
+        std::fs::write(s.path(), raw).unwrap();
+        // Pre-reload: cache still holds v1.
+        match s.get("anthropic").unwrap() {
+            Some(AuthRecord::ApiKey { key }) => assert_eq!(key, "v1"),
+            _ => panic!("expected api_key v1 from cache"),
+        }
+        // After reload: cache picks up v2.
+        s.reload();
+        match s.get("anthropic").unwrap() {
+            Some(AuthRecord::ApiKey { key }) => assert_eq!(key, "v2"),
+            _ => panic!("expected api_key v2 after reload"),
+        }
+    }
+
+    /// A failed reload (parse error / corrupted file) does NOT clear
+    /// the previously-cached snapshot — callers continue to see the
+    /// last successful state. The error lands in `drain_errors`.
+    #[test]
+    fn reload_failure_preserves_cache_and_records_error() {
+        let dir = TempDir::new().unwrap();
+        let s = storage_in(&dir);
+        s.set("anthropic", AuthRecord::api_key("good-key")).unwrap();
+        s.reload();
+        // Corrupt the file.
+        std::fs::write(s.path(), "{invalid-json").unwrap();
+        s.reload();
+        // Cache still has the old value.
+        match s.get("anthropic").unwrap() {
+            Some(AuthRecord::ApiKey { key }) => assert_eq!(key, "good-key"),
+            _ => panic!("expected api_key from preserved cache"),
+        }
+        // Error buffer holds the parse failure.
+        let errs = s.drain_errors();
+        assert!(!errs.is_empty(), "expected parse error in drain");
+        // Second drain returns an empty Vec.
+        assert!(s.drain_errors().is_empty());
+    }
+
+    /// `set()` synchronously updates the in-memory cache so a
+    /// follow-up `get()` returns the freshly-written value without an
+    /// explicit `reload()`.
+    #[test]
+    fn set_updates_cache_in_lockstep() {
+        let dir = TempDir::new().unwrap();
+        let s = storage_in(&dir);
+        s.set("openai", AuthRecord::api_key("first")).unwrap();
+        s.reload();
+        s.set("openai", AuthRecord::api_key("second")).unwrap();
+        match s.get("openai").unwrap() {
+            Some(AuthRecord::ApiKey { key }) => assert_eq!(key, "second"),
+            _ => panic!("cache should reflect second write"),
+        }
     }
 
     /// Runtime override takes priority over the disk-backed record.
