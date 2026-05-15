@@ -1427,11 +1427,11 @@ mod tests {
     ///   - merely loading a session updates atime/mtime on some FSes;
     ///   - sync engines (Dropbox, iCloud) and backup tools rewrite mtime;
     ///   - a `touch` would silently reshuffle the picker.
-    /// Pi-mono's TS test pins this by appending a message with an
-    /// explicit `timestamp` and asserting `info.modified` matches that
-    /// timestamp, not the file's mtime. We do the same by writing a
-    /// JSONL file directly so the message timestamp is decoupled from
-    /// the file write time.
+    ///
+    /// The test pins this by appending a message with an explicit
+    /// `timestamp` and asserting `info.modified` matches that timestamp,
+    /// not the file's mtime. We write a JSONL file directly so the
+    /// message timestamp is decoupled from the file write time.
     #[test]
     fn test_session_info_modified_uses_message_timestamp_not_mtime() {
         let dir = TempDir::new().unwrap();

@@ -956,8 +956,10 @@ mod tests {
             "service_tier".to_string(),
             Value::String("priority".to_string()),
         );
-        let mut options = StreamOptions::default();
-        options.metadata = Some(metadata);
+        let options = StreamOptions {
+            metadata: Some(metadata),
+            ..StreamOptions::default()
+        };
         let body = build_codex_request_body(
             &codex_test_model(),
             &codex_user_context(Some("You are pi.")),
@@ -985,8 +987,10 @@ mod tests {
 
         let mut metadata: HashMap<String, Value> = HashMap::new();
         metadata.insert("service_tier".to_string(), Value::Null);
-        let mut options = StreamOptions::default();
-        options.metadata = Some(metadata);
+        let options = StreamOptions {
+            metadata: Some(metadata),
+            ..StreamOptions::default()
+        };
         let null_meta = build_codex_request_body(
             &codex_test_model(),
             &codex_user_context(Some("You are pi.")),
@@ -1005,9 +1009,11 @@ mod tests {
     #[test]
     fn codex_body_strips_prompt_cache_retention_but_keeps_key() {
         use crate::types::CacheRetention;
-        let mut options = StreamOptions::default();
-        options.session_id = Some("sess-codex".to_string());
-        options.cache_retention = Some(CacheRetention::Long);
+        let options = StreamOptions {
+            session_id: Some("sess-codex".to_string()),
+            cache_retention: Some(CacheRetention::Long),
+            ..StreamOptions::default()
+        };
         let body = build_codex_request_body(
             &codex_test_model(),
             &codex_user_context(Some("You are pi.")),

@@ -1771,8 +1771,10 @@ mod tests {
             messages: vec![Message::User(UserMessage::new_text("hi"))],
             tools: None,
         };
-        let mut options = OpenAICompletionsOptions::default();
-        options.reasoning_effort = Some(openai_rust::types::ReasoningEffort::High);
+        let options = OpenAICompletionsOptions {
+            reasoning_effort: Some(openai_rust::types::ReasoningEffort::High),
+            ..OpenAICompletionsOptions::default()
+        };
 
         let params = build_params(&model, &context, &options).expect("build ok");
         let body = serde_json::to_value(&params).expect("serialize");
@@ -1828,8 +1830,10 @@ mod tests {
             messages: vec![Message::User(UserMessage::new_text("hi"))],
             tools: None,
         };
-        let mut options = OpenAICompletionsOptions::default();
-        options.reasoning_effort = Some(openai_rust::types::ReasoningEffort::High);
+        let options = OpenAICompletionsOptions {
+            reasoning_effort: Some(openai_rust::types::ReasoningEffort::High),
+            ..OpenAICompletionsOptions::default()
+        };
 
         let params = build_params(&model, &context, &options).expect("build ok");
         let body = serde_json::to_value(&params).expect("serialize");
@@ -2043,8 +2047,10 @@ mod tests {
             messages: vec![Message::User(UserMessage::new_text("hi"))],
             tools: None,
         };
-        let mut options = OpenAICompletionsOptions::default();
-        options.reasoning_effort = Some(openai_rust::types::ReasoningEffort::Medium);
+        let options = OpenAICompletionsOptions {
+            reasoning_effort: Some(openai_rust::types::ReasoningEffort::Medium),
+            ..OpenAICompletionsOptions::default()
+        };
 
         let params = build_params(&model, &context, &options).expect("build_params ok");
         let body = serde_json::to_value(&params).expect("serialize ok");

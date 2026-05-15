@@ -1400,8 +1400,10 @@ mod tests {
     /// client session so cache hits stay deterministic.
     #[test]
     fn build_request_body_emits_prompt_cache_key_for_session() {
-        let mut options = StreamOptions::default();
-        options.session_id = Some("sess-abc".to_string());
+        let options = StreamOptions {
+            session_id: Some("sess-abc".to_string()),
+            ..StreamOptions::default()
+        };
         let body = build_request_body(&responses_test_model(), &responses_test_context(), &options);
         assert_eq!(body["prompt_cache_key"].as_str(), Some("sess-abc"));
     }
@@ -1411,9 +1413,11 @@ mod tests {
     /// whether a session id was supplied.
     #[test]
     fn build_request_body_omits_prompt_cache_key_when_caching_disabled() {
-        let mut options = StreamOptions::default();
-        options.session_id = Some("sess-abc".to_string());
-        options.cache_retention = Some(CacheRetention::None);
+        let options = StreamOptions {
+            session_id: Some("sess-abc".to_string()),
+            cache_retention: Some(CacheRetention::None),
+            ..StreamOptions::default()
+        };
         let body = build_request_body(&responses_test_model(), &responses_test_context(), &options);
         assert!(body.get("prompt_cache_key").is_none(), "body: {body}");
         assert!(body.get("prompt_cache_retention").is_none(), "body: {body}");
@@ -1424,9 +1428,11 @@ mod tests {
     /// builder emits `prompt_cache_retention: "24h"`.
     #[test]
     fn build_request_body_emits_24h_retention_for_long_cache() {
-        let mut options = StreamOptions::default();
-        options.session_id = Some("sess-long".to_string());
-        options.cache_retention = Some(CacheRetention::Long);
+        let options = StreamOptions {
+            session_id: Some("sess-long".to_string()),
+            cache_retention: Some(CacheRetention::Long),
+            ..StreamOptions::default()
+        };
         let body = build_request_body(&responses_test_model(), &responses_test_context(), &options);
         assert_eq!(body["prompt_cache_retention"].as_str(), Some("24h"));
     }
@@ -1443,9 +1449,11 @@ mod tests {
             send_session_id_header: None,
             supports_long_cache_retention: Some(false),
         }));
-        let mut options = StreamOptions::default();
-        options.session_id = Some("sess-long".to_string());
-        options.cache_retention = Some(CacheRetention::Long);
+        let options = StreamOptions {
+            session_id: Some("sess-long".to_string()),
+            cache_retention: Some(CacheRetention::Long),
+            ..StreamOptions::default()
+        };
         let body = build_request_body(&model, &responses_test_context(), &options);
         // Key still emits (short-cache equivalent) but the 24h
         // retention does not.
@@ -1460,9 +1468,11 @@ mod tests {
     /// the 24h retention is opt-in.
     #[test]
     fn build_request_body_omits_24h_retention_for_short_cache() {
-        let mut options = StreamOptions::default();
-        options.session_id = Some("sess-short".to_string());
-        options.cache_retention = Some(CacheRetention::Short);
+        let options = StreamOptions {
+            session_id: Some("sess-short".to_string()),
+            cache_retention: Some(CacheRetention::Short),
+            ..StreamOptions::default()
+        };
         let body = build_request_body(&responses_test_model(), &responses_test_context(), &options);
         assert_eq!(body["prompt_cache_key"].as_str(), Some("sess-short"));
         assert!(body.get("prompt_cache_retention").is_none());

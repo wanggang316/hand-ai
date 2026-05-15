@@ -1013,7 +1013,8 @@ mod tests {
         // hook is invoked with the right inputs and its output reaches the
         // rendered lines verbatim.
         use std::sync::Mutex;
-        let captured: Arc<Mutex<Option<(String, Option<String>)>>> = Arc::new(Mutex::new(None));
+        type CapturedHookCall = Option<(String, Option<String>)>;
+        let captured: Arc<Mutex<CapturedHookCall>> = Arc::new(Mutex::new(None));
         let cap2 = Arc::clone(&captured);
         let hook: CodeHighlighter = Arc::new(move |code: &str, lang: Option<&str>| {
             *cap2.lock().unwrap() = Some((code.to_string(), lang.map(|s| s.to_string())));
@@ -1022,8 +1023,10 @@ mod tests {
                 .collect()
         });
         let mut md = MarkdownComponent::new("```ts\nconst x = 1;\nconst y = 2;\n```");
-        let mut theme = MarkdownTheme::default();
-        theme.highlight = Some(hook);
+        let theme = MarkdownTheme {
+            highlight: Some(hook),
+            ..MarkdownTheme::default()
+        };
         md.set_theme(theme);
         let lines = md.render(80);
         let joined = lines.join("\n");
