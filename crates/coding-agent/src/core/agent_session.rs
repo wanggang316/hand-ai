@@ -1139,6 +1139,7 @@ impl AgentSession {
                         output: "[bash aborted]".to_string(),
                         exit_code: None,
                         truncated: true,
+                        full_output_path: None,
                     },
                     aborted: true,
                 })

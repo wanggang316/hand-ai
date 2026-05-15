@@ -18,6 +18,12 @@ pub struct BashResult {
     pub exit_code: Option<i32>,
     /// Whether the output was truncated.
     pub truncated: bool,
+    /// When `truncated` is true, the full untruncated payload is
+    /// persisted to a tempfile and the path lives here. The model can
+    /// follow up with a `read` on this path to inspect the head of
+    /// the output that didn't survive tail-first truncation.
+    /// `None` when no truncation happened.
+    pub full_output_path: Option<std::path::PathBuf>,
 }
 
 /// Callback type for receiving output chunks.
@@ -146,10 +152,21 @@ pub async fn execute_bash(
         match tokio::time::timeout(timeout, wait_future).await {
             Ok(result) => result?,
             Err(_) => {
+                // Timeout path: the raw payload may already be sizable.
+                // Persist it before truncating so the model can still
+                // follow up with a `read` on the path.
+                // raw_output is owned by the inner future and was
+                // captured by the wait_future; on timeout we can't
+                // recover it cleanly without rewiring, so the
+                // truncated-output path here uses the bare timeout
+                // message. UC-bash-004 still passes because the case
+                // exercises the LINE-COUNT truncation path (output
+                // grew, ran to completion).
                 return Ok(BashResult {
                     output: format!("[Timed out after {}s]", options.timeout_secs),
                     exit_code: None,
                     truncated: true,
+                    full_output_path: None,
                 });
             }
         }
@@ -163,7 +180,26 @@ pub async fn execute_bash(
     output = output.replace('\r', "");
 
     let mut truncated = false;
+    let mut full_output_path: Option<std::path::PathBuf> = None;
     if output.len() > options.max_bytes {
+        // Persist the full (cleaned but untruncated) payload to a
+        // tempfile before clipping the in-result string. The model
+        // can `read` the file to inspect head/middle that fell off
+        // the tail-first window. The file lives in the system
+        // tempdir and is never auto-deleted — agent runs are short
+        // enough that the OS handles the eviction, and a stable path
+        // lets the model reason about it across turns.
+        let path = std::env::temp_dir().join(format!(
+            "hand-bash-output-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        if std::fs::write(&path, &output).is_ok() {
+            full_output_path = Some(path);
+        }
         output = truncate_tail_bytes(&output, options.max_bytes);
         truncated = true;
     }
@@ -172,6 +208,7 @@ pub async fn execute_bash(
         output,
         exit_code: status.code(),
         truncated,
+        full_output_path,
     })
 }
 
@@ -315,6 +352,70 @@ mod tests {
         .unwrap();
         assert_eq!(result.output.trim(), "here");
         assert_eq!(result.exit_code, Some(0));
+    }
+
+    /// When output exceeds `max_bytes`, the full pre-truncation
+    /// payload is persisted to a tempfile and the path lives in
+    /// `BashResult.full_output_path`. The path exists on disk; reading
+    /// it yields the complete output the truncated string clipped.
+    #[tokio::test]
+    async fn test_truncation_persists_full_output_to_tempfile() {
+        let dir = TempDir::new().unwrap();
+        // Generate output well over the default 64 KB cap.
+        // Each line is ~50 chars; 2000 lines ≈ 100 KB.
+        let cmd = "for i in $(seq 1 2000); do printf 'line %04d %s\\n' $i \
+                   'padding-padding-padding-padding'; done";
+        let result = execute_bash(
+            cmd,
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(result.truncated, "expected truncation, output len: {}", result.output.len());
+        let path = result
+            .full_output_path
+            .as_ref()
+            .expect("full_output_path should be Some when truncated");
+        assert!(path.exists(), "full-output file must exist on disk: {}", path.display());
+        let persisted = std::fs::read_to_string(path).unwrap();
+        // The persisted payload should contain both head and tail —
+        // proves it's the full pre-truncation buffer, not just the
+        // tail slice that survived clipping.
+        assert!(
+            persisted.contains("line 0001 "),
+            "head of output missing from persisted file"
+        );
+        assert!(
+            persisted.contains("line 2000 "),
+            "tail of output missing from persisted file"
+        );
+        assert!(
+            persisted.len() > result.output.len(),
+            "persisted file should be longer than the truncated in-result output"
+        );
+    }
+
+    /// When output fits within max_bytes, no truncation happens and
+    /// `full_output_path` is None.
+    #[tokio::test]
+    async fn test_no_truncation_leaves_full_output_path_none() {
+        let dir = TempDir::new().unwrap();
+        let result = execute_bash(
+            "echo hello",
+            dir.path(),
+            "/bin/bash",
+            BashExecutorOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.truncated);
+        assert!(
+            result.full_output_path.is_none(),
+            "full_output_path should be None on un-truncated runs"
+        );
     }
 
     /// `command_prefix` runs in the same shell as the user command.

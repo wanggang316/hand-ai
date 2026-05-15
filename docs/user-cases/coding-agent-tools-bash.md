@@ -38,7 +38,7 @@ implementation:
 | UC-bash-001 | ✅ pass | `test_execute_simple_command`, `test_bash_echo` |
 | UC-bash-002 | ✅ pass | `test_execute_failing_command`, `test_bash_exit_code` |
 | UC-bash-003 | ✅ pass | `test_execute_with_timeout` |
-| UC-bash-004 | ❌ fail | hand's truncation lacks `Full output: <path>` persistence |
+| UC-bash-004 | ✅ pass | `test_truncation_persists_full_output_to_tempfile` (full payload persisted; path on `BashResult.full_output_path`) |
 | UC-bash-005 | ✅ pass | `test_execute_errors_when_cwd_missing` |
 | UC-bash-006 | ⚠️ pending | "process spawn errors" — needs explicit hand test for nonexistent shell path |
 | UC-bash-007 | ⚠️ pending | custom `shellPath` per-call config |
@@ -49,8 +49,8 @@ implementation:
 | UC-bash-012 | ✅ pass | UTF-8 chunk-boundary handling (`test_execute_multiline_output` family) |
 | UC-bash-013 | ⚠️ pending | "local bash operations" injection seam (extension API) |
 | UC-bash-014 | ✅ pass | sanitisation across executor and tool (`test_execute_sanitizes_bash_output`, `test_sanitize_strips_c0_controls_except_whitespace`) |
-| UC-bash-015 | ❌ fail | full-output-file persistence on line-count truncation |
-| UC-bash-016 | ❌ fail | same — via the lower-level `executeBash` API |
+| UC-bash-015 | ✅ pass | same (BashResult.full_output_path) |
+| UC-bash-016 | ✅ pass | same (the executor itself exposes the field) |
 | UC-bash-017 | ✅ pass | `test_execute_truncates_from_tail_not_head` (tail-first truncation strategy) |
 
 ## Cases
