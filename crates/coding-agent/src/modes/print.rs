@@ -82,10 +82,10 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 AgentSession::new(config, setup.agent_tools)?
             }
             Err(_) => {
-                // Pi-mono parity: an explicit --fork <id> that can't be
-                // resolved must fail with a clear error and exit 1, not
-                // silently fall through to a new session that scripts
-                // wouldn't notice was empty.
+                // An explicit --fork <id> that can't be resolved must
+                // fail with a clear error and exit 1, not silently fall
+                // through to a new session that scripts wouldn't notice
+                // was empty.
                 return Err(format!("No session found matching '{fork_source}'").into());
             }
         }
@@ -138,10 +138,10 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             SAW_ERROR.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         AgentSessionEvent::SessionInfoChanged { name } => {
-            // Pi-mono JSON mode emits a `session_info_changed` line so
-            // JSONL consumers see name updates. Text mode is silent —
-            // print mode is one-shot and the user already supplied the
-            // label by issuing `/name`.
+            // JSON mode emits a `session_info_changed` line so JSONL
+            // consumers see name updates. Text mode is silent — print
+            // mode is one-shot and the user already supplied the label
+            // by issuing `/name`.
             if json_mode {
                 let val = serde_json::json!({
                     "type": "session_info_changed",
@@ -193,16 +193,17 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Process-wide flag set when any assistant message ended with an Error
 /// or Aborted stop_reason. Read by `run` after the prompt completes so
-/// the process exits non-zero — matching pi's `pi --print` contract.
+/// the process exits non-zero — matching the documented `--print`
+/// contract.
 static SAW_ERROR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
     use hand_agent::types::AgentEvent;
     use std::sync::atomic::Ordering;
-    // Pi-mono's `pi --print` text mode emits ONLY the final assistant
-    // message's text content blocks after the turn completes — NOT a
-    // streaming dump. Multi-step tool loops therefore stay silent until
-    // the model produces a `stop_reason: Stop` message with actual text;
+    // `--print` text mode emits ONLY the final assistant message's text
+    // content blocks after the turn completes — NOT a streaming dump.
+    // Multi-step tool loops therefore stay silent until the model
+    // produces a `stop_reason: Stop` message with actual text;
     // intermediate tool-call rounds are invisible to scripts.
     //
     // Approach: drop MessageUpdate / streaming events entirely. At
@@ -218,11 +219,11 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
             if let ModelMessage::Assistant(a) = message {
                 match a.stop_reason {
                     StopReason::Error | StopReason::Aborted => {
-                        // Pi-mono parity: write the error to stderr verbatim,
-                        // no ANSI color wrap. Scripts that pipe stderr to a
-                        // file or grep would otherwise see escape sequences
-                        // and have to strip them. Pi's print-mode contract
-                        // is plain stderr; we match it.
+                        // Write the error to stderr verbatim, no ANSI
+                        // color wrap. Scripts that pipe stderr to a
+                        // file or grep would otherwise see escape
+                        // sequences and have to strip them. The
+                        // print-mode contract is plain stderr.
                         let msg = format_assistant_error(&a.error_message, a.stop_reason);
                         eprintln!("{}", msg);
                         SAW_ERROR.store(true, Ordering::Relaxed);
@@ -246,8 +247,8 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
                 }
             }
         }
-        // Tool execution events are silent in text mode — reserved for
-        // `pi --mode json` upstream; hand has no JSON mode wired yet.
+        // Tool execution events are silent in text mode — they belong
+        // to `--mode json`, which is not wired up here yet.
         AgentEvent::ToolExecutionStart { .. } => {}
         AgentEvent::ToolExecutionEnd { .. } => {}
         AgentEvent::ToolExecutionUpdate { .. } => {}
@@ -555,17 +556,17 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
     let mut prefix = String::new();
     for path_str in &attachments {
         // Expand `~` and macOS Unicode-space variants the same way the
-        // read tool does (path_utils::expand_path). Without this hand
-        // joined `~/file` onto cwd, producing an invalid path that
+        // read tool does (path_utils::expand_path). Without this we'd
+        // join `~/file` onto cwd, producing an invalid path that
         // failed with "File not found" instead of resolving to the
-        // user's home dir as pi does.
+        // user's home dir.
         let path = crate::tools::path_utils::expand_path(path_str);
         let abs = if path.is_absolute() {
             path.clone()
         } else {
             cwd.join(&path)
         };
-        // Skip empty files silently — pi's behavior.
+        // Skip empty files silently.
         match std::fs::metadata(&abs) {
             Ok(m) if m.len() == 0 => continue,
             Ok(_) => {}
@@ -584,12 +585,12 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
                 );
             }
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                // Non-UTF-8 (likely a binary file e.g. image). Pi-mono
-                // supports image @file attachments via base64 + image
-                // content blocks; hand's --prompt API is currently
-                // text-only, so surface a clean error pointing at the
-                // problem path instead of the cryptic
-                // "stream did not contain valid UTF-8" raw IO message.
+                // Non-UTF-8 (likely a binary file e.g. image). The
+                // `--prompt` API is currently text-only, so surface a
+                // clean error pointing at the problem path instead of
+                // the cryptic "stream did not contain valid UTF-8" raw
+                // IO message. Image @-attachments via base64 + image
+                // content blocks would need separate plumbing.
                 return Err(format!(
                     "Cannot attach {}: binary files (e.g. images) are not yet supported by `--prompt @<path>` — text attachments only for now",
                     abs.display()
@@ -625,11 +626,12 @@ fn read_piped_stdin() -> Option<String> {
 }
 
 /// Combine piped-stdin and `--prompt` into a single initial message.
-/// Pi-mono's `buildInitialMessage` concatenates `stdin + fileText + prompt`
-/// with an EMPTY separator (`parts.join("")`); it relies on the source
-/// strings (especially stdin) to carry their own trailing newlines. Order
-/// matters: stdin comes FIRST so the user prompt provides final framing —
-/// e.g. `cat data | hand --print -p "summarize the preceding data"`.
+///
+/// Parts are concatenated with an EMPTY separator; the source strings
+/// (especially stdin) are expected to carry their own trailing
+/// newlines. Order matters: stdin comes FIRST so the user prompt
+/// provides final framing — e.g.
+/// `cat data | hand --print -p "summarize the preceding data"`.
 ///
 /// Returns `None` when neither source contributes content so the caller
 /// can skip the agent send entirely. An empty `--prompt` is treated as
@@ -654,10 +656,12 @@ fn build_initial_message(stdin: Option<&str>, prompt: Option<&str>) -> Option<St
     }
 }
 
-/// Format an assistant-message error for stderr emission. Pi-mono's
-/// `print-mode` does `console.error(errorMessage || `Request ${stopReason}`)`
-/// — plain text, no ANSI. We mirror that exactly so scripts that pipe or
-/// redirect hand's stderr see the same bytes as pi's.
+/// Format an assistant-message error for stderr emission.
+///
+/// Output shape: `error_message` when present, otherwise the literal
+/// `Request <StopReason>` — plain text, no ANSI. Scripts that pipe or
+/// redirect hand's stderr can grep this without stripping escape
+/// sequences.
 fn format_assistant_error(
     error_message: &Option<String>,
     stop_reason: model::StopReason,
@@ -696,13 +700,6 @@ fn resolve_session_path(cwd: &std::path::Path, source: &str) -> std::path::PathB
 mod tests {
     use super::*;
 
-    /// Pi-mono parity & bug regression: `handle_export` with a `.jsonl`
-    /// target must copy the live session file. The previous
-    /// implementation passed `&SessionManager::in_memory()` (which has
-    /// no underlying file) to `export_to_jsonl`, so the path ALWAYS
-    /// errored out with "Cannot export an in-memory session." Fixed by
-    /// resolving `session.session_file()` and re-opening the manager
-    /// from there, matching the interactive `/export` dispatcher.
     /// Build a minimal on-disk AgentSession for the export tests.
     /// Lives in the test module so its dependency on the `cfg(test)`
     /// `session_manager_mut` accessor is OK.
@@ -750,13 +747,13 @@ mod tests {
         session
     }
 
-    /// Pi-mono parity & bug regression: `handle_export` with a `.jsonl`
-    /// target must copy the live session file. The previous
-    /// implementation passed `&SessionManager::in_memory()` (which has
-    /// no underlying file) to `export_to_jsonl`, so the path ALWAYS
-    /// errored out with "Cannot export an in-memory session." Fixed by
-    /// resolving `session.session_file()` and re-opening the manager
-    /// from there, matching the interactive `/export` dispatcher.
+    /// Regression: `handle_export` with a `.jsonl` target must copy the
+    /// live session file. The previous implementation passed a
+    /// `&SessionManager::in_memory()` (which has no underlying file)
+    /// to `export_to_jsonl`, so the path ALWAYS errored out with
+    /// "Cannot export an in-memory session." Fixed by resolving
+    /// `session.session_file()` and re-opening the manager from there
+    /// — matching the interactive `/export` dispatcher.
     #[tokio::test]
     async fn handle_export_jsonl_copies_live_session_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -789,14 +786,12 @@ mod tests {
         assert!(text.contains("\"type\":\"session\""));
     }
 
-    /// Pi-mono parity (exact byte equality): piped stdin and `--prompt`
-    /// concatenate into a single initial message with an empty
-    /// separator. The pi `initial-message.test.ts` test pins
-    /// `"README contents\nSummarize the text given"` — the single `\n`
-    /// is from stdin's trailing newline, not an injected blank line.
-    /// Adding our own separator would diverge from pi byte-for-byte
-    /// and could break a model that's been tuned on pi's exact prompt
-    /// shape.
+    /// Pin the byte shape: piped stdin and `--prompt` concatenate into
+    /// a single initial message with an empty separator. The expected
+    /// output is `"README contents\nSummarize the text given"` — the
+    /// single `\n` comes from stdin's trailing newline, not an
+    /// injected blank line. Adding our own separator would change the
+    /// canonical prompt shape and could break a model tuned on it.
     #[test]
     fn build_initial_message_concatenates_stdin_and_prompt() {
         // Stdin payloads typically end in \n (line-buffered shell).
@@ -808,7 +803,7 @@ mod tests {
         );
 
         // Without a trailing newline on stdin the two strings adjoin
-        // directly — same as pi.
+        // directly.
         let no_nl = build_initial_message(Some("data"), Some("summarize"));
         assert_eq!(no_nl.as_deref(), Some("datasummarize"));
     }
@@ -829,17 +824,16 @@ mod tests {
     }
 
     /// Neither source — caller should skip the agent send entirely.
-    /// `Some("")` for prompt is treated as missing per pi semantics.
+    /// `Some("")` for prompt is treated as missing.
     #[test]
     fn build_initial_message_returns_none_when_both_empty() {
         assert_eq!(build_initial_message(None, None), None);
         assert_eq!(build_initial_message(None, Some("")), None);
     }
 
-    /// Pi-mono parity: error rendering for `--print` mode emits plain
-    /// stderr text, no ANSI escapes. Scripts that pipe `hand --print
-    /// 2>error.log` should see the raw message, not the `\x1b[31m...`
-    /// wrap.
+    /// Error rendering for `--print` mode emits plain stderr text, no
+    /// ANSI escapes. Scripts that pipe `hand --print 2>error.log`
+    /// should see the raw message, not the `\x1b[31m...` wrap.
     #[test]
     fn format_assistant_error_uses_message_verbatim_with_no_ansi() {
         let msg = format_assistant_error(
@@ -851,7 +845,7 @@ mod tests {
     }
 
     /// When the assistant provides no error_message, fall back to
-    /// `Request <Reason>` — pi's exact wording.
+    /// the literal `Request <Reason>`.
     #[test]
     fn format_assistant_error_falls_back_to_request_label() {
         assert_eq!(
@@ -861,7 +855,7 @@ mod tests {
         assert_eq!(
             format_assistant_error(&Some(String::new()), model::StopReason::Error),
             "Request Error",
-            "empty string is treated the same as missing — pi's `m || `Request …``"
+            "empty string is treated the same as missing"
         );
     }
 
@@ -876,9 +870,9 @@ mod tests {
             format_iso8601(1_704_067_200 + 12 * 3600 + 34 * 60 + 56, 789),
             "2024-01-01T12:34:56.789Z"
         );
-        // Pi sample used 2026-05-12T20:41:22.791Z — compute its epoch.
-        // 2026-05-12 is 56 years + leap days after 1970-01-01.
-        // We just verify the shape (YYYY-MM-DDTHH:MM:SS.sssZ) is right.
+        // Spot-check a recent timestamp: 2026-05-12T20:41:22.791Z is
+        // 56 years + leap days after 1970-01-01. We just verify the
+        // shape (YYYY-MM-DDTHH:MM:SS.sssZ) is right.
         let s = format_iso8601(1_778_618_482, 791);
         assert!(s.starts_with("2026-05-12T"));
         assert!(s.ends_with("Z"));
@@ -904,9 +898,9 @@ mod tests {
         path
     }
 
-    /// Pi-mono parity: an empty / whitespace-only --prompt is a no-op
-    /// at expansion time too. The function returns an empty (or all-
-    /// whitespace) string that the call site treats as no-message.
+    /// An empty / whitespace-only --prompt is a no-op at expansion
+    /// time. The function returns an empty (or all-whitespace) string
+    /// that the call site treats as no-message.
     #[test]
     fn at_mentions_passthrough_preserves_empty_input() {
         let cwd = std::env::temp_dir();
@@ -951,9 +945,9 @@ mod tests {
 
     #[test]
     fn at_mentions_only_consume_leading_tokens() {
-        // A `@` in the middle of the prompt should NOT be expanded — only
-        // leading tokens are file attachments, matching pi's positional
-        // shell semantics.
+        // A `@` in the middle of the prompt should NOT be expanded —
+        // only leading tokens are file attachments, matching positional
+        // shell argument semantics.
         let path = write_tmp("body");
         let prompt = format!("preamble @{} trailing", path.display());
         let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
@@ -994,15 +988,14 @@ mod tests {
 
     /// `~/path` in @-mentions must expand against the user's HOME the
     /// same way the read tool does, not get joined onto cwd as
-    /// `cwd/~/path` (which then fails to find the file). The test
-    /// writes into HOME, expands, and removes.
-    /// Pi-mono accepts paths with spaces as a single argv positional —
-    /// hand's single `--prompt` string can't preserve that grouping
-    /// directly. The expander uses greedy lookahead to glue subsequent
-    /// non-@ tokens onto the path until it resolves. Verifies that a
-    /// path like `@/tmp/dir with space/file` is found even though it
-    /// crosses two whitespace-separated tokens, AND that the trailing
-    /// prompt question is preserved separately.
+    /// `cwd/~/path` (which then fails to find the file).
+    ///
+    /// `--prompt` is a single string, so paths with spaces can't be
+    /// quoted the way they would be in argv. The expander uses greedy
+    /// lookahead to glue subsequent non-@ tokens onto the path until
+    /// it resolves. Verifies that a path like `@/tmp/dir with space/file`
+    /// is found even though it crosses two whitespace-separated tokens,
+    /// AND that the trailing prompt question is preserved separately.
     #[test]
     fn at_mentions_handle_paths_with_spaces() {
         let dir = std::env::temp_dir().join(format!(
