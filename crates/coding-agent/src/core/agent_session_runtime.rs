@@ -26,6 +26,7 @@ use thiserror::Error;
 
 use crate::core::agent_session::AgentSession;
 use crate::core::agent_session_services::{AgentSessionRuntimeDiagnostic, AgentSessionServices};
+use crate::core::session_cwd::{SessionCwdSource, assert_session_cwd_exists};
 use crate::core::session_manager::SessionManager;
 
 /// Boxed future returned by a [`CreateAgentSessionRuntimeFactory`].
@@ -75,6 +76,29 @@ pub struct CreateAgentSessionRuntimeResult {
 /// Hosts decide how to surface this to the user; the runtime simply
 /// propagates failures from the factory unchanged.
 pub type RuntimeFactoryError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// Thin adapter so `SessionManager` can satisfy the `SessionCwdSource`
+/// trait without `session_cwd.rs` reaching into the session_manager
+/// module (and creating a cycle). Constructed only at the call site
+/// inside [`create_agent_session_runtime`].
+struct SessionManagerCwdSource<'a> {
+    sm: &'a SessionManager,
+}
+
+impl<'a> SessionCwdSource for SessionManagerCwdSource<'a> {
+    fn cwd(&self) -> Option<PathBuf> {
+        self.sm.stored_cwd()
+    }
+
+    fn session_file(&self) -> Option<PathBuf> {
+        self.sm.on_disk_session_file()
+    }
+}
+
+// Re-export so callers downcasting `RuntimeFactoryError` can pattern-
+// match the missing-cwd variant without depending on the cwd module
+// path. Mirrors how the TS export surfaces `MissingSessionCwdError`.
+pub use crate::core::session_cwd::MissingSessionCwdError as RuntimeMissingSessionCwdError;
 
 /// Raised when `/import` references a JSONL file path that does not exist.
 ///
@@ -212,8 +236,17 @@ pub async fn create_agent_session_runtime(
     create_runtime: CreateAgentSessionRuntimeFactory,
     options: CreateAgentSessionRuntimeFactoryInput,
 ) -> Result<AgentSessionRuntime, RuntimeFactoryError> {
-    // TODO(parity): call `assert_session_cwd_exists(&session_manager, &cwd)`
-    // once that helper is ported from `session-cwd.ts`.
+    // Guard the stored-cwd contract BEFORE any heavy runtime allocation.
+    // When the session was persisted under a cwd that no longer exists
+    // on disk, surface a controlled `MissingSessionCwdError` here —
+    // pre-factory, pre-services — so neither the agent runtime nor any
+    // extension lifecycle hook fires for a broken session.
+    let cwd_source = SessionManagerCwdSource {
+        sm: &options.session_manager,
+    };
+    if let Err(e) = assert_session_cwd_exists(&cwd_source, &options.cwd) {
+        return Err(Box::new(e) as RuntimeFactoryError);
+    }
     let result = (create_runtime)(options).await?;
     Ok(AgentSessionRuntime::new(
         result.session,
@@ -233,6 +266,56 @@ mod tests {
         let err = SessionImportFileNotFoundError::new("/tmp/missing.jsonl");
         assert_eq!(err.path, PathBuf::from("/tmp/missing.jsonl"));
         assert_eq!(err.to_string(), "file not found: /tmp/missing.jsonl");
+    }
+
+    /// UC-sm-007 — when the session's stored cwd is missing on disk,
+    /// `create_agent_session_runtime` must fail with a
+    /// `MissingSessionCwdError` BEFORE the factory runs. No services
+    /// are allocated; no extension lifecycle event fires.
+    #[tokio::test]
+    async fn create_runtime_rejects_missing_stored_cwd_before_factory() {
+        use crate::core::session_cwd::MissingSessionCwdError;
+
+        // Set up a real on-disk session file whose header.cwd points at
+        // a directory that does NOT exist. We write the JSONL by hand
+        // so we don't need a SessionManager mutator.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real_dir = tmp.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let session_dir = real_dir.join(".hand").join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let bad_cwd = "/definitely-not-a-real-path-uc-sm-007";
+        let session_path = session_dir.join("uc-sm-007.jsonl");
+        let header_line = format!(
+            "{{\"type\":\"session\",\"data\":{{\"version\":3,\"id\":\"uc-sm-007\",\"timestamp\":0,\"cwd\":\"{}\"}}}}\n",
+            bad_cwd
+        );
+        std::fs::write(&session_path, header_line).unwrap();
+
+        let sm = SessionManager::open(&session_path).expect("open session");
+
+        // The factory MUST NOT be invoked. We use a sentinel that panics
+        // if called so the assertion is direct.
+        let factory: CreateAgentSessionRuntimeFactory = Arc::new(|_input| {
+            Box::pin(async {
+                panic!("factory was invoked despite a missing stored cwd");
+            })
+        });
+
+        let input = CreateAgentSessionRuntimeFactoryInput {
+            cwd: real_dir.clone(),
+            agent_dir: real_dir.clone(),
+            session_manager: sm,
+        };
+        let outcome = create_agent_session_runtime(factory, input).await;
+        let err = match outcome {
+            Ok(_) => panic!("expected MissingSessionCwdError, got Ok"),
+            Err(e) => e,
+        };
+        let downcast = err
+            .downcast_ref::<MissingSessionCwdError>()
+            .expect("error type is MissingSessionCwdError");
+        assert_eq!(downcast.issue().session_cwd, PathBuf::from(bad_cwd));
     }
 
     #[test]

@@ -23,7 +23,7 @@ touches).
 | UC-sm-004 | ⚠️ pending | "cwd derived from explicit SessionManager when cwd omitted" |
 | UC-sm-005 | ⚠️ pending | "detect missing session cwd from persisted sessions" — hand has `session_cwd_missing` detection somewhere; needs probe |
 | UC-sm-006 | ⚠️ pending | "supports overriding effective cwd when opening" |
-| UC-sm-007 | ❌ fail | hand throws a generic IO error when stored cwd is missing; pi throws a controlled error before runtime creation |
+| UC-sm-007 | ✅ pass | `create_runtime_rejects_missing_stored_cwd_before_factory` — `create_agent_session_runtime` calls `assert_session_cwd_exists` before the factory; missing cwd surfaces as `MissingSessionCwdError` (downcastable from `RuntimeFactoryError`). |
 
 ## Cases
 

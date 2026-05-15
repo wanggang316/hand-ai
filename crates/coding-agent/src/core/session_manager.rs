@@ -912,6 +912,27 @@ impl SessionManager {
         &self.header
     }
 
+    /// Stored cwd recorded in this session's header, if any.
+    pub fn stored_cwd(&self) -> Option<PathBuf> {
+        if self.header.cwd.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(&self.header.cwd))
+        }
+    }
+
+    /// Path to the on-disk session file, or `None` for in-memory
+    /// sessions. Bridges `SessionManager` into the
+    /// [`crate::core::session_cwd::SessionCwdSource`] trait without
+    /// hard-coding a coupling — the impl lives at the call site.
+    pub fn on_disk_session_file(&self) -> Option<PathBuf> {
+        if self.in_memory {
+            None
+        } else {
+            Some(self.path.clone())
+        }
+    }
+
     /// List all sessions for `cwd`'s default session directory. Sorted
     /// by `modified` descending (most recently active first), matching
     /// the TS `SessionManager.list` ordering.
