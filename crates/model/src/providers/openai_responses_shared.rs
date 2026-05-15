@@ -527,9 +527,7 @@ pub(crate) fn dispatch_responses_event(
                         .and_then(|v| v.as_str())
                         .map(|reason| format!("incomplete: {reason}"))
                 })
-                .unwrap_or_else(|| {
-                    "response.failed event without error details".to_string()
-                });
+                .unwrap_or_else(|| "response.failed event without error details".to_string());
             output.stop_reason = StopReason::Error;
             output.error_message = Some(msg);
             emitted.push(AssistantMessageEvent::Error {
@@ -742,7 +740,10 @@ mod tests {
     #[test]
     fn response_created_value_survives_completed() {
         let output = run_events(&[
-            ("response.created", json!({ "response": { "id": "resp_first" } })),
+            (
+                "response.created",
+                json!({ "response": { "id": "resp_first" } }),
+            ),
             (
                 "response.completed",
                 json!({ "response": { "id": "resp_first" } }),
@@ -756,10 +757,7 @@ mod tests {
     /// to log a correlation hint.
     #[test]
     fn response_created_skips_empty_id() {
-        let output = run_events(&[(
-            "response.created",
-            json!({ "response": { "id": "" } }),
-        )]);
+        let output = run_events(&[("response.created", json!({ "response": { "id": "" } }))]);
         assert!(output.response_id.is_none());
     }
 
@@ -1351,7 +1349,8 @@ mod tests {
             &StreamOptions::default(),
         );
         assert_eq!(
-            body["store"], serde_json::Value::Bool(false),
+            body["store"],
+            serde_json::Value::Bool(false),
             "store must default to false: {body}"
         );
     }

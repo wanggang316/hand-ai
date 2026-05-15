@@ -434,8 +434,14 @@ mod tests {
         let cases = [
             (Provider::Xiaomi, "XIAOMI_API_KEY"),
             (Provider::XiaomiTokenPlanCn, "XIAOMI_TOKEN_PLAN_CN_API_KEY"),
-            (Provider::XiaomiTokenPlanAms, "XIAOMI_TOKEN_PLAN_AMS_API_KEY"),
-            (Provider::XiaomiTokenPlanSgp, "XIAOMI_TOKEN_PLAN_SGP_API_KEY"),
+            (
+                Provider::XiaomiTokenPlanAms,
+                "XIAOMI_TOKEN_PLAN_AMS_API_KEY",
+            ),
+            (
+                Provider::XiaomiTokenPlanSgp,
+                "XIAOMI_TOKEN_PLAN_SGP_API_KEY",
+            ),
         ];
         for (provider, expected_env) in cases {
             // Skip the assertion if the env var happens to be set in

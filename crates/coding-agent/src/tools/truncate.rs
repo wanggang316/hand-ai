@@ -252,7 +252,9 @@ fn truncate_string_to_bytes_from_end(s: &str, max_bytes: usize) -> String {
         start += 1;
     }
     // Safety: `start` now lands on a UTF-8 char boundary or at the end.
-    std::str::from_utf8(&bytes[start..]).unwrap_or("").to_string()
+    std::str::from_utf8(&bytes[start..])
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Single-line truncation used by grep / similar tools. Returns the

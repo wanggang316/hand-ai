@@ -24,9 +24,7 @@
 //! sequences into the chat log).
 
 use hand_tui::utils::strip_ansi;
-use hand_tui::{
-    ImageDimensions, ImageRenderOptions, TerminalImageCapabilities, image_fallback,
-};
+use hand_tui::{ImageDimensions, ImageRenderOptions, TerminalImageCapabilities, image_fallback};
 use model::types::ToolResultContent;
 
 /// Replace a leading `$HOME` with `~` for compact display.
@@ -114,8 +112,7 @@ pub fn get_text_output(
             ToolResultContent::Text(t) => {
                 // Pi parity: sanitize_binary_output → strip ANSI → drop \r.
                 // Order matches pi's `sanitizeBinaryOutput(stripAnsi(text)).replace(/\r/g, "")`.
-                let cleaned =
-                    sanitize_binary_output(&strip_ansi(&t.text)).replace('\r', "");
+                let cleaned = sanitize_binary_output(&strip_ansi(&t.text)).replace('\r', "");
                 text_parts.push(cleaned);
             }
             ToolResultContent::Image(img) => image_blocks.push(img),
@@ -134,9 +131,7 @@ pub fn get_text_output(
                 img.data.as_bytes(),
             )
             .ok();
-            let dims = bytes
-                .as_deref()
-                .and_then(hand_tui::get_image_dimensions);
+            let dims = bytes.as_deref().and_then(hand_tui::get_image_dimensions);
             indicators.push(image_fallback_indicator(&img.mime_type, dims));
         }
         let joined = indicators.join("\n");

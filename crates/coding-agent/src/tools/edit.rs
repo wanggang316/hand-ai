@@ -181,11 +181,7 @@ pub fn normalize_for_fuzzy_match(s: &str) -> String {
             '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2015}'
             | '\u{2212}' => '-',
             // NBSP and wide / math spaces → ASCII space
-            '\u{00A0}'
-            | '\u{2002}'..='\u{200A}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}' => ' ',
+            '\u{00A0}' | '\u{2002}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => ' ',
             other => other,
         };
         out.push(replacement);
@@ -236,7 +232,8 @@ mod tests {
                 "old_string": "world",
                 "new_string": "rust"
             }),
-        ).await;
+        )
+        .await;
         let text = get_text(&result);
         assert!(text.contains("-hello world"));
         assert!(text.contains("+hello rust"));
@@ -256,7 +253,8 @@ mod tests {
                 "old_string": "nonexistent",
                 "new_string": "foo"
             }),
-        ).await;
+        )
+        .await;
         let text = get_text(&result);
         assert!(text.contains("not found"));
     }
@@ -274,7 +272,8 @@ mod tests {
                 "old_string": "aaa",
                 "new_string": "ccc"
             }),
-        ).await;
+        )
+        .await;
         let text = get_text(&result);
         assert!(text.contains("found 2 times"));
     }
@@ -293,7 +292,8 @@ mod tests {
                 "new_string": "ccc",
                 "replace_all": true
             }),
-        ).await;
+        )
+        .await;
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "ccc bbb ccc");
     }
 
@@ -321,7 +321,8 @@ mod tests {
                 "old_string": "    println!(\"hello\");",
                 "new_string": "    println!(\"goodbye\");"
             }),
-        ).await;
+        )
+        .await;
         let content = std::fs::read_to_string(&file).unwrap();
         assert!(content.contains("goodbye"));
     }
@@ -343,16 +344,21 @@ mod tests {
                 "old_string": "old_a\nold_b",
                 "new_string": "new_a\nnew_b",
             }),
-        ).await;
+        )
+        .await;
         let text = get_text(&result);
         assert!(
             !text.starts_with("Error: old_string not found"),
             "LF old_string should match CRLF file via line-ending normalization, got: {text}"
         );
         let after = std::fs::read_to_string(&file).unwrap();
-        assert!(after.contains("new_a\r\nnew_b"), "result preserves CRLF: {after:?}");
         assert!(
-            !after.contains("new_a\nnew_b\r\n") || after.matches("\n").count() == after.matches("\r\n").count(),
+            after.contains("new_a\r\nnew_b"),
+            "result preserves CRLF: {after:?}"
+        );
+        assert!(
+            !after.contains("new_a\nnew_b\r\n")
+                || after.matches("\n").count() == after.matches("\r\n").count(),
             "no mixed line endings introduced: {after:?}"
         );
     }
@@ -372,7 +378,8 @@ mod tests {
                 "old_string": "old_a\r\nold_b",
                 "new_string": "new_a\r\nnew_b",
             }),
-        ).await;
+        )
+        .await;
         let text = get_text(&result);
         assert!(
             !text.starts_with("Error: old_string not found"),
@@ -401,7 +408,8 @@ mod tests {
                 "old_string": "const msg = \"Hello World\";",
                 "new_string": "const msg = \"Goodbye\";",
             }),
-        ).await;
+        )
+        .await;
         let text = get_text(&result);
         assert!(
             !text.starts_with("Error:"),
@@ -425,7 +433,8 @@ mod tests {
                 "old_string": "it's working",
                 "new_string": "it's fixed",
             }),
-        ).await;
+        )
+        .await;
         assert!(!get_text(&result).starts_with("Error:"));
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("fixed"));
@@ -446,7 +455,8 @@ mod tests {
                 "old_string": "range: 1-5",
                 "new_string": "range: 10-50",
             }),
-        ).await;
+        )
+        .await;
         assert!(!get_text(&result).starts_with("Error:"));
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("range: 10-50"));
@@ -466,7 +476,8 @@ mod tests {
                 "old_string": "hello world",
                 "new_string": "hello rust",
             }),
-        ).await;
+        )
+        .await;
         assert!(!get_text(&result).starts_with("Error:"));
         let after = std::fs::read_to_string(&file).unwrap();
         assert!(after.contains("hello rust"));
@@ -497,7 +508,8 @@ mod tests {
                 "old_string": "world",
                 "new_string": "rust",
             }),
-        ).await;
+        )
+        .await;
         let text = get_text(&result);
         assert!(!text.starts_with("Error:"));
         let after = std::fs::read_to_string(&file).unwrap();
@@ -551,8 +563,14 @@ mod tests {
         let _ = r2.unwrap();
 
         let after = std::fs::read_to_string(&file).unwrap();
-        assert!(after.contains("RESULT_A"), "edit A must land, got: {after:?}");
-        assert!(after.contains("RESULT_B"), "edit B must land, got: {after:?}");
+        assert!(
+            after.contains("RESULT_A"),
+            "edit A must land, got: {after:?}"
+        );
+        assert!(
+            after.contains("RESULT_B"),
+            "edit B must land, got: {after:?}"
+        );
         assert!(
             !after.contains("marker_A"),
             "marker_A should be replaced, got: {after:?}"
@@ -636,9 +654,8 @@ mod tests {
         // that mixes characters from both (e.g. `WRITE_0\nbeta\n` with a
         // stray `EDIT_` substring), which would mean a write and an edit
         // didn't serialise.
-        let valid = after.starts_with("WRITE_")
-            || after.starts_with("EDIT_")
-            || after.contains("EDIT_");
+        let valid =
+            after.starts_with("WRITE_") || after.starts_with("EDIT_") || after.contains("EDIT_");
         assert!(valid, "unexpected final content: {after:?}");
     }
 }

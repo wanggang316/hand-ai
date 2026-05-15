@@ -61,7 +61,10 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let path = resolve_read_path(path_str, cwd);
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
     // `limit` is user-controlled — only enforce the line budget if absent.
-    let user_limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let user_limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
     let limit = user_limit.unwrap_or(DEFAULT_MAX_LINES);
 
     let content = match std::fs::read_to_string(&path) {
@@ -244,9 +247,13 @@ mod tests {
         let text = get_text(&result);
 
         if let Some(h) = original_home {
-            unsafe { std::env::set_var("HOME", h); }
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
         } else {
-            unsafe { std::env::remove_var("HOME"); }
+            unsafe {
+                std::env::remove_var("HOME");
+            }
         }
 
         assert!(

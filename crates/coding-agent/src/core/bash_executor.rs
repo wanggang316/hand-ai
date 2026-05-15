@@ -490,7 +490,10 @@ mod tests {
         assert_eq!(sanitize_output("a\u{FFF9}b\u{FFFA}c\u{FFFB}d"), "abcd");
         // Adjacent codepoints (U+FFF8, U+FFFC) survive — only the documented
         // range is stripped.
-        assert_eq!(sanitize_output("a\u{FFF8}b\u{FFFC}c"), "a\u{FFF8}b\u{FFFC}c");
+        assert_eq!(
+            sanitize_output("a\u{FFF8}b\u{FFFC}c"),
+            "a\u{FFF8}b\u{FFFC}c"
+        );
     }
 
     /// Regression: a UTF-8 multi-byte sequence straddling the truncate boundary

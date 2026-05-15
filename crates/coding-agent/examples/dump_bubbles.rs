@@ -35,7 +35,9 @@ fn main() {
 
     let mut tool = ToolExecutionComponent::new("ls", json!(""));
     tool.set_result(
-        hand_agent::types::ToolResult::text("Invalid arguments for tool 'ls': \"\" is not of type \"object\" (path: )"),
+        hand_agent::types::ToolResult::text(
+            "Invalid arguments for tool 'ls': \"\" is not of type \"object\" (path: )",
+        ),
         true,
     );
     dump("tool ls (error)", &tool.render(width));

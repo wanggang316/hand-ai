@@ -199,10 +199,7 @@ impl Component for InputComponent {
                 let split = self.cursor.min(text_to_show.len());
                 let (before, after) = text_to_show.split_at(split);
                 if after.is_empty() {
-                    format!(
-                        "{}{}{}\x1b[7m \x1b[0m",
-                        self.prefix, before, CURSOR_MARKER
-                    )
+                    format!("{}{}{}\x1b[7m \x1b[0m", self.prefix, before, CURSOR_MARKER)
                 } else {
                     let first = after.graphemes(true).next().unwrap_or(after);
                     let rest = &after[first.len()..];

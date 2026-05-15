@@ -254,9 +254,9 @@ impl SlashCommandTable {
             // so user overrides surface here; falls back to a short static
             // crib of session-level shortcuts that aren't in the
             // registry-driven Keybinding enum (Enter / Ctrl+C / Ctrl+D / Esc).
-            "hotkeys" | "keybindings" => SlashCommandResult::Handled(SlashCommandAction::ShowText(
-                Self::hotkeys_text(),
-            )),
+            "hotkeys" | "keybindings" => {
+                SlashCommandResult::Handled(SlashCommandAction::ShowText(Self::hotkeys_text()))
+            }
 
             // Show the active model + provider. Stop short of the rich
             // "session" panel — that needs `SessionManager` access (TODO).
@@ -294,11 +294,13 @@ impl SlashCommandTable {
                 SlashCommandAction::Import(parse_path_argument(&cmd.args))
             }),
 
-            "fork" => SlashCommandResult::Handled(SlashCommandAction::Fork(if cmd.args.is_empty() {
-                None
-            } else {
-                Some(cmd.args.clone())
-            })),
+            "fork" => {
+                SlashCommandResult::Handled(SlashCommandAction::Fork(if cmd.args.is_empty() {
+                    None
+                } else {
+                    Some(cmd.args.clone())
+                }))
+            }
 
             "clone" => SlashCommandResult::Handled(SlashCommandAction::Clone),
 
@@ -308,13 +310,13 @@ impl SlashCommandTable {
                 SlashCommandAction::Name(cmd.args.clone())
             }),
 
-            "theme" => SlashCommandResult::Handled(SlashCommandAction::Theme(
-                if cmd.args.is_empty() {
+            "theme" => {
+                SlashCommandResult::Handled(SlashCommandAction::Theme(if cmd.args.is_empty() {
                     None
                 } else {
                     Some(cmd.args.clone())
-                },
-            )),
+                }))
+            }
 
             "skills" => SlashCommandResult::Handled(SlashCommandAction::ListSkills),
 
@@ -333,11 +335,7 @@ impl SlashCommandTable {
             "settings" => SlashCommandResult::Handled(SlashCommandAction::OpenSettingsSelector),
 
             "login" => SlashCommandResult::Handled(SlashCommandAction::OpenLoginDialog {
-                provider: cmd
-                    .args
-                    .split_whitespace()
-                    .next()
-                    .map(|s| s.to_string()),
+                provider: cmd.args.split_whitespace().next().map(|s| s.to_string()),
             }),
 
             "logout" => SlashCommandResult::Handled(SlashCommandAction::Logout),

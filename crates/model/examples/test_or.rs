@@ -5,9 +5,7 @@
 //! stack the request stalls.
 
 use futures::StreamExt;
-use model::types::{
-    Api, AssistantMessageEvent, Cost, InputType, Message, Provider, UserMessage,
-};
+use model::types::{Api, AssistantMessageEvent, Cost, InputType, Message, Provider, UserMessage};
 use model::{ApiProviderRegistry, Context, Model, stream_simple};
 use std::time::{Duration, Instant};
 

@@ -7,10 +7,10 @@
 
 use model::types::Provider;
 use model::{
-    AssistantContentBlock, AssistantMessage, AssistantMessageEvent, Api, StopReason, TextContent,
+    Api, AssistantContentBlock, AssistantMessage, AssistantMessageEvent, StopReason, TextContent,
     ToolCall, Usage,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn empty_assistant_message() -> AssistantMessage {
     AssistantMessage {
@@ -30,7 +30,10 @@ fn empty_assistant_message() -> AssistantMessage {
 }
 
 fn type_tag(value: &Value) -> &str {
-    value.get("type").and_then(Value::as_str).unwrap_or("<missing>")
+    value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing>")
 }
 
 #[test]
@@ -134,14 +137,20 @@ fn toolcall_variants_use_compound_tag_not_split() {
         content_index: 0,
         partial: empty_assistant_message(),
     };
-    assert_eq!(type_tag(&serde_json::to_value(&start).unwrap()), "toolcall_start");
+    assert_eq!(
+        type_tag(&serde_json::to_value(&start).unwrap()),
+        "toolcall_start"
+    );
 
     let delta = AssistantMessageEvent::ToolCallDelta {
         content_index: 0,
         delta: "{}".to_string(),
         partial: empty_assistant_message(),
     };
-    assert_eq!(type_tag(&serde_json::to_value(&delta).unwrap()), "toolcall_delta");
+    assert_eq!(
+        type_tag(&serde_json::to_value(&delta).unwrap()),
+        "toolcall_delta"
+    );
 
     let end = AssistantMessageEvent::ToolCallEnd {
         content_index: 0,
@@ -168,7 +177,10 @@ fn done_and_error_have_camelcase_fields() {
     };
     let value = serde_json::to_value(&done).unwrap();
     assert_eq!(type_tag(&value), "done");
-    assert_eq!(value.get("reason"), Some(&Value::String("stop".to_string())));
+    assert_eq!(
+        value.get("reason"),
+        Some(&Value::String("stop".to_string()))
+    );
 
     let err = AssistantMessageEvent::Error {
         reason: StopReason::Error,
@@ -215,7 +227,11 @@ fn deserializes_canonical_wire_shaped_json() {
     });
     let parsed: AssistantMessageEvent = serde_json::from_value(payload).expect("parse");
     match parsed {
-        AssistantMessageEvent::ToolCallEnd { content_index, tool_call, .. } => {
+        AssistantMessageEvent::ToolCallEnd {
+            content_index,
+            tool_call,
+            ..
+        } => {
             assert_eq!(content_index, 2);
             assert_eq!(tool_call.id, "call_abc");
             assert_eq!(tool_call.name, "bash");

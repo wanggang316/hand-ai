@@ -77,12 +77,9 @@ impl SessionSetup {
         // so the slash can drive routing (e.g. `--model deepseek/deepseek-r1`
         // resolves to openrouter without us pre-pinning anthropic).
         let explicit_provider = args.provider.as_deref();
-        let model_pattern = args
-            .model
-            .as_deref()
-            .unwrap_or_else(|| model_resolver::default_model_for_provider(
-                explicit_provider.unwrap_or("anthropic"),
-            ));
+        let model_pattern = args.model.as_deref().unwrap_or_else(|| {
+            model_resolver::default_model_for_provider(explicit_provider.unwrap_or("anthropic"))
+        });
         let mut resolved = if explicit_provider.is_none() && model_pattern.contains('/') {
             model_resolver::resolve_model(None, model_pattern)
         } else {
@@ -302,14 +299,8 @@ mod tests {
     /// message text is stable so scripts can pattern-match against it.
     #[test]
     fn unknown_provider_returns_descriptive_error() {
-        let args = Args::try_parse_from([
-            "hand",
-            "--provider",
-            "nonexistent",
-            "--model",
-            "fake",
-        ])
-        .expect("parse");
+        let args = Args::try_parse_from(["hand", "--provider", "nonexistent", "--model", "fake"])
+            .expect("parse");
         let result = SessionSetup::resolve(&args);
         let err = match result {
             Ok(_) => panic!("must reject unknown provider"),
@@ -347,12 +338,8 @@ mod tests {
     /// creds, masking the user's intent.
     #[test]
     fn api_key_flag_populates_stream_options() {
-        let args = Args::try_parse_from([
-            "hand",
-            "--api-key",
-            "sk-test-override-12345",
-        ])
-        .expect("parse");
+        let args =
+            Args::try_parse_from(["hand", "--api-key", "sk-test-override-12345"]).expect("parse");
         let setup = SessionSetup::resolve(&args).expect("resolve");
         assert_eq!(
             setup.stream_options.base.api_key.as_deref(),
@@ -396,12 +383,8 @@ mod tests {
     /// `<cwd>/.hand/sessions`.
     #[test]
     fn session_dir_flag_propagates() {
-        let args = Args::try_parse_from([
-            "hand",
-            "--session-dir",
-            "/tmp/custom-sessions",
-        ])
-        .expect("parse");
+        let args =
+            Args::try_parse_from(["hand", "--session-dir", "/tmp/custom-sessions"]).expect("parse");
         let setup = SessionSetup::resolve(&args).expect("resolve");
         assert_eq!(
             setup.session_dir.as_deref(),

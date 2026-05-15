@@ -86,10 +86,7 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 // resolved must fail with a clear error and exit 1, not
                 // silently fall through to a new session that scripts
                 // wouldn't notice was empty.
-                return Err(format!(
-                    "No session found matching '{fork_source}'"
-                )
-                .into());
+                return Err(format!("No session found matching '{fork_source}'").into());
             }
         }
     } else {
@@ -329,7 +326,10 @@ fn handle_agent_event_json(event: &hand_agent::types::AgentEvent) {
             serde_json::json!({"type": "agent_end", "messages": messages})
         }
         AgentEvent::TurnStart => serde_json::json!({"type": "turn_start"}),
-        AgentEvent::TurnEnd { message, tool_results } => serde_json::json!({
+        AgentEvent::TurnEnd {
+            message,
+            tool_results,
+        } => serde_json::json!({
             "type": "turn_end",
             "message": message,
             "toolResults": tool_results,
@@ -337,7 +337,10 @@ fn handle_agent_event_json(event: &hand_agent::types::AgentEvent) {
         AgentEvent::MessageStart { message } => {
             serde_json::json!({"type": "message_start", "message": message})
         }
-        AgentEvent::MessageUpdate { message, assistant_message_event } => serde_json::json!({
+        AgentEvent::MessageUpdate {
+            message,
+            assistant_message_event,
+        } => serde_json::json!({
             "type": "message_update",
             "assistantMessageEvent": assistant_message_event,
             "message": message,
@@ -353,13 +356,22 @@ fn handle_agent_event_json(event: &hand_agent::types::AgentEvent) {
             }
             serde_json::json!({"type": "message_end", "message": message})
         }
-        AgentEvent::ToolExecutionStart { tool_call_id, tool_name, args } => serde_json::json!({
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } => serde_json::json!({
             "type": "tool_execution_start",
             "toolCallId": tool_call_id,
             "toolName": tool_name,
             "args": args,
         }),
-        AgentEvent::ToolExecutionUpdate { tool_call_id, tool_name, args, partial_result } => {
+        AgentEvent::ToolExecutionUpdate {
+            tool_call_id,
+            tool_name,
+            args,
+            partial_result,
+        } => {
             serde_json::json!({
                 "type": "tool_execution_update",
                 "toolCallId": tool_call_id,
@@ -368,7 +380,12 @@ fn handle_agent_event_json(event: &hand_agent::types::AgentEvent) {
                 "partialResult": partial_result,
             })
         }
-        AgentEvent::ToolExecutionEnd { tool_call_id, tool_name, result, is_error } => {
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            tool_name,
+            result,
+            is_error,
+        } => {
             serde_json::json!({
                 "type": "tool_execution_end",
                 "toolCallId": tool_call_id,
@@ -584,10 +601,7 @@ fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, Str
                 ));
             }
             Err(e) => {
-                return Err(format!(
-                    "Could not read file {}: {e}",
-                    abs.display()
-                ));
+                return Err(format!("Could not read file {}: {e}", abs.display()));
             }
         }
     }
@@ -710,7 +724,9 @@ mod tests {
         let mut session = AgentSession::new(cfg, vec![]).expect("session new");
         session
             .session_manager_mut()
-            .append_message(model::Message::User(model::UserMessage::new_text("export me")))
+            .append_message(model::Message::User(model::UserMessage::new_text(
+                "export me",
+            )))
             .expect("append");
         session
     }
@@ -765,10 +781,8 @@ mod tests {
     #[test]
     fn build_initial_message_concatenates_stdin_and_prompt() {
         // Stdin payloads typically end in \n (line-buffered shell).
-        let combined = build_initial_message(
-            Some("README contents\n"),
-            Some("Summarize the text given"),
-        );
+        let combined =
+            build_initial_message(Some("README contents\n"), Some("Summarize the text given"));
         assert_eq!(
             combined.as_deref(),
             Some("README contents\nSummarize the text given")
@@ -907,7 +921,10 @@ mod tests {
         let prompt = format!("@{} @{} compare them", p1.display(), p2.display());
         let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
         assert!(out.contains(&format!("<file name=\"{}\">\nfirst\n</file>", p1.display())));
-        assert!(out.contains(&format!("<file name=\"{}\">\nsecond\n</file>", p2.display())));
+        assert!(out.contains(&format!(
+            "<file name=\"{}\">\nsecond\n</file>",
+            p2.display()
+        )));
         assert!(out.contains("compare them"));
         // Ordering: first file appears before second.
         assert!(out.find("first").unwrap() < out.find("second").unwrap());
@@ -921,7 +938,10 @@ mod tests {
         let path = write_tmp("body");
         let prompt = format!("preamble @{} trailing", path.display());
         let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
-        assert_eq!(out, prompt, "no leading @, prompt must pass through verbatim");
+        assert_eq!(
+            out, prompt,
+            "no leading @, prompt must pass through verbatim"
+        );
     }
 
     /// The greedy-lookahead added for spaced paths must not swallow

@@ -1098,10 +1098,9 @@ fn parse_sse_body(body: &str, model: &Model) -> Result<Vec<AssistantMessageEvent
                                 // we don't silently drop the entire tool call
                                 // to `{}`.
                                 if !args_buf.is_empty() {
-                                    tc.arguments = crate::transform::parse_json_with_repair(
-                                        &args_buf,
-                                    )
-                                    .unwrap_or(serde_json::json!({}));
+                                    tc.arguments =
+                                        crate::transform::parse_json_with_repair(&args_buf)
+                                            .unwrap_or(serde_json::json!({}));
                                 }
                                 if let Some(AssistantContentBlock::ToolCall(out_tc)) =
                                     output.content.get_mut(index)
@@ -1647,7 +1646,9 @@ mod tests {
         };
         let body = build_request_body(&model, &context, 4096, None, &Some(opts)).unwrap();
         assert_eq!(
-            body["temperature"].as_f64().map(|v| (v * 10.0).round() / 10.0),
+            body["temperature"]
+                .as_f64()
+                .map(|v| (v * 10.0).round() / 10.0),
             Some(0.7)
         );
     }
@@ -1676,10 +1677,7 @@ mod tests {
             "claude-sonnet-3-7",
             "claude-3-5-haiku",
         ] {
-            assert!(
-                !supports_adaptive_thinking(id),
-                "{id} must NOT be adaptive"
-            );
+            assert!(!supports_adaptive_thinking(id), "{id} must NOT be adaptive");
         }
     }
 
@@ -2033,7 +2031,8 @@ mod tests {
         assert_eq!(tools.len(), 2);
         for (i, t) in tools.iter().enumerate() {
             assert_eq!(
-                t["eager_input_streaming"], serde_json::Value::Bool(true),
+                t["eager_input_streaming"],
+                serde_json::Value::Bool(true),
                 "tool {i} missing eager_input_streaming: {t:?}"
             );
         }

@@ -179,11 +179,18 @@ mod tests {
         let landed = expected.exists();
 
         if let Some(h) = original_home {
-            unsafe { std::env::set_var("HOME", h); }
+            unsafe {
+                std::env::set_var("HOME", h);
+            }
         } else {
-            unsafe { std::env::remove_var("HOME"); }
+            unsafe {
+                std::env::remove_var("HOME");
+            }
         }
 
-        assert!(landed, "expected ~/written.txt to land at $HOME/written.txt");
+        assert!(
+            landed,
+            "expected ~/written.txt to land at $HOME/written.txt"
+        );
     }
 }

@@ -1766,20 +1766,14 @@ mod tests {
     #[ignore = "parity gap: unbreakable word filling width followed by space"]
     fn parity_handles_unbreakable_word_filling_width_followed_by_space() {
         let got = wrap_text_with_ansi("aaaaaaaaaaaa aaaa", 12);
-        assert_eq!(
-            got,
-            vec!["aaaaaaaaaaaa".to_string(), " aaaa".to_string()]
-        );
+        assert_eq!(got, vec!["aaaaaaaaaaaa".to_string(), " aaaa".to_string()]);
     }
 
     #[test]
     #[ignore = "parity gap: leading whitespace preserved on first chunk"]
     fn parity_leading_whitespace_followed_by_long_word_wraps_word_after_spaces() {
         let got = wrap_text_with_ansi("      aaaaaaaaaaaa", 12);
-        assert_eq!(
-            got,
-            vec!["      ".to_string(), "aaaaaaaaaaaa".to_string()]
-        );
+        assert_eq!(got, vec!["      ".to_string(), "aaaaaaaaaaaa".to_string()]);
     }
 
     #[test]

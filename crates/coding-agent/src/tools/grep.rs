@@ -397,7 +397,9 @@ mod tests {
         // The flag-shaped pattern should be treated as literal search
         // text (no match against `target\n`).
         assert!(
-            text.contains("No matches") || text.contains("no matches") || text.trim().is_empty()
+            text.contains("No matches")
+                || text.contains("no matches")
+                || text.trim().is_empty()
                 || text.to_lowercase().contains("not found"),
             "expected no matches for flag-pattern, got: {text}"
         );

@@ -181,7 +181,9 @@ pub fn clamp_thinking_level(
     if available.contains(&requested) {
         return requested;
     }
-    let Some(requested_index) = EXTENDED_THINKING_LEVELS.iter().position(|l| *l == requested)
+    let Some(requested_index) = EXTENDED_THINKING_LEVELS
+        .iter()
+        .position(|l| *l == requested)
     else {
         return available.first().copied().flatten();
     };

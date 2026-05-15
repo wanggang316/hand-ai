@@ -535,9 +535,7 @@ impl WarningSettings {
 
     fn merge(base: Self, project: Self) -> Self {
         Self {
-            anthropic_extra_usage: project
-                .anthropic_extra_usage
-                .or(base.anthropic_extra_usage),
+            anthropic_extra_usage: project.anthropic_extra_usage.or(base.anthropic_extra_usage),
         }
     }
 }
@@ -782,15 +780,11 @@ impl Settings {
             skills: project.skills.or(base.skills),
             prompts: project.prompts.or(base.prompts),
             themes: project.themes.or(base.themes),
-            enable_skill_commands: project
-                .enable_skill_commands
-                .or(base.enable_skill_commands),
+            enable_skill_commands: project.enable_skill_commands.or(base.enable_skill_commands),
             terminal: TerminalSettings::merge(base.terminal, project.terminal),
             images: ImageSettings::merge(base.images, project.images),
             enabled_models: project.enabled_models.or(base.enabled_models),
-            double_escape_action: project
-                .double_escape_action
-                .or(base.double_escape_action),
+            double_escape_action: project.double_escape_action.or(base.double_escape_action),
             tree_filter_mode: project.tree_filter_mode.or(base.tree_filter_mode),
             thinking_budgets: ThinkingBudgetsSettings::merge(
                 base.thinking_budgets,
@@ -800,9 +794,7 @@ impl Settings {
             autocomplete_max_visible: project
                 .autocomplete_max_visible
                 .or(base.autocomplete_max_visible),
-            show_hardware_cursor: project
-                .show_hardware_cursor
-                .or(base.show_hardware_cursor),
+            show_hardware_cursor: project.show_hardware_cursor.or(base.show_hardware_cursor),
             markdown: MarkdownSettings::merge(base.markdown, project.markdown),
             warnings: WarningSettings::merge(base.warnings, project.warnings),
             session_dir: project.session_dir.or(base.session_dir),

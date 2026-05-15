@@ -643,7 +643,10 @@ fn list_models_for_cli(search: Option<&str>) -> Vec<model::Model> {
             .collect();
         let haystack_refs: Vec<&str> = haystacks.iter().map(String::as_str).collect();
         let matches = fuzzy_filter(pattern, &haystack_refs);
-        let kept: Vec<model::Model> = matches.into_iter().map(|(i, _)| models[i].clone()).collect();
+        let kept: Vec<model::Model> = matches
+            .into_iter()
+            .map(|(i, _)| models[i].clone())
+            .collect();
         models = kept;
     }
     models.sort_by(|a, b| {
@@ -1032,10 +1035,7 @@ mod tests {
         let table: std::collections::HashMap<&str, &[&str]> =
             clipboard_writers().iter().map(|(n, a)| (*n, *a)).collect();
         assert_eq!(table.get("xclip"), Some(&&["-selection", "clipboard"][..]));
-        assert_eq!(
-            table.get("xsel"),
-            Some(&&["--clipboard", "--input"][..])
-        );
+        assert_eq!(table.get("xsel"), Some(&&["--clipboard", "--input"][..]));
         assert!(table.get("pbcopy").unwrap().is_empty());
         assert!(table.get("wl-copy").unwrap().is_empty());
     }

@@ -198,7 +198,6 @@ fn bash_exit_code(result: &ToolResult) -> Option<i32> {
         .map(|v| v as i32)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +408,9 @@ mod tests {
         // banner) instead of an AppendStatus line; dispatch() no longer
         // emits anything for the Error variant.
         let updates = dispatch(&AgentSessionEvent::Error("boom".to_string()));
-        assert!(updates.is_empty(), "expected no chat updates, got {updates:?}");
+        assert!(
+            updates.is_empty(),
+            "expected no chat updates, got {updates:?}"
+        );
     }
 }

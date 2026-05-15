@@ -1070,8 +1070,7 @@ impl AgentSession {
     /// and cleared by an RAII guard, so the value observed here is
     /// monotone within a single executor: false → true → false.
     pub fn is_bash_running(&self) -> bool {
-        self.bash_running
-            .load(std::sync::atomic::Ordering::Acquire)
+        self.bash_running.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Run a one-off bash command, racing it against [`Self::abort_bash`].
@@ -1107,14 +1106,12 @@ impl AgentSession {
         struct InFlightGuard(Arc<std::sync::atomic::AtomicBool>);
         impl Drop for InFlightGuard {
             fn drop(&mut self) {
-                self.0
-                    .store(false, std::sync::atomic::Ordering::Release);
+                self.0.store(false, std::sync::atomic::Ordering::Release);
             }
         }
         self.bash_running
             .store(true, std::sync::atomic::Ordering::Release);
         let _guard = InFlightGuard(self.bash_running.clone());
-
 
         // Prefer the session's `shell_path` setting over the ambient
         // `$SHELL`. Without this, multiple agent sessions running from the
@@ -1601,8 +1598,8 @@ mod tests {
     #[test]
     fn set_label_emits_session_info_changed() {
         let dir = TempDir::new().unwrap();
-        let mut session = AgentSession::new(test_config(dir.path().to_path_buf()), vec![])
-            .expect("new session");
+        let mut session =
+            AgentSession::new(test_config(dir.path().to_path_buf()), vec![]).expect("new session");
         // Capture all events that pass through. Use a Mutex<Vec> so the
         // subscribe closure can append from any thread.
         let captured: Arc<Mutex<Vec<AgentSessionEvent>>> = Arc::new(Mutex::new(Vec::new()));

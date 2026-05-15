@@ -146,7 +146,9 @@ impl UserMessageSelectorComponent {
 
     fn raw_key(event: &InputEvent) -> Option<std::borrow::Cow<'_, str>> {
         match event {
-            InputEvent::Raw(s) | InputEvent::Paste(s) => Some(std::borrow::Cow::Borrowed(s.as_str())),
+            InputEvent::Raw(s) | InputEvent::Paste(s) => {
+                Some(std::borrow::Cow::Borrowed(s.as_str()))
+            }
             // The Tui parses ESC-prefixed sequences and single-byte
             // control codes (arrows, Escape, Enter, Tab, Backspace) as
             // `InputEvent::Key`. Convert back to the canonical byte

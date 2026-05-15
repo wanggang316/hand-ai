@@ -48,13 +48,13 @@ use crate::core::error::CodingAgentError;
 
 use super::components::{
     AssistantMessageComponent, AuthSelectorMode, AuthSelectorProvider, BashExecutionComponent,
-    BashStatus, BorderedLoaderComponent, CustomMessageComponent, CustomMessageData, FooterComponent,
-    FooterViewModel, LoginDialogComponent, LoginDialogEvent, ModelOutcome, ModelSelectorComponent,
-    OAuthOutcome, OAuthSelectorComponent, ScopedModelsConfig, ScopedModelsOutcome,
-    ScopedModelsSelectorComponent, SessionSelectorComponent, SessionSelectorEvent,
-    TreeRow, TreeSelectorComponent, TreeSelectorEvent,
-    SettingsSelectorComponent, SettingsSelectorEvent, ThemeOutcome, ThemeSelectorComponent,
-    ThinkingOutcome, ThinkingSelectorComponent, TokenUsageSummary, ToolExecutionComponent,
+    BashStatus, BorderedLoaderComponent, CustomMessageComponent, CustomMessageData,
+    FooterComponent, FooterViewModel, LoginDialogComponent, LoginDialogEvent, ModelOutcome,
+    ModelSelectorComponent, OAuthOutcome, OAuthSelectorComponent, ScopedModelsConfig,
+    ScopedModelsOutcome, ScopedModelsSelectorComponent, SessionSelectorComponent,
+    SessionSelectorEvent, SettingsSelectorComponent, SettingsSelectorEvent, ThemeOutcome,
+    ThemeSelectorComponent, ThinkingOutcome, ThinkingSelectorComponent, TokenUsageSummary,
+    ToolExecutionComponent, TreeRow, TreeSelectorComponent, TreeSelectorEvent,
     UserMessageComponent,
 };
 use super::event_dispatch::{ChatUpdate, dispatch as dispatch_event};
@@ -459,25 +459,20 @@ impl InteractiveMode {
                 && matches!(&key.name, KeyName::Char('g'))
                 && key.modifiers.ctrl
             {
-                let current = editor_for_ext
-                    .lock()
-                    .map(|e| e.text())
-                    .unwrap_or_default();
+                let current = editor_for_ext.lock().map(|e| e.text()).unwrap_or_default();
                 let chat_clone = Arc::clone(&chat_for_ext);
                 let editor_clone = Arc::clone(&editor_for_ext);
-                std::thread::spawn(move || {
-                    match run_external_editor(&current) {
-                        Ok(new_text) => {
-                            if let Ok(mut e) = editor_clone.lock() {
-                                e.set_text(&new_text);
-                            }
+                std::thread::spawn(move || match run_external_editor(&current) {
+                    Ok(new_text) => {
+                        if let Ok(mut e) = editor_clone.lock() {
+                            e.set_text(&new_text);
                         }
-                        Err(e) => push_status(
-                            &chat_clone,
-                            format!("[external editor failed: {e}]"),
-                            Some(RED_FG),
-                        ),
                     }
+                    Err(e) => push_status(
+                        &chat_clone,
+                        format!("[external editor failed: {e}]"),
+                        Some(RED_FG),
+                    ),
                 });
                 return ListenerResult {
                     consume: true,
@@ -494,8 +489,7 @@ impl InteractiveMode {
         // is inserted via the editor's Arc handle.
         let chat_for_img = Arc::clone(&chat);
         let editor_for_img = Arc::clone(&editor);
-        let render_for_img: Arc<dyn Fn() + Send + Sync + 'static> =
-            Arc::new(tui.render_handle());
+        let render_for_img: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(tui.render_handle());
         tui.add_input_listener(Box::new(move |event: &InputEvent| {
             if let InputEvent::Key(key) = event
                 && matches!(&key.name, KeyName::Char('v'))
@@ -540,10 +534,7 @@ impl InteractiveMode {
                 && !key.modifiers.ctrl
                 && !key.modifiers.alt
             {
-                let loader_active = loader_for_esc
-                    .lock()
-                    .map(|s| s.is_some())
-                    .unwrap_or(false);
+                let loader_active = loader_for_esc.lock().map(|s| s.is_some()).unwrap_or(false);
                 if loader_active {
                     if let Ok(token) = cancel_for_esc.lock() {
                         token.cancel();
@@ -644,8 +635,7 @@ impl InteractiveMode {
         let stop_for_tick = Arc::clone(&stop);
         let tick_render = tui.render_handle();
         let tick_task = tokio::spawn(async move {
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_millis(LOADER_TICK_MS));
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(LOADER_TICK_MS));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while !stop_for_tick.load(Ordering::Relaxed) {
                 tick.tick().await;
@@ -673,8 +663,7 @@ impl InteractiveMode {
         tokio::spawn(async move {
             let fetcher = crate::utils::version_check::HttpVersionFetcher::new();
             if let Some(latest) =
-                crate::utils::version_check::check_for_new_version(&fetcher, &current_version)
-                    .await
+                crate::utils::version_check::check_for_new_version(&fetcher, &current_version).await
             {
                 let banner = format!(
                     "[update available] hand-coding-agent {latest} is newer than {current_version}. \
@@ -834,10 +823,7 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
                             if let Ok(token) = session.cancel_handle().lock() {
                                 token.cancel();
                             }
-                            push_error(
-                                &agent_chat,
-                                "request timed out after 5 minutes; cancelled",
-                            );
+                            push_error(&agent_chat, "request timed out after 5 minutes; cancelled");
                         }
                     }
                     refresh_footer(&session, &cwd, &agent_footer, &agent_usage);
@@ -976,7 +962,10 @@ fn coloured_text(text: impl AsRef<str>, ansi_prefix: Option<&str>) -> TextCompon
 /// lost in tool output / dim messages above it.
 fn push_error(chat: &ChatList, msg: impl AsRef<str>) {
     // \x1b[1;97;41m = bold + bright white + red background.
-    let body = format!("\x1b[1;97;41m ✘ Error  \x1b[0m \x1b[1;91m{}{RESET}", msg.as_ref());
+    let body = format!(
+        "\x1b[1;97;41m ✘ Error  \x1b[0m \x1b[1;91m{}{RESET}",
+        msg.as_ref()
+    );
     let mut list = chat.lock().expect("chat list mutex poisoned");
     list.push(Box::new(TextComponent::new(body)));
 }
@@ -1007,9 +996,8 @@ fn handle_clipboard_image_paste() -> Result<Option<String>, String> {
         Ok(None) => return Ok(None),
         Err(e) => return Err(e.to_string()),
     };
-    let ext =
-        crate::utils::clipboard_image::extension_for_image_mime_type(&image.mime_type)
-            .unwrap_or("png");
+    let ext = crate::utils::clipboard_image::extension_for_image_mime_type(&image.mime_type)
+        .unwrap_or("png");
     let tmp_dir = std::env::temp_dir();
     // Cheap unique suffix — nanos since UNIX epoch plus a process-local
     // counter. We don't need cryptographic uniqueness, just enough to
@@ -1464,8 +1452,7 @@ fn push_status(chat: &ChatList, text: String, color_prefix: Option<&str>) {
 ///
 /// Set once from [`InteractiveMode::run`] via [`set_render_handle`], then
 /// any code path that mutates shared TUI state calls [`request_render`].
-static RENDER_HANDLE: std::sync::OnceLock<RenderFn> =
-    std::sync::OnceLock::new();
+static RENDER_HANDLE: std::sync::OnceLock<RenderFn> = std::sync::OnceLock::new();
 
 type RenderFn = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -1895,11 +1882,7 @@ fn build_tree_rows(root: &Path) -> Vec<TreeRow> {
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let display = if is_dir {
-                format!("{label}/")
-            } else {
-                label
-            };
+            let display = if is_dir { format!("{label}/") } else { label };
             out.push(TreeRow {
                 id: rel,
                 depth,
@@ -1951,10 +1934,8 @@ async fn mount_scoped_models_selector(
     let initial_ids: Option<Vec<String>> = if initial_patterns.is_empty() {
         None
     } else {
-        let resolved = crate::core::model_resolver::resolve_model_scope(
-            &initial_patterns,
-            &all_models,
-        );
+        let resolved =
+            crate::core::model_resolver::resolve_model_scope(&initial_patterns, &all_models);
         Some(
             resolved
                 .models
@@ -2418,8 +2399,8 @@ async fn mount_login_key_input(
             if key.is_empty() {
                 push_status(chat, "[/login cancelled: empty key]".to_string(), None);
             } else {
-                let result = AuthStorage::new()
-                    .and_then(|s| s.set(&canonical, AuthRecord::ApiKey { key }));
+                let result =
+                    AuthStorage::new().and_then(|s| s.set(&canonical, AuthRecord::ApiKey { key }));
                 match result {
                     Ok(()) => push_status(
                         chat,
@@ -2464,7 +2445,10 @@ async fn run_oauth_login(chat: &ChatList, oauth_id: model::OAuthProviderId) {
     let Some(provider) = registry.get(oauth_id) else {
         push_status(
             chat,
-            format!("[/login: no OAuth implementation for {}]", oauth_id.as_str()),
+            format!(
+                "[/login: no OAuth implementation for {}]",
+                oauth_id.as_str()
+            ),
             Some(RED_FG),
         );
         return;
@@ -2607,18 +2591,10 @@ async fn mount_resume_picker(
                     }
                     push_welcome_header(chat, session.model());
                     replay_messages_into(chat, session.messages());
-                    push_status(
-                        chat,
-                        format!("[resumed: {}]", path.display()),
-                        None,
-                    );
+                    push_status(chat, format!("[resumed: {}]", path.display()), None);
                 }
                 Err(e) => {
-                    push_status(
-                        chat,
-                        format!("[/resume failed: {e}]"),
-                        Some(RED_FG),
-                    );
+                    push_status(chat, format!("[/resume failed: {e}]"), Some(RED_FG));
                 }
             }
         }
@@ -3081,11 +3057,7 @@ fn decide_changelog_startup(
 fn maybe_show_changelog_on_update(chat: &ChatList, session: &mut AgentSession) {
     let current_version = env!("CARGO_PKG_VERSION");
     let messages_empty = session.messages().is_empty();
-    let last_version = session
-        .settings()
-        .current()
-        .last_changelog_version
-        .clone();
+    let last_version = session.settings().current().last_changelog_version.clone();
 
     let path = match locate_changelog_file() {
         Some(p) => p,
@@ -3107,8 +3079,7 @@ fn maybe_show_changelog_on_update(chat: &ChatList, session: &mut AgentSession) {
             let _ = session.settings().save(scope);
         }
         ChangelogStartupAction::Display(body) => {
-            let component =
-                CustomMessageComponent::new(CustomMessageData::new("changelog", body));
+            let component = CustomMessageComponent::new(CustomMessageData::new("changelog", body));
             {
                 let mut list = chat.lock().expect("chat list mutex poisoned");
                 list.push(Box::new(component));
@@ -3413,9 +3384,17 @@ mod tests {
         apply_updates_to_chat(&chat, &tools, &asst, updates);
 
         let list = chat.lock().unwrap();
-        assert_eq!(list.len(), 1, "expected exactly one bubble, got {}", list.len());
+        assert_eq!(
+            list.len(),
+            1,
+            "expected exactly one bubble, got {}",
+            list.len()
+        );
         let joined = list[0].render(80).join("\n");
-        assert!(joined.contains("你好"), "expected the bubble to carry the text, got: {joined:?}");
+        assert!(
+            joined.contains("你好"),
+            "expected the bubble to carry the text, got: {joined:?}"
+        );
     }
 
     #[test]
@@ -3690,18 +3669,14 @@ mod tests {
 
     #[test]
     fn changelog_startup_records_only_on_fresh_install() {
-        let entries = crate::utils::changelog::parse_changelog(
-            "## [0.1.0] 2026-04-01\n- first",
-        );
+        let entries = crate::utils::changelog::parse_changelog("## [0.1.0] 2026-04-01\n- first");
         let action = decide_changelog_startup(true, None, &entries);
         assert_eq!(action, ChangelogStartupAction::RecordOnly);
     }
 
     #[test]
     fn changelog_startup_skips_when_up_to_date() {
-        let entries = crate::utils::changelog::parse_changelog(
-            "## [0.1.0] 2026-04-01\n- first",
-        );
+        let entries = crate::utils::changelog::parse_changelog("## [0.1.0] 2026-04-01\n- first");
         let action = decide_changelog_startup(true, Some("0.1.0"), &entries);
         assert_eq!(action, ChangelogStartupAction::Skip);
     }
@@ -3813,8 +3788,8 @@ mod tests {
         msg.content.push(model::AssistantContentBlock::Thinking(
             model::ThinkingContent::new("inner reasoning"),
         ));
-        let comp = AssistantMessageComponent::with_message(msg)
-            .with_shared_hide_flag(Arc::clone(flag));
+        let comp =
+            AssistantMessageComponent::with_message(msg).with_shared_hide_flag(Arc::clone(flag));
         let visible = comp.render(80).join("\n");
         assert!(
             visible.contains("inner reasoning"),
@@ -4123,7 +4098,8 @@ mod tests {
     async fn import_missing_file_pushes_error() {
         let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
         let mut session = make_session();
-        let action = SlashCommandAction::Import(PathBuf::from("/tmp/definitely-does-not-exist.jsonl"));
+        let action =
+            SlashCommandAction::Import(PathBuf::from("/tmp/definitely-does-not-exist.jsonl"));
         apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
         let joined = chat.lock().unwrap()[0].render(80).join("\n");
         assert!(joined.contains("not found"), "{joined:?}");

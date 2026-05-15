@@ -86,9 +86,7 @@ fn downgrade_unsupported_user_images(messages: Vec<Message>, model: &Model) -> V
         .collect()
 }
 
-fn replace_user_images_with_placeholder(
-    blocks: Vec<UserContentBlock>,
-) -> Vec<UserContentBlock> {
+fn replace_user_images_with_placeholder(blocks: Vec<UserContentBlock>) -> Vec<UserContentBlock> {
     let mut out: Vec<UserContentBlock> = Vec::with_capacity(blocks.len());
     let mut previous_was_placeholder = false;
     for block in blocks {
@@ -777,7 +775,9 @@ mod tests {
             panic!("blocks expected");
         };
         assert!(
-            blocks.iter().any(|b| matches!(b, UserContentBlock::Image(_))),
+            blocks
+                .iter()
+                .any(|b| matches!(b, UserContentBlock::Image(_))),
             "image must survive for vision models"
         );
     }
@@ -868,7 +868,9 @@ mod tests {
         );
         // No special characters survive the normalization (only [a-zA-Z0-9_-]).
         assert!(
-            result.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            result
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
             "unexpected chars in {result:?}"
         );
         // Prefix preserved so the truncated ID is still recognisable as

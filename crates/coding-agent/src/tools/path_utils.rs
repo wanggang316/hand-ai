@@ -35,11 +35,7 @@ const CURLY_RIGHT_SINGLE_QUOTE: char = '\u{2019}';
 fn normalize_unicode_spaces(s: &str) -> String {
     s.chars()
         .map(|c| match c {
-            '\u{00A0}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}' => ' ',
+            '\u{00A0}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' => ' ',
             other => other,
         })
         .collect()

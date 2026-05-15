@@ -16,8 +16,7 @@ use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagE
 /// fenced block. When the highlighter cannot handle the language it should
 /// return the input split on newlines — the renderer adds the default
 /// foreground color itself.
-pub type CodeHighlighter =
-    Arc<dyn Fn(&str, Option<&str>) -> Vec<String> + Send + Sync + 'static>;
+pub type CodeHighlighter = Arc<dyn Fn(&str, Option<&str>) -> Vec<String> + Send + Sync + 'static>;
 
 // ---------------------------------------------------------------------------
 // Theme + default-style types
@@ -985,8 +984,7 @@ mod tests {
     /// itself; the fallback must NOT duplicate it as `https://x (https://x)`.
     #[test]
     fn test_link_autolink_fallback_does_not_duplicate() {
-        let plain =
-            hyperlink_with_support("https://example.com", "https://example.com", false);
+        let plain = hyperlink_with_support("https://example.com", "https://example.com", false);
         assert_eq!(plain, "https://example.com");
     }
 
@@ -1015,8 +1013,7 @@ mod tests {
         // hook is invoked with the right inputs and its output reaches the
         // rendered lines verbatim.
         use std::sync::Mutex;
-        let captured: Arc<Mutex<Option<(String, Option<String>)>>> =
-            Arc::new(Mutex::new(None));
+        let captured: Arc<Mutex<Option<(String, Option<String>)>>> = Arc::new(Mutex::new(None));
         let cap2 = Arc::clone(&captured);
         let hook: CodeHighlighter = Arc::new(move |code: &str, lang: Option<&str>| {
             *cap2.lock().unwrap() = Some((code.to_string(), lang.map(|s| s.to_string())));
@@ -1038,7 +1035,10 @@ mod tests {
         assert!(body.contains("const y = 2;"));
         // The magenta SGR (35) from the hook output reaches the rendered
         // line. The default code_fg color path is bypassed.
-        assert!(joined.contains("\x1b[35m"), "missing hook color in {joined:?}");
+        assert!(
+            joined.contains("\x1b[35m"),
+            "missing hook color in {joined:?}"
+        );
         // Both code lines render.
         let stripped = strip(&joined);
         assert!(stripped.contains("const x = 1;"));

@@ -1827,10 +1827,7 @@ mod tests {
 
     #[test]
     fn extract_cursor_position_strips_marker_above_viewport() {
-        let mut lines = vec![
-            format!("above{}", CURSOR_MARKER),
-            "visible".to_string(),
-        ];
+        let mut lines = vec![format!("above{}", CURSOR_MARKER), "visible".to_string()];
         // height=1 → viewport is only line 1; marker at line 0 is outside
         // the viewport and should NOT be used for positioning, but MUST
         // still be stripped to prevent APC leaking.
@@ -2302,9 +2299,12 @@ mod tests {
     fn marker_rendering_never_leaks_apc_bytes() {
         let (term, output) = SharedTerminal::new();
         let mut tui = Tui::new(Box::new(term));
-        tui.root_mut().add_child_with_id(Box::new(
-            MarkerComponent::new(vec!["line0", "line1", "line2"], 1, 2),
-        ));
+        tui.root_mut()
+            .add_child_with_id(Box::new(MarkerComponent::new(
+                vec!["line0", "line1", "line2"],
+                1,
+                2,
+            )));
 
         // Frame 1
         tui.request_render();
@@ -2354,10 +2354,7 @@ mod tests {
         tui.maybe_render();
 
         let all: String = output.lock().unwrap().join("");
-        assert!(
-            !all.contains("_hand:c"),
-            "multiple markers leaked: {all:?}"
-        );
+        assert!(!all.contains("_hand:c"), "multiple markers leaked: {all:?}");
     }
 
     // ---------- overlay-mount channel ----------

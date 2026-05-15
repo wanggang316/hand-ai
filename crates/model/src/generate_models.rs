@@ -395,11 +395,13 @@ fn openrouter_compat(model_id: &str) -> Option<Compat> {
     {
         return None;
     }
-    Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
-        thinking_format: Some("deepseek".to_string()),
-        requires_reasoning_content_on_assistant_messages: Some(true),
-        ..Default::default()
-    })))
+    Some(Compat::OpenAICompletions(Box::new(
+        OpenAICompletionsCompat {
+            thinking_format: Some("deepseek".to_string()),
+            requires_reasoning_content_on_assistant_messages: Some(true),
+            ..Default::default()
+        },
+    )))
 }
 
 fn provider_has_tool_call(m: &ModelsDevModel) -> bool {
@@ -984,10 +986,7 @@ async fn load_models_dev_data(client: &reqwest::Client) -> Vec<Model> {
                 if has_canonical {
                     continue;
                 }
-                (
-                    "kimi-for-coding".to_string(),
-                    "Kimi For Coding".to_string(),
-                )
+                ("kimi-for-coding".to_string(), "Kimi For Coding".to_string())
             } else {
                 (
                     model_id.clone(),
@@ -1882,13 +1881,7 @@ mod tests {
     /// `is_zai = true` default leaves `zai_tool_stream` enabled.
     #[test]
     fn zai_tool_stream_set_excludes_newer_and_unrelated_ids() {
-        for id in [
-            "glm-4.6",
-            "glm-4.6-air",
-            "glm-4.6-thinking",
-            "gpt-4o",
-            "",
-        ] {
+        for id in ["glm-4.6", "glm-4.6-air", "glm-4.6-thinking", "gpt-4o", ""] {
             assert!(
                 !is_zai_tool_stream_unsupported(id),
                 "{id} must NOT be marked tool-stream-unsupported"

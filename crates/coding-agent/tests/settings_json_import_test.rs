@@ -19,10 +19,7 @@ fn camelcase_settings_json_deserializes_into_settings() {
     // Top-level scalars (camelCase → snake_case via serde alias).
     assert_eq!(s.last_changelog_version.as_deref(), Some("0.42.1"));
     assert_eq!(s.default_provider.as_deref(), Some("anthropic"));
-    assert_eq!(
-        s.default_thinking_level,
-        Some(ThinkingLevelSetting::Medium),
-    );
+    assert_eq!(s.default_thinking_level, Some(ThinkingLevelSetting::Medium),);
     assert_eq!(s.transport, Some(TransportSetting::Websocket));
     assert_eq!(s.steering_mode, Some(SteeringMode::All));
     assert_eq!(s.follow_up_mode, Some(SteeringMode::OneAtATime));
@@ -68,13 +65,15 @@ fn camelcase_settings_json_deserializes_into_settings() {
     // Lists round-trip.
     assert_eq!(
         s.npm_command.as_deref(),
-        Some(&[
-            "mise".to_string(),
-            "exec".to_string(),
-            "node@20".to_string(),
-            "--".to_string(),
-            "npm".to_string(),
-        ][..]),
+        Some(
+            &[
+                "mise".to_string(),
+                "exec".to_string(),
+                "node@20".to_string(),
+                "--".to_string(),
+                "npm".to_string(),
+            ][..]
+        ),
     );
     assert_eq!(
         s.enabled_models.as_deref(),
@@ -105,5 +104,8 @@ fn camelcase_settings_json_deserializes_into_settings() {
         s.session_dir.as_deref(),
         Some(std::path::Path::new("~/.local/share/hand/sessions")),
     );
-    assert_eq!(s.shell_path.as_deref(), Some(std::path::Path::new("/bin/zsh")));
+    assert_eq!(
+        s.shell_path.as_deref(),
+        Some(std::path::Path::new("/bin/zsh"))
+    );
 }

@@ -260,8 +260,7 @@ mod tests {
     /// pins the parse surface.
     #[test]
     fn parses_offline_flag() {
-        let args =
-            Args::try_parse_from(["hand", "--offline"]).expect("--offline should parse");
+        let args = Args::try_parse_from(["hand", "--offline"]).expect("--offline should parse");
         assert!(args.offline);
         let default = Args::try_parse_from(["hand"]).expect("no-arg parse");
         assert!(!default.offline, "default must be false");
@@ -343,8 +342,12 @@ mod tests {
     #[test]
     fn parses_export_flag() {
         let args = Args::try_parse_from(["hand", "--export", "out.html"]).unwrap();
-        assert_eq!(args.export.as_deref().map(|p| p.to_string_lossy().to_string()),
-                   Some("out.html".to_string()));
+        assert_eq!(
+            args.export
+                .as_deref()
+                .map(|p| p.to_string_lossy().to_string()),
+            Some("out.html".to_string())
+        );
     }
 
     #[test]
@@ -375,7 +378,9 @@ mod tests {
     fn parses_session_dir_flag() {
         let args = Args::try_parse_from(["hand", "--session-dir", "/tmp/sessions"]).unwrap();
         assert_eq!(
-            args.session_dir.as_deref().map(|p| p.to_string_lossy().to_string()),
+            args.session_dir
+                .as_deref()
+                .map(|p| p.to_string_lossy().to_string()),
             Some("/tmp/sessions".to_string())
         );
     }

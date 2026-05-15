@@ -33,11 +33,11 @@ pub use components::{
     DEFAULT_INDICATOR_INTERVAL_MS, DEFAULT_PRIMARY_COLUMN_WIDTH, DEFAULT_SPINNER_FRAMES,
     EditorComponent, ImageComponent, ImageOptions, ImageProtocol, ImageTheme, InputComponent,
     LoaderComponent, LoaderIndicatorOptions, MarkdownComponent, PasteContent,
-    PathAutocompleteProvider, ProgressBarComponent,
-    SelectItem, SelectListComponent, SelectListLayoutOptions, SelectListTheme, SettingEntry,
-    SettingValue, SettingsListComponent, SettingsListTheme, SlashCommand, SlashCommandProvider,
-    SpacerComponent, StatusBarComponent, Suggestion, TextComponent, ToastComponent, ToastLevel,
-    TruncatedTextComponent, UndoEntry, UndoOp,
+    PathAutocompleteProvider, ProgressBarComponent, SelectItem, SelectListComponent,
+    SelectListLayoutOptions, SelectListTheme, SettingEntry, SettingValue, SettingsListComponent,
+    SettingsListTheme, SlashCommand, SlashCommandProvider, SpacerComponent, StatusBarComponent,
+    Suggestion, TextComponent, ToastComponent, ToastLevel, TruncatedTextComponent, UndoEntry,
+    UndoOp,
 };
 pub use error::{TuiError, TuiResult};
 pub use fuzzy::{FuzzyMatch, fuzzy_filter, fuzzy_match};

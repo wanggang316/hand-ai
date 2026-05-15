@@ -200,8 +200,7 @@ pub type SubmitCallback = Box<dyn FnMut(String) + Send + 'static>;
 /// it. Drivers use this to rewrite terminal file-drop pastes (which arrive as
 /// quoted absolute paths) into a form the agent understands — e.g. prefixing
 /// with `@` so the @path resolver picks them up.
-pub type PasteTransform =
-    Arc<dyn Fn(&str) -> Option<String> + Send + Sync + 'static>;
+pub type PasteTransform = Arc<dyn Fn(&str) -> Option<String> + Send + Sync + 'static>;
 
 impl EditorComponent {
     /// Construct a new empty editor.
@@ -529,10 +528,7 @@ impl EditorComponent {
         if text.is_empty() {
             return;
         }
-        let transformed = self
-            .paste_transform
-            .as_ref()
-            .and_then(|t| t(text));
+        let transformed = self.paste_transform.as_ref().and_then(|t| t(text));
         let text: &str = match transformed.as_deref() {
             Some(t) => t,
             None => text,
@@ -1248,10 +1244,9 @@ impl Component for EditorComponent {
         // Render the top border, if any.
         if self.border {
             output.push(match self.border_style {
-                BorderStyle::Box => paint_border(format!(
-                    "┌{}┐",
-                    "─".repeat(total_width.saturating_sub(2))
-                )),
+                BorderStyle::Box => {
+                    paint_border(format!("┌{}┐", "─".repeat(total_width.saturating_sub(2))))
+                }
                 BorderStyle::Horizontal => paint_border("─".repeat(total_width)),
             });
         }
@@ -1310,8 +1305,11 @@ impl Component for EditorComponent {
         if self.border {
             output.push(match self.border_style {
                 BorderStyle::Box => {
-                    let info =
-                        format!(" {}:{} ", self.cursor_line + 1, self.cursor_visual_col() + 1);
+                    let info = format!(
+                        " {}:{} ",
+                        self.cursor_line + 1,
+                        self.cursor_visual_col() + 1
+                    );
                     let remaining = total_width.saturating_sub(2 + info.len());
                     paint_border(format!(
                         "└{}{info}{}┘",
@@ -1365,11 +1363,7 @@ impl EditorComponent {
         } else {
             ""
         };
-        let cursor_cell = if self.focused {
-            "\x1b[7m \x1b[0m"
-        } else {
-            " "
-        };
+        let cursor_cell = if self.focused { "\x1b[7m \x1b[0m" } else { " " };
         format!("{marker}{cursor_cell}\x1b[2m{placeholder}\x1b[0m")
     }
 
@@ -1580,11 +1574,7 @@ impl EditorComponent {
                 // `\` immediately before Enter. The trailing `\` is consumed
                 // and replaced with a newline; submission is suppressed.
                 if self.cursor_col > 0
-                    && self
-                        .current_line()
-                        .as_bytes()
-                        .get(self.cursor_col - 1)
-                        == Some(&b'\\')
+                    && self.current_line().as_bytes().get(self.cursor_col - 1) == Some(&b'\\')
                 {
                     self.delete_back();
                     self.insert_newline();
@@ -1993,7 +1983,9 @@ mod tests {
         let lines = editor.render(40);
         // Some content row contains the placeholder text.
         assert!(
-            lines.iter().any(|l| utils::strip_ansi(l).contains("Type a message…")),
+            lines
+                .iter()
+                .any(|l| utils::strip_ansi(l).contains("Type a message…")),
             "expected placeholder in {lines:?}"
         );
 
@@ -2001,7 +1993,9 @@ mod tests {
         editor.handle_input(&InputEvent::Raw("h".into()));
         let lines = editor.render(40);
         assert!(
-            lines.iter().all(|l| !utils::strip_ansi(l).contains("Type a message…")),
+            lines
+                .iter()
+                .all(|l| !utils::strip_ansi(l).contains("Type a message…")),
             "expected placeholder to be hidden after typing"
         );
     }

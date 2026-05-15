@@ -261,8 +261,8 @@ fn normalize_azure_host_path(trimmed: &str) -> String {
         .or_else(|| scheme_host.strip_prefix("http://"))
         .unwrap_or(&scheme_host)
         .to_lowercase();
-    let is_azure_host = host.ends_with(".openai.azure.com")
-        || host.ends_with(".cognitiveservices.azure.com");
+    let is_azure_host =
+        host.ends_with(".openai.azure.com") || host.ends_with(".cognitiveservices.azure.com");
     let normalized_path = path.trim_end_matches('/');
     if is_azure_host && (normalized_path.is_empty() || normalized_path == "/openai") {
         return format!("{scheme_host}/openai/v1");

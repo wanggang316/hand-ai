@@ -289,10 +289,7 @@ fn build_codex_request_body(model: &Model, context: &Context, options: &StreamOp
     // default; agents that wrap responses with their own narration get
     // more signal per token. The upstream lowered this from `medium` for
     // the same reason. Callers that already set `text.verbosity` win.
-    let text_has_verbosity = body
-        .get("text")
-        .and_then(|t| t.get("verbosity"))
-        .is_some();
+    let text_has_verbosity = body.get("text").and_then(|t| t.get("verbosity")).is_some();
     if !text_has_verbosity {
         let entry = body
             .as_object_mut()
@@ -386,9 +383,7 @@ fn extract_account_id(token: &str) -> Option<String> {
 /// session id is present.
 pub(crate) fn should_send_session_id_header(compat: Option<&crate::types::Compat>) -> bool {
     match compat {
-        Some(crate::types::Compat::OpenAIResponses(c)) => {
-            c.send_session_id_header.unwrap_or(true)
-        }
+        Some(crate::types::Compat::OpenAIResponses(c)) => c.send_session_id_header.unwrap_or(true),
         _ => true,
     }
 }
@@ -874,24 +869,24 @@ mod tests {
     fn should_send_session_id_header_honors_responses_compat_flag() {
         use crate::types::{Compat, OpenAIResponsesCompat};
         assert!(should_send_session_id_header(None), "default is on");
-        assert!(should_send_session_id_header(Some(&Compat::OpenAIResponses(
-            OpenAIResponsesCompat {
+        assert!(should_send_session_id_header(Some(
+            &Compat::OpenAIResponses(OpenAIResponsesCompat {
                 send_session_id_header: None,
                 ..Default::default()
-            }
-        ))));
-        assert!(should_send_session_id_header(Some(&Compat::OpenAIResponses(
-            OpenAIResponsesCompat {
+            })
+        )));
+        assert!(should_send_session_id_header(Some(
+            &Compat::OpenAIResponses(OpenAIResponsesCompat {
                 send_session_id_header: Some(true),
                 ..Default::default()
-            }
-        ))));
-        assert!(!should_send_session_id_header(Some(&Compat::OpenAIResponses(
-            OpenAIResponsesCompat {
+            })
+        )));
+        assert!(!should_send_session_id_header(Some(
+            &Compat::OpenAIResponses(OpenAIResponsesCompat {
                 send_session_id_header: Some(false),
                 ..Default::default()
-            }
-        ))));
+            })
+        )));
     }
 
     /// A non-Responses compat block (e.g. OpenAICompletions on a model
@@ -1071,11 +1066,8 @@ mod tests {
         simple.base.api_key = Some("sk-fake".to_string());
         simple.base.transport = Some(Transport::Websocket);
 
-        let mut stream = provider.stream_simple(
-            model,
-            codex_user_context(Some("You are pi.")),
-            Some(simple),
-        );
+        let mut stream =
+            provider.stream_simple(model, codex_user_context(Some("You are pi.")), Some(simple));
 
         let mut saw_websocket_error = false;
         while let Some(event) = stream.next().await {

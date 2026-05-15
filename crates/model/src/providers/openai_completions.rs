@@ -312,10 +312,7 @@ fn capture_chunk_metadata(
     if output.response_id.is_none() && !chunk_id.is_empty() {
         output.response_id = Some(chunk_id.to_string());
     }
-    if output.response_model.is_none()
-        && !chunk_model.is_empty()
-        && chunk_model != requested_id
-    {
+    if output.response_model.is_none() && !chunk_model.is_empty() && chunk_model != requested_id {
         output.response_model = Some(chunk_model.to_string());
     }
 }
@@ -740,10 +737,8 @@ fn build_params(
             Some(openai_rust::types::ReasoningEffort::High) => "high",
             None => "none",
         };
-        builder = builder.insert_extra_param(
-            "reasoning",
-            serde_json::json!({ "effort": effort_str }),
-        );
+        builder =
+            builder.insert_extra_param("reasoning", serde_json::json!({ "effort": effort_str }));
     } else if let Some(effort) = options.reasoning_effort
         && model.reasoning
         && compat.supports_reasoning_effort
@@ -761,9 +756,7 @@ fn build_params(
         // object only if SOMETHING set — otherwise the upstream sees
         // an empty `provider: {}` which it rejects on some routes.
         if let Ok(provider_json) = serde_json::to_value(router_routing)
-            && provider_json
-                .as_object()
-                .is_some_and(|obj| !obj.is_empty())
+            && provider_json.as_object().is_some_and(|obj| !obj.is_empty())
         {
             let mut extra = HashMap::new();
             extra.insert("provider".to_string(), provider_json);
@@ -782,9 +775,7 @@ fn build_params(
         && let Some(crate::types::Compat::OpenAICompletions(compat_settings)) = &model.compat
         && let Some(gateway_routing) = &compat_settings.vercel_gateway_routing
         && let Ok(gateway_json) = serde_json::to_value(gateway_routing)
-        && gateway_json
-            .as_object()
-            .is_some_and(|obj| !obj.is_empty())
+        && gateway_json.as_object().is_some_and(|obj| !obj.is_empty())
     {
         builder = builder.insert_extra_param(
             "providerOptions",
@@ -1749,11 +1740,8 @@ mod tests {
     fn session_affinity_headers_dropped_when_caching_disabled() {
         use crate::types::CacheRetention;
         let compat = affinity_compat(true);
-        let headers = resolve_session_affinity_headers(
-            &compat,
-            Some("sess-abc"),
-            Some(CacheRetention::None),
-        );
+        let headers =
+            resolve_session_affinity_headers(&compat, Some("sess-abc"), Some(CacheRetention::None));
         assert!(headers.is_empty());
     }
 
@@ -1860,13 +1848,15 @@ mod tests {
         use crate::types::{Compat, OpenAICompletionsCompat, VercelGatewayRouting};
         let mut model = test_model(Provider::OpenAI);
         model.base_url = "https://ai-gateway.vercel.sh/v1".to_string();
-        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
-            vercel_gateway_routing: Some(VercelGatewayRouting {
-                only: Some(vec!["bedrock".to_string(), "anthropic".to_string()]),
-                order: Some(vec!["anthropic".to_string(), "bedrock".to_string()]),
-            }),
-            ..Default::default()
-        })));
+        model.compat = Some(Compat::OpenAICompletions(Box::new(
+            OpenAICompletionsCompat {
+                vercel_gateway_routing: Some(VercelGatewayRouting {
+                    only: Some(vec!["bedrock".to_string(), "anthropic".to_string()]),
+                    order: Some(vec!["anthropic".to_string(), "bedrock".to_string()]),
+                }),
+                ..Default::default()
+            },
+        )));
         let context = Context {
             system_prompt: None,
             messages: vec![Message::User(UserMessage::new_text("hi"))],
@@ -1891,13 +1881,15 @@ mod tests {
         use crate::types::{Compat, OpenAICompletionsCompat, VercelGatewayRouting};
         let mut model = test_model(Provider::OpenAI);
         model.base_url = "https://api.openai.com/v1".to_string();
-        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
-            vercel_gateway_routing: Some(VercelGatewayRouting {
-                only: Some(vec!["bedrock".to_string()]),
-                order: None,
-            }),
-            ..Default::default()
-        })));
+        model.compat = Some(Compat::OpenAICompletions(Box::new(
+            OpenAICompletionsCompat {
+                vercel_gateway_routing: Some(VercelGatewayRouting {
+                    only: Some(vec!["bedrock".to_string()]),
+                    order: None,
+                }),
+                ..Default::default()
+            },
+        )));
         let context = Context {
             system_prompt: None,
             messages: vec![Message::User(UserMessage::new_text("hi"))],
@@ -1920,10 +1912,12 @@ mod tests {
         use crate::types::{Compat, OpenAICompletionsCompat, VercelGatewayRouting};
         let mut model = test_model(Provider::OpenAI);
         model.base_url = "https://ai-gateway.vercel.sh/v1".to_string();
-        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
-            vercel_gateway_routing: Some(VercelGatewayRouting::default()),
-            ..Default::default()
-        })));
+        model.compat = Some(Compat::OpenAICompletions(Box::new(
+            OpenAICompletionsCompat {
+                vercel_gateway_routing: Some(VercelGatewayRouting::default()),
+                ..Default::default()
+            },
+        )));
         let context = Context {
             system_prompt: None,
             messages: vec![Message::User(UserMessage::new_text("hi"))],
@@ -1948,10 +1942,12 @@ mod tests {
         use crate::types::{Compat, OpenAICompletionsCompat, Tool};
         let mut model = test_model(Provider::Zai);
         model.base_url = "https://api.z.ai/api/coding/paas/v4".to_string();
-        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
-            zai_tool_stream: Some(true),
-            ..Default::default()
-        })));
+        model.compat = Some(Compat::OpenAICompletions(Box::new(
+            OpenAICompletionsCompat {
+                zai_tool_stream: Some(true),
+                ..Default::default()
+            },
+        )));
         let context = Context {
             system_prompt: None,
             messages: vec![Message::User(UserMessage::new_text("hi"))],
@@ -2005,10 +2001,12 @@ mod tests {
         use crate::types::{Compat, OpenAICompletionsCompat};
         let mut model = test_model(Provider::Zai);
         model.base_url = "https://api.z.ai/api/coding/paas/v4".to_string();
-        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
-            zai_tool_stream: Some(true),
-            ..Default::default()
-        })));
+        model.compat = Some(Compat::OpenAICompletions(Box::new(
+            OpenAICompletionsCompat {
+                zai_tool_stream: Some(true),
+                ..Default::default()
+            },
+        )));
         let context = Context {
             system_prompt: None,
             messages: vec![Message::User(UserMessage::new_text("hi"))],
@@ -2033,10 +2031,12 @@ mod tests {
         use crate::types::{Compat, OpenAICompletionsCompat};
         let mut model = test_model(Provider::Openrouter);
         model.reasoning = true;
-        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
-            thinking_format: Some("qwen-chat-template".to_string()),
-            ..Default::default()
-        })));
+        model.compat = Some(Compat::OpenAICompletions(Box::new(
+            OpenAICompletionsCompat {
+                thinking_format: Some("qwen-chat-template".to_string()),
+                ..Default::default()
+            },
+        )));
         let context = Context {
             system_prompt: None,
             messages: vec![Message::User(UserMessage::new_text("hi"))],
@@ -2061,10 +2061,12 @@ mod tests {
         use crate::types::{Compat, OpenAICompletionsCompat};
         let mut model = test_model(Provider::Openrouter);
         model.reasoning = true;
-        model.compat = Some(Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
-            thinking_format: Some("qwen-chat-template".to_string()),
-            ..Default::default()
-        })));
+        model.compat = Some(Compat::OpenAICompletions(Box::new(
+            OpenAICompletionsCompat {
+                thinking_format: Some("qwen-chat-template".to_string()),
+                ..Default::default()
+            },
+        )));
         let context = Context {
             system_prompt: None,
             messages: vec![Message::User(UserMessage::new_text("hi"))],
@@ -2473,9 +2475,7 @@ mod tests {
             tool_call_id: id.to_string(),
             tool_name: "read".to_string(),
             content: vec![
-                ToolResultContent::Text(TextContent::new(
-                    "Read image file [image/png]",
-                )),
+                ToolResultContent::Text(TextContent::new("Read image file [image/png]")),
                 ToolResultContent::Image(ImageContent::new("ZmFrZQ==", "image/png")),
             ],
             details: None,
@@ -2774,10 +2774,7 @@ mod tests {
 
         assert_eq!(output.content.len(), 2);
         match (&output.content[0], &output.content[1]) {
-            (
-                AssistantContentBlock::ToolCall(a),
-                AssistantContentBlock::ToolCall(b),
-            ) => {
+            (AssistantContentBlock::ToolCall(a), AssistantContentBlock::ToolCall(b)) => {
                 assert_eq!(a.name, "read");
                 assert_eq!(b.name, "write");
                 assert_eq!(a.id, "call_a");
@@ -2794,7 +2791,11 @@ mod tests {
         let mut current: Option<CurrentBlock> = None;
 
         let mut events = Vec::new();
-        events.extend(handle_delta(&reasoning_delta("We"), &mut current, &mut output));
+        events.extend(handle_delta(
+            &reasoning_delta("We"),
+            &mut current,
+            &mut output,
+        ));
         events.extend(handle_delta(
             &reasoning_delta(" need to respond"),
             &mut current,
@@ -2858,10 +2859,7 @@ mod tests {
         match &output.content[0] {
             AssistantContentBlock::ToolCall(tc) => {
                 assert_eq!(tc.id, "call_abc");
-                assert_eq!(
-                    tc.name, "read",
-                    "first chunk's name must be authoritative"
-                );
+                assert_eq!(tc.name, "read", "first chunk's name must be authoritative");
                 assert_eq!(tc.arguments, serde_json::json!({"a": 1}));
             }
             other => panic!("expected ToolCall, got {other:?}"),

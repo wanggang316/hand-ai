@@ -1166,24 +1166,15 @@ mod tests {
         let mut current: Option<String> = None;
 
         // Empty payload: skip.
-        capture_chunk_response_id(
-            &serde_json::json!({ "responseId": "" }),
-            &mut current,
-        );
+        capture_chunk_response_id(&serde_json::json!({ "responseId": "" }), &mut current);
         assert!(current.is_none());
 
         // First real id wins.
-        capture_chunk_response_id(
-            &serde_json::json!({ "responseId": "abc123" }),
-            &mut current,
-        );
+        capture_chunk_response_id(&serde_json::json!({ "responseId": "abc123" }), &mut current);
         assert_eq!(current.as_deref(), Some("abc123"));
 
         // Later non-empty id must not overwrite.
-        capture_chunk_response_id(
-            &serde_json::json!({ "responseId": "def456" }),
-            &mut current,
-        );
+        capture_chunk_response_id(&serde_json::json!({ "responseId": "def456" }), &mut current);
         assert_eq!(current.as_deref(), Some("abc123"));
     }
 

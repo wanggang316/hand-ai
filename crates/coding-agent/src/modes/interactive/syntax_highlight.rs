@@ -124,10 +124,10 @@ enum CLikeFlavor {
 }
 
 const RUST_KEYWORDS: &[&str] = &[
-    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
-    "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
-    "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true",
-    "type", "unsafe", "use", "where", "while", "yield", "box",
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
+    "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub",
+    "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
+    "unsafe", "use", "where", "while", "yield", "box",
 ];
 
 const RUST_TYPES: &[&str] = &[
@@ -137,18 +137,89 @@ const RUST_TYPES: &[&str] = &[
 ];
 
 const JS_KEYWORDS: &[&str] = &[
-    "abstract", "any", "as", "async", "await", "boolean", "break", "case", "catch", "class",
-    "const", "constructor", "continue", "debugger", "declare", "default", "delete", "do",
-    "else", "enum", "export", "extends", "false", "finally", "for", "from", "function", "get",
-    "if", "implements", "import", "in", "instanceof", "interface", "let", "namespace", "new",
-    "null", "of", "package", "private", "protected", "public", "readonly", "return", "set",
-    "static", "super", "switch", "this", "throw", "true", "try", "type", "typeof", "undefined",
-    "var", "void", "while", "with", "yield",
+    "abstract",
+    "any",
+    "as",
+    "async",
+    "await",
+    "boolean",
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "constructor",
+    "continue",
+    "debugger",
+    "declare",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "from",
+    "function",
+    "get",
+    "if",
+    "implements",
+    "import",
+    "in",
+    "instanceof",
+    "interface",
+    "let",
+    "namespace",
+    "new",
+    "null",
+    "of",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "return",
+    "set",
+    "static",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "type",
+    "typeof",
+    "undefined",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
 ];
 
 const JS_BUILTINS: &[&str] = &[
-    "Array", "Boolean", "Date", "Error", "Function", "JSON", "Map", "Math", "Number", "Object",
-    "Promise", "RegExp", "Set", "String", "Symbol", "console", "document", "window", "globalThis",
+    "Array",
+    "Boolean",
+    "Date",
+    "Error",
+    "Function",
+    "JSON",
+    "Map",
+    "Math",
+    "Number",
+    "Object",
+    "Promise",
+    "RegExp",
+    "Set",
+    "String",
+    "Symbol",
+    "console",
+    "document",
+    "window",
+    "globalThis",
     "process",
 ];
 
@@ -293,24 +364,63 @@ fn highlight_clike_line(
 // ---------------------------------------------------------------------------
 
 const PY_KEYWORDS: &[&str] = &[
-    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
-    "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if",
-    "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
-    "while", "with", "yield", "match", "case",
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield", "match", "case",
 ];
 
 const PY_BUILTINS: &[&str] = &[
-    "abs", "all", "any", "bool", "bytes", "callable", "chr", "dict", "dir", "enumerate", "filter",
-    "float", "frozenset", "getattr", "hasattr", "hash", "id", "input", "int", "isinstance",
-    "issubclass", "iter", "len", "list", "map", "max", "min", "next", "object", "open", "ord",
-    "print", "range", "repr", "reversed", "round", "set", "setattr", "slice", "sorted", "str",
-    "sum", "tuple", "type", "vars", "zip",
+    "abs",
+    "all",
+    "any",
+    "bool",
+    "bytes",
+    "callable",
+    "chr",
+    "dict",
+    "dir",
+    "enumerate",
+    "filter",
+    "float",
+    "frozenset",
+    "getattr",
+    "hasattr",
+    "hash",
+    "id",
+    "input",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "len",
+    "list",
+    "map",
+    "max",
+    "min",
+    "next",
+    "object",
+    "open",
+    "ord",
+    "print",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "slice",
+    "sorted",
+    "str",
+    "sum",
+    "tuple",
+    "type",
+    "vars",
+    "zip",
 ];
 
 fn highlight_python(code: &str) -> Vec<String> {
-    code.lines()
-        .map(highlight_python_line)
-        .collect()
+    code.lines().map(highlight_python_line).collect()
 }
 
 fn highlight_python_line(line: &str) -> String {
@@ -359,7 +469,9 @@ fn highlight_python_line(line: &str) -> String {
         }
         if c.is_ascii_digit() {
             let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.' || bytes[i] == b'_') {
+            while i < bytes.len()
+                && (bytes[i].is_ascii_digit() || bytes[i] == b'.' || bytes[i] == b'_')
+            {
                 i += 1;
             }
             out.push_str(&paint(NUMBER, &line[start..i]));
@@ -425,13 +537,19 @@ fn highlight_json_line(line: &str) -> String {
             out.push_str(&paint(color, &line[start..i]));
             continue;
         }
-        if c.is_ascii_digit() || (c == '-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit()) {
+        if c.is_ascii_digit() || (c == '-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
+        {
             let start = i;
             if c == '-' {
                 i += 1;
             }
             while i < bytes.len()
-                && (bytes[i].is_ascii_digit() || bytes[i] == b'.' || bytes[i] == b'e' || bytes[i] == b'E' || bytes[i] == b'+' || bytes[i] == b'-')
+                && (bytes[i].is_ascii_digit()
+                    || bytes[i] == b'.'
+                    || bytes[i] == b'e'
+                    || bytes[i] == b'E'
+                    || bytes[i] == b'+'
+                    || bytes[i] == b'-')
             {
                 i += 1;
             }
@@ -524,7 +642,9 @@ fn highlight_bash_line(line: &str) -> String {
         }
         if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-') {
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-')
+            {
                 i += 1;
             }
             let word = &line[start..i];
@@ -584,12 +704,20 @@ fn highlight_yaml_line(line: &str) -> String {
         // Only treat as a mapping key when the char after ':' is space, tab,
         // newline, or end-of-line.
         let mapping_break = after.len() == 1
-            || after.as_bytes().get(1).map(|b| matches!(b, b' ' | b'\t')).unwrap_or(true);
+            || after
+                .as_bytes()
+                .get(1)
+                .map(|b| matches!(b, b' ' | b'\t'))
+                .unwrap_or(true);
         if mapping_break && !key.is_empty() && !key.contains(' ') {
             out.push_str(&paint(BUILTIN, key));
             out.push(':');
             let value = &after[1..];
-            highlight_yaml_value(value.trim_start(), value.len() - value.trim_start().len(), &mut out);
+            highlight_yaml_value(
+                value.trim_start(),
+                value.len() - value.trim_start().len(),
+                &mut out,
+            );
             return out;
         }
     }
@@ -608,12 +736,21 @@ fn highlight_yaml_value(value: &str, leading_ws: usize, out: &mut String) {
         out.push_str(&paint(STRING, trimmed));
         return;
     }
-    if matches!(trimmed.trim(), "true" | "false" | "null" | "~" | "yes" | "no") {
+    if matches!(
+        trimmed.trim(),
+        "true" | "false" | "null" | "~" | "yes" | "no"
+    ) {
         out.push_str(&paint(KEYWORD, trimmed));
         return;
     }
-    if trimmed.chars().next().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false)
-        && trimmed.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+    if trimmed
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_digit() || c == '-')
+        .unwrap_or(false)
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
     {
         out.push_str(&paint(NUMBER, trimmed));
         return;
@@ -639,11 +776,12 @@ fn highlight_toml_line(line: &str) -> String {
         return out;
     }
     if rest.starts_with('[')
-        && let Some(end) = rest.find(']') {
-            out.push_str(&paint(KEYWORD, &rest[..=end]));
-            out.push_str(&rest[end + 1..]);
-            return out;
-        }
+        && let Some(end) = rest.find(']')
+    {
+        out.push_str(&paint(KEYWORD, &rest[..=end]));
+        out.push_str(&rest[end + 1..]);
+        return out;
+    }
     if let Some(eq_pos) = rest.find('=') {
         let key = rest[..eq_pos].trim_end();
         let after = &rest[eq_pos..];
@@ -657,7 +795,12 @@ fn highlight_toml_line(line: &str) -> String {
             out.push_str(&paint(STRING, value_trimmed));
         } else if matches!(value_trimmed.trim(), "true" | "false") {
             out.push_str(&paint(KEYWORD, value_trimmed));
-        } else if value_trimmed.chars().next().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false) {
+        } else if value_trimmed
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit() || c == '-')
+            .unwrap_or(false)
+        {
             out.push_str(&paint(NUMBER, value_trimmed));
         } else {
             out.push_str(value_trimmed);

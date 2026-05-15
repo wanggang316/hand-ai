@@ -451,10 +451,7 @@ mod tests {
             "http2 request did not get a response",
             "HTTP2 Request did not get a response within deadline",
         ] {
-            assert!(
-                is_retriable_error(msg),
-                "expected retriable: {msg}"
-            );
+            assert!(is_retriable_error(msg), "expected retriable: {msg}");
         }
     }
 

@@ -334,7 +334,8 @@ async fn stream_vertex_inner(
     let project = resolve_project(&options)?;
     let location = resolve_location(&options)?;
 
-    let host_base = resolve_vertex_host_base(base_url_override.as_deref(), &model.base_url, &location);
+    let host_base =
+        resolve_vertex_host_base(base_url_override.as_deref(), &model.base_url, &location);
 
     let mut url = format!(
         "{host_base}/v1/projects/{project}/locations/{location}/publishers/google/models/{model_id}:streamGenerateContent?alt=sse",
@@ -536,8 +537,7 @@ mod tests {
     /// pointer and must beat the default host.
     #[test]
     fn vertex_host_base_uses_model_base_url_when_custom() {
-        let host =
-            resolve_vertex_host_base(None, "https://proxy.example.com", "us-central1");
+        let host = resolve_vertex_host_base(None, "https://proxy.example.com", "us-central1");
         assert_eq!(host, "https://proxy.example.com");
     }
 
