@@ -1,11 +1,10 @@
-//! Lightweight ANSI syntax highlighter for fenced code blocks (M3.2).
+//! Lightweight ANSI syntax highlighter for fenced code blocks.
 //!
-//! Mirrors pi-mono's `highlightCode` slot: takes a code body + optional
-//! language tag and returns one ANSI-colored line per source line. The
-//! goal is "code blocks look like code", not a faithful semantic lexer —
-//! so this module is intentionally regex-free and keyword-list driven.
-//! When the language is unknown the body is returned with a flat color
-//! prefix (same as pi-mono's fallback to `mdCodeBlock`).
+//! Takes a code body plus an optional language tag and returns one
+//! ANSI-colored line per source line. The goal is "code blocks look
+//! like code", not a faithful semantic lexer — so this module is
+//! intentionally regex-free and keyword-list driven. When the language
+//! is unknown the body is returned with a flat color prefix.
 //!
 //! Supported languages: rust, ts/tsx/typescript, js/jsx/javascript,
 //! python/py, json, bash/sh/shell, yaml/yml, toml. Aliases are mapped

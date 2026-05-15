@@ -1,19 +1,18 @@
 //! Interactive TUI mode for the coding agent.
 //!
-//! Phase-1 components (in `components/`) and the theme system (in `theme/`)
-//! are fully ported. This module wires them together via [`InteractiveMode`]
-//! — a skeleton port of pi-mono's `interactive-mode.ts` covering the happy
-//! path: chat scrollback, editor input, agent dispatch, a small slash-command
-//! table, and a model-selector overlay. Many features are deferred behind
-//! `// TODO(parity)` markers; see the parity-completion plan for the queue.
+//! Components live in `components/` and the theme system in `theme/`.
+//! This module wires them together via [`InteractiveMode`], covering
+//! the happy path: chat scrollback, editor input, agent dispatch, a
+//! small slash-command table, and a model-selector overlay. Features
+//! still in flight are marked with `// TODO` notes.
 //!
 //! # Theming
 //!
-//! pi-mono's interactive components consume a coding-agent–specific `theme`
-//! object (semantic color slots like `userMessageBg`, `customMessageLabel`,
-//! etc.). The Phase-1 theme port is in [`theme`]; the driver currently uses
-//! the components' built-in defaults rather than reading the theme directly,
-//! since the theme→component wiring is a follow-up task.
+//! Interactive components are styled through semantic color slots
+//! (`user_message_bg`, `custom_message_label`, etc.) provided by
+//! [`theme`]. The driver currently uses the components' built-in
+//! defaults rather than reading the theme directly — the
+//! theme-to-component wiring is a follow-up task.
 
 pub mod components;
 pub mod driver;

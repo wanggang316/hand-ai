@@ -1,12 +1,11 @@
 //! Bridges [`AgentSessionEvent`]s into component-update intents the driver
 //! applies to the chat container.
 //!
-//! pi-mono's `interactive-mode.ts` handles ~20 distinct event variants with
-//! complex state (streaming components, pending tool calls, compaction
-//! loaders, ...). The Rust port covers the happy path: render
-//! `MessageStart` / `MessageUpdate` / `MessageEnd` for assistant + user
-//! messages, surface tool-execution lifecycle events, and forward errors.
-//! Compaction-summary UI, login dialogs, etc. remain deferred.
+//! Covers the happy path: render `MessageStart` / `MessageUpdate` /
+//! `MessageEnd` for assistant and user messages, surface
+//! tool-execution lifecycle events, and forward errors. Compaction-
+//! summary UI, login dialogs, and other auxiliary surfaces are
+//! still in flight.
 
 use crate::core::agent_session::AgentSessionEvent;
 use hand_agent::types::{AgentEvent, ToolResult};
@@ -110,9 +109,9 @@ pub fn dispatch_agent_event(event: &AgentEvent) -> Vec<ChatUpdate> {
             // echo), and by `replay_messages_into` for history. Emitting an
             // additional `AppendUser` from this event fires AFTER the
             // immediate echo and renders a second identical bubble.
-            // pi-mono uses the event-driven path *exclusively*; we keep
-            // the immediate echo for input responsiveness, so we drop the
-            // event-driven path instead.
+            // The driver echoes the user message immediately for input
+            // responsiveness, so the event-driven path is dropped to
+            // avoid a duplicate bubble.
             Message::User(_) => vec![],
             Message::Assistant(a) => vec![ChatUpdate::AppendAssistant {
                 message: Box::new(a.clone()),
@@ -133,10 +132,9 @@ pub fn dispatch_agent_event(event: &AgentEvent) -> Vec<ChatUpdate> {
             }],
             // Tool results are rendered inline with the matching tool-call
             // bubble (see `ChatUpdate::ToolEnd`, driven from
-            // `AgentEvent::ToolExecutionEnd`). Don't emit a duplicate dim
-            // `[tool] [error] body` line below the bubble — pi-mono drops
-            // this branch and our previous behaviour left a white-gapped
-            // copy of the bubble's contents below every tool call.
+            // `AgentEvent::ToolExecutionEnd`). Drop the branch so we
+            // don't leave a duplicate dim `[tool] [error] body` line
+            // below the bubble.
             Message::ToolResult(_) => vec![],
             Message::User(_) => vec![],
         },

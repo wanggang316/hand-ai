@@ -1,10 +1,10 @@
 //! Slash-command parsing and dispatch table for the interactive driver.
 //!
-//! pi-mono's `interactive-mode.ts` registers ~30 slash commands. This module
-//! ports the framework plus the commands required by the parity brief; the
-//! remainder are documented at the call site with `// TODO(parity)` markers.
+//! Provides the dispatch framework plus a curated set of commands.
+//! Commands still in flight are documented at the call site with
+//! `// TODO` markers.
 //!
-//! Parsing rules mirror the upstream behaviour:
+//! Parsing rules:
 //! * a leading `/` is required;
 //! * the first whitespace separates the command name from the (single) argument
 //!   string, which is passed through verbatim (no further tokenisation);
@@ -136,9 +136,9 @@ pub enum SlashCommandAction {
     /// Run diagnostics and dump the report into the chat.
     ShowDiagnostics,
     /// Re-read SettingsManager + keybindings from disk and surface a
-    /// confirmation status. Mirrors pi-mono's `/reload`. Per-subsystem
-    /// reloaders (extensions, skills, prompts, themes) attach over time
-    /// — the driver fires the ones it knows about.
+    /// confirmation status. Per-subsystem reloaders (extensions,
+    /// skills, prompts, themes) attach over time — the driver fires
+    /// the ones it knows about.
     Reload,
     /// Open the scoped-models multi-select overlay (M4.5). The driver
     /// passes the resulting list to `/model` so the quick-cycle reaches
@@ -460,11 +460,10 @@ Commands:
     }
 }
 
-/// Strip a single layer of matched single/double quotes from `arg` and
-/// return the inner string as a [`PathBuf`]. Mirrors the
-/// `getPathCommandArgument` helper in pi-mono's `interactive-mode.ts`.
-/// The arg is assumed to be already-trimmed of leading whitespace by the
-/// slash-command parser.
+/// Strip a single layer of matched single/double quotes from `arg`
+/// and return the inner string as a [`PathBuf`]. The arg is assumed
+/// to be already-trimmed of leading whitespace by the slash-command
+/// parser.
 fn parse_path_argument(arg: &str) -> PathBuf {
     let arg = arg.trim();
     if arg.len() >= 2 {

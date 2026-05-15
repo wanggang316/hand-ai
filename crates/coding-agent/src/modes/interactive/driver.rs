@@ -1,8 +1,7 @@
 //! `InteractiveMode` — TUI driver wiring [`AgentSession`], a [`Tui`], and the
 //! chat / footer / editor components into a runnable interactive session.
 //!
-//! This is a deliberately minimal port of pi-mono's
-//! `interactive-mode.ts` (5500 LOC). The skeleton covers the happy path:
+//! A deliberately minimal driver. The skeleton covers the happy path:
 //!
 //! * a vertical layout with chat scrollback above and an editor + footer below;
 //! * user input → [`AgentSession::send_message`] → message components;
@@ -293,10 +292,10 @@ impl InteractiveMode {
             std::sync::atomic::Ordering::Relaxed,
         );
 
-        // Welcome header at the very top of the scrollback. Compact one-liner
-        // with the product name, version, and the most-used keybindings —
-        // similar to pi-mono's expandable header but without the easter-egg
-        // logo. Stays in the scrollback (scrolls off as chat grows).
+        // Welcome header at the very top of the scrollback. Compact
+        // one-liner with the product name, version, and the most-used
+        // keybindings. Stays in the scrollback (scrolls off as chat
+        // grows).
         push_welcome_header(&chat, session.model());
         // M5.2 — surface a tmux-keyboard warning at startup so the user
         // knows extended-keys (Modified Enter, Alt+letter, etc.) won't
@@ -328,9 +327,9 @@ impl InteractiveMode {
         // as the run loop), so it just hands the submitted text off to the
         // shared `Pending` slot which the agent task polls.
         //
-        // No placeholder: pi-mono renders an empty editor box and a
-        // placeholder collides with terminal IME composition (the IME draws
-        // its preview at the cursor column, on top of the dim placeholder).
+        // No placeholder: the editor renders empty so an active
+        // terminal IME composition (which draws its preview at the
+        // cursor column) doesn't collide with a dim placeholder.
         let pending_for_submit = Arc::clone(&pending);
         let cwd_for_paste = cwd.clone();
         let paste_transform: hand_tui::components::PasteTransform =
@@ -763,9 +762,9 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
                     if trimmed.is_empty() {
                         continue;
                     }
-                    // Bash mode: `!cmd` runs cmd in a subprocess and shows the
-                    // output inline like a tool call. `!!cmd` does the same
-                    // but is excluded from agent context (pi-mono behaviour).
+                    // Bash mode: `!cmd` runs cmd in a subprocess and
+                    // shows the output inline like a tool call. `!!cmd`
+                    // does the same but is excluded from agent context.
                     if trimmed.starts_with('!') {
                         run_bash_inline(&agent_chat, &session, &trimmed).await;
                         refresh_footer(&session, &cwd, &agent_footer, &agent_usage);
@@ -935,9 +934,9 @@ async fn run_bash_inline(chat: &ChatList, session: &AgentSession, raw: &str) {
     }
 }
 
-/// Push a welcome header into the chat. Two lines mirroring pi-mono's
-/// compact startup header: bold logo + version on line 1, dim keybinding
-/// hints separated by ` · ` on line 2.
+/// Push a welcome header into the chat. Two lines: bold logo +
+/// version on line 1, dim keybinding hints separated by ` · ` on
+/// line 2.
 fn push_welcome_header(chat: &ChatList, model: &model::Model) {
     use super::components::keybinding_hints::raw_key_hint;
     let version = env!("CARGO_PKG_VERSION");
@@ -1506,11 +1505,11 @@ fn refresh_editor_border(session: &AgentSession, editor: &Arc<StdMutex<EditorCom
     }
 }
 
-/// Map a thinking level to the focused-border SGR. Mirrors the pi-mono
-/// dark theme palette (`thinkingOff`=#505050, `Minimal`=#6e6e6e,
-/// `Low`=#5f87af, `Medium`=#81a2be, `High`=#b294bb, `Xhigh`=#d183e8).
-/// `None` (reasoning off) returns the default `BORDER_FOCUS` cyan so the
-/// border stays consistent with the editor's idle state.
+/// Map a thinking level to the focused-border SGR. Uses the
+/// dark-theme palette: `thinking_off`=#505050, `Minimal`=#6e6e6e,
+/// `Low`=#5f87af, `Medium`=#81a2be, `High`=#b294bb, `Xhigh`=#d183e8.
+/// `None` (reasoning off) returns the default `BORDER_FOCUS` cyan so
+/// the border stays consistent with the editor's idle state.
 fn thinking_level_border_color(level: Option<model::ThinkingLevel>) -> String {
     use model::ThinkingLevel;
     match level {
@@ -1777,13 +1776,13 @@ fn format_diagnostics_report(report: &crate::core::diagnostics::DiagnosticsRepor
 // status-line stub so existing test fixtures continue to work.
 // ---------------------------------------------------------------------------
 
-/// M4.4 — mount a filesystem-tree picker. Builds a depth-bounded BFS
-/// flat tree from `root` (cwd, plus optional sub-path argument from
+/// Mount a filesystem-tree picker. Builds a depth-bounded BFS flat
+/// tree from `root` (cwd, plus optional sub-path argument from
 /// `/tree <subdir>`), skips noise directories, and renders the tree
-/// selector. The chosen entry is pushed as a status line — pi-mono
-/// uses this primarily to /attach@ the picked path, which our editor
-/// already handles via `@`-autocomplete, so a status-only outcome
-/// keeps the surface minimal until paste-attach is wired.
+/// selector. The chosen entry is pushed as a status line — direct
+/// `@`-attach is already handled by the editor's `@`-autocomplete,
+/// so a status-only outcome keeps the surface minimal until
+/// paste-attach is wired.
 async fn mount_tree_selector(
     chat: &ChatList,
     cwd: &Path,
@@ -2039,7 +2038,7 @@ async fn mount_model_selector(
     let all_models: Vec<model::Model> = session.model_registry().all().to_vec();
     // Scoped models: read patterns from `settings.enabled_models` and
     // resolve them against the live model catalogue. Empty patterns ⇒
-    // empty scope (selector hides the toggle), matching pi-mono.
+    // empty scope (selector hides the toggle).
     let patterns: Vec<String> = session
         .settings()
         .current()
@@ -2222,12 +2221,12 @@ async fn mount_settings_selector(
     let _ = mounter.hide(handle);
 }
 
-/// Build the read-only entries displayed by `/settings`. Mirrors the
-/// most-used subset of pi-mono's settings dialog (theme, auto-compact,
+/// Build the read-only entries displayed by `/settings`. Surfaces a
+/// curated subset of the settings (theme, auto-compact,
 /// hide-thinking-block, terminal.show-images, terminal.clear-on-shrink,
 /// quiet-startup). Each entry carries the live value from
-/// `SettingsManager::current()` so the dialog reflects what's actually
-/// in effect for this session, not just a static list.
+/// `SettingsManager::current()` so the dialog reflects what's
+/// actually in effect for this session, not just a static list.
 pub(crate) fn build_settings_entries(
     manager: &crate::core::settings::SettingsManager,
 ) -> Vec<SettingEntry> {
@@ -2726,9 +2725,10 @@ fn apply_export(chat: &ChatList, session: &AgentSession, path: &Path, fmt: Expor
     use crate::core::export::{export_to_html, export_to_jsonl};
     match fmt {
         ExportFormat::Jsonl | ExportFormat::Json => {
-            // For `.json` we still copy the JSONL stream verbatim — pi-mono
-            // has no separate JSON exporter and the JSONL form parses as a
-            // sequence of JSON values, which is what most consumers expect.
+            // For `.json` we still copy the JSONL stream verbatim — a
+            // JSONL stream parses as a sequence of JSON values, which is
+            // what most consumers expect, so we don't ship a separate
+            // JSON exporter.
             let manager = match session.session_file() {
                 Some(p) => match crate::core::session_manager::SessionManager::open(p) {
                     Ok(m) => m,
