@@ -301,7 +301,7 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         // still a definitive "I'm the one that handles this trigger but
         // nothing matches", which is different from `None` (defer).
         // Providers that don't claim the trigger return `None` and the
-        // loop continues. Matches pi-mono's combined provider semantics.
+        // loop continues.
         let mut produced = false;
         let mut out = Vec::new();
         for provider in &self.providers {
@@ -411,8 +411,8 @@ impl AutocompleteProvider for SlashCommandProvider {
 const DEFAULT_PATH_MAX_DEPTH: usize = 3;
 
 /// Default cap on returned entries. Above this the popup becomes unusable
-/// anyway; 200 mirrors pi-mono's `walkDirectoryWithFd(..., 100, ...)` doubled
-/// to soften the ceiling for repos where the user prefixes with a directory.
+/// anyway; 200 is generous enough to cover repos where the user prefixes
+/// with a directory without making the result list unwieldy.
 const DEFAULT_PATH_MAX_ENTRIES: usize = 200;
 
 /// Walks the project root looking for files / dirs whose path matches the

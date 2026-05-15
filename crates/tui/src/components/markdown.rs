@@ -1,10 +1,8 @@
 //! Markdown component — renders markdown with terminal styling.
 //!
-//! Ported from `pi-mono/packages/tui/src/components/markdown.ts`. The TS version
-//! uses `marked` and exposes theme/default-style hooks; we port the *behavior*
-//! using `pulldown-cmark`'s event stream and a small set of theme colors that
-//! are translated to ANSI on render. Plain-text fallback (no styling) is used
-//! when a theme color is `None`.
+//! Uses `pulldown-cmark`'s event stream and a small set of theme colors
+//! that are translated to ANSI on render. Plain-text fallback (no
+//! styling) is used when a theme color is `None`.
 
 use std::sync::Arc;
 
@@ -45,7 +43,7 @@ pub struct MarkdownTheme {
     /// renderer calls it with the raw code body and the optional language
     /// tag and uses the returned lines as-is (the highlighter is expected
     /// to emit ANSI). When unset, code lines fall back to a flat
-    /// `code_fg`-colored render. Mirrors pi-mono's `theme.highlightCode`.
+    /// `code_fg`-colored render.
     pub highlight: Option<CodeHighlighter>,
 }
 
@@ -707,8 +705,7 @@ fn hyperlink_with_support(text: &str, url: &str, osc8_supported: bool) -> String
 /// Whether the host terminal renders OSC 8 hyperlinks. Defaults to
 /// `false` for unknown terminals and any tmux / screen multiplexer
 /// session — both pass OSC 8 through to the outer terminal unreliably,
-/// often swallowing the sequence entirely. Mirrors the pi-mono
-/// `detectCapabilities()` policy.
+/// often swallowing the sequence entirely.
 fn supports_osc8_hyperlinks() -> bool {
     if std::env::var("HAND_DISABLE_OSC8").is_ok_and(|v| !v.is_empty() && v != "0") {
         return false;

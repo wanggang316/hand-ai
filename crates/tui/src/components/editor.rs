@@ -1,11 +1,6 @@
 //! Editor component — multi-line text editor with grapheme-aware editing,
-//! viewport scrolling, paste markers, kill-ring integration, undo/redo with
-//! coalescing, and an autocomplete contract.
-//!
-//! Behavioural parity target: `pi-mono/packages/tui/src/components/editor.ts`.
-//! This is functional parity, not visual pixel parity — paste-marker format,
-//! undo coalescing rules, and key dispatch mirror the TS source; rendering and
-//! border chrome are the Rust port's choice.
+//! viewport scrolling, paste markers, kill-ring integration, undo/redo
+//! with coalescing, and an autocomplete contract.
 //!
 //! ## Async autocomplete contract
 //!
@@ -153,16 +148,15 @@ pub struct EditorComponent {
     autocomplete_debounce_until: Option<Instant>,
     /// Cached keybindings manager (for key dispatch).
     keybindings: KeybindingsManager,
-    /// Submit callback, invoked on bare Enter. Mirrors pi-mono's
-    /// `editor.onSubmit`. The editor buffer is cleared *before* the callback
-    /// runs, so the callback can safely mutate UI state.
+    /// Submit callback, invoked on bare Enter. The editor buffer is
+    /// cleared *before* the callback runs, so the callback can safely
+    /// mutate UI state.
     on_submit: Option<SubmitCallback>,
     /// Placeholder text shown when the buffer is empty. Rendered dim and
     /// truncated to fit the available width. `None` disables the placeholder.
     placeholder: Option<String>,
     /// ANSI SGR prefix used for the border when the editor is unfocused.
-    /// `None` keeps the border uncoloured. Mirrors pi-mono's
-    /// `theme.borderColor`.
+    /// `None` keeps the border uncoloured.
     border_color: Option<String>,
     /// ANSI SGR prefix used for the border when the editor is focused.
     /// Falls back to [`Self::border_color`] when `None`.
@@ -171,13 +165,12 @@ pub struct EditorComponent {
     /// follow. Capped at [`HISTORY_CAP`].
     history: Vec<String>,
     /// Current position in `history`. `-1` means "not browsing", `0` is
-    /// the most recent entry, `1` is the next-older, etc. Matches
-    /// pi-mono's `historyIndex` semantics so Up walks back (increments).
+    /// the most recent entry, `1` is the next-older, etc. Up walks back
+    /// (increments) through the history.
     history_index: i32,
     /// Border style when [`Self::border`] is true. `Box` draws full
     /// `┌─┐│└─┘` chrome (legacy default). `Horizontal` draws top/bottom
-    /// horizontal rules only with no side glyphs — matches pi-mono's
-    /// `EditorComponent` rendering.
+    /// horizontal rules only with no side glyphs.
     border_style: BorderStyle,
     /// Optional paste-payload transformer. Run in [`Self::paste`] before
     /// the marker / insert decision so a transformed text follows the
@@ -190,12 +183,11 @@ pub struct EditorComponent {
 pub enum BorderStyle {
     /// Full box with corners and side rails (`┌─┐ │ └─┘`).
     Box,
-    /// Top and bottom horizontal rules only (matches pi-mono).
+    /// Top and bottom horizontal rules only, no side glyphs.
     Horizontal,
 }
 
 /// Maximum number of submitted prompts the editor retains for Up/Down recall.
-/// Matches pi-mono's `editor.ts` cap.
 const HISTORY_CAP: usize = 100;
 
 /// Callback invoked when the user submits the editor (bare Enter). The string
@@ -1314,7 +1306,7 @@ impl Component for EditorComponent {
 
         // Bottom border. Box style keeps the `line:col` indicator (it's a
         // long-standing debug aid for the Box variant). Horizontal style
-        // mirrors pi-mono and renders a plain rule with no indicator.
+        // renders a plain rule with no indicator.
         if self.border {
             output.push(match self.border_style {
                 BorderStyle::Box => {

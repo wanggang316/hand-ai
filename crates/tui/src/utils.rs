@@ -1,10 +1,8 @@
 //! Text utilities for terminal rendering.
 //!
-//! Grapheme-aware visible width, wrapping that preserves SGR + OSC 8 hyperlinks
-//! across line breaks, truncation with ellipsis, and ANSI-aware column slicing.
-//!
-//! Ported from `pi-mono/packages/tui/src/utils.ts`. Internal helper layout is
-//! Rust-idiomatic; the public API mirrors the TypeScript surface.
+//! Grapheme-aware visible width, wrapping that preserves SGR + OSC 8
+//! hyperlinks across line breaks, truncation with ellipsis, and
+//! ANSI-aware column slicing.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
@@ -1746,9 +1744,9 @@ mod tests {
 
     // --- wrap_text_with_ansi ----------------------------------------------
 
-    // Parity probes mirroring pi-mono's wordWrapLine boundary tests.
-    // Currently `#[ignore]` so they document the expected behavior without
-    // failing the suite; flip to active tests once parity is implemented.
+    // Boundary probes for word-wrap behaviour. Currently `#[ignore]` so
+    // they document expected behaviour without failing the suite; flip
+    // to active tests once the implementation lands.
 
     #[test]
     #[ignore = "parity gap: trailing-space-with-following-word grouping"]

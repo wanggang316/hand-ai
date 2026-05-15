@@ -8,10 +8,10 @@
 //! key parser.
 //!
 //! Bugs here surface as "F1 doesn't work over slow SSH" or "Chinese
-//! input shows mojibake under load". The implementation mirrors
-//! `pi-mono/packages/tui/src/stdin-buffer.ts`, ported to a synchronous
-//! `push(&[u8]) -> Vec<Event>` shape — no callbacks, no implicit
-//! timeouts. Async consumers can wrap one with [`channel_from_buffer`].
+//! input shows mojibake under load". The implementation exposes a
+//! synchronous `push(&[u8]) -> Vec<Event>` shape — no callbacks, no
+//! implicit timeouts. Async consumers can wrap one with
+//! [`channel_from_buffer`].
 //!
 //! Higher layers (paste-mode framing, Kitty raw-duplicate suppression)
 //! are intentionally out of scope here: this module only guarantees

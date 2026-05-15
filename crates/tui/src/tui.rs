@@ -66,8 +66,7 @@ pub fn input_event_from_str(data: &str) -> InputEvent {
 /// (`ESC _ hand:c BEL`). Focused components embed this in their rendered
 /// output at the cursor position; [`Tui`]'s render path scans every frame
 /// for it, strips it from the line, and repositions the terminal's
-/// hardware cursor. The marker is the parity equivalent of pi-mono's
-/// `CURSOR_MARKER`. Terminals treat APC as zero-width and ignore the
+/// hardware cursor. Terminals treat APC as zero-width and ignore the
 /// payload, so there is no visible artefact if it ever leaks through.
 pub const CURSOR_MARKER: &str = "\x1b_hand:c\x07";
 
