@@ -8,8 +8,8 @@
 //! The component inlines minimal private equivalents of two sibling
 //! helpers so it can ship before they land:
 //!
-//! * [`border_line`] mirrors `DynamicBorder::render`.
-//! * [`format_cancel_hint`] mirrors the default keybinding-hint
+//! * `border_line` mirrors `DynamicBorder::render`.
+//! * `format_cancel_hint` mirrors the default keybinding-hint
 //!   formatting.
 //!
 //! Theming caveat: the component expects `border`, `accent`, `muted`,

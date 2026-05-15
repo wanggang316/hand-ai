@@ -8,8 +8,8 @@
 //!   `<base>/responses?api-version=<version>`.
 //! - Authentication uses the `api-key` header instead of `Authorization: Bearer`.
 //!
-//! Body construction and SSE event parsing are delegated to
-//! [`super::openai_responses_shared`].
+//! Body construction and SSE event parsing are delegated to the shared
+//! `openai_responses_shared` helpers in this module's parent.
 
 use crate::api_registry::{ApiProvider, AssistantMessageEventStream};
 use crate::env_api_keys;

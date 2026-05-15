@@ -4,7 +4,7 @@
 //!
 //! # Cursor invariant
 //!
-//! After every call to [`DiffRenderer::diff`] (or [`DiffRenderer::full_render`]),
+//! After every call to [`DiffRenderer::diff`] (or `full_render`),
 //! the hardware cursor is left at column 0 of the row immediately *below* the
 //! last rendered line — i.e. exactly `prev_line_count()` rows below the top
 //! of the rendered region. The next [`DiffRenderer::diff`] call homes the

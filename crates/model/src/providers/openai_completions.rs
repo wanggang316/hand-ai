@@ -1306,9 +1306,10 @@ fn current_timestamp_ms() -> u64 {
 
 /// Resolved compatibility settings with all fields set.
 ///
-/// Fields are populated by [`detect_compat`] from `model.provider`/`model.base_url`,
-/// then overridden by any explicit settings on `model.compat`. New fields should
-/// be added with sane defaults so older callers keep compiling.
+/// Fields are populated by `detect_compat` from
+/// `model.provider`/`model.base_url`, then overridden by any explicit
+/// settings on `model.compat`. New fields should be added with sane
+/// defaults so older callers keep compiling.
 #[derive(Debug, Clone)]
 pub struct ResolvedCompat {
     pub supports_store: bool,

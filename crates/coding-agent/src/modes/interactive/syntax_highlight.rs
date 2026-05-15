@@ -8,7 +8,7 @@
 //!
 //! Supported languages: rust, ts/tsx/typescript, js/jsx/javascript,
 //! python/py, json, bash/sh/shell, yaml/yml, toml. Aliases are mapped
-//! to the canonical id in [`resolve_language`].
+//! to the canonical id in `resolve_language`.
 //!
 //! ANSI palette mirrors common terminal "monokai-ish" mapping:
 //!   keyword → bright cyan (96)

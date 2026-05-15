@@ -165,8 +165,9 @@ impl From<&ToolResultEvent> for ToolResultDto {
 /// A Tier 2 (subprocess) extension. Implements [`Extension`] so the host
 /// cannot tell it apart from a Tier 1 in-process extension.
 ///
-/// The shared state lives in [`SubprocessInner`] behind an `Arc` so that
-/// tool execute closures (which need `'static + Send + Sync`) and slash
+/// The shared state lives in a private `SubprocessInner` behind an
+/// `Arc` so that tool execute closures (which need
+/// `'static + Send + Sync`) and slash
 /// command handlers can clone a handle to drive RPC back into the
 /// subprocess from the agent loop's tool list.
 pub struct SubprocessExtension {

@@ -1,7 +1,7 @@
 //! Login dialog used by `/login` to drive an OAuth-style authentication flow.
 //!
 //! [`LoginDialogComponent`] owns an [`InputComponent`] and a typed
-//! [`Stage`] enum capturing what to show. The OAuth provider transitions
+//! `Stage` enum capturing what to show. The OAuth provider transitions
 //! stages by calling the `show_*` mutator methods (`show_auth`,
 //! `show_manual_input`, `show_prompt`, `show_info`, `show_waiting`,
 //! `show_progress`) — each one clears or appends content and requests a

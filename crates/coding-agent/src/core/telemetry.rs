@@ -47,8 +47,8 @@ fn is_truthy_env_flag(value: &str) -> bool {
 
 /// Resolve whether install-telemetry attribution headers are enabled.
 ///
-/// - `env_override = Some(s)` → uses [`is_truthy_env_flag`] on `s`; the
-///   settings layer is ignored.
+/// - `env_override = Some(s)` → uses the `is_truthy_env_flag` predicate
+///   on `s`; the settings layer is ignored.
 /// - `env_override = None` → defers to
 ///   [`SettingsManager::enable_install_telemetry`] (default `true`).
 ///

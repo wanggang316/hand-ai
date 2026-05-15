@@ -326,7 +326,7 @@ Be concise. Focus on what's needed to understand the kept suffix."#;
 // ============================================================================
 
 /// Generate a summary of the given conversation slice, optionally merging
-/// with a previous summary (uses [`UPDATE_SUMMARIZATION_PROMPT`] when
+/// with a previous summary (uses the update-summarization prompt when
 /// `previous_summary` is `Some`).
 ///
 /// Routes through the [`SummarizationClient`] trait so tests can stub the

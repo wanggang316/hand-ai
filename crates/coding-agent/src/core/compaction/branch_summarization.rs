@@ -149,8 +149,8 @@ pub trait SummarizationClient: Send + Sync {
 /// variants — see the module-level docs.
 ///
 /// Returns a [`BranchSummaryResult`]:
-/// - `summary` populated on success (with [`BRANCH_SUMMARY_PREAMBLE`] and
-///   the file-operations XML appended).
+/// - `summary` populated on success (with the branch-summary preamble
+///   and the file-operations XML appended).
 /// - `aborted = true` when the underlying completion was aborted.
 /// - `error = Some(_)` when the completion or transport returned an error.
 pub async fn generate_branch_summary(

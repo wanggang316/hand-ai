@@ -262,7 +262,7 @@ impl EditorComponent {
     }
 
     /// Append a submitted prompt to the recall history. Consecutive
-    /// duplicates collapse; the list is capped at [`HISTORY_CAP`].
+    /// duplicates collapse; the list is capped at `HISTORY_CAP`.
     pub fn add_to_history(&mut self, text: impl AsRef<str>) {
         let trimmed = text.as_ref().trim();
         if trimmed.is_empty() {
@@ -281,7 +281,7 @@ impl EditorComponent {
     }
 
     /// Replace the entire recall history (e.g. when restoring a saved
-    /// session). Most-recent entry first. Truncated to [`HISTORY_CAP`].
+    /// session). Most-recent entry first. Truncated to `HISTORY_CAP`.
     pub fn set_history(&mut self, items: Vec<String>) {
         self.history = items;
         self.history.truncate(HISTORY_CAP);

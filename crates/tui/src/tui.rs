@@ -664,7 +664,7 @@ impl Tui {
 
     /// Returns a `Send + Clone` handle that lets background tasks ask the run
     /// loop to mount or unmount overlays. Mount requests are processed at the
-    /// start of every render tick (see [`Self::drain_overlay_mounts`]).
+    /// start of every render tick (see `drain_overlay_mounts`).
     ///
     /// This API is additive: the existing ownership-based [`Self::show_overlay`]
     /// / [`Self::hide_overlay`] methods continue to work for callers that hold
