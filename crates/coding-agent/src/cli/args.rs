@@ -255,9 +255,9 @@ mod tests {
         );
     }
 
-    /// Pi-mono parity: `--offline` is a top-level flag, default false.
-    /// Wiring through HAND_OFFLINE happens in main(); this test only
-    /// pins the parse surface.
+    /// `--offline` is a top-level flag, default false. Wiring through
+    /// HAND_OFFLINE happens in main(); this test only pins the parse
+    /// surface.
     #[test]
     fn parses_offline_flag() {
         let args = Args::try_parse_from(["hand", "--offline"]).expect("--offline should parse");
@@ -266,12 +266,11 @@ mod tests {
         assert!(!default.offline, "default must be false");
     }
 
-    // ===== Pi-mono args.test.ts parity surface =====
+    // ===== CLI surface parse tests =====
     //
-    // Each pi test that exercises an existing hand flag gets a direct
-    // mirror so a future refactor (e.g. renaming a clap field, changing
-    // a short alias) shows up in `cargo test` instead of in user
-    // scripts.
+    // Each flag gets a direct parse-surface test so a future refactor
+    // (e.g. renaming a clap field, changing a short alias) shows up in
+    // `cargo test` instead of in user scripts.
 
     #[test]
     fn parses_provider_flag() {
@@ -291,8 +290,8 @@ mod tests {
         assert_eq!(args.system_prompt.as_deref(), Some("Be concise"));
     }
 
-    /// Pi-mono parity: --append-system-prompt is repeatable. Each invocation
-    /// pushes another entry; main() concatenates them with blank-line
+    /// `--append-system-prompt` is repeatable. Each invocation pushes
+    /// another entry; main() concatenates them with blank-line
     /// separators when building the system prompt. Critical for scripts
     /// that compose a prompt from multiple sources.
     #[test]
@@ -324,9 +323,9 @@ mod tests {
         assert_eq!(short.resume.as_deref(), Some("sess-2"));
     }
 
-    /// Pi-mono parity: `--session <id>` is an alias for `--resume <id>`.
-    /// Hand uses clap's alias mechanism; this test pins the binding so a
-    /// refactor that drops the alias would break the parity contract.
+    /// `--session <id>` is an alias for `--resume <id>`. Hand uses
+    /// clap's alias mechanism; this test pins the binding so a refactor
+    /// that drops the alias would break user scripts.
     #[test]
     fn parses_session_alias_for_resume() {
         let args = Args::try_parse_from(["hand", "--session", "sid-42"]).unwrap();
@@ -396,8 +395,7 @@ mod tests {
         assert_eq!(default.mode, "text");
     }
 
-    /// Pi-mono parity: `--mode rpc` is accepted as an alias for `--rpc`
-    /// so scripts written against pi's CLI surface keep working. Main's
+    /// `--mode rpc` is accepted as an alias for `--rpc`. Main's
     /// dispatcher checks `cli.mode == "rpc"` alongside `cli.rpc`.
     #[test]
     fn parses_mode_rpc() {

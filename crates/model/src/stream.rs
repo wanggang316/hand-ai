@@ -265,21 +265,20 @@ fn is_retriable_error(message: &str) -> bool {
     {
         return true;
     }
-    // Pi-mono parity (issue #2313): OpenAI-compatible providers (z.ai
-    // notably) surface transient blips as `finish_reason: network_error`
-    // in the stream, which the provider adapter maps to the error
-    // message `"Provider finish_reason: network_error"`. Recognise the
-    // token directly so a single z.ai connectivity dip doesn't terminate
-    // the agent loop.
+    // OpenAI-compatible providers (z.ai notably) surface transient
+    // blips as `finish_reason: network_error` in the stream, which the
+    // provider adapter maps to the error message
+    // `"Provider finish_reason: network_error"`. Recognise the token
+    // directly so a single z.ai connectivity dip doesn't terminate the
+    // agent loop.
     if lower.contains("network_error") {
         return true;
     }
-    // Pi-mono parity (issue #3317): Apple's URLSession surfaces
-    // "Network connection lost." for transient connectivity blips it
-    // believes will recover on retry. Anthropic's Swift SDK passes
-    // this through verbatim. Recognise the substring so iOS/macOS
-    // users on flaky WiFi don't see momentary handoffs terminate the
-    // agent loop.
+    // Apple's URLSession surfaces "Network connection lost." for
+    // transient connectivity blips it believes will recover on retry.
+    // Anthropic's Swift SDK passes this through verbatim. Recognise
+    // the substring so iOS/macOS users on flaky WiFi don't see
+    // momentary handoffs terminate the agent loop.
     if lower.contains("network connection lost") {
         return true;
     }
@@ -384,12 +383,12 @@ mod tests {
         assert!(!is_retriable_error("HTTP 500 internal server error"));
     }
 
-    /// Pi-mono parity: OpenAI-compatible providers (z.ai notably) signal
-    /// transient connectivity failures via `finish_reason: "network_error"`
-    /// in the stream. The provider adapter surfaces this as
+    /// OpenAI-compatible providers (z.ai notably) signal transient
+    /// connectivity failures via `finish_reason: "network_error"` in
+    /// the stream. The provider adapter surfaces this as
     /// `errorMessage: "Provider finish_reason: network_error"`. Without
-    /// recognising it here, a single z.ai blip would terminate the agent
-    /// loop with no retry. Pi explicitly tests this — issue #2313.
+    /// recognising it here, a single z.ai blip would terminate the
+    /// agent loop with no retry.
     #[test]
     fn retriable_recognizes_provider_network_error() {
         assert!(is_retriable_error("Provider finish_reason: network_error"));
@@ -455,15 +454,13 @@ mod tests {
         }
     }
 
-    /// Pi-mono parity (issue #3317): Apple's URLSession surfaces a
-    /// "Network connection lost." string for transient connectivity
-    /// blips that the OS itself believes will recover on retry.
-    /// Anthropic's Swift SDK passes this through verbatim; without
-    /// recognising it, an iOS/macOS user on flaky WiFi would see
-    /// every momentary handoff terminate the agent loop. Pi's fix
-    /// added the token; mirror it here. We anchor on a substring so
-    /// minor wording changes ("network connection was lost") still
-    /// retry.
+    /// Apple's URLSession surfaces a "Network connection lost." string
+    /// for transient connectivity blips that the OS itself believes
+    /// will recover on retry. Anthropic's Swift SDK passes this through
+    /// verbatim; without recognising it, an iOS/macOS user on flaky
+    /// WiFi would see every momentary handoff terminate the agent
+    /// loop. We anchor on a substring so minor wording changes
+    /// ("network connection was lost") still retry.
     #[test]
     fn retriable_recognizes_network_connection_lost() {
         assert!(is_retriable_error("Network connection lost."));

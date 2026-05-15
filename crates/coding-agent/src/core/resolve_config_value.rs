@@ -347,15 +347,15 @@ mod tests {
         assert_eq!(out.get("X-Foo").map(String::as_str), Some("literal"));
     }
 
-    // ===== Pi-mono `!command` parity tests =====
+    // ===== `!command` substitution tests =====
     //
     // The `!command` path was implemented but only indirectly exercised
-    // via the headers tests. Pi-mono has explicit tests for trimming,
-    // multiline collapse, exit-code failure, nonexistent binary, empty
-    // output, caching, and per-instance cache behavior. Mirror them so
-    // a refactor that breaks any of these surfaces is caught by `cargo
-    // test` instead of by a user noticing their `op read` integration
-    // silently returns wrong data.
+    // via the headers tests. Explicit tests cover trimming, multiline
+    // collapse, exit-code failure, nonexistent binary, empty output,
+    // caching, and per-instance cache behavior so a refactor that breaks
+    // any of these surfaces is caught by `cargo test` instead of by a
+    // user noticing their `op read` integration silently returns wrong
+    // data.
 
     #[cfg(unix)]
     #[test]
@@ -371,7 +371,7 @@ mod tests {
     fn bang_command_multiline_uses_trimmed_full_stdout() {
         clear_config_value_cache();
         // Multiline stdout: trimming removes only leading/trailing
-        // whitespace (not internal newlines), matching pi's `stdout.trim()`.
+        // whitespace (not internal newlines), like `stdout.trim()`.
         let v = resolve_config_value("!printf 'line1\\nline2\\n'");
         assert_eq!(v.as_deref(), Some("line1\nline2"));
     }
@@ -396,9 +396,9 @@ mod tests {
         assert_eq!(v.as_deref(), Some("HELLO"));
     }
 
-    /// Pi-mono parity: cache is keyed on the FULL `!<command>` string, so
-    /// identical commands resolve to the same cached entry. Different
-    /// commands get separate cache entries.
+    /// Cache is keyed on the FULL `!<command>` string, so identical
+    /// commands resolve to the same cached entry. Different commands
+    /// get separate cache entries.
     #[cfg(unix)]
     #[test]
     fn bang_command_results_cache_by_full_config_key() {
@@ -411,11 +411,11 @@ mod tests {
         assert_eq!(b.as_deref(), Some("cached_value_BBB"));
     }
 
-    /// Pi-mono parity: failed commands are CACHED as `None` — pi
-    /// explicitly tests this so that an integration that's mis-configured
-    /// at startup doesn't get hammered with one shell invocation per
-    /// model request. Hand's cache stores `Option<String>` so failures
-    /// cache too; verify uncached call still runs the command fresh.
+    /// Failed commands are CACHED as `None` so that an integration
+    /// that's mis-configured at startup doesn't get hammered with one
+    /// shell invocation per model request. The cache stores
+    /// `Option<String>` so failures cache too; verify uncached call
+    /// still runs the command fresh.
     #[cfg(unix)]
     #[test]
     fn bang_command_failures_are_cached() {
@@ -434,9 +434,9 @@ mod tests {
         assert_eq!(b, None, "post-clear retry must still fail clean");
     }
 
-    /// Pi-mono parity: `clear_config_value_cache` empties the store so a
-    /// later identical command runs again. Without this, tests that
-    /// share a process couldn't validate command-changing behavior.
+    /// `clear_config_value_cache` empties the store so a later
+    /// identical command runs again. Without this, tests that share a
+    /// process couldn't validate command-changing behavior.
     #[cfg(unix)]
     #[test]
     fn clear_config_value_cache_allows_rerun() {
