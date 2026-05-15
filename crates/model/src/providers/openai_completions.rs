@@ -1590,11 +1590,11 @@ mod tests {
         }
     }
 
-    /// Direct OpenAI requests should emit `prompt_cache_key` (the session
-    /// id) whenever caching is enabled, even at the default "short"
-    /// retention. Long retention adds the 24h hint. Pi-mono gates both
-    /// on `model.baseUrl.includes("api.openai.com")` and the same logic
-    /// drives this helper.
+    /// Direct OpenAI requests should emit `prompt_cache_key` (the
+    /// session id) whenever caching is enabled, even at the default
+    /// "short" retention. Long retention adds the 24h hint. Both
+    /// branches gate on `model.baseUrl.includes("api.openai.com")`,
+    /// which is what this helper encodes.
     #[test]
     fn openai_prompt_cache_emits_key_for_direct_openai() {
         use crate::types::CacheRetention;
@@ -2530,7 +2530,7 @@ mod tests {
     /// shape is non-standard for `role: "assistant"` and triggers
     /// mirrored-structure output on some hosted gateways (DeepSeek V3.2
     /// via NVIDIA NIM recursively echoes the wrapper as literal text in
-    /// the reply). Pi-mono #3387 pins the plain-string shape.
+    /// the reply). This test pins the plain-string shape.
     #[test]
     fn assistant_text_only_content_serializes_as_plain_string() {
         let model = test_model(Provider::OpenAI);

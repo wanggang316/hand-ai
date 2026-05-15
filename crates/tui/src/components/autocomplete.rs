@@ -355,8 +355,8 @@ impl SlashCommandProvider {
 
 impl SlashCommandProvider {
     fn matches(&self, ctx: &AutocompleteContext) -> Vec<AutocompleteItem> {
-        // Pi-mono's filter is a prefix match against the command name —
-        // `/he` matches `help` and `hotkeys`. Args completion happens after
+        // Filter is a prefix match against the command name — `/he`
+        // matches `help` and `hotkeys`. Args completion happens after
         // a space (which we currently leave to extension providers).
         let query = ctx.query.as_str();
         self.commands
@@ -403,11 +403,11 @@ impl AutocompleteProvider for SlashCommandProvider {
 // PathAutocompleteProvider — `@path` completion
 // ============================================================================
 
-/// Default max BFS depth from the project root. Pi-mono drives `fd
-/// --max-depth=∞` and lets fd's own gitignore handling do the pruning. We
-/// don't depend on fd, so cap a manual walk at 3 levels — enough to
-/// surface typical `src/...`, `crates/.../*` etc. paths without scanning
-/// node_modules / target / .git.
+/// Default max BFS depth from the project root. A tool like `fd
+/// --max-depth=∞` could rely on its own gitignore handling for
+/// pruning; this autocomplete does a manual walk so it caps at 3
+/// levels — enough to surface typical `src/...`, `crates/.../*` etc.
+/// paths without scanning node_modules / target / .git.
 const DEFAULT_PATH_MAX_DEPTH: usize = 3;
 
 /// Default cap on returned entries. Above this the popup becomes unusable

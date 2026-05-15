@@ -182,8 +182,7 @@ fn try_ripgrep(
     // Stop flag parsing before the user-controlled pattern. Without
     // `--`, a pattern like `--pre=/tmp/payload.sh` is interpreted by
     // ripgrep as the `--pre` preprocessor flag, which executes the
-    // script for every searched file (an LLM-injection RCE). Pi-mono
-    // has an explicit test for this.
+    // script for every searched file (an LLM-injection RCE).
     cmd.arg("--").arg(pattern).arg(search_path);
 
     match cmd.output() {
@@ -353,13 +352,13 @@ mod tests {
         assert_eq!(kept_emojis, GREP_MAX_LINE_LENGTH);
     }
 
-    /// Pi-mono test: a `--pre=…` pattern must not let ripgrep execute
-    /// the referenced script as a preprocessor. With `cmd.arg(pattern)`
+    /// A `--pre=…` pattern must not let ripgrep execute the
+    /// referenced script as a preprocessor. With `cmd.arg(pattern)`
     /// directly (no `--`), ripgrep parses the flag and runs the
     /// preprocessor on every searched file. This is a real RCE vector
-    /// when the pattern comes from an LLM acting on attacker-controlled
-    /// content. The fix is to insert `--` before the pattern so flag
-    /// parsing stops.
+    /// when the pattern comes from an LLM acting on attacker-
+    /// controlled content. The fix is to insert `--` before the
+    /// pattern so flag parsing stops.
     ///
     /// We verify the guard by trying a flag-shaped pattern that, if
     /// interpreted as a flag, would either error or execute. Either

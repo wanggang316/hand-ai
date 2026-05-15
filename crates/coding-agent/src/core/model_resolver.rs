@@ -1316,8 +1316,8 @@ mod tests {
     /// (e.g. `deepseek/deepseek-r1`). Hand previously stripped the segment
     /// before the slash and looked the pattern up as `deepseek-r1`, which
     /// fell through to a fuzzy `contains` match that returned the wrong
-    /// model — e.g. `tngtech/deepseek-r1t2-chimera`. Pi-mono matches the
-    /// full slashed id first; we mirror that.
+    /// model — e.g. `tngtech/deepseek-r1t2-chimera`. The resolver now
+    /// matches the full slashed id first to avoid that footgun.
     #[test]
     fn resolve_model_preserves_slashed_id_under_explicit_provider() {
         let result = resolve_model(Some("openrouter"), "deepseek/deepseek-r1");
@@ -1375,9 +1375,9 @@ mod tests {
     /// across ALL providers — including ones the user has no credentials for
     /// (Bedrock, Vertex) — and silently picked one.
     ///
-    /// Pi-mono falls back to matching the full slashed input as an id across
-    /// every provider in the registry, finding e.g. openrouter's
-    /// `deepseek/deepseek-r1` and routing there.
+    /// The resolver falls back to matching the full slashed input as
+    /// an id across every provider in the registry, finding e.g.
+    /// openrouter's `deepseek/deepseek-r1` and routing there.
     #[test]
     fn resolve_model_no_provider_with_slashed_id_finds_openrouter_match() {
         let result = resolve_model(None, "deepseek/deepseek-r1");

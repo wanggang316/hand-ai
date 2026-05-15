@@ -268,7 +268,7 @@ mod tests {
             sanitize_binary_output("x\u{FFF8}y\u{FFF9}z\u{FFFB}w\u{FFFC}"),
             "x\u{FFF8}yzw\u{FFFC}"
         );
-        // DEL (0x7F) is not in the C0 range — keep it (pi parity).
+        // DEL (0x7F) is not in the C0 range — keep it.
         assert_eq!(sanitize_binary_output("a\x7Fb"), "a\x7Fb");
     }
 

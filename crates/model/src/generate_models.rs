@@ -1520,11 +1520,11 @@ fn static_vertex_models() -> Vec<Model> {
 }
 
 fn static_deepseek_models() -> Vec<Model> {
-    // Native DeepSeek API. Pi-mono maintains these as first-party entries
-    // because they predate (and outlive) any single models.dev snapshot.
-    // Single-turn use works out of the box; multi-turn replay requires the
-    // `requiresReasoningContentOnAssistantMessages` compat path (encoded
-    // here but not yet enforced on the request side — see
+    // Native DeepSeek API. Maintained as first-party entries because
+    // they predate (and outlive) any single models.dev snapshot.
+    // Single-turn use works out of the box; multi-turn replay requires
+    // the `requiresReasoningContentOnAssistantMessages` compat path
+    // (encoded here but not yet enforced on the request side — see
     // ResolvedCompat::requires_reasoning_content_on_assistant_messages).
     const BASE_URL: &str = "https://api.deepseek.com";
 

@@ -482,11 +482,11 @@ impl InteractiveMode {
             ListenerResult::pass()
         }));
 
-        // Ctrl+V listener: read an image from the system clipboard, write
-        // it to a temp file, and insert the path at the cursor. Pi-mono
-        // parity item M4.2. The actual clipboard read + file write runs
-        // off-thread (arboard / tempfile are sync) and the resulting path
-        // is inserted via the editor's Arc handle.
+        // Ctrl+V listener: read an image from the system clipboard,
+        // write it to a temp file, and insert the path at the cursor.
+        // The actual clipboard read + file write runs off-thread
+        // (arboard / tempfile are sync) and the resulting path is
+        // inserted via the editor's Arc handle.
         let chat_for_img = Arc::clone(&chat);
         let editor_for_img = Arc::clone(&editor);
         let render_for_img: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(tui.render_handle());
@@ -1481,10 +1481,10 @@ fn refresh_footer(
     }
 }
 
-/// Tint the editor's focused border with the active thinking level
-/// (M3.3). Pi-mono picks the colour from the `thinkingOff`/`Minimal`/
-/// `Low`/`Medium`/`High`/`Xhigh` theme slots; we mirror the same palette
-/// with truecolor literals so the change works under any terminal.
+/// Tint the editor's focused border with the active thinking level.
+/// The palette uses truecolor literals for `thinkingOff`/`Minimal`/
+/// `Low`/`Medium`/`High`/`Xhigh` so the colours work under any
+/// terminal.
 fn refresh_editor_border(session: &AgentSession, editor: &Arc<StdMutex<EditorComponent>>) {
     let colour = thinking_level_border_color(session.stream_options().reasoning);
     if let Ok(mut e) = editor.lock() {
@@ -2581,8 +2581,7 @@ async fn mount_resume_picker(
             // success the scrollback is stale (still shows the previous
             // session's messages) — wipe it and replay the new session's
             // history so the chat reflects what `session.messages()` now
-            // returns. Pi-mono does the same via `chatContainer.clear()`
-            // followed by `renderSessionContext`.
+            // returns.
             match session.switch_session(&path) {
                 Ok(()) => {
                     {

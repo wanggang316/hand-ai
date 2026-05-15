@@ -24,9 +24,9 @@ pub struct BuildSystemPromptOptions<'a> {
 pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
     // If a custom prompt is provided, use it as the base — but still
     // append project guidelines from --append-system-prompt so the two
-    // flags compose. Pi-mono concatenates both; hand previously short-
-    // circuited here and silently dropped --append-system-prompt when
-    // --system-prompt was set.
+    // flags compose. An earlier implementation short-circuited here
+    // and silently dropped --append-system-prompt when --system-prompt
+    // was set.
     if let Some(custom) = options.custom_prompt {
         let mut out = custom.to_string();
         if let Some(guidelines) = options.custom_guidelines
