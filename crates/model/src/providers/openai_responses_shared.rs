@@ -106,11 +106,12 @@ fn responses_supports_long_cache_retention(model: &Model) -> bool {
 
 /// Convert a `Context` into the `input` array accepted by the Responses API.
 ///
-/// Kept as the legacy single-arg surface so tests that don't care
-/// about vision routing don't have to thread a model through. New
-/// callers should prefer `convert_to_input_for_model`, which forwards
-/// tool-result image blocks when the target model advertises image
-/// input support.
+/// Test-only single-arg surface: production callers always have a
+/// `Model` in hand and must use `convert_to_input_for_model` to get the
+/// vision-aware routing of tool-result image blocks. This wrapper
+/// avoids threading a synthetic model through the unit tests that
+/// don't care about vision behaviour.
+#[cfg(test)]
 pub(crate) fn convert_to_input(context: &Context) -> Value {
     convert_to_input_for_model_inner(context, false)
 }
