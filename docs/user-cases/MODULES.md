@@ -19,8 +19,8 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts | coding-agent | — | — | — | — |
 | coding-agent-core-session-manager.md | pi-mono/packages/coding-agent/test/session-*.test.ts | coding-agent | — | — | — | — |
 | coding-agent-core-bash-executor.md | pi-mono/packages/coding-agent/test/bash-*.test.ts | coding-agent | — | — | — | — |
-| coding-agent-tools-render-utils.md | pi-mono/packages/coding-agent/test/render-*.test.ts | coding-agent | — | — | — | — |
-| coding-agent-core-system-prompt.md | pi-mono/packages/coding-agent/test/system-prompt*.test.ts | coding-agent | — | — | — | — |
+| coding-agent-tools-render-utils.md | hand parity contract (pi has no dedicated test file) | coding-agent | 12 | 12 | 0 | 0 |
+| coding-agent-core-system-prompt.md | pi-mono/packages/coding-agent/test/system-prompt.test.ts | coding-agent | 7 | 1 | 5 | 1 |
 | model-stream-retry.md | pi-mono/packages/ai/test/retry-*.test.ts (et al) | model | — | — | — | — |
 | tui-keys.md | pi-mono/packages/tui/test/keys*.test.ts | tui | — | — | — | — |
 | tui-autocomplete.md | pi-mono/packages/tui/test/autocomplete*.test.ts | tui | — | — | — | — |
@@ -30,10 +30,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
 
 ## Rollup
 
-- **Total cases authored:** 54
-- **Pass:** 46
-- **Fail:** 8
-- **Pending:** 0
+- **Total cases authored:** 73
+- **Pass:** 59
+- **Fail:** 13
+- **Pending:** 1
 
 ### Known failures (drive remediation)
 
@@ -58,3 +58,9 @@ authored yet, or the count hasn't been recomputed since the last edit.
   metadata; pi populates the side-channel for host consumption.
 - **UC-read-010** — hand never detects image MIME via file magic; pi
   emits an image block when bytes match a known header.
+- **UC-sysp-001** — hand suppresses the Available-tools section when
+  the tools slice is empty; pi emits `(none)`.
+- **UC-sysp-004/005** — hand has no `tool_snippets` channel; custom
+  tools can't be advertised at the protocol level.
+- **UC-sysp-006/007** — hand's `custom_guidelines` is a string, not a
+  list; no dedup/trim semantics.
