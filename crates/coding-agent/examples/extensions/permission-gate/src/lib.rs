@@ -1,7 +1,5 @@
 //! Tier 1 extension: blocks dangerous bash commands at the agent loop boundary.
 //!
-//! Ported from `pi-mono/.../examples/extensions/permission-gate.ts`.
-//!
 //! Registers a `before_tool_call` hook. When the model issues a `bash` tool
 //! call, the command string is checked against a small blocklist of obviously
 //! destructive substrings. A match returns `HookDecision::Cancel(reason)` so

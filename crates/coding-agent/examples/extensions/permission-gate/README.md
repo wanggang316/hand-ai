@@ -16,5 +16,3 @@ use ext_permission_gate::PermissionGate;
 let mut session = /* AgentSession */;
 session.register_extension(Arc::new(PermissionGate::new()));
 ```
-
-Ported from `pi-mono/.../examples/extensions/permission-gate.ts`.

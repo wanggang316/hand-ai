@@ -1,11 +1,10 @@
 //! Tier 1 extension: when the session ends, auto-commit any uncommitted
 //! changes in the session's working directory.
 //!
-//! Ported from `pi-mono/.../examples/extensions/auto-commit-on-exit.ts`.
-//! The pi-mono original derives a commit subject from the last assistant
-//! message; we use a static subject because hand's `on_shutdown` hook does
-//! not yet receive the message log. Lifting that limitation is a future
-//! enhancement.
+//! Uses a static commit subject because hand's `on_shutdown` hook does
+//! not yet receive the message log. Deriving the subject from the last
+//! assistant message is a future enhancement once the hook surface
+//! widens.
 //!
 //! All git operations are best-effort: failures are logged via
 //! `tracing::warn!` and never surfaced as errors. A coding session must not

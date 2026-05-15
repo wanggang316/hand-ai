@@ -1,11 +1,10 @@
 //! Tier 1 extension: blocks `write` / `edit` tool calls when the working
 //! directory has uncommitted git changes.
 //!
-//! Ported from `pi-mono/.../examples/extensions/dirty-repo-guard.ts`. The
-//! pi-mono version hooks `session_before_switch` / `session_before_fork`;
-//! hand's extension API does not expose those hooks yet, so we approximate
-//! the same intent at the most relevant point we *do* have — the moment
-//! before a write-shaped tool call mutates the tree.
+//! Hand's extension API does not yet expose `session_before_switch` /
+//! `session_before_fork`, so this fixture approximates the same intent
+//! at the most relevant available hook — the moment before a
+//! write-shaped tool call mutates the tree.
 //!
 //! Algorithm: shell out to `git status --porcelain` in `cx.cwd`. A non-empty
 //! stdout means the repo is dirty. A non-zero exit (e.g. cwd not a git repo)
