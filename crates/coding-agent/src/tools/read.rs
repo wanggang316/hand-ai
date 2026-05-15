@@ -136,8 +136,11 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
 
     let last_shown = start + included;
     if byte_truncated {
+        // Byte-cap truncation: a single chunk hit the 50 KB byte budget
+        // before the line cap. pi's wording is
+        // `[Showing lines N-M of T (<size> limit). Use offset=M+1 to continue.]`.
         output.push_str(&format!(
-            "\n[Showing lines {}-{} of {} ({} byte limit). Use offset={} to continue.]",
+            "\n[Showing lines {}-{} of {} ({} limit). Use offset={} to continue.]",
             start + 1,
             last_shown,
             total_lines,
@@ -145,12 +148,28 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
             last_shown + 1
         ));
     } else if last_shown < total_lines {
-        output.push_str(&format!(
-            "\n[Showing lines {}-{} of {} total. Use offset/limit to read more.]",
-            start + 1,
-            last_shown,
-            total_lines
-        ));
+        if user_limit.is_some() {
+            // User supplied `limit` and we hit it. pi's wording counts
+            // the remaining unseen lines from the user's reading frame:
+            // `[K more lines in file. Use offset=N+K+1 to continue.]`.
+            let remaining = total_lines - last_shown;
+            output.push_str(&format!(
+                "\n[{} more lines in file. Use offset={} to continue.]",
+                remaining,
+                last_shown + 1
+            ));
+        } else {
+            // Default 2000-line cap path: no user limit was supplied,
+            // and the byte budget did not fire. pi wording:
+            // `[Showing lines N-M of T. Use offset=M+1 to continue.]`.
+            output.push_str(&format!(
+                "\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
+                start + 1,
+                last_shown,
+                total_lines,
+                last_shown + 1
+            ));
+        }
     }
 
     ToolResult::text(output)
@@ -348,5 +367,102 @@ mod tests {
             "expected sed/head fallback hint, got: {}",
             text
         );
+    }
+
+    /// Default 2000-line truncation footer matches pi's wording exactly:
+    /// `[Showing lines 1-2000 of <T>. Use offset=2001 to continue.]`.
+    /// The earlier hand wording read
+    /// `[Showing lines 1-2000 of <T> total. Use offset/limit to read more.]`,
+    /// which forced any consumer parsing the footer (UI, doc tooling,
+    /// agent self-prompts) to handle a different shape than pi.
+    #[test]
+    fn test_read_default_line_cap_footer_matches_pi_wording() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("big.txt");
+        let content: String = (1..=2500).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(&file, &content).unwrap();
+
+        let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
+        let text = get_text(&result);
+        assert!(
+            text.contains("[Showing lines 1-2000 of 2500. Use offset=2001 to continue.]"),
+            "expected pi-aligned default-cap footer, got tail: {}",
+            &text[text.len().saturating_sub(300)..]
+        );
+        // Negative anchor: the old "total. Use offset/limit to read more"
+        // wording must not be present.
+        assert!(
+            !text.contains("Use offset/limit to read more"),
+            "old footer wording leaked through, got: {}",
+            &text[text.len().saturating_sub(300)..]
+        );
+    }
+
+    /// When the user supplies an explicit `limit` and the file has more
+    /// lines beyond it, the footer reads
+    /// `[K more lines in file. Use offset=<M+1> to continue.]` — pi's
+    /// user-limit truncation wording. K is the count of unseen lines,
+    /// `M+1` is the next read offset.
+    #[test]
+    fn test_read_user_limit_footer_emits_remaining_count() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("limited.txt");
+        let content: String = (1..=100).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n");
+        std::fs::write(&file, &content).unwrap();
+
+        let result = execute_read(
+            dir.path(),
+            json!({"path": file.to_str().unwrap(), "limit": 10}),
+        );
+        let text = get_text(&result);
+        assert!(
+            text.contains("[90 more lines in file. Use offset=11 to continue.]"),
+            "expected pi-aligned user-limit footer, got tail: {}",
+            &text[text.len().saturating_sub(300)..]
+        );
+        // Verify only the first 10 lines surfaced.
+        assert!(text.contains("Line 1"));
+        assert!(text.contains("Line 10"));
+        assert!(
+            !text.contains("Line 11"),
+            "line 11 leaked past limit=10"
+        );
+    }
+
+    /// Byte-cap truncation footer reads
+    /// `[Showing lines N-M of T (<size> limit). Use offset=M+1 to continue.]`
+    /// per pi. The earlier wording `(50.0KB byte limit)` is gone.
+    #[test]
+    fn test_read_byte_cap_footer_matches_pi_wording() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("wide.txt");
+        // ~100 KB of body across 500 lines of ~200 chars each.
+        let line = "x".repeat(200);
+        let content: String = (1..=500).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+        std::fs::write(&file, &content).unwrap();
+
+        let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
+        let text = get_text(&result);
+        // Pi pattern: "(<size> limit)" — note: NOT "(<size> byte limit)".
+        let footer_regex = regex_like(text);
+        assert!(
+            footer_regex.contains("Showing lines 1-")
+                && footer_regex.contains("of 500 (")
+                && footer_regex.contains("limit). Use offset="),
+            "expected pi-aligned byte-cap footer, got tail: {}",
+            &text[text.len().saturating_sub(300)..]
+        );
+        assert!(
+            !text.contains("byte limit"),
+            "old `byte limit` wording leaked, got: {}",
+            &text[text.len().saturating_sub(300)..]
+        );
+    }
+
+    /// Helper: render the last 300 chars of the result so the assertion
+    /// errors carry diagnostic context without dumping the whole 50 KB
+    /// payload.
+    fn regex_like(text: &str) -> String {
+        text[text.len().saturating_sub(300)..].to_string()
     }
 }

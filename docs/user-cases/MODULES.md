@@ -8,7 +8,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-path-utils.md | pi-mono/packages/coding-agent/test/path-utils.test.ts | coding-agent | 12 | 12 | 0 | 0 |
 | coding-agent-tools-file-mutation-queue.md | pi-mono/packages/coding-agent/test/file-mutation-queue.test.ts | coding-agent | 7 | 7 | 0 | 0 |
 | coding-agent-tools-find.md | pi-mono/packages/coding-agent/test/tools.test.ts (find describe) | coding-agent | 8 | 7 | 1 | 0 |
-| coding-agent-tools-read.md | pi-mono/packages/coding-agent/test/tools.test.ts (read describe) | coding-agent | 11 | 5 | 6 | 0 |
+| coding-agent-tools-read.md | pi-mono/packages/coding-agent/test/tools.test.ts (read describe) | coding-agent | 11 | 8 | 3 | 0 |
 | coding-agent-tools-grep.md | pi-mono/packages/coding-agent/test/tools.test.ts (grep describe) | coding-agent | 6 | 6 | 0 | 0 |
 | coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 10 | 11 | 10 |
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
@@ -31,8 +31,8 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 209
-- **Fail:** 74
+- **Pass:** 212
+- **Fail:** 71
 - **Pending:** 55
 
 ### Known failures (drive remediation)
@@ -46,15 +46,12 @@ authored yet, or the count hasn't been recomputed since the last edit.
 - **UC-read-001** — hand prepends every output line with `{N>6}→`;
   pi returns raw content. Resolution: drop the prefix at the tool
   surface (or make it opt-in), keep numbering in the TUI renderer.
-- **UC-read-003** — hand's truncation footer wording differs from pi.
-  Resolution: replace the template with pi's
-  `[Showing lines 1-N of T. Use offset=N+1 to continue.]`.
-- **UC-read-004** — hand's byte-limit footer wording differs (`50.0KB
-  byte limit` vs pi's `(<size> limit)`).
-- **UC-read-006** — hand uses one truncation footer for both
-  default-cap and user-limit truncation; pi has a distinct
-  `[N more lines in file. Use offset=M to continue.]` for the
-  user-limit case.
+- ~~UC-read-003/004/006~~ ✅ FIXED — all three truncation footers
+  (default 2000-line cap, 50 KB byte cap, user-supplied limit) now
+  match pi's wording exactly: `[Showing lines N-M of T. Use offset=M+1
+  to continue.]`, `[Showing lines N-M of T (<size> limit). Use
+  offset=M+1 to continue.]`, `[K more lines in file. Use offset=M+1
+  to continue.]`.
 - **UC-read-009** — hand emits no structured `details.truncation`
   metadata; pi populates the side-channel for host consumption.
 - **UC-read-010** — hand never detects image MIME via file magic; pi

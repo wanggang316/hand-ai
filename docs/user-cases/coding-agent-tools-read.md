@@ -9,22 +9,20 @@ how the model thinks about file contents.
 
 ## Divergence summary
 
-Several upstream behaviours diverge from hand's current implementation:
+Remaining upstream divergences (after the 2026-05-16 footer-alignment
+fix):
 
 - **Line-number prefix:** hand prepends each line with `{N>6}→` (e.g.
   `     1→`); pi returns raw content. Visible delta in every read.
-- **Truncation message wording:** hand emits
-  `[Showing lines 1-2000 of 2500 total. Use offset/limit to read more.]`;
-  pi emits `[Showing lines 1-2000 of 2500. Use offset=2001 to continue.]`.
-- **Limit-truncation message:** hand emits the same truncation footer;
-  pi emits `[90 more lines in file. Use offset=11 to continue.]` when
-  truncation is by user-supplied limit (not the default line cap).
+  Tracked under UC-read-001.
 - **Image-magic detection:** hand has no PNG/JPEG/GIF magic check —
-  every read returns a text block regardless of file bytes.
+  every read returns a text block regardless of file bytes. UC-read-010.
 - **Result `details` metadata:** hand returns only text; pi populates a
   structured `result.details.truncation` object the host can render.
+  UC-read-009.
 
-Each of these surfaces below as a ❌ case with a remediation note.
+Truncation footer wording (UC-read-003/004/006) is now aligned with
+pi.
 
 ## Status
 
@@ -32,10 +30,10 @@ Each of these surfaces below as a ❌ case with a remediation note.
 |----|--------|-------------|
 | UC-read-001 | ❌ fail | hand prefixes each line with `{N>6}→`; pi returns raw content |
 | UC-read-002 | ✅ pass | `test_read_missing_file` (error returned as success-shaped ToolResult — observable behaviour equivalent for the model) |
-| UC-read-003 | ❌ fail | hand's default line cap is 2000 and wording differs from pi |
-| UC-read-004 | ❌ fail | byte-limit wording differs from pi |
+| UC-read-003 | ✅ pass | `test_read_default_line_cap_footer_matches_pi_wording` |
+| UC-read-004 | ✅ pass | `test_read_byte_cap_footer_matches_pi_wording` |
 | UC-read-005 | ✅ pass | `test_read_with_offset_and_limit` (offset semantics correct, but output formatting differs — see UC-read-001) |
-| UC-read-006 | ❌ fail | limit-truncation wording differs from pi |
+| UC-read-006 | ✅ pass | `test_read_user_limit_footer_emits_remaining_count` |
 | UC-read-007 | ✅ pass | offset+limit semantics correct (modulo UC-read-001 formatting) |
 | UC-read-008 | ✅ pass | `test_read_offset_beyond_eof_errors` |
 | UC-read-009 | ❌ fail | hand emits no structured `details.truncation` object |
@@ -91,11 +89,7 @@ do NOT appear; a footer line tells the user to fetch the rest with
 - Assertion: the output does NOT contain the text of line 2001.
 - Assertion: the output footer reads
   `[Showing lines 1-2000 of 2500. Use offset=2001 to continue.]`.
-- Probe (FAILS today): hand emits
-  `[Showing lines 1-2000 of 2500 total. Use offset/limit to read more.]`
-  — wording differs.
-- Resolution proposal: replace hand's truncation footer template with
-  the pi wording (parameterised on `last_shown + 1`).
+- Probe: `cargo test -p hand-coding-agent test_read_default_line_cap_footer_matches_pi_wording -- --exact`.
 
 ### UC-read-004 — files exceeding 50 KB are truncated by byte budget
 
@@ -109,12 +103,7 @@ to continue.]` is included.
 - Assertion: the output contains line 1's content.
 - Assertion: the footer matches the regex
   `\[Showing lines 1-\d+ of 500 \(.* limit\)\. Use offset=\d+ to continue\.\]`.
-- Probe (FAILS today): hand emits
-  `[Showing lines 1-N of 500 (50.0KB byte limit). Use offset=N+1 to continue.]`
-  with `50.0KB` formatting. Close to pi but wording differs slightly
-  (`KB limit` vs `byte limit`).
-- Resolution proposal: align byte-limit footer wording with pi's
-  `(<size> limit)` shape.
+- Probe: `cargo test -p hand-coding-agent test_read_byte_cap_footer_matches_pi_wording -- --exact`.
 
 ### UC-read-005 — `offset` skips initial lines
 
@@ -140,11 +129,7 @@ no truncation banner is emitted (it fits within limits).
 - Assertion: the output does NOT contain line 11.
 - Assertion: the output contains
   `[90 more lines in file. Use offset=11 to continue.]`.
-- Probe (FAILS today): hand emits its truncation footer which differs
-  in wording from pi when truncation was driven by user `limit`.
-- Resolution proposal: branch hand's footer template between
-  "default-cap truncation" and "user-limit truncation" with the
-  matching wording for each.
+- Probe: `cargo test -p hand-coding-agent test_read_user_limit_footer_emits_remaining_count -- --exact`.
 
 ### UC-read-007 — `offset` + `limit` together select a window
 
