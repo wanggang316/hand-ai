@@ -14,9 +14,9 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-tools-ls.md | pi-mono/packages/coding-agent/test/tools.test.ts (ls describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 22 | 30 | 8 |
-| coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (subset) | coding-agent | — | — | — | — |
-| coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | — | — | — | — |
-| coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts | coding-agent | — | — | — | — |
+| coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (API-key + caching subset) | coding-agent | 16 | 16 | 0 | 0 |
+| coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 11 | 3 | 17 |
+| coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 5 | 5 | 1 |
 | coding-agent-core-session-manager.md | pi-mono/packages/coding-agent/test/session-*.test.ts | coding-agent | — | — | — | — |
 | coding-agent-core-bash-executor.md | pi-mono/packages/coding-agent/test/bash-*.test.ts | coding-agent | — | — | — | — |
 | coding-agent-tools-render-utils.md | hand parity contract (pi has no dedicated test file) | coding-agent | 12 | 12 | 0 | 0 |
@@ -30,10 +30,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
 
 ## Rollup
 
-- **Total cases authored:** 133
-- **Pass:** 81
-- **Fail:** 43
-- **Pending:** 9
+- **Total cases authored:** 191
+- **Pass:** 113
+- **Fail:** 51
+- **Pending:** 27
 
 ### Known failures (drive remediation)
 
@@ -81,6 +81,13 @@ authored yet, or the count hasn't been recomputed since the last edit.
 - **UC-args-055/056** — `@<path>` arg recognition missing.
 - **UC-args-057..059** — unknown-flag capture (instead of parse error)
   missing.
+- **UC-mr-027/028/029** — default model lookups (`openai`, `zai`,
+  `minimax`, `cerebras`, `vercel-ai-gateway`) likely drift from pi's
+  current values; needs a snapshot-equality test.
+- **UC-as-001** — no `get_api_key` async with OAuth refresh + lock
+  compromise recovery on `AuthStorage`.
+- **UC-as-005..008** — no `reload`/`drain_errors`, no `get_auth_status`
+  redactor, no runtime-override layer.
 
 ## Next-batch backlog
 
