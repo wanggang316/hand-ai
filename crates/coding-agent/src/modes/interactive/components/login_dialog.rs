@@ -8,7 +8,7 @@
 //! re-render.
 //!
 //! Events ([`LoginDialogEvent::Submit`] / `Cancel`) flow through an
-//! [`mpsc::Sender`] supplied at construction. The input's
+//! [`std::sync::mpsc::Sender`] supplied at construction. The input's
 //! `on_submit` / `on_escape` callbacks forward to that channel so the
 //! manual-input and prompt stages dispatch user-supplied strings
 //! without a host-owned future.

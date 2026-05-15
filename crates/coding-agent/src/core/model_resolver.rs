@@ -284,8 +284,9 @@ fn has_date_suffix(id: &str) -> bool {
 
 /// Build a fallback model for an unknown model ID.
 ///
-/// Two-step resolution: parse the provider string into a [`Provider`] enum
-/// (handles aliases below), then pick the API protocol that provider uses.
+/// Two-step resolution: parse the provider string into a
+/// [`model::types::Provider`] enum (handles aliases below), then pick
+/// the API protocol that provider uses.
 /// Defaults to Anthropic only when the provider string is genuinely
 /// unrecognised — *not* when it's a known provider we just hadn't enumerated
 /// here, which was the bug the user hit with `--provider zai`.

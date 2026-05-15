@@ -6,8 +6,8 @@
 //! being moved into one.
 //!
 //! Events ([`ExtensionInputEvent::Submit`] / `Cancel`) are surfaced via
-//! an [`mpsc::Sender`] supplied at construction — channels are
-//! preferred over `Box<dyn Fn>` callbacks for cross-component
+//! an [`std::sync::mpsc::Sender`] supplied at construction — channels
+//! are preferred over `Box<dyn Fn>` callbacks for cross-component
 //! signalling.
 //!
 //! Theming caveat: the dialog can read an `accent` slot from the

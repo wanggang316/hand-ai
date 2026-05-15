@@ -7,9 +7,10 @@
 //! After every call to [`DiffRenderer::diff`] (or [`DiffRenderer::full_render`]),
 //! the hardware cursor is left at column 0 of the row immediately *below* the
 //! last rendered line — i.e. exactly `prev_line_count()` rows below the top
-//! of the rendered region. The next [`diff`] call homes the cursor up by
-//! `prev_line_count()` rows before painting, so the renderer can address any
-//! row in the region with a `\x1b[{n}B` (cursor-down) sequence.
+//! of the rendered region. The next [`DiffRenderer::diff`] call homes the
+//! cursor up by `prev_line_count()` rows before painting, so the renderer
+//! can address any row in the region with a `\x1b[{n}B` (cursor-down)
+//! sequence.
 //!
 //! Without this invariant, the cursor drifts by one rendered region per
 //! frame and every multi-frame interactive session paints in the wrong rows.

@@ -395,7 +395,7 @@ impl ProcessRunner for DefaultProcessRunner {
 /// Default in-process implementation of [`SourceRegistry`].
 ///
 /// Holds the agent + cwd dirs needed to compute install paths, a
-/// snapshot of the per-layer [`Settings`] for read-side resolve, an
+/// snapshot of the per-layer settings for read-side resolve, an
 /// optional shared [`SettingsManager`] handle so the persistence
 /// helpers ([`SourceRegistry::add_source_to_settings`] et al.) can
 /// commit changes back to YAML, and a [`ProcessRunner`] used by the

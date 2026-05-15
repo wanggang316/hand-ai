@@ -1017,8 +1017,8 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
 }
 
 /// Built-in slash command specs. Built from a fresh
-/// [`SlashCommandRegistry::new`] so the surface here tracks the
-/// dispatcher's actual built-in set.
+/// [`crate::core::slash_commands::SlashCommandRegistry::new`] so the
+/// surface here tracks the dispatcher's actual built-in set.
 fn builtin_command_specs() -> Vec<RpcSlashCommand> {
     let registry = crate::core::slash_commands::SlashCommandRegistry::new();
     registry

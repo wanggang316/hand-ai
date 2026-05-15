@@ -116,10 +116,11 @@ pub(crate) fn convert_to_input(context: &Context) -> Value {
     convert_to_input_for_model_inner(context, false)
 }
 
-/// Like [`convert_to_input`] but routes tool-result images into the
-/// `function_call_output` content array when the model accepts image
-/// input. This lets vision-capable Responses models see screenshots,
-/// PDFs, and other binary tool-output payloads inline.
+/// Convert a `Context` into the `input` array for the Responses API,
+/// routing tool-result image blocks into the `function_call_output`
+/// content array when the target model accepts image input. This lets
+/// vision-capable Responses models see screenshots, PDFs, and other
+/// binary tool-output payloads inline.
 pub(crate) fn convert_to_input_for_model(context: &Context, model: &Model) -> Value {
     let supports_images = model.input.contains(&crate::types::InputType::Image);
     convert_to_input_for_model_inner(context, supports_images)

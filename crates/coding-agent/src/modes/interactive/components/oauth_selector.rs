@@ -7,13 +7,11 @@
 //! any key it doesn't itself handle. Fuzzy filtering uses
 //! [`hand_tui::fuzzy_filter`].
 //!
-//! The TS source resolves provider auth status by calling `authStorage.get(id)`
-//! and an optional `getAuthStatus(id)` callback. The Rust port avoids tying
-//! the renderer to [`AuthStorage`] / [`ModelRegistry`] directly; instead the
-//! constructor accepts a fully-resolved
-//! [`AuthSelectorProvider::status`] string per provider, computed by the
-//! driver from the same APIs. This keeps the component pure-render and easy
-//! to test, matching the view-model pattern used by `footer`.
+//! The renderer is intentionally decoupled from `AuthStorage` and
+//! `ModelRegistry`. The constructor accepts a fully-resolved
+//! [`AuthSelectorProvider::status`] string per provider, computed by
+//! the driver. This keeps the component pure-render and easy to test,
+//! matching the view-model pattern used by `footer`.
 //!
 //! Theming caveat: the TS source pulls `accent`, `success`, `warning`,
 //! `muted`, `error` from the coding-agent theme. Until the theme port lands

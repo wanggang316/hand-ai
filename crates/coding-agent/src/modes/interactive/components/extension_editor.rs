@@ -15,7 +15,7 @@
 //!    [`ExtensionEditorComponent::set_text`].
 //!
 //! 3. **Submit / cancel through a channel.** The component takes an
-//!    [`mpsc::Sender`] and emits
+//!    [`std::sync::mpsc::Sender`] and emits
 //!    [`ExtensionEditorEvent::Submit`] / `Cancel` — channels over
 //!    `Box<dyn Fn>` for cross-component signalling.
 

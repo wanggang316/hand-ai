@@ -32,8 +32,9 @@
 //! ## Concurrency
 //!
 //! [`ModelRegistry`] is `Send + Sync` (built from owned data) but mutating
-//! methods like [`ModelRegistry::register_provider`] / [`refresh`] are not
-//! reentrant. Wrap in a `Mutex` if multiple threads need to mutate it.
+//! methods like [`ModelRegistry::register_provider`] /
+//! [`ModelRegistry::refresh`] are not reentrant. Wrap in a `Mutex` if
+//! multiple threads need to mutate it.
 
 use crate::core::auth_storage::{AuthRecord, AuthStorage};
 use crate::core::resolve_config_value::{
@@ -517,7 +518,7 @@ impl ModelRegistry {
         self.has_provider_auth_configured(model.provider.as_str())
     }
 
-    /// Like [`has_configured_auth`] but keyed by raw provider id — used by
+    /// Like [`Self::has_configured_auth`] but keyed by raw provider id — used by
     /// query paths that don't have a `Model` in hand.
     pub fn has_provider_auth_configured(&self, provider: &str) -> bool {
         if self.has_auth_storage_credential(provider) {

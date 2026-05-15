@@ -1078,14 +1078,16 @@ impl AgentSession {
     /// Replaces the stored `bash_cancel` with a fresh token so a stale
     /// abort can't poison this call, then races the executor future
     /// against the new token's `cancelled()` future via `tokio::select!`.
-    /// On cancel, returns a synthesized [`BashResult`] with
-    /// `truncated: true`, the abort marker `"[bash aborted]"` on
-    /// `output`, and `aborted: true` so the caller can route the marker
-    /// to `stderr` on the wire (see [`RunBashOutcome`]). The underlying
-    /// child process is killed via [`tokio::process::Command::kill_on_drop`]
+    /// On cancel, returns a synthesized
+    /// [`crate::core::bash_executor::BashResult`] with `truncated: true`,
+    /// the abort marker `"[bash aborted]"` on `output`, and
+    /// `aborted: true` so the caller can route the marker to `stderr`
+    /// on the wire (see [`RunBashOutcome`]). The underlying child
+    /// process is killed via [`tokio::process::Command::kill_on_drop`]
     /// — dropping the executor future on the cancel arm reaps the child.
     ///
-    /// `timeout_secs` is forwarded to [`BashExecutorOptions::timeout_secs`]
+    /// `timeout_secs` is forwarded to
+    /// [`crate::core::bash_executor::BashExecutorOptions::timeout_secs`]
     /// (0 disables the timeout).
     pub async fn run_bash(
         &self,
@@ -1316,9 +1318,9 @@ impl AgentSession {
 /// holds `&mut self` (see `rpc/server.rs` Prompt arm).
 ///
 /// Mirrors [`AgentSession::send_message`]'s prompt path: when no images
-/// are attached, use [`UserMessage::new_text`] for the cheap text-only
-/// shape; otherwise emit a `Blocks` message with the text first and the
-/// images appended. An empty text + non-empty images list still produces
+/// are attached, use [`model::types::UserMessage::new_text`] for the
+/// cheap text-only shape; otherwise emit a `Blocks` message with the
+/// text first and the images appended. An empty text + non-empty images list still produces
 /// a valid `Blocks` payload (the leading text block is always present
 /// even when empty, matching the wire shape the model sees for
 /// multi-modal user turns).

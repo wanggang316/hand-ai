@@ -5,8 +5,9 @@
 //! / `tui.select.down` / `tui.select.confirm` / `tui.select.cancel`, plus
 //! the vim-style `j` / `k` shortcuts.
 //!
-//! Events ([`ExtensionSelectorEvent::Select`] / `Cancel`) flow through an
-//! [`mpsc::Sender`] supplied at construction. Theme colouring of the
+//! Events ([`ExtensionSelectorEvent::Select`] / `Cancel`) flow through
+//! an [`std::sync::mpsc::Sender`] supplied at construction. Theme
+//! colouring of the
 //! title and selected row is optional; pass `None` for plain output and
 //! let the driver wrap it.
 

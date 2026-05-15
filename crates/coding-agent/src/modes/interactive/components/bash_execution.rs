@@ -3,12 +3,13 @@
 //! Models a long-running shell command in the interactive UI:
 //!
 //! * A header `$ <command>` line.
-//! * Streaming output appended via [`Self::append_output`], with ANSI codes
-//!   stripped and `\r\n` / `\r` normalised.
+//! * Streaming output appended via
+//!   [`BashExecutionComponent::append_output`], with ANSI codes stripped
+//!   and `\r\n` / `\r` normalised.
 //! * Top and bottom borders that adapt to the terminal width.
 //! * A loader frame while the command is running, replaced by status text
 //!   (cancelled / exit code / truncation note) once
-//!   [`Self::set_complete`] is called.
+//!   [`BashExecutionComponent::set_complete`] is called.
 //! * An expand/collapse toggle: when collapsed the last
 //!   [`PREVIEW_LINES`] visual lines are shown; when expanded the full
 //!   (post-context-truncation) buffer is shown.

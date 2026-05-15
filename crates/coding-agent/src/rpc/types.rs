@@ -85,7 +85,7 @@ pub enum QueueMode {
     OneAtATime,
 }
 
-/// Severity tag for [`RpcExtensionUiRequest::Notify`] popups.
+/// Severity tag for [`RpcExtensionUiRequestKind::Notify`] popups.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NotifyType {
@@ -94,7 +94,7 @@ pub enum NotifyType {
     Error,
 }
 
-/// Placement for [`RpcExtensionUiRequest::SetWidget`] surfaces.
+/// Placement for [`RpcExtensionUiRequestKind::SetWidget`] surfaces.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WidgetPlacement {

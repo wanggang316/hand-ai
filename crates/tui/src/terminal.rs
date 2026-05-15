@@ -97,9 +97,9 @@ pub trait Terminal: Send {
         Ok(())
     }
 
-    /// Restore canonical (cooked) mode. Paired with [`enter_raw_mode`];
-    /// called from the run loop's shutdown path so the user's shell
-    /// inherits a usable terminal.
+    /// Restore canonical (cooked) mode. Paired with
+    /// [`Self::enter_raw_mode`]; called from the run loop's shutdown
+    /// path so the user's shell inherits a usable terminal.
     fn leave_raw_mode(&mut self) -> std::io::Result<()> {
         Ok(())
     }

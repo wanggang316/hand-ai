@@ -398,12 +398,12 @@ impl Agent {
     ///
     /// `abort` only cancels a run that is *currently executing*. Calling
     /// `abort` between runs (when no `prompt`/`continue` is in flight) is
-    /// silently lost: the next run's [`start_run`] installs a fresh
-    /// cancellation token before any cancellable work begins.
+    /// silently lost: the next run installs a fresh cancellation token
+    /// before any cancellable work begins.
     ///
     /// Cancellation surfaces in two places:
     /// - `prompt()` and `continue()` return `Ok(_)` with the final assistant
-    ///   message's [`crate::types::StopReason`] set to `Aborted`. They do
+    ///   message's [`model::StopReason`] set to `Aborted`. They do
     ///   **not** return `Err(AgentError::Aborted)` — `Err` is reserved for
     ///   transport / lifecycle errors. Callers that need to distinguish a
     ///   normal completion from an aborted one should inspect
@@ -759,14 +759,14 @@ impl std::fmt::Debug for Agent {
 /// from any task or thread.
 ///
 /// The handle holds an `Arc` to the agent's shared cancellation cell. Each
-/// [`Agent::start_run`] replaces the cell's contents with a fresh
+/// new run replaces the cell's contents with a fresh
 /// [`CancellationToken`], so a handle created before run N still cancels
 /// run N+1 if that run is what's in flight when [`Self::abort`] is called.
 ///
 /// # Threading model
 ///
 /// `Agent` itself is held by `&mut self` in [`Agent::prompt`] /
-/// [`Agent::r#continue`], so concurrent prompts on the same agent require
+/// `Agent::continue`, so concurrent prompts on the same agent require
 /// external synchronization. `AbortHandle`, [`Agent::steer`],
 /// [`Agent::follow_up`], and [`Agent::subscribe`] all take `&self` and are
 /// safe to call from any task or thread while a prompt is running.
@@ -778,7 +778,7 @@ pub struct AbortHandle {
 impl AbortHandle {
     /// Cancel the in-flight run, if any. See [`Agent::abort`] for the full
     /// semantics — the same caveats apply: between runs, `abort` is silently
-    /// lost because [`Agent::start_run`] installs a fresh token.
+    /// lost because the next run installs a fresh token.
     pub fn abort(&self) {
         self.cancel.lock().unwrap().cancel();
     }

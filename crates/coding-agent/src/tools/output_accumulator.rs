@@ -12,8 +12,9 @@
 //! - writes the *raw* bytes to a temp file once the output exceeds
 //!   either the line or the byte limit, so callers can persist the full
 //!   stream without holding it all in memory;
-//! - exposes a [`snapshot`] that pairs a tail-truncated string with the
-//!   full counts and the path to the spilled file (when present).
+//! - exposes a [`OutputAccumulator::snapshot`] that pairs a
+//!   tail-truncated string with the full counts and the path to the
+//!   spilled file (when present).
 //!
 //! ## Implementation notes
 //!

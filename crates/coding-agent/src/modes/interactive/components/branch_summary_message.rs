@@ -4,9 +4,10 @@
 //! inserts a synthetic "branchSummary" message that shows either a short
 //! collapsed line or the full markdown summary.
 //!
-//! Mirrors [`CompactionSummaryMessageComponent`] in structure; the
-//! differences are the `[branch]` label, the heading, and the absence of a
-//! token count.
+//! Mirrors
+//! [`super::compaction_summary_message::CompactionSummaryMessageComponent`]
+//! in structure; the differences are the `[branch]` label, the heading,
+//! and the absence of a token count.
 //!
 //! Theming + keybinding caveats: same as
 //! [`super::compaction_summary_message`] (see parent module docs).

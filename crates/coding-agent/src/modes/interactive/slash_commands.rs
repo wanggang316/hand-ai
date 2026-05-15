@@ -386,10 +386,11 @@ Commands:
     }
 
     /// Build the `/hotkeys` text by enumerating the live
-    /// [`KeybindingsManager`] so user overrides show up and additions to
-    /// the registry don't require updating this file. Returns a static
-    /// header (session-level shortcuts that aren't in the registry)
-    /// followed by the resolved bindings, grouped by category.
+    /// [`hand_tui::keybindings::KeybindingsManager`] so user overrides
+    /// show up and additions to the registry don't require updating this
+    /// file. Returns a static header (session-level shortcuts that
+    /// aren't in the registry) followed by the resolved bindings,
+    /// grouped by category.
     fn hotkeys_text() -> String {
         use hand_tui::keybindings::{
             Keybinding, KeybindingDefinition, TUI_KEYBINDINGS, get_keybindings,

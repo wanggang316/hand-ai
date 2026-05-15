@@ -2,7 +2,7 @@
 //!
 //! A tiny global checkpoint log used to profile process startup. Each call
 //! to [`time`] records the label and the milliseconds elapsed since the
-//! previous checkpoint (or since [`reset`] / first call). [`print`]
+//! previous checkpoint (or since [`reset`] / first call). [`print()`]
 //! dumps the log to stderr. Both are no-ops unless the env-var gate is on.
 //!
 //! Usage:
