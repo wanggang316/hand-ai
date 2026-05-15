@@ -1,36 +1,32 @@
 //! Generic tool-execution component (fallback path only).
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/tool-execution.ts`.
+//! A full tool-execution renderer orchestrates three parallel paths:
 //!
-//! pi-mono's full `ToolExecutionComponent` orchestrates three parallel
-//! rendering paths:
-//!
-//! 1. A built-in or extension-registered call/result renderer with optional
-//!    `default`/`self` shells.
-//! 2. An image-block renderer for `image/*` MCP content (with on-the-fly
-//!    PNG conversion for kitty-protocol terminals).
+//! 1. A built-in or extension-registered call/result renderer with
+//!    optional `default`/`self` shells.
+//! 2. An image-block renderer for `image/*` MCP content (with
+//!    on-the-fly PNG conversion for kitty-protocol terminals).
 //! 3. A generic textual fallback used when no renderer is registered.
 //!
-//! Paths #1 and #2 require infrastructure that is not yet ported to the Rust
-//! crate: the `ToolDefinition` / `ToolRenderContext` extension surface, the
-//! `createAllToolDefinitions` registry, the kitty-protocol image pipeline,
-//! and the [`hand_tui::ImageComponent`] driver.
+//! Paths #1 and #2 require infrastructure that is still in flight: the
+//! `ToolDefinition` / `ToolRenderContext` extension surface, a
+//! registry that materialises all tool definitions, the kitty-protocol
+//! image pipeline, and the [`hand_tui::ImageComponent`] driver.
 //!
-//! This Rust port covers **path #3 only** — the fallback rendering — which
-//! is what `formatToolExecution()` produces in pi-mono. It boxes the tool
-//! name in a tinted background that flips between three states (pending /
-//! error / success), shows the args as pretty-printed JSON, and appends any
-//! text content from the [`ToolResult`].
+//! This component covers **path #3 only** — the fallback rendering.
+//! It boxes the tool name in a tinted background that flips between
+//! three states (pending / error / success), shows the args as
+//! pretty-printed JSON, and appends any text content from the
+//! [`ToolResult`].
 //!
-//! TODO(parity): once the extension surface and tool registry land, extend
-//! this component to dispatch to registered renderers. See
-//! docs/exec-plans/parity-completion.md §A1.
+//! TODO: once the extension surface and tool registry land, extend
+//! this component to dispatch to registered renderers.
 //!
-//! Theming caveat: pi-mono reads `toolPendingBg`, `toolErrorBg`,
-//! `toolSuccessBg`, `toolTitle`, `toolOutput` slots from the coding-agent
-//! theme. Until that theme system is ported (see parent module docs) we
-//! hardcode 256-color ANSI defaults that approximate the dark-theme spirit.
+//! Theming caveat: the renderer expects a `tool_pending_bg`,
+//! `tool_error_bg`, `tool_success_bg`, `tool_title`, `tool_output`
+//! palette. Until the theme system surfaces those slots, the
+//! component hardcodes 256-color ANSI defaults that approximate the
+//! dark-theme spirit.
 
 use hand_agent::types::ToolResult;
 use hand_tui::components::markdown::DefaultTextStyle;
@@ -38,19 +34,19 @@ use hand_tui::{BoxComponent, Color, Component, NamedColor, TextComponent};
 use model::ToolResultContent;
 use serde_json::Value;
 
-// Backgrounds — pi-mono dark-theme truecolor values. The 256-color
-// `\x1b[48;5;52m` (saturated dark red) shipped initially was unreadable
-// against terminals whose default foreground is dark; pi-mono's
-// `#3c2828` is intentionally muted so explicit-fg body text always wins
-// on contrast.
+// Backgrounds — dark-theme truecolor values. An earlier 256-color
+// `\x1b[48;5;52m` (saturated dark red) was unreadable against
+// terminals whose default foreground is dark; `#3c2828` is
+// intentionally muted so explicit-fg body text always wins on
+// contrast.
 /// Background ANSI for an in-flight tool call.
 const PENDING_BG: &str = "\x1b[48;2;40;40;50m"; // #282832
 /// Background ANSI for a failed tool call.
 const ERROR_BG: &str = "\x1b[48;2;60;40;40m"; // #3c2828
 /// Background ANSI for a successful tool call.
 const SUCCESS_BG: &str = "\x1b[48;2;40;50;40m"; // #283228
-/// Bold + bright cyan title color (matches pi-mono `theme.bold(toolName)`
-/// in dark mode where `toolTitle` falls back to terminal default).
+/// Bold + bright cyan title color (the dark-theme `tool_title` slot
+/// falls back to terminal default).
 const TITLE_FG: &str = "\x1b[1m\x1b[96m";
 /// Body foreground. Explicit light grey so the JSON args and result text
 /// stay readable on any of the three tinted backgrounds above — without
@@ -72,8 +68,8 @@ pub enum ToolExecutionStatus {
 
 /// Generic, renderer-less tool-execution renderer.
 ///
-/// Mirrors pi-mono's `formatToolExecution()` fallback path: a tinted box
-/// containing `<bold tool name>\n\n<args JSON>\n<output text>`.
+/// Produces the fallback layout: a tinted box containing
+/// `<bold tool name>\n\n<args JSON>\n<output text>`.
 pub struct ToolExecutionComponent {
     tool_name: String,
     args: Value,
@@ -160,9 +156,9 @@ impl ToolExecutionComponent {
 
 impl Component for ToolExecutionComponent {
     fn render(&self, width: u16) -> Vec<String> {
-        // Render args as pretty JSON, but skip the section entirely when args
-        // are an empty object — matches pi-mono's `JSON.stringify(args)` which
-        // would otherwise render a bare `{}`.
+        // Render args as pretty JSON, but skip the section entirely
+        // when args are an empty object — a bare `{}` adds noise
+        // without conveying information.
         let args_text = match &self.args {
             Value::Object(map) if map.is_empty() => String::new(),
             _ => serde_json::to_string_pretty(&self.args).unwrap_or_default(),

@@ -1,34 +1,30 @@
 //! Colorised diff renderer with intra-line word highlighting.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/diff.ts`.
-//!
-//! Takes the unified-style diff text emitted by the edit/write tools (lines
-//! prefixed with `+`, `-`, or space and a line number) and styles it for
-//! terminal display:
+//! Takes the unified-style diff text emitted by the edit/write tools
+//! (lines prefixed with `+`, `-`, or space and a line number) and
+//! styles it for terminal display:
 //!
 //! * Context lines render with a dim/gray foreground.
-//! * Removed lines render in red, with inverse video on tokens that changed
-//!   within a single-line modification.
+//! * Removed lines render in red, with inverse video on tokens that
+//!   changed within a single-line modification.
 //! * Added lines render in green, with the same inverse highlighting.
 //!
-//! Intra-line highlighting is only applied when a removal block has exactly
-//! one removed and one added line (signalling a single-line modification);
-//! larger blocks are shown line-by-line without word-level diffing, matching
-//! pi-mono behaviour.
+//! Intra-line highlighting is only applied when a removal block has
+//! exactly one removed and one added line (signalling a single-line
+//! modification); larger blocks are shown line-by-line without
+//! word-level diffing.
 //!
-//! Word-level diffing uses the [`similar`] crate. Its `diff_words` tokenizer
-//! emits whitespace as separate tokens (npm `diff.diffWords` groups
-//! whitespace with adjacent words); the visible output still highlights only
-//! changed tokens, which is the property the human reader cares about.
+//! Word-level diffing uses the [`similar`] crate. Its `diff_words`
+//! tokenizer emits whitespace as separate tokens; the visible output
+//! still highlights only changed tokens, which is the property the
+//! human reader cares about.
 //!
-//! Theming caveat: pi-mono reads `toolDiffContext`, `toolDiffRemoved`,
-//! `toolDiffAdded` slots from the coding-agent theme. Until the theme port
-//! lands (see parent module docs) we hardcode ANSI defaults that match
-//! pi-mono's dark theme spirit.
+//! Theming caveat: the renderer expects `tool_diff_context`,
+//! `tool_diff_removed`, `tool_diff_added` slots. Until the theme
+//! system surfaces them we hardcode ANSI defaults that match the
+//! dark-theme spirit.
 //!
-//! TODO(parity): theme integration deferred — see
-//! docs/exec-plans/parity-completion.md §A1.
+//! TODO: theme integration deferred until the theme slot wiring lands.
 
 use similar::{ChangeTag, TextDiff};
 
@@ -43,7 +39,8 @@ const INVERSE: &str = "\x1b[7m";
 /// Reset.
 const RESET: &str = "\x1b[0m";
 
-/// Replace tabs with three spaces, matching pi-mono.
+/// Replace tabs with three spaces so terminal width math doesn't
+/// blow up on tab-indented diffs.
 fn replace_tabs(s: &str) -> String {
     s.replace('\t', "   ")
 }
@@ -159,8 +156,8 @@ fn render_intra_line_diff(old_content: &str, new_content: &str) -> (String, Stri
     (removed_line, added_line)
 }
 
-/// Render `diff_text` as a styled string. Each diff line becomes one line of
-/// output joined with `\n`, matching pi-mono's `renderDiff` return shape.
+/// Render `diff_text` as a styled string. Each diff line becomes one
+/// line of output joined with `\n`.
 pub fn render_diff(diff_text: &str) -> String {
     let lines: Vec<&str> = diff_text.split('\n').collect();
     let mut result: Vec<String> = Vec::new();
@@ -229,8 +226,9 @@ pub fn render_diff(diff_text: &str) -> String {
                 i += 1;
             }
             _ => {
-                // Context line: an extra leading space matches pi-mono's
-                // ` ${lineNum} ${content}` template (note the leading space).
+                // Context line: render ` <lineNum> <content>` with a
+                // leading space so the column aligns with the prefixed
+                // `+` / `-` lines.
                 result.push(format!(
                     "{CONTEXT_FG} {} {}{RESET}",
                     parsed.line_num,

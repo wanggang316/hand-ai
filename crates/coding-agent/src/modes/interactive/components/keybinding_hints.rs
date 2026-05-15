@@ -1,24 +1,18 @@
 //! Formatting helpers for keybinding hints.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts`.
-//!
-//! pi-mono pulls keybinding entries from a global keybinding registry and
-//! renders them as `"<key> <description>"` with dim styling on the key and
-//! muted styling on the description. This Rust port exposes:
+//! Resolves keybinding entries to `"<key> <description>"` with dim
+//! styling on the key and muted styling on the description. Exposes:
 //!
 //! * [`format_keys`] — slash-joined display string for a slice of key names.
 //! * [`raw_key_hint`] — pre-formatted hint from a literal key string.
 //! * [`key_hint_for`] — convenience that resolves a key from the
 //!   [`hand_tui`] keybindings registry by binding name.
 //!
-//! Theming caveat: the TS source consumes the coding-agent theme's `dim` and
-//! `muted` slots. Until that theme system is ported (see parent module docs)
-//! we hardcode ANSI defaults — `\x1b[2m` for dim and `\x1b[90m`
-//! (bright black) for muted — matching the spirit of pi-mono's dark theme.
+//! Theming caveat: the module expects `dim` and `muted` slots. Until
+//! the theme system surfaces them, ANSI defaults are hardcoded —
+//! `\x1b[2m` for dim and `\x1b[90m` (bright black) for muted.
 //!
-//! TODO(parity): theme integration deferred — see
-//! docs/exec-plans/parity-completion.md §A1.
+//! TODO: theme integration deferred until the theme slot wiring lands.
 
 use hand_tui::{Keybinding, get_keybindings};
 
@@ -31,8 +25,8 @@ const RESET: &str = "\x1b[0m";
 
 /// Slash-join the supplied key names into a display string.
 ///
-/// Mirrors pi-mono's `formatKeys` helper: empty input yields an empty string,
-/// a single key is returned verbatim, and multiple keys are joined with `/`.
+/// Empty input yields an empty string, a single key is returned
+/// verbatim, and multiple keys are joined with `/`.
 pub fn format_keys<I, S>(keys: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -50,14 +44,14 @@ where
     out
 }
 
-/// Resolve the display string for a binding name from the global keybinding
-/// registry. Returns an empty string if the binding name is unknown or has no
-/// keys registered.
+/// Resolve the display string for a binding name from the global
+/// keybinding registry. Returns an empty string if the binding name is
+/// unknown or has no keys registered.
 ///
-/// Mirrors pi-mono's `keyText`. Unknown binding ids — including coding-agent
-/// namespaced ids that haven't been added to [`hand_tui::Keybinding`] yet —
-/// resolve to an empty string rather than panicking, matching the spirit of
-/// the TS lookup which returns an empty array for unregistered bindings.
+/// Unknown binding ids — including coding-agent namespaced ids that
+/// haven't been added to [`hand_tui::Keybinding`] yet — resolve to an
+/// empty string rather than panicking, so the renderer falls back to
+/// description-only hints without crashing.
 pub fn key_text(binding_name: &str) -> String {
     let Some(binding) = Keybinding::from_id(binding_name) else {
         return String::new();
@@ -67,18 +61,15 @@ pub fn key_text(binding_name: &str) -> String {
     format_keys(keys)
 }
 
-/// Build a hint of the form `"<key> <description>"` with dim styling on the
-/// key and muted styling on the description, sourcing the key from the global
-/// keybinding registry.
-///
-/// Equivalent to pi-mono's `keyHint(keybinding, description)`.
+/// Build a hint of the form `"<key> <description>"` with dim styling
+/// on the key and muted styling on the description, sourcing the key
+/// from the global keybinding registry.
 pub fn key_hint_for(binding_name: &str, description: &str) -> String {
     raw_key_hint(&key_text(binding_name), description)
 }
 
-/// Build a hint of the form `"<key> <description>"` from a literal key string.
-///
-/// Equivalent to pi-mono's `rawKeyHint(key, description)`.
+/// Build a hint of the form `"<key> <description>"` from a literal
+/// key string.
 pub fn raw_key_hint(key: &str, description: &str) -> String {
     format!("{DIM}{key}{RESET}{MUTED} {description}{RESET}")
 }

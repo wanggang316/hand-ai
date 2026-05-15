@@ -1,8 +1,5 @@
 //! Bash execution component — streaming command output with framing.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/bash-execution.ts`.
-//!
 //! Models a long-running shell command in the interactive UI:
 //!
 //! * A header `$ <command>` line.
@@ -16,14 +13,12 @@
 //!   [`PREVIEW_LINES`] visual lines are shown; when expanded the full
 //!   (post-context-truncation) buffer is shown.
 //!
-//! Theming caveat: pi-mono reads `bashMode`, `dim`, `muted`, `error`,
-//! `warning` slots from the coding-agent theme. Until that theme system is
-//! ported (see parent module docs) we hardcode ANSI defaults matching the
-//! dark-theme spirit. The `bashMode` accent is cyan (matching pi-mono's
-//! dark `bashMode` slot), and the `dim` border is bright black.
+//! Theming caveat: the component expects `bash_mode`, `dim`, `muted`,
+//! `error`, `warning` slots. Until the theme system surfaces them
+//! we hardcode ANSI defaults matching the dark-theme spirit — the
+//! `bash_mode` accent is cyan and the `dim` border is bright black.
 //!
-//! TODO(parity): theme integration deferred — see
-//! docs/exec-plans/parity-completion.md §A1.
+//! TODO: theme integration deferred until the theme slot wiring lands.
 
 use hand_tui::utils::strip_ansi;
 use hand_tui::{Component, LoaderComponent, TextComponent};
@@ -32,12 +27,12 @@ use super::dynamic_border::DynamicBorderComponent;
 use super::keybinding_hints::{key_hint_for, key_text};
 use super::visual_truncate::truncate_to_visual_lines;
 
-/// Preview line limit when collapsed — matches pi-mono's tool execution.
+/// Preview line limit when the component is collapsed.
 pub const PREVIEW_LINES: usize = 20;
 
-/// LLM-context line limit (from pi-mono's `DEFAULT_MAX_LINES`).
+/// LLM-context line limit (matches `tools::truncate::DEFAULT_MAX_LINES`).
 const CONTEXT_MAX_LINES: usize = 2000;
-/// LLM-context byte limit (from pi-mono's `DEFAULT_MAX_BYTES` = 50KiB).
+/// LLM-context byte limit (matches `tools::truncate::DEFAULT_MAX_BYTES`, 50 KiB).
 const CONTEXT_MAX_BYTES: usize = 50 * 1024;
 
 /// ANSI cyan, used for the command header and (default) borders.
@@ -156,7 +151,7 @@ impl BashExecutionComponent {
         self.expanded
     }
 
-    /// Raw output as a single string (mirrors pi-mono's `getOutput()`).
+    /// Raw output as a single string.
     pub fn output(&self) -> String {
         self.output_lines.join("\n")
     }
@@ -298,11 +293,11 @@ impl Component for BashExecutionComponent {
     }
 }
 
-/// Minimal tail truncator: mirrors pi-mono's `truncateTail` only as far as
-/// needed by this renderer (post-truncation content + a `truncated` flag).
+/// Minimal tail truncator used by the bash-execution renderer:
+/// returns the post-truncation content plus a `truncated` flag.
 ///
-/// Walks backward from the end, accumulating lines until either the line
-/// limit or byte limit (counting newline separators) is hit.
+/// Walks backward from the end, accumulating lines until either the
+/// line limit or byte limit (counting newline separators) is hit.
 fn truncate_tail_simple(content: &str, max_lines: usize, max_bytes: usize) -> (String, bool) {
     let lines: Vec<&str> = content.split('\n').collect();
     let total_lines = lines.len();
