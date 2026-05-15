@@ -1,5 +1,4 @@
-//! Parity port of compat-resolution coverage in
-//! `pi-mono/packages/ai/test/openai-completions.test.ts`.
+//! Compat-resolution coverage for the OpenAI Completions provider.
 //!
 //! Verifies the precedence rules of `resolve_compat`:
 //! 1. Explicit `model.compat` overrides win.

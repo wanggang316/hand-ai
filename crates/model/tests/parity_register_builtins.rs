@@ -1,4 +1,4 @@
-//! Parity port of `pi-mono/packages/ai/test/register-builtins.test.ts`.
+//! Coverage tests for `register_builtins`.
 //!
 //! Verifies that `register_builtins` covers every canonical `Api` variant,
 //! that re-invocation is safe, and that `Client::default()` ships with the

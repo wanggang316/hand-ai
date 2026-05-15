@@ -1,8 +1,7 @@
-//! Parity port of `pi-mono/packages/ai/test/validation.test.ts` adapted to
-//! the Rust `validate_context` API.
+//! Structural-validator coverage for `validate_context`.
 //!
-//! TS exercises tool-argument coercion via Ajv; the Rust port instead covers
-//! the structural validator we expose via `validate_context`, hitting every
+//! Covers the structural validator exposed via `validate_context`,
+//! hitting every
 //! `ValidationIssueKind` with a faux-generated message graph.
 //!
 //! NOTE: TS reference also exercises Ajv-style tool-argument schema validation

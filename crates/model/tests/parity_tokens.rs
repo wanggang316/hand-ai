@@ -1,4 +1,4 @@
-//! Parity port of `pi-mono/packages/ai/test/total-tokens.test.ts`.
+//! Total-tokens invariant coverage.
 //!
 //! Asserts that `Usage::total_tokens` honors the
 //! `input + output + cache_read + cache_write` invariant when emitted via the

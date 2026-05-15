@@ -1,4 +1,4 @@
-//! Parity port of `pi-mono/packages/ai/test/stream.test.ts`.
+//! Streaming text-delta coverage.
 //!
 //! Asserts that multiple text deltas concatenated through
 //! `EventStream::collect_to_message` yield the full text in the final

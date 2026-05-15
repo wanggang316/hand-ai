@@ -1,4 +1,4 @@
-//! Parity port of `pi-mono/packages/ai/test/tool-call-without-result.test.ts`.
+//! Orphan tool-call coverage.
 //!
 //! When an assistant emits a tool call that never receives a `ToolResult`,
 //! the user follows up with a fresh prompt, and we replay the conversation

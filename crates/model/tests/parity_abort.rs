@@ -1,8 +1,8 @@
-//! Parity port of `pi-mono/packages/ai/test/abort.test.ts`.
+//! Cancellation coverage for the streaming event pipeline.
 //!
-//! TS exercises real providers; we exercise the faux provider with a long
-//! `Sleep` step that gets cancelled mid-flight via `CancellationToken`. The
-//! asserted invariant: cancellation results in a terminal `Error` event with
+//! Exercises the faux provider with a long `Sleep` step that gets
+//! cancelled mid-flight via `CancellationToken`. The asserted
+//! invariant: cancellation results in a terminal `Error` event with
 //! `StopReason::Aborted` and the stream does not panic.
 
 use futures::StreamExt;

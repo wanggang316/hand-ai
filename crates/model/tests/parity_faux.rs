@@ -1,6 +1,4 @@
-//! Parity port of `pi-mono/packages/ai/test/faux-provider.test.ts`.
-//!
-//! Tests the contract of the Rust faux provider itself: every script-step
+//! Contract tests for the faux provider: every script-step
 //! variant emits the right event, ordering is preserved, and terminal events
 //! produce well-formed envelopes.
 

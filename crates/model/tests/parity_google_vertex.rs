@@ -1,8 +1,7 @@
-//! Parity tests for the Google Vertex provider.
+//! Coverage tests for the Google Vertex provider.
 //!
-//! - `vertex_api_key_resolution_uses_explicit_key_first` — port of
-//!   `pi-mono/.../test/google-vertex-api-key-resolution.test.ts`. Verifies
-//!   that an explicit, non-placeholder `api_key` is forwarded as
+//! - `vertex_api_key_resolution_uses_explicit_key_first` — verifies that
+//!   an explicit, non-placeholder `api_key` is forwarded as
 //!   `?key=<value>` and that the request does NOT carry an
 //!   `Authorization: Bearer …` header (i.e. ADC is not consulted when an
 //!   explicit key is provided).

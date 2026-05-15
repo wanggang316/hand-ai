@@ -1,8 +1,8 @@
-//! Parity port of `pi-mono/packages/ai/test/empty.test.ts`.
+//! Empty-script handling for the streaming event pipeline.
 //!
-//! TS reference exercises live providers; here we exercise the faux provider
-//! with a script that emits zero events. The asserted invariant: an empty
-//! script produces an `Aborted` envelope (because the stream ended without a
+//! Exercises the faux provider with a script that emits zero events.
+//! The asserted invariant: an empty script produces an `Aborted`
+//! envelope (because the stream ended without a
 //! terminal event) rather than panicking, and the synthesized message carries
 //! truthful provenance.
 

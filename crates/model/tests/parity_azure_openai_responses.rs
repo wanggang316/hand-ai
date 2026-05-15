@@ -1,10 +1,8 @@
-//! Parity ports of the Azure OpenAI Responses provider tests.
+//! Azure OpenAI Responses provider — base-URL resolution coverage.
 //!
-//! Ports `pi-mono/.../test/azure-openai-base-url.test.ts`. The TS tests use a
-//! mocked `AzureOpenAI` constructor to capture the resolved `baseURL`; the
-//! Rust port stands up a `tiny_http` mock server and inspects the actual
-//! request line + headers + body that the provider sends — same pattern used
-//! by `parity_mistral.rs`.
+//! Stands up a `tiny_http` mock server and inspects the actual request
+//! line + headers + body that the provider sends — same pattern used by
+//! `parity_mistral.rs`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

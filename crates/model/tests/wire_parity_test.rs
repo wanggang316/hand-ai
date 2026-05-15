@@ -1,10 +1,9 @@
-//! Wire-format parity tests: ensure `AssistantMessageEvent` JSON matches the
-//! pi-mono TypeScript shape exactly. The TS source of truth lives at
-//! `pi-mono/packages/ai/src/types.ts` (line 269+).
+//! Wire-format tests: pin `AssistantMessageEvent` JSON to its canonical
+//! shape.
 //!
-//! TS variant tags use `snake_case` for textual variants but `toolcall_*`
-//! (single word, NOT `tool_call_*`) for the three tool-call variants. All
-//! payload fields are `camelCase` (e.g. `contentIndex`, `toolCall`).
+//! Variant tags use `snake_case` for textual variants but `toolcall_*`
+//! (single word, NOT `tool_call_*`) for the three tool-call variants.
+//! All payload fields are `camelCase` (e.g. `contentIndex`, `toolCall`).
 
 use model::types::Provider;
 use model::{
@@ -130,8 +129,7 @@ fn thinking_start_delta_end_use_snake_case_tags() {
 
 #[test]
 fn toolcall_variants_use_compound_tag_not_split() {
-    // pi-mono TS uses `toolcall_start`, NOT `tool_call_start`. This is the
-    // bug the M1 fix addresses.
+    // Wire tag is `toolcall_start` — single word, NOT `tool_call_start`.
     let start = AssistantMessageEvent::ToolCallStart {
         content_index: 0,
         partial: empty_assistant_message(),
@@ -180,8 +178,8 @@ fn done_and_error_have_camelcase_fields() {
 }
 
 #[test]
-fn deserializes_pi_mono_shaped_json() {
-    // A canonical pi-mono frame as it would arrive over SSE. Use empty
+fn deserializes_canonical_wire_shaped_json() {
+    // A canonical SSE frame. Use empty
     // content array to sidestep the pre-existing TextContent dup-tag bug.
     let payload = json!({
         "type": "toolcall_end",

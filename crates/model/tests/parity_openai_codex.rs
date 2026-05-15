@@ -1,7 +1,4 @@
-//! Parity tests for the OpenAI Codex Responses provider.
-//!
-//! Mirrors the surface that `pi-mono`'s
-//! `openai-codex-responses.test.ts` exercises:
+//! Coverage tests for the OpenAI Codex Responses provider.
 //!
 //! 1. OAuth credentials are loaded from the `OAuthRegistry` when no
 //!    explicit `api_key` is supplied; the resulting bearer token shows

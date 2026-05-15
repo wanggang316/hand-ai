@@ -335,13 +335,10 @@ fn github_copilot_base_url_falls_back_to_enterprise_or_default() {
 // ---------------------------------------------------------------------------
 // Per-provider flow tests
 //
-// These ports of the TS suites
-//   pi-mono/.../test/anthropic-oauth.test.ts
-//   pi-mono/.../test/openai-codex-oauth.test.ts
-//   pi-mono/.../test/github-copilot-oauth.test.ts
-// stand up a tiny_http mock server on a free port, route a small set of
-// scripted responses, and assert the provider builds the correct request and
-// surfaces fields from the response correctly.
+// Each test stands up a tiny_http mock server on a free port, routes a
+// small set of scripted responses, and asserts the provider builds the
+// correct request and surfaces fields from the response correctly.
+// Covers anthropic, openai-codex, and github-copilot OAuth surfaces.
 // ---------------------------------------------------------------------------
 
 /// Configure a tiny_http server on `127.0.0.1:0` (kernel-assigned port) and

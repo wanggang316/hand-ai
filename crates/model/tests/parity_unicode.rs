@@ -1,8 +1,6 @@
-//! Parity port of `pi-mono/packages/ai/test/unicode-surrogate.test.ts`.
+//! Unicode-surrogate sanitisation coverage.
 //!
-//! The TS test exercises real providers with emoji-heavy tool results to
-//! confirm lone surrogate halves get replaced before the JSON body crosses
-//! the wire. The Rust equivalent is to verify `sanitize_bytes` collapses
+//! Verifies that `sanitize_bytes` collapses
 //! a WTF-8 encoded lone UTF-16 surrogate (`0xED 0xA0 0x80`) into a single
 //! U+FFFD replacement character.
 

@@ -1,15 +1,16 @@
-//! Parity ports of the Mistral provider tests:
+//! Coverage tests for the Mistral provider:
 //!
-//! - `pi-mono/.../test/mistral-tool-schema.test.ts` — verifies that tool call
-//!   IDs replayed against a Mistral target get coerced to the 9-character
-//!   alphanumeric form Mistral requires.
-//! - `pi-mono/.../test/mistral-reasoning-mode.test.ts` — verifies that the
-//!   provider sets `prompt_mode: "reasoning"` on the outbound request body
-//!   when reasoning is requested, and omits the field otherwise.
+//! - Tool-schema coercion: tool call IDs replayed against a Mistral
+//!   target get coerced to the 9-character alphanumeric form Mistral
+//!   requires.
+//! - Reasoning-mode: the provider sets `prompt_mode: "reasoning"` on
+//!   the outbound request body when reasoning is requested, and omits
+//!   the field otherwise.
 //!
-//! The reasoning-mode test stands up a `tiny_http` mock server, points the
-//! provider at it via `MistralProvider::with_base_url(...)`, and inspects the
-//! captured request body — same pattern used by the M4 OAuth tests.
+//! The reasoning-mode test stands up a `tiny_http` mock server, points
+//! the provider at it via `MistralProvider::with_base_url(...)`, and
+//! inspects the captured request body — same pattern used by the M4
+//! OAuth tests.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
