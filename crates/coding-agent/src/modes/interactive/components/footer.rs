@@ -1,23 +1,15 @@
 //! Two- or three-line footer summarising session state.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/footer.ts`.
+//! Decoupled from concrete session APIs: the renderer accepts a
+//! plain-data [`FooterViewModel`]. The driver populates that
+//! view-model from session state so components stay scoped to
+//! `model::Message`, `hand_agent`, and `hand_tui`.
 //!
-//! pi-mono's footer reads directly from `AgentSession`, the model registry,
-//! and the [`crate::core::footer_data_provider::FooterDataProvider`]. To keep
-//! this Phase-2 port decoupled from those still-evolving APIs (and to stay
-//! within the brief's scope rule that components only depend on
-//! `model::Message`, `hand_agent`, `hand_tui`), the renderer accepts a
-//! plain-data [`FooterViewModel`]. The driver port (queued) is responsible
-//! for populating the view-model from session state.
+//! Theming caveat: the component expects `dim`, `error`, `warning`
+//! slots. Until the theme system surfaces them we hardcode ANSI
+//! defaults — dim is `\x1b[2m`, warning is yellow, error is red.
 //!
-//! Theming caveat: pi-mono reads `dim`, `error`, `warning` slots from the
-//! coding-agent theme. Until the theme port lands (see parent module docs)
-//! we hardcode ANSI defaults: dim is `\x1b[2m`, warning is yellow,
-//! error is red.
-//!
-//! TODO(parity): theme integration deferred — see
-//! docs/exec-plans/parity-completion.md §A1.
+//! TODO: theme integration deferred until the theme slot wiring lands.
 
 use hand_tui::Component;
 use hand_tui::utils::{truncate_to_width_with, visible_width};
@@ -291,8 +283,8 @@ fn sanitize_status_text(text: &str) -> String {
     out.trim().to_string()
 }
 
-/// Format a token count with k / M suffixes, mirroring pi-mono's
-/// `formatTokens`.
+/// Format a token count with k / M suffixes for compact display in
+/// the footer.
 fn format_tokens(count: u64) -> String {
     if count < 1_000 {
         return count.to_string();

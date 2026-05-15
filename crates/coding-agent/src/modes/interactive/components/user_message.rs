@@ -1,17 +1,15 @@
 //! User message renderer.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/user-message.ts`.
-//!
 //! Renders a single user-role message as a markdown body wrapped in a
-//! background-tinted [`hand_tui::BoxComponent`], with OSC 133 zone markers
-//! on the first and last lines so terminals with shell-integration support
-//! (iTerm2, WezTerm, Ghostty) can detect prompt regions.
+//! background-tinted [`hand_tui::BoxComponent`], with OSC 133 zone
+//! markers on the first and last lines so terminals with
+//! shell-integration support (iTerm2, WezTerm, Ghostty) can detect
+//! prompt regions.
 //!
-//! Theming caveat: pi-mono reads `userMessageBg`/`userMessageText` from its
-//! coding-agent theme; until that theme system is ported (see parent module
-//! docs), this component hardcodes a 256-color background and falls back to
-//! the markdown component's default text colors.
+//! Theming caveat: the component expects `user_message_bg` /
+//! `user_message_text` slots. Until the theme system surfaces them
+//! it hardcodes a 256-color background and falls back to the markdown
+//! component's default text colors.
 
 use hand_tui::components::markdown::DefaultTextStyle;
 use hand_tui::{BoxComponent, Color, Component, MarkdownComponent};
@@ -23,17 +21,17 @@ const OSC133_ZONE_END: &str = "\x1b]133;B\x07";
 /// OSC 133 command-finished marker (`C`).
 const OSC133_ZONE_FINAL: &str = "\x1b]133;C\x07";
 
-/// Default user-message background. Mirrors pi-mono dark theme's
-/// `userMessageBg = #343541` (a muted gray, not the hard indigo we shipped
-/// initially). Truecolor bg with a 256-color fallback (`\x1b[48;5;238m`,
-/// roughly the same hue) for terminals that don't support RGB.
+/// Default user-message background — a muted gray (`#343541`). The
+/// truecolor escape below works in modern terminals; older 256-color
+/// terminals would substitute `\x1b[48;5;238m` for a roughly equivalent
+/// hue.
 const DEFAULT_BG_ANSI: &str = "\x1b[48;2;52;53;65m";
 /// Hex equivalent of [`DEFAULT_BG_ANSI`] — consumed by the markdown renderer
 /// so wrapped lines get tinted edge-to-edge.
 const DEFAULT_BG_HEX: &str = "#343541";
-/// Default foreground for user-message text. Light gray with good contrast
-/// against [`DEFAULT_BG_HEX`]. Mirrors pi-mono behaviour where the terminal
-/// foreground default is light on the dark theme.
+/// Default foreground for user-message text. Light gray with good
+/// contrast against [`DEFAULT_BG_HEX`], matching a dark-theme
+/// terminal foreground default.
 const DEFAULT_FG_HEX: &str = "#e6e6e6";
 
 /// Component that renders a user message.

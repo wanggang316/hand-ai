@@ -1,25 +1,19 @@
 //! "pi has joined Earendil" announcement banner.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/earendil-announcement.ts`.
+//! Composes a [`Container`] of dynamic borders, two `Text` lines, an
+//! optional `Image`, and `Spacer` separators. The bundled
+//! `clankolas.png` asset can't yet be loaded automatically, so the
+//! component takes the image bytes (or `None`) from the caller —
+//! hosts that have wired an asset bundle pass the bytes; tests pass
+//! `None` and verify the text-only layout.
 //!
-//! pi-mono composes a [`Container`] of dynamic borders, two `Text` lines, an
-//! optional `Image`, and `Spacer` separators. The TS source loads the
-//! `clankolas.png` asset eagerly via `getBundledInteractiveAssetPath`. Since
-//! the Rust port hasn't ported that asset-bundling helper yet, this component
-//! takes the image bytes (or `None`) from the caller — exactly mirroring the
-//! TS code's "imageBase64 = undefined" branch. Hosts that have wired the asset
-//! bundle pass the bytes; tests pass `None` and verify the text-only layout.
+//! Theming caveat: the component reads `accent`, `muted`, `md_link`
+//! slots from the interactive theme when a `Theme` is passed, and
+//! falls back to hardcoded ANSI escapes that match the dark-theme
+//! visual style otherwise.
 //!
-//! Theming caveat: pi-mono pulls `accent`, `muted`, `mdLink` slots from the
-//! interactive-mode theme. To stay aligned with the other components in this
-//! batch (which were ported before the theme integration landed), we accept a
-//! `Theme` reference at construction time and fall back to hardcoded ANSI
-//! escapes when the slot is missing. The defaults match the dark theme's
-//! visual style.
-//!
-//! TODO(parity): bundle-asset loader deferred — see
-//! docs/exec-plans/parity-completion.md §A1.
+//! TODO: ship a bundled-asset loader so the image can be supplied
+//! automatically.
 
 use hand_tui::{
     Component, Container, ImageComponent, ImageOptions, ImageProtocol, ImageTheme, InputEvent,
@@ -29,7 +23,7 @@ use hand_tui::{
 use crate::modes::interactive::components::dynamic_border::DynamicBorderComponent;
 use crate::modes::interactive::theme::{Theme, ThemeColor};
 
-/// Blog post URL referenced in the announcement (kept stable per pi-mono).
+/// Blog post URL referenced in the announcement.
 pub const BLOG_URL: &str = "https://mariozechner.at/posts/2026-04-08-ive-sold-out/";
 
 /// Filename surfaced in the image fallback placeholder.

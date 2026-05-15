@@ -1,28 +1,22 @@
 //! Login dialog used by `/login` to drive an OAuth-style authentication flow.
 //!
-//! Ported from
-//! `pi-mono/packages/coding-agent/src/modes/interactive/components/login-dialog.ts`.
+//! [`LoginDialogComponent`] owns an [`InputComponent`] and a typed
+//! [`Stage`] enum capturing what to show. The OAuth provider transitions
+//! stages by calling the `show_*` mutator methods (`show_auth`,
+//! `show_manual_input`, `show_prompt`, `show_info`, `show_waiting`,
+//! `show_progress`) — each one clears or appends content and requests a
+//! re-render.
 //!
-//! The TS class extends `Container`, embeds an `Input`, and exposes a set of
-//! mutator methods (`showAuth`, `showManualInput`, `showPrompt`, `showInfo`,
-//! `showWaiting`, `showProgress`) the OAuth provider invokes through
-//! callbacks. Each mutator clears or appends to a `contentContainer` and
-//! requests a re-render. The Rust port mirrors that surface with a single
-//! [`LoginDialogComponent`] that owns an [`InputComponent`] and a typed
-//! [`Stage`] enum capturing what to show. Driver code transitions stages by
-//! calling the same `show_*` methods.
+//! Events ([`LoginDialogEvent::Submit`] / `Cancel`) flow through an
+//! [`mpsc::Sender`] supplied at construction. The input's
+//! `on_submit` / `on_escape` callbacks forward to that channel so the
+//! manual-input and prompt stages dispatch user-supplied strings
+//! without a host-owned future.
 //!
-//! Events ([`LoginDialogEvent::Submit`] / `Cancel`) are surfaced through an
-//! [`mpsc::Sender`] supplied at construction; the input's `on_submit` /
-//! `on_escape` callbacks forward to that channel so manual-input and prompt
-//! stages dispatch user-supplied strings without a host-owned `Promise`.
-//!
-//! Provider lookup parity: pi-mono calls `getOAuthProviders()` from
-//! `@mariozechner/pi-ai/oauth` to resolve a provider's display name. That
-//! provider registry has not been ported to Rust yet, so the constructor
-//! accepts an explicit `providers` slice (mirroring the pattern
-//! `oauth_selector` already uses). Callers that don't have a provider list
-//! pass an empty slice and the dialog falls back to the raw provider id.
+//! Provider lookup: until a shared OAuth provider registry lands, the
+//! constructor accepts an explicit `providers` slice (the same pattern
+//! `oauth_selector` uses). Callers without a provider list pass an
+//! empty slice and the dialog falls back to the raw provider id.
 
 use std::sync::mpsc::Sender;
 
@@ -252,9 +246,9 @@ impl LoginDialogComponent {
     }
 }
 
-// Theming caveat: pi-mono pulls `accent`, `dim`, `warning`, `text` from the
-// coding-agent theme. While theme integration is deferred (see
-// `bordered_loader` for the same caveat) we hardcode dark-theme defaults.
+// Theming caveat: the component expects `accent`, `dim`, `warning`,
+// `text` slots. Until the theme system surfaces them we hardcode
+// dark-theme defaults.
 const ACCENT: &str = "\x1b[36m";
 const DIM: &str = "\x1b[2m";
 const WARNING: &str = "\x1b[33m";
