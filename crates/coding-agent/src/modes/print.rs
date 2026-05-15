@@ -411,13 +411,13 @@ fn handle_export(
 
     match ext {
         "jsonl" | "json" => {
-            // Pi-mono parity: copy the live session file verbatim.
-            // We previously passed a fresh `SessionManager::in_memory()`
-            // to `export_to_jsonl`, which had no path and so always
+            // Copy the live session file verbatim. An earlier
+            // implementation handed `export_to_jsonl` a fresh
+            // `SessionManager::in_memory()` with no path, which always
             // failed with "Cannot export an in-memory session" — the
             // jsonl export path of `--print --export out.jsonl` was
-            // completely broken. Mirror the interactive `/export`
-            // dispatcher: read the session file path from the live
+            // completely broken. The interactive `/export` dispatcher
+            // is the model: read the session file path from the live
             // AgentSession, re-open a SessionManager rooted at that
             // path, then copy.
             let Some(file_path) = session.session_file() else {
@@ -442,19 +442,6 @@ fn handle_export(
     Ok(())
 }
 
-/// Pi-mono parity: leading whitespace-separated `@<path>` tokens in the
-/// prompt are treated as file attachments. Each one is expanded inline as
-///
-///     <file name="<absolute_path>">
-///     <file content>
-///     </file>
-///
-/// before the remaining prompt text. Non-existent paths return an error
-/// matching pi's `Error: File not found: <path>` text so script consumers
-/// can pattern-match on it. Empty files are silently skipped (pi's
-/// behavior). This intentionally only handles TEXT files for now —
-/// image attachments require the ImageContent path and resizing logic
-/// that hand's --prompt single-string interface doesn't yet expose.
 /// Split `s` on ASCII whitespace and return each token alongside its byte
 /// offset in the original string. Mirrors `str::split_whitespace` but
 /// preserves the position info we need to reconstruct the rest of the
@@ -493,12 +480,20 @@ fn at_path_exists(path_str: &str, cwd: &std::path::Path) -> bool {
     std::fs::metadata(&abs).is_ok()
 }
 
+/// Expand leading whitespace-separated `@<path>` tokens in the prompt
+/// into inline file attachments. Each one becomes
+/// `<file name="<absolute_path>"><file content></file>` ahead of the
+/// remaining prompt text. Non-existent paths produce an error string
+/// scripts can pattern-match on; empty files are silently skipped.
+/// Text only — image attachments need the ImageContent path and
+/// resizing logic that the single-string `--prompt` surface doesn't
+/// yet expose.
 fn expand_at_mentions(prompt: &str, cwd: &std::path::Path) -> Result<String, String> {
     // Collect leading `@<path>` tokens, stop at the first non-@ token.
     //
-    // Pi's argv-positional flow gives it free quoting for paths with
-    // spaces; hand's single --prompt string does not. To preserve the
-    // behavior we look ahead: if `@token` doesn't resolve to an existing
+    // An argv-positional CLI gets free quoting for paths with spaces;
+    // hand's single --prompt string does not. To preserve the same
+    // behaviour we look ahead: if `@token` doesn't resolve to an existing
     // file, greedily glue subsequent whitespace-separated tokens onto
     // the path until we find one that does. The greedy match stops at
     // either the first existing-file candidate OR the first remaining

@@ -250,15 +250,16 @@ pub fn strip_ansi(s: &str) -> String {
 // Whitespace / punctuation classification
 // ---------------------------------------------------------------------------
 
-/// Whitespace classification used by wrap logic. Mirrors the TS `\s` regex.
+/// Whitespace classification used by wrap logic. Matches the
+/// regex-style `\s` predicate.
 pub fn is_whitespace_char(c: char) -> bool {
     c.is_whitespace()
 }
 
 const PUNCTUATION_CHARS: &str = "(){}[]<>.,;:'\"!?+-=*/\\|&%^$#@~`";
 
-/// Punctuation classification used by wrap logic. Mirrors the TS punctuation
-/// regex: `[(){}[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]`.
+/// Punctuation classification used by wrap logic. Equivalent to the
+/// character class ``[(){}[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]``.
 pub fn is_punctuation_char(c: char) -> bool {
     PUNCTUATION_CHARS.contains(c)
 }
