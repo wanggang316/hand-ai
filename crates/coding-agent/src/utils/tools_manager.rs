@@ -1,14 +1,13 @@
 //! Resolve external CLI tools (`fd`, `rg`) by checking $PATH first and then
 //! downloading platform-specific binaries from upstream GitHub releases.
 //!
-//! Behaviour parity with `pi-mono/.../tools-manager.ts`:
+//! Behaviour:
 //! - Cached binaries live next to the runtime in a per-user directory
-//!   (`~/.hand/tools/` here; the TS uses the same convention via
-//!   `getBinDir`).
+//!   (`~/.hand/tools/`).
 //! - Already-installed system binaries (including `fdfind` on Debian) win
 //!   over the cache and skip downloads entirely.
 //! - Offline mode (`HAND_OFFLINE=1`) suppresses downloads and returns
-//!   `Ok(None)`, matching the TS `PI_OFFLINE` switch.
+//!   `Ok(None)`.
 //! - Download failures become `Ok(None)` rather than errors so callers can
 //!   degrade gracefully when GitHub is unreachable.
 //!
@@ -407,8 +406,7 @@ pub async fn ensure_tool(
 /// Knobs controlling [`ensure_tool`] without bloating its signature.
 #[derive(Debug, Clone)]
 pub struct EnsureOptions {
-    /// Skip downloads even when a binary is missing. Mirrors `HAND_OFFLINE=1`
-    /// / `PI_OFFLINE=1` in the TS implementation.
+    /// Skip downloads even when a binary is missing. Set via `HAND_OFFLINE=1`.
     pub offline: bool,
     /// Target platform. Defaults to the host via [`Platform::current`].
     pub platform: Platform,
@@ -440,10 +438,7 @@ pub fn default_tools_dir() -> Result<PathBuf, ToolsError> {
 }
 
 fn is_offline_env() -> bool {
-    match std::env::var("HAND_OFFLINE")
-        .or_else(|_| std::env::var("PI_OFFLINE"))
-        .ok()
-    {
+    match std::env::var("HAND_OFFLINE").ok() {
         Some(v) => {
             let lc = v.to_ascii_lowercase();
             v == "1" || lc == "true" || lc == "yes"
