@@ -401,11 +401,12 @@ Commands:
         // is readable. Order within each group follows `Keybinding::all()`
         // declaration order.
         let manager = get_keybindings();
-        let mut groups: std::collections::BTreeMap<&str, Vec<(Keybinding, Vec<String>, String)>> =
+        type KeybindingRow = (Keybinding, Vec<String>, String);
+        let mut groups: std::collections::BTreeMap<&str, Vec<KeybindingRow>> =
             std::collections::BTreeMap::new();
         for (binding, keys) in manager.all() {
             let id = binding.id();
-            let category = id.splitn(3, '.').nth(1).unwrap_or("other");
+            let category = id.split('.').nth(1).unwrap_or("other");
             let key_labels: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
             let description: String = TUI_KEYBINDINGS
                 .get(id)
@@ -434,7 +435,7 @@ Commands:
                 "select" => "Select",
                 other => other,
             };
-            out.push_str("\n");
+            out.push('\n');
             out.push_str(header);
             out.push('\n');
             let max_keys = entries

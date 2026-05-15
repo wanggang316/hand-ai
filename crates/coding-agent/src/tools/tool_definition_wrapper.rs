@@ -33,6 +33,22 @@ use crate::core::extensions::api::ExtensionContext;
 /// recorded cwd and a synthetic session id).
 pub type ContextFactory = Arc<dyn Fn() -> Option<ExtensionContext> + Send + Sync>;
 
+/// Boxed extension-aware tool executor.
+///
+/// Same shape as `AgentTool::execute` but with an extra trailing
+/// `ExtensionContext`. The wrapper turns this into the runtime closure
+/// by capturing a [`ContextFactory`].
+pub type ExtensionToolExecuteFn = Box<
+    dyn Fn(
+            ToolExecuteCtx,
+            ExtensionContext,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<hand_agent::types::ToolResult, hand_agent::types::ToolError>,
+        > + Send
+        + Sync,
+>;
+
 /// Runtime-flavoured `ToolDefinition`. See module docs.
 pub struct ToolDefinition {
     pub name: String,
@@ -41,19 +57,7 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
     pub execution_mode: Option<ToolExecutionMode>,
     pub prepare_arguments: Option<PrepareArgumentsFn>,
-    /// Same shape as `AgentTool::execute` but with an extra trailing
-    /// `ExtensionContext`. The wrapper turns this into the runtime
-    /// closure by capturing a [`ContextFactory`].
-    pub execute: Box<
-        dyn Fn(
-                ToolExecuteCtx,
-                ExtensionContext,
-            ) -> futures::future::BoxFuture<
-                'static,
-                Result<hand_agent::types::ToolResult, hand_agent::types::ToolError>,
-            > + Send
-            + Sync,
-    >,
+    pub execute: ExtensionToolExecuteFn,
 }
 
 /// Wrap a [`ToolDefinition`] into an [`AgentTool`].
@@ -67,8 +71,6 @@ pub fn wrap_tool_definition(
     fallback_cwd: PathBuf,
 ) -> AgentTool {
     let exec = definition.execute;
-    let ctx_factory = ctx_factory;
-    let fallback_cwd = fallback_cwd;
     let execute: ToolExecuteFn = Box::new(move |call_ctx: ToolExecuteCtx| {
         let cx = ctx_factory
             .as_ref()

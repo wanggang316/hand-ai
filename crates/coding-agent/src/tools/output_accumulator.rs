@@ -38,24 +38,14 @@ use super::truncate::{
 };
 
 /// Caller-tunable limits and identifiers for the spill file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OutputAccumulatorOptions {
     pub max_lines: Option<usize>,
     pub max_bytes: Option<usize>,
     pub temp_file_prefix: Option<String>,
 }
 
-impl Default for OutputAccumulatorOptions {
-    fn default() -> Self {
-        Self {
-            max_lines: None,
-            max_bytes: None,
-            temp_file_prefix: None,
-        }
-    }
-}
-
-/// Result of a snapshot, mirroring TS `OutputSnapshot`.
+/// Result of a snapshot describing the buffered output.
 #[derive(Debug, Clone)]
 pub struct OutputSnapshot {
     pub content: String,
@@ -185,7 +175,7 @@ impl OutputAccumulator {
         let truncated =
             self.total_lines > self.max_lines || self.total_decoded_bytes > self.max_bytes;
         let truncated_by = if truncated {
-            tail.truncated_by.or_else(|| {
+            tail.truncated_by.or({
                 if self.total_decoded_bytes > self.max_bytes {
                     Some(TruncatedBy::Bytes)
                 } else {

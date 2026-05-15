@@ -55,18 +55,19 @@ pub fn default_highlighter() -> CodeHighlighter {
 /// Call sites that build a `MarkdownComponent` should use this in place of
 /// `MarkdownTheme::default()` to get fenced-block coloring.
 pub fn default_markdown_theme() -> MarkdownTheme {
-    let mut theme = MarkdownTheme::default();
-    theme.highlight = Some(default_highlighter());
-    theme
+    MarkdownTheme {
+        highlight: Some(default_highlighter()),
+        ..MarkdownTheme::default()
+    }
 }
 
 /// Highlight `code` in `lang`. Returns one ANSI-styled string per source
 /// line (no trailing newline).
 pub fn highlight(code: &str, lang: Option<&str>) -> Vec<String> {
     match resolve_language(lang) {
-        Some(Language::Rust) => highlight_clike(code, &RUST_KEYWORDS, &RUST_TYPES, CLikeFlavor::Rust),
+        Some(Language::Rust) => highlight_clike(code, RUST_KEYWORDS, RUST_TYPES, CLikeFlavor::Rust),
         Some(Language::TypeScript) | Some(Language::JavaScript) => {
-            highlight_clike(code, &JS_KEYWORDS, &JS_BUILTINS, CLikeFlavor::JsLike)
+            highlight_clike(code, JS_KEYWORDS, JS_BUILTINS, CLikeFlavor::JsLike)
         }
         Some(Language::Python) => highlight_python(code),
         Some(Language::Json) => highlight_json(code),
@@ -272,9 +273,9 @@ fn highlight_clike_line(
                 i += 1;
             }
             let word = &line[start..i];
-            if keywords.iter().any(|k| *k == word) {
+            if keywords.contains(&word) {
                 out.push_str(&paint(KEYWORD, word));
-            } else if types.iter().any(|t| *t == word) {
+            } else if types.contains(&word) {
                 out.push_str(&paint(BUILTIN, word));
             } else {
                 out.push_str(word);
@@ -308,7 +309,7 @@ const PY_BUILTINS: &[&str] = &[
 
 fn highlight_python(code: &str) -> Vec<String> {
     code.lines()
-        .map(|line| highlight_python_line(line))
+        .map(highlight_python_line)
         .collect()
 }
 
@@ -637,13 +638,12 @@ fn highlight_toml_line(line: &str) -> String {
         out.push_str(&paint(COMMENT, rest));
         return out;
     }
-    if rest.starts_with('[') {
-        if let Some(end) = rest.find(']') {
+    if rest.starts_with('[')
+        && let Some(end) = rest.find(']') {
             out.push_str(&paint(KEYWORD, &rest[..=end]));
             out.push_str(&rest[end + 1..]);
             return out;
         }
-    }
     if let Some(eq_pos) = rest.find('=') {
         let key = rest[..eq_pos].trim_end();
         let after = &rest[eq_pos..];

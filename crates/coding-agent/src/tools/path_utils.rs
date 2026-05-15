@@ -75,10 +75,11 @@ fn try_macos_screenshot_path(s: &str) -> String {
         // Copy a single UTF-8 character.
         let ch_start = i;
         let first = bytes[i];
-        let len = if first < 0x80 {
+        // ASCII (`first < 0x80`) is a 1-byte char. A lead byte in
+        // `0x80..0xC0` is invalid (continuation byte in lead position);
+        // copy a single byte to avoid panicking.
+        let len = if first < 0xC0 {
             1
-        } else if first < 0xC0 {
-            1 // invalid lead byte; copy a single byte to avoid panic
         } else if first < 0xE0 {
             2
         } else if first < 0xF0 {

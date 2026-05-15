@@ -157,7 +157,7 @@ fn run_edit(path: &Path, old_string: &str, new_string: &str, replace_all: bool) 
     let diff = generate_diff(&content, &new_content, &path.display().to_string());
 
     // Write file
-    if let Err(e) = std::fs::write(&path, &new_content) {
+    if let Err(e) = std::fs::write(path, &new_content) {
         return ToolResult::error(format!("Failed to write file: {}", e));
     }
 

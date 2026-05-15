@@ -564,8 +564,9 @@ impl ModelRegistry {
     /// - Any OAuth record under the `anthropic` provider, OR
     /// - Any ApiKey record under `anthropic` whose value starts with
     ///   `sk-ant-oat`.
-    /// False for every other provider so a Google or OpenAI OAuth
-    /// record doesn't trigger an irrelevant warning.
+    ///
+    /// Returns false for every other provider so a Google or OpenAI
+    /// OAuth record doesn't trigger an irrelevant warning.
     pub fn is_anthropic_subscription_credential(&self, model: &Model) -> bool {
         let provider = model.provider.as_str();
         if provider != "anthropic" {

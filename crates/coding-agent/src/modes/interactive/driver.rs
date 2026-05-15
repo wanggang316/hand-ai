@@ -599,10 +599,10 @@ impl InteractiveMode {
                                     clear_loader(&loader_for_events);
                                     emit_terminal_progress(ProgressState::Clear);
                                 }
-                                hand_agent::types::AgentEvent::MessageEnd { message } => {
-                                    if let model::Message::Assistant(a) = message {
-                                        accumulate_usage(&usage_for_events, &a.usage);
-                                    }
+                                hand_agent::types::AgentEvent::MessageEnd {
+                                    message: model::Message::Assistant(a),
+                                } => {
+                                    accumulate_usage(&usage_for_events, &a.usage);
                                 }
                                 _ => {}
                             },
@@ -836,7 +836,7 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
                             }
                             push_error(
                                 &agent_chat,
-                                "request timed out after 5 minutes; cancelled".to_string(),
+                                "request timed out after 5 minutes; cancelled",
                             );
                         }
                     }

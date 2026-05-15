@@ -62,7 +62,7 @@ pub fn create_find_tool(cwd: PathBuf) -> AgentTool {
 /// a file *named* `.git` at the top level is fine (no separator after).
 fn is_auto_ignored(relative: &str) -> bool {
     for comp in relative.split(['/', '\\']) {
-        if AUTO_IGNORE_NAMES.iter().any(|n| *n == comp) {
+        if AUTO_IGNORE_NAMES.contains(&comp) {
             return true;
         }
     }
