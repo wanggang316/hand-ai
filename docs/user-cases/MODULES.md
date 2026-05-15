@@ -64,3 +64,32 @@ authored yet, or the count hasn't been recomputed since the last edit.
   tools can't be advertised at the protocol level.
 - **UC-sysp-006/007** — hand's `custom_guidelines` is a string, not a
   list; no dedup/trim semantics.
+
+## Next-batch backlog
+
+Authored ordered by ascending case count so the suite breadths first.
+Each batch ends with a passing build + a commit + a MODULES update.
+
+1. **cli/args** (~18 cases) — `pi-mono/.../test/args.test.ts`
+2. **bash_executor** — `bash-execution-width.test.ts` + the `bash tool`
+   subset of `tools.test.ts` (~16 cases together)
+3. **model_resolver** (~33 cases) — `model-resolver.test.ts`
+4. **auth_storage** (~6 cases) — `auth-storage.test.ts`
+5. **resolve_config_value** (~8 cases) — derived from
+   `auth-storage.test.ts` `!command` subset + the dedicated test file
+6. **tools/edit** (~31 cases) — `tools.test.ts` edit-tool + edit-tool
+   fuzzy matching + edit-tool CRLF describes; `edit-tool-legacy-input`,
+   `edit-tool-no-full-redraw`
+7. **bash tool** (~16 cases) — `tools.test.ts` bash-tool describe
+8. **session_manager** (~26 cases) — `session-*.test.ts` family
+9. **stream / retry** — `pi-mono/.../packages/ai/test/retry-*.test.ts`
+10. **tui/keys** — `pi-mono/.../packages/tui/test/keys*.test.ts`
+11. **tui/autocomplete** — `pi-mono/.../packages/tui/test/autocomplete*.test.ts`
+
+After the suite breadth is complete (every module has a `.md` file),
+the failing UC cluster drives a remediation milestone:
+
+- gitignore-aware find tool (UC-find-002)
+- grep API alignment (UC-grep-002)
+- read tool output format alignment (UC-read-001..010)
+- system_prompt API surface alignment (UC-sysp-*)
