@@ -6,6 +6,7 @@ and current coverage health. Updated as each module's UC file lands.
 | Module file | Upstream | hand-ai crate | Case count | Pass | Fail | Pending |
 |-------------|----------|---------------|-----------:|-----:|-----:|--------:|
 | coding-agent-tools-path-utils.md | pi-mono/packages/coding-agent/test/path-utils.test.ts | coding-agent | 12 | 12 | 0 | 0 |
+| coding-agent-tools-file-mutation-queue.md | pi-mono/packages/coding-agent/test/file-mutation-queue.test.ts | coding-agent | 7 | 7 | 0 | 0 |
 | coding-agent-tools-find.md | pi-mono/packages/coding-agent/test/find-tool.test.ts (et al) | coding-agent | — | — | — | — |
 | coding-agent-tools-read.md | pi-mono/packages/coding-agent/test/read-tool.test.ts (et al) | coding-agent | — | — | — | — |
 | coding-agent-tools-grep.md | pi-mono/packages/coding-agent/test/grep-tool.test.ts | coding-agent | — | — | — | — |
@@ -29,7 +30,7 @@ authored yet, or the count hasn't been recomputed since the last edit.
 
 ## Rollup
 
-- **Total cases authored:** 12
-- **Pass:** 12
+- **Total cases authored:** 19
+- **Pass:** 19
 - **Fail:** 0
 - **Pending:** 0
