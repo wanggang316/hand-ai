@@ -8,7 +8,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-path-utils.md | pi-mono/packages/coding-agent/test/path-utils.test.ts | coding-agent | 12 | 12 | 0 | 0 |
 | coding-agent-tools-file-mutation-queue.md | pi-mono/packages/coding-agent/test/file-mutation-queue.test.ts | coding-agent | 7 | 7 | 0 | 0 |
 | coding-agent-tools-find.md | pi-mono/packages/coding-agent/test/tools.test.ts (find describe) | coding-agent | 8 | 8 | 0 | 0 |
-| coding-agent-tools-read.md | pi-mono/packages/coding-agent/test/tools.test.ts (read describe) | coding-agent | 11 | 9 | 2 | 0 |
+| coding-agent-tools-read.md | pi-mono/packages/coding-agent/test/tools.test.ts (read describe) | coding-agent | 11 | 10 | 1 | 0 |
 | coding-agent-tools-grep.md | pi-mono/packages/coding-agent/test/tools.test.ts (grep describe) | coding-agent | 6 | 6 | 0 | 0 |
 | coding-agent-tools-edit.md | pi-mono/packages/coding-agent/test/tools.test.ts (edit + fuzzy + CRLF describes) | coding-agent | 31 | 10 | 11 | 10 |
 | coding-agent-tools-write.md | pi-mono/packages/coding-agent/test/tools.test.ts (write describe) | coding-agent | 5 | 5 | 0 | 0 |
@@ -31,8 +31,8 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 251
-- **Fail:** 33
+- **Pass:** 252
+- **Fail:** 32
 - **Pending:** 54
 
 ### Known failures (drive remediation)
@@ -58,8 +58,10 @@ authored yet, or the count hasn't been recomputed since the last edit.
   `details.truncation` with fields `{ truncated, truncated_by,
   total_lines, output_lines }` whenever truncation fires (lines /
   bytes / user-limit). `ToolResult::with_details` builder added.
-- **UC-read-010** — hand never detects image MIME via file magic; pi
-  emits an image block when bytes match a known header.
+- ~~UC-read-010~~ ✅ FIXED — `detect_image_mime()` sniffs PNG / JPEG
+  / GIF / WebP magic at offset 0 (and the `RIFF…WEBP` interlocked
+  header for WebP). Matched bytes return a `Read image file [<mime>]`
+  marker plus an `image` content block carrying base64 payload.
 - ~~UC-sysp-001~~ ✅ FIXED — emits `Available tools:\n(none)` for empty
   tools and the `Show file paths clearly` guideline is anchored. (And
   UC-sysp-002.)

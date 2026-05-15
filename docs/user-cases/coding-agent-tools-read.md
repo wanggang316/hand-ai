@@ -37,8 +37,8 @@ pi.
 | UC-read-007 | ✅ pass | offset+limit semantics correct (modulo UC-read-001 formatting) |
 | UC-read-008 | ✅ pass | `test_read_offset_beyond_eof_errors` |
 | UC-read-009 | ✅ pass | `test_read_truncation_emits_structured_details`, `test_read_user_limit_truncation_emits_limit_kind`, `test_read_no_truncation_no_details` |
-| UC-read-010 | ❌ fail | hand does not detect image MIME via file magic |
-| UC-read-011 | ✅ pass | files without image magic always return text (vacuously: hand never returns image blocks today) |
+| UC-read-010 | ✅ pass | `test_read_detects_png_by_magic_not_extension` |
+| UC-read-011 | ✅ pass | `test_read_text_file_with_png_extension_stays_text` |
 
 ## Cases
 

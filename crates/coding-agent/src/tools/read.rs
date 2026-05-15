@@ -1,7 +1,9 @@
 //! Read tool — read file contents with line numbers.
 
 use crate::tools::path_utils::resolve_read_path;
+use base64::Engine;
 use hand_agent::types::{AgentTool, ToolResult};
+use model::types::{ImageContent, TextContent, ToolResultContent};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +20,32 @@ fn format_size(bytes: usize) -> String {
     } else {
         format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
     }
+}
+
+/// Detect image MIME by file-magic bytes. Returns `Some(mime)` for
+/// the four image formats `image` (the crate) decodes — PNG, JPEG,
+/// GIF, WebP — and `None` for everything else (including text files
+/// that happen to have an image extension).
+///
+/// Magic bytes (all anchored at offset 0):
+/// - PNG:  `89 50 4E 47 0D 0A 1A 0A`
+/// - JPEG: `FF D8 FF`
+/// - GIF:  `47 49 46 38` (`GIF8`, matches both 87a and 89a)
+/// - WebP: `52 49 46 46 ?? ?? ?? ?? 57 45 42 50` (`RIFF....WEBP`)
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Some("image/png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF8") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 /// Create the read tool.
@@ -67,9 +95,32 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
         .map(|v| v as usize);
     let limit = user_limit.unwrap_or(DEFAULT_MAX_LINES);
 
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
+    // Read as raw bytes first so we can inspect the file-magic header
+    // before deciding text-vs-image. A `.png` extension whose body is
+    // ASCII still surfaces as text; a `.txt` extension whose body
+    // starts with the PNG magic still surfaces as an image. The model
+    // gets the right block type regardless of misleading filenames.
+    let raw_bytes = match std::fs::read(&path) {
+        Ok(b) => b,
         Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
+    };
+
+    if let Some(mime) = detect_image_mime(&raw_bytes) {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+        let marker = format!("Read image file [{mime}]");
+        return ToolResult {
+            content: vec![
+                ToolResultContent::Text(TextContent::new(marker)),
+                ToolResultContent::Image(ImageContent::new(encoded, mime)),
+            ],
+            details: None,
+            terminate: None,
+        };
+    }
+
+    let content = match std::str::from_utf8(&raw_bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => String::from_utf8_lossy(&raw_bytes).into_owned(),
     };
 
     let lines: Vec<&str> = content.lines().collect();
@@ -523,6 +574,54 @@ mod tests {
         assert!(
             result.details.is_none(),
             "details should be None when the read fits cleanly"
+        );
+    }
+
+    /// A file whose bytes start with PNG magic is returned as an
+    /// image content block — even when the filename has a misleading
+    /// extension (e.g. `image.txt`). pi anchors this contract; we
+    /// inherit it.
+    #[test]
+    fn test_read_detects_png_by_magic_not_extension() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("image.txt");
+        // 1×1 transparent PNG payload, base64-decoded inline.
+        let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==";
+        let png_bytes = base64::engine::general_purpose::STANDARD.decode(png_b64).unwrap();
+        std::fs::write(&file, &png_bytes).unwrap();
+
+        let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
+        // The text block carries the marker, the image block carries
+        // the encoded payload with the right MIME.
+        let text = get_text(&result);
+        assert!(
+            text.contains("Read image file [image/png]"),
+            "expected PNG marker, got: {text}"
+        );
+        let image_block = result.content.iter().find_map(|c| match c {
+            model::ToolResultContent::Image(img) => Some(img),
+            _ => None,
+        });
+        let img = image_block.expect("result should include an image block");
+        assert_eq!(img.mime_type, "image/png");
+        assert!(!img.data.is_empty(), "image data should be the base64 payload");
+    }
+
+    /// A file with an image-suggesting extension but text content
+    /// surfaces as text — never as an image block. The check is on
+    /// the bytes, not the filename.
+    #[test]
+    fn test_read_text_file_with_png_extension_stays_text() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("not-an-image.png");
+        std::fs::write(&file, "definitely not a png").unwrap();
+
+        let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
+        let text = get_text(&result);
+        assert!(text.contains("definitely not a png"));
+        assert!(
+            !result.content.iter().any(|c| matches!(c, model::ToolResultContent::Image(_))),
+            "no image block expected"
         );
     }
 
