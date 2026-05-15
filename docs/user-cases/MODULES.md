@@ -15,7 +15,7 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-tools-ls.md | pi-mono/packages/coding-agent/test/tools.test.ts (ls describe) | coding-agent | 5 | 5 | 0 | 0 |
 | coding-agent-cli-args.md | pi-mono/packages/coding-agent/test/args.test.ts | coding-agent | 60 | 28 | 24 | 8 |
 | coding-agent-core-resolve-config-value.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (API-key + caching subset) | coding-agent | 16 | 16 | 0 | 0 |
-| coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 11 | 3 | 17 |
+| coding-agent-core-model-resolver.md | pi-mono/packages/coding-agent/test/model-resolver.test.ts | coding-agent | 31 | 14 | 0 | 17 |
 | coding-agent-core-auth-storage.md | pi-mono/packages/coding-agent/test/auth-storage.test.ts (oauth/persistence/status/runtime-override) | coding-agent | 11 | 5 | 5 | 1 |
 | coding-agent-core-session-manager.md | pi-mono/packages/coding-agent/test/{session-info-modified-timestamp,session-cwd,sdk-session-manager}.test.ts | coding-agent | 7 | 1 | 1 | 5 |
 | coding-agent-tools-bash.md | pi-mono/packages/coding-agent/test/tools.test.ts (bash describe) + bash-execution-width.test.ts | coding-agent | 17 | 7 | 5 | 5 |
@@ -31,8 +31,8 @@ authored yet, or the count hasn't been recomputed since the last edit.
 ## Rollup
 
 - **Total cases authored:** 338
-- **Pass:** 219
-- **Fail:** 64
+- **Pass:** 222
+- **Fail:** 61
 - **Pending:** 55
 
 ### Known failures (drive remediation)
@@ -87,9 +87,11 @@ authored yet, or the count hasn't been recomputed since the last edit.
 - **UC-args-055/056** — `@<path>` arg recognition missing.
 - **UC-args-057..059** — unknown-flag capture (instead of parse error)
   missing.
-- **UC-mr-027/028/029** — default model lookups (`openai`, `zai`,
-  `minimax`, `cerebras`, `vercel-ai-gateway`) likely drift from pi's
-  current values; needs a snapshot-equality test.
+- ~~UC-mr-027/028/029~~ ✅ FIXED — snapshot test
+  `default_model_per_provider_matches_pi_snapshot` locks the table
+  against pi's `defaultModelPerProvider` map. The values already
+  matched at the time of this lockstep; the test prevents future
+  drift.
 - **UC-as-001** — no `get_api_key` async with OAuth refresh + lock
   compromise recovery on `AuthStorage`.
 - **UC-as-005..008** — no `reload`/`drain_errors`, no `get_auth_status`

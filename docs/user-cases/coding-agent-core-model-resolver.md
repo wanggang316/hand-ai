@@ -44,9 +44,9 @@ registry, surface a `thinking_level`, and emit a `warning` when a
 | UC-mr-024 | ⚠️ pending | "no models available" clear error |
 | UC-mr-025 | ⚠️ pending | provider/model split prefers provider over gateway |
 | UC-mr-026 | ✅ pass | `resolve_model_no_provider_with_slashed_id_finds_openrouter_match` |
-| UC-mr-027 | ❌ fail | hand's `default_model_per_provider` defaults likely diverge from current pi values |
-| UC-mr-028 | ❌ fail | zai/minimax/minimax-cn/cerebras defaults likely diverge |
-| UC-mr-029 | ❌ fail | vercel-ai-gateway default likely diverges |
+| UC-mr-027 | ✅ pass | `default_model_per_provider_matches_pi_snapshot` |
+| UC-mr-028 | ✅ pass | same |
+| UC-mr-029 | ✅ pass | same |
 | UC-mr-030 | ⚠️ pending | `find_initial_model` accepts explicit custom ids |
 | UC-mr-031 | ⚠️ pending | `find_initial_model` picks ai-gateway default when available |
 

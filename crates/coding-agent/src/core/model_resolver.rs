@@ -1464,6 +1464,38 @@ mod tests {
         assert!(default_model_id_for_known_provider("not-a-provider").is_none());
     }
 
+    /// Lockstep parity with upstream pi's `defaultModelPerProvider`
+    /// snapshot. The default-model-per-provider map shifts each time
+    /// a vendor pushes a new GA release; user scripts that omit
+    /// `--model` rely on this map to land on the right model.
+    /// Drifting from pi would silently route hand to an older model
+    /// for the same `hand --provider X` invocation.
+    ///
+    /// The pi snapshot at the time of the 2026-05-16 lockstep:
+    ///   openai → gpt-5.4
+    ///   openai-codex → gpt-5.5
+    ///   zai → glm-5.1
+    ///   minimax → MiniMax-M2.7
+    ///   minimax-cn → MiniMax-M2.7
+    ///   cerebras → zai-glm-4.7
+    ///   vercel-ai-gateway → zai/glm-5.1
+    ///
+    /// When pi pushes an update, refresh this test in the same commit
+    /// that updates `default_model_per_provider()` so the snapshot
+    /// stays a single source of truth.
+    #[test]
+    fn default_model_per_provider_matches_pi_snapshot() {
+        let map: std::collections::HashMap<&str, &str> =
+            default_model_per_provider().iter().copied().collect();
+        assert_eq!(map.get("openai"), Some(&"gpt-5.4"));
+        assert_eq!(map.get("openai-codex"), Some(&"gpt-5.5"));
+        assert_eq!(map.get("zai"), Some(&"glm-5.1"));
+        assert_eq!(map.get("minimax"), Some(&"MiniMax-M2.7"));
+        assert_eq!(map.get("minimax-cn"), Some(&"MiniMax-M2.7"));
+        assert_eq!(map.get("cerebras"), Some(&"zai-glm-4.7"));
+        assert_eq!(map.get("vercel-ai-gateway"), Some(&"zai/glm-5.1"));
+    }
+
     #[test]
     fn find_exact_canonical_match_returns_unique_match() {
         let models = vec![
