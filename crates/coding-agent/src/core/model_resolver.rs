@@ -497,6 +497,14 @@ pub fn find_exact_model_reference_match<'a>(
 /// matching against id and name. Among partial matches, aliases (no date
 /// suffix) are preferred over dated versions; ties break by id descending.
 fn try_match_model<'a>(model_pattern: &str, available_models: &'a [Model]) -> Option<&'a Model> {
+    // An empty pattern would substring-match every id (`contains("")`
+    // is always true). pi returns null in that case; replicate that so
+    // a bug-shaped empty `--model ""` doesn't silently pick the first
+    // catalog row.
+    if model_pattern.is_empty() {
+        return None;
+    }
+
     if let Some(exact) = find_exact_model_reference_match(model_pattern, available_models) {
         return Some(exact);
     }
@@ -1982,5 +1990,185 @@ mod tests {
         assert!(res.model.is_none());
         assert!(res.fallback_message.is_none());
         assert!(!res.messages.is_empty());
+    }
+
+    // ---------- UC-mr pending closures ----------
+
+    /// UC-mr-006 — every canonical thinking-level literal accepted by
+    /// the strict parser (`off`, `minimal`, `low`, `medium`, `high`,
+    /// `xhigh`) resolves through `parse_model_pattern_full` against an
+    /// exact model id; the returned `thinking_level` matches the
+    /// literal; no warning is emitted.
+    #[test]
+    fn parse_full_resolves_every_thinking_level_keyword() {
+        let models = vec![fake(model::types::Provider::Anthropic, "claude-sonnet-4")];
+        let cases = [
+            ("off", ThinkingLevel::Minimal),
+            ("minimal", ThinkingLevel::Minimal),
+            ("low", ThinkingLevel::Low),
+            ("medium", ThinkingLevel::Medium),
+            ("high", ThinkingLevel::High),
+            ("xhigh", ThinkingLevel::Xhigh),
+        ];
+        for (keyword, expected) in cases {
+            let pat = format!("claude-sonnet-4:{keyword}");
+            let res =
+                parse_model_pattern_full(&pat, &models, ParseModelPatternOptions::permissive());
+            assert_eq!(
+                res.model.as_ref().map(|m| m.id.as_str()),
+                Some("claude-sonnet-4"),
+                "model must resolve for {keyword}"
+            );
+            assert_eq!(
+                res.thinking_level,
+                Some(expected),
+                "{keyword} should map to {expected:?}"
+            );
+            assert!(
+                res.warning.is_none(),
+                "{keyword} is a valid keyword — no warning, got {:?}",
+                res.warning
+            );
+        }
+    }
+
+    /// UC-mr-016 — an empty pattern resolves to `None` rather than
+    /// returning the first model in the catalog. An empty `--model`
+    /// argument is a programming error from the caller, not a request
+    /// for "any model".
+    #[test]
+    fn parse_full_empty_pattern_returns_none() {
+        let models = vec![
+            fake(model::types::Provider::Anthropic, "claude-sonnet-4"),
+            fake(model::types::Provider::OpenAI, "gpt-4o"),
+        ];
+        let res = parse_model_pattern_full("", &models, ParseModelPatternOptions::permissive());
+        assert!(
+            res.model.is_none(),
+            "empty pattern must not silently pick a model, got {:?}",
+            res.model.as_ref().map(|m| &m.id)
+        );
+        assert!(res.thinking_level.is_none());
+        assert!(res.warning.is_none());
+    }
+
+    /// UC-mr-017 — a trailing colon (`claude-sonnet-4:`) means the
+    /// suffix is empty. Empty is NOT a valid thinking level; in
+    /// permissive mode the recursion still resolves the bare prefix
+    /// but a warning is surfaced; in strict mode the call returns
+    /// `model: None`.
+    #[test]
+    fn parse_full_trailing_colon_empty_suffix_warns_permissive() {
+        let models = vec![fake(model::types::Provider::Anthropic, "claude-sonnet-4")];
+        let permissive = parse_model_pattern_full(
+            "claude-sonnet-4:",
+            &models,
+            ParseModelPatternOptions::permissive(),
+        );
+        assert!(
+            permissive.model.is_some(),
+            "permissive mode falls back to the bare model: {permissive:?}"
+        );
+        assert!(permissive.thinking_level.is_none());
+        assert!(
+            permissive
+                .warning
+                .as_deref()
+                .map(|w| w.contains("Invalid thinking level"))
+                .unwrap_or(false),
+            "warning must flag the empty suffix, got: {:?}",
+            permissive.warning
+        );
+
+        let strict = parse_model_pattern_full(
+            "claude-sonnet-4:",
+            &models,
+            ParseModelPatternOptions::strict(),
+        );
+        assert!(strict.model.is_none(), "strict mode rejects empty suffix");
+    }
+
+    /// UC-mr-023 — when an explicit provider is given and the model id
+    /// is custom (not in the registry), the fallback model carries the
+    /// id verbatim — no provider prefix is glued on. e.g. `--provider
+    /// openai --model my-fine-tune` resolves to a model whose `id` is
+    /// `my-fine-tune`, NOT `openai/my-fine-tune`.
+    #[test]
+    fn resolve_model_explicit_provider_custom_id_keeps_raw_id() {
+        let resolved = resolve_model(Some("anthropic"), "totally-custom-not-in-registry");
+        assert_eq!(
+            resolved.model.id, "totally-custom-not-in-registry",
+            "raw id must be preserved verbatim under explicit provider"
+        );
+        assert_eq!(
+            resolved.model.provider.as_str(),
+            "anthropic",
+            "explicit provider must stick"
+        );
+        // No double-prefix.
+        assert!(
+            !resolved.model.id.starts_with("anthropic/"),
+            "id must not gain a provider prefix"
+        );
+    }
+
+    /// UC-mr-030 — `find_initial_model` accepts an explicit custom id
+    /// supplied via CLI even when the registry does not contain it.
+    /// The resulting model carries the raw id under the requested
+    /// provider (custom fine-tunes / private models).
+    #[test]
+    fn find_initial_accepts_explicit_custom_id_via_cli() {
+        let available = vec![fake(model::types::Provider::Anthropic, "claude-opus-4-7")];
+        let outcome = find_initial_model(FindInitialModelArgs {
+            cli_provider: Some("anthropic"),
+            cli_model: Some("my-custom-fine-tune"),
+            available_models: &available,
+            all_models: &available,
+            ..Default::default()
+        });
+        match outcome {
+            FindInitialModelOutcome::Resolved(r) => {
+                let m = r.model.expect("model must resolve under explicit provider");
+                assert_eq!(m.id, "my-custom-fine-tune");
+                assert_eq!(m.provider.as_str(), "anthropic");
+            }
+            FindInitialModelOutcome::CliError(e) => {
+                panic!("custom id under explicit provider must not error: {e}")
+            }
+        }
+    }
+
+    /// UC-mr-031 — when no CLI / scoped / settings default exists but
+    /// the auth-configured catalog includes the AI-Gateway provider's
+    /// default, `find_initial_model` picks it up via the
+    /// `default_model_per_provider` table.
+    #[test]
+    fn find_initial_picks_ai_gateway_default_when_available() {
+        // Build the catalog so `vercel-ai-gateway` is present with its
+        // pi-snapshotted default model. The known-default lookup loops
+        // over `default_model_per_provider()` and returns the first
+        // matching available row.
+        let gateway_default = default_model_per_provider()
+            .iter()
+            .find(|(p, _)| *p == "vercel-ai-gateway")
+            .map(|(_, m)| *m)
+            .expect("ai-gateway entry exists in pi snapshot");
+        let mut row = fake(model::types::Provider::Anthropic, gateway_default);
+        // Force provider field to vercel-ai-gateway via a custom build.
+        row.provider = model::types::Provider::from_str("vercel-ai-gateway")
+            .unwrap_or(model::types::Provider::Anthropic);
+        let available = vec![row.clone()];
+        let outcome = find_initial_model(FindInitialModelArgs {
+            available_models: &available,
+            all_models: &available,
+            ..Default::default()
+        });
+        match outcome {
+            FindInitialModelOutcome::Resolved(r) => {
+                let m = r.model.expect("resolved to a model");
+                assert_eq!(m.id, gateway_default);
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
     }
 }

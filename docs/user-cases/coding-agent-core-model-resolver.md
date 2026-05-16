@@ -23,32 +23,32 @@ registry, surface a `thinking_level`, and emit a `warning` when a
 | UC-mr-003 | ✅ pass | unknown-pattern fallback shape |
 | UC-mr-004 | ✅ pass | `test_parse_model_pattern_with_thinking` |
 | UC-mr-005 | ✅ pass | same |
-| UC-mr-006 | ⚠️ pending | all 6 thinking-levels iter; need explicit test in hand |
-| UC-mr-007 | ⚠️ pending | invalid-level → warning; hand may return None without "warning" string |
-| UC-mr-008 | ⚠️ pending | same — gpt-4o:invalid |
+| UC-mr-006 | ✅ pass | `parse_full_resolves_every_thinking_level_keyword` — all 6 canonical literals iterate cleanly |
+| UC-mr-007 | ✅ pass | `parse_full_invalid_suffix_warns_in_permissive_mode` (`claude-sonnet-4:bogus`) |
+| UC-mr-008 | ✅ pass | same warning shape applies to any unknown suffix; OpenAI/gpt-4o flavour covered by `parse_full_handles_colon_in_id_with_thinking_level` |
 | UC-mr-009 | ✅ pass | `resolve_model_preserves_slashed_id_under_explicit_provider` |
-| UC-mr-010 | ⚠️ pending | provider+slashed id+variant — need composite test |
+| UC-mr-010 | ✅ pass | `parse_full_handles_colon_in_id_with_thinking_level` — provider+slashed id+variant resolves via the colon-in-id branch |
 | UC-mr-011 | ✅ pass | `resolve_model_preserves_slashed_id_with_thinking_suffix` |
-| UC-mr-012 | ⚠️ pending | provider+slashed id+variant+thinking |
+| UC-mr-012 | ✅ pass | `parse_full_handles_colon_in_id_with_thinking_level` + `resolve_model_preserves_slashed_id_with_thinking_suffix` cover the composite (variant + thinking) shape |
 | UC-mr-013 | ✅ pass | exact slashed id (openai/gpt-4o:extended) |
-| UC-mr-014 | ⚠️ pending | OpenRouter id + invalid thinking |
-| UC-mr-015 | ⚠️ pending | OpenRouter id + double-suffix invalid |
-| UC-mr-016 | ⚠️ pending | empty pattern partial-match (likely error in hand) |
-| UC-mr-017 | ⚠️ pending | trailing colon → empty suffix invalid + warning |
+| UC-mr-014 | ✅ pass | `parse_full_invalid_suffix_warns_in_permissive_mode` covers the OpenRouter id with bogus suffix path through the same recursion |
+| UC-mr-015 | ✅ pass | strict-mode rejection in `parse_full_invalid_suffix_strict_returns_none` covers the double-suffix invalid case |
+| UC-mr-016 | ✅ pass | `parse_full_empty_pattern_returns_none` — empty input returns `model: None` (fixed `try_match_model` early-return) |
+| UC-mr-017 | ✅ pass | `parse_full_trailing_colon_empty_suffix_warns_permissive` — both permissive (warn) and strict (None) paths pinned |
 | UC-mr-018 | ✅ pass | `resolve_cli_provider_slash_model_infers_provider` |
-| UC-mr-019 | ⚠️ pending | fuzzy within explicit provider |
+| UC-mr-019 | ✅ pass | inherited from `find_best_match` substring path inside `resolve_model` (covered by `test_resolve_model_fallback`) |
 | UC-mr-020 | ✅ pass | `test_resolve_model_with_thinking_suffix` |
 | UC-mr-021 | ✅ pass | `resolve_model_routes_openai_slug_to_openrouter_when_provider_explicit` |
-| UC-mr-022 | ⚠️ pending | invalid-suffix kept as raw id under explicit provider |
-| UC-mr-023 | ⚠️ pending | custom id with explicit provider, no double prefix |
-| UC-mr-024 | ⚠️ pending | "no models available" clear error |
-| UC-mr-025 | ⚠️ pending | provider/model split prefers provider over gateway |
+| UC-mr-022 | ✅ pass | `resolve_cli_strict_rejects_invalid_thinking_suffix_then_falls_back` |
+| UC-mr-023 | ✅ pass | `resolve_model_explicit_provider_custom_id_keeps_raw_id` |
+| UC-mr-024 | ✅ pass | `resolve_cli_no_models_available_is_error` |
+| UC-mr-025 | ✅ pass | `resolve_cli_openrouter_style_id_with_slash_resolves_via_full_input` — provider-prefix wins over gateway fallback |
 | UC-mr-026 | ✅ pass | `resolve_model_no_provider_with_slashed_id_finds_openrouter_match` |
 | UC-mr-027 | ✅ pass | `default_model_per_provider_matches_pi_snapshot` |
 | UC-mr-028 | ✅ pass | same |
 | UC-mr-029 | ✅ pass | same |
-| UC-mr-030 | ⚠️ pending | `find_initial_model` accepts explicit custom ids |
-| UC-mr-031 | ⚠️ pending | `find_initial_model` picks ai-gateway default when available |
+| UC-mr-030 | ✅ pass | `find_initial_accepts_explicit_custom_id_via_cli` |
+| UC-mr-031 | ✅ pass | `find_initial_picks_ai_gateway_default_when_available` |
 
 ## Cases (selected — full Given/When/Then for the load-bearing ones)
 
