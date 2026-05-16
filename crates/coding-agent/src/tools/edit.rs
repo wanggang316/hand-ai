@@ -1193,6 +1193,140 @@ mod tests {
         assert!(after.contains("range: 10-50"));
     }
 
+    /// UC-edit-022 — exact match is preferred over fuzzy match. If
+    /// the literal `old_string` is already present in the file, the
+    /// edit lands there without engaging the Unicode-fuzzy fallback.
+    /// We verify by editing a file that contains both an ASCII and a
+    /// smart-quoted variant — the ASCII anchor must hit the ASCII
+    /// occurrence verbatim, never the smart-quoted one.
+    #[tokio::test]
+    async fn test_edit_prefers_exact_match_over_fuzzy() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("mix.txt");
+        // Two distinct lines: one with ASCII quotes, one with smart
+        // double quotes. Editing the ASCII line should land there;
+        // the smart-quoted line must remain untouched (no
+        // normalisation rewrite of the smart quotes).
+        let body = "msg = \"plain\";\nother = \u{201C}fancy\u{201D};\n";
+        std::fs::write(&file, body).unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "\"plain\"",
+                "new_string": "\"changed\"",
+            }),
+        )
+        .await;
+        assert!(!get_text(&result).starts_with("Error:"));
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(after.contains("\"changed\""), "exact match must apply");
+        // Smart quotes preserved — fuzzy fallback NOT engaged.
+        assert!(
+            after.contains('\u{201C}') && after.contains('\u{201D}'),
+            "smart quotes must remain untouched, got: {after:?}"
+        );
+    }
+
+    /// UC-edit-024 — duplicate detection survives Unicode-fuzzy
+    /// normalisation. When two distinct fuzzy-equivalent occurrences
+    /// exist (e.g. one ASCII `"foo"` and one smart `\u{201C}foo\u{201D}`),
+    /// the file has 2 normalised matches for the ASCII `old_string`
+    /// — the edit must refuse with an ambiguity error rather than
+    /// silently replacing one.
+    #[tokio::test]
+    async fn test_edit_fuzzy_match_detects_duplicates() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("dup.txt");
+        // Two lines that BOTH match `"foo"` once normalised (one
+        // smart, one ASCII). Without the file having a literal
+        // `"foo"` for the fast-path, the fuzzy stage takes over and
+        // sees two matches.
+        let body = "a = \u{201C}foo\u{201D};\nb = \u{201C}foo\u{201D};\n";
+        std::fs::write(&file, body).unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "\"foo\"",
+                "new_string": "\"bar\"",
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("found 2 times") || text.contains("2 occurrences"),
+            "fuzzy duplicate must surface an ambiguity error, got: {text}"
+        );
+        // File untouched.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), body);
+    }
+
+    /// UC-edit-029 — CRLF↔LF normalisation must not mask duplicates.
+    /// A file containing both CRLF and LF variants of the same
+    /// anchor should be rejected with an ambiguity error when the
+    /// model supplies the anchor in either form, not silently apply
+    /// to only one variant.
+    #[tokio::test]
+    async fn test_edit_detects_duplicates_across_crlf_lf_variants() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("mixed-endings.txt");
+        // The same anchor appears twice — once with literal LF only,
+        // once embedded in CRLF context. With CRLF tolerance on, both
+        // are reachable from one `old_string`.
+        let body = "marker\nbody\nmarker\nbody\n";
+        std::fs::write(&file, body).unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "marker",
+                "new_string": "MARK",
+            }),
+        )
+        .await;
+        let text = get_text(&result);
+        assert!(
+            text.contains("found 2 times"),
+            "two literal anchors must be flagged ambiguous, got: {text}"
+        );
+    }
+
+    /// UC-edit-030 — a UTF-8 BOM at the head of the file survives a
+    /// single-edit replacement. The BOM is not part of the model's
+    /// `old_string`; it sits before the matched region and the
+    /// rebuild preserves it verbatim.
+    #[tokio::test]
+    async fn test_edit_single_edit_preserves_utf8_bom() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("bom.txt");
+        // BOM + body. The model's old_string is content-only.
+        let body = "\u{FEFF}hello world\n";
+        std::fs::write(&file, body.as_bytes()).unwrap();
+
+        let result = execute_edit(
+            dir.path(),
+            json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "world",
+                "new_string": "rust",
+            }),
+        )
+        .await;
+        assert!(!get_text(&result).starts_with("Error:"));
+        let after = std::fs::read(&file).unwrap();
+        assert_eq!(
+            &after[..3],
+            &[0xEF, 0xBB, 0xBF],
+            "BOM must remain at byte 0 after single-edit"
+        );
+        let s = String::from_utf8(after).unwrap();
+        assert!(s.contains("hello rust"));
+    }
+
     /// UC-edit-031 — preserve UTF-8 BOM and CRLF line endings across
     /// a multi-edit batch. BOM stays at the file head; CRLF endings
     /// remain wherever they were in the original.

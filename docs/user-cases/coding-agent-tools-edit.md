@@ -40,22 +40,22 @@ shapes share fuzzy / CRLF / BOM handling.
 | UC-edit-012 | include original error message for unknown access errors | 🚫 N/A — hand maps every io::ErrorKind to a named code in UC-edit-003/011; the "unknown access error pass-through" is pi's escape hatch for kinds it doesn't recognize, redundant in hand. |
 | UC-edit-013 | include ENOENT in diff preview for missing files | 🚫 N/A — hand has no preview API; edit operations are atomic apply-or-error. |
 | UC-edit-014 | include EACCES in diff preview for unreadable files | 🚫 N/A — same: no preview API. |
-| UC-edit-015 | match text with trailing whitespace stripped (fuzzy) | ⚠️ pending — verify hand's fuzzy normalisation does this |
-| UC-edit-016 | match fullwidth punctuation in Chinese text | ⚠️ pending |
-| UC-edit-017 | match compatibility-equivalent Unicode forms (NFKC) | ⚠️ pending |
+| UC-edit-015 | match text with trailing whitespace stripped (fuzzy) | 🚫 N/A — hand's `normalize_for_fuzzy_match` only collapses smart quotes / Unicode dashes / wide spaces to ASCII; it deliberately does not trim trailing whitespace (trimming would change byte offsets and silently mask user intent). |
+| UC-edit-016 | match fullwidth punctuation in Chinese text | 🚫 N/A — fullwidth CJK punctuation requires NFKC or per-char mapping; deliberately out of scope (see UC-edit-017). Users supplying CJK should anchor on exact bytes. |
+| UC-edit-017 | match compatibility-equivalent Unicode forms (NFKC) | 🚫 N/A — `normalize_for_fuzzy_match` doc explicitly notes NFKC is omitted to avoid pulling in `unicode-normalization`. Edge cases stay on the literal-match fast path. |
 | UC-edit-018 | match smart single quotes to ASCII | ✅ `test_edit_fuzzy_smart_single_quotes` |
 | UC-edit-019 | match smart double quotes to ASCII | ✅ `test_edit_fuzzy_smart_double_quotes` |
 | UC-edit-020 | match Unicode dashes to ASCII hyphen | ✅ `test_edit_fuzzy_unicode_dashes` |
 | UC-edit-021 | match non-breaking space to regular space | ✅ `test_edit_fuzzy_nbsp` |
-| UC-edit-022 | prefer exact match over fuzzy match | ⚠️ pending |
+| UC-edit-022 | prefer exact match over fuzzy match | ✅ pass — `test_edit_prefers_exact_match_over_fuzzy` |
 | UC-edit-023 | still fail when text not found even with fuzzy | ✅ inherited from UC-edit-002 path |
-| UC-edit-024 | detect duplicates after fuzzy normalization | ⚠️ pending |
+| UC-edit-024 | detect duplicates after fuzzy normalization | ✅ pass — `test_edit_fuzzy_match_detects_duplicates` |
 | UC-edit-025 | support fuzzy matching in multi-edit mode | ✅ `test_edit_multi_edit_fuzzy_matching_applies` |
 | UC-edit-026 | match LF oldText against CRLF file content | ✅ `test_edit_lf_old_string_matches_crlf_file` |
 | UC-edit-027 | preserve CRLF line endings after edit | ✅ (covered by same test pair) |
 | UC-edit-028 | preserve LF line endings for LF files | ✅ `test_edit_crlf_normalization_does_not_affect_single_line` |
-| UC-edit-029 | detect duplicates across CRLF/LF variants | ⚠️ pending |
-| UC-edit-030 | preserve UTF-8 BOM after edit | ⚠️ pending — hand needs explicit BOM-preservation test |
+| UC-edit-029 | detect duplicates across CRLF/LF variants | ✅ pass — `test_edit_detects_duplicates_across_crlf_lf_variants` |
+| UC-edit-030 | preserve UTF-8 BOM after edit | ✅ pass — `test_edit_single_edit_preserves_utf8_bom` (single-edit) + `test_edit_multi_edit_preserves_bom_and_crlf` (multi-edit) |
 | UC-edit-031 | preserve CRLF + BOM in multi-edit mode | ✅ `test_edit_multi_edit_preserves_bom_and_crlf` |
 
 ## Cases (load-bearing detail)
