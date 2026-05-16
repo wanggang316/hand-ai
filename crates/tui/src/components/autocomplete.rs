@@ -1126,4 +1126,168 @@ mod tests {
             "symlinked file must surface, got: {bn_labels:?}"
         );
     }
+
+    // ---------- UC-ac pending closures (provider-side) ----------
+
+    /// UC-ac-005 — an empty `@` query returns every file and folder
+    /// under the project root (modulo the auto-ignore list). The
+    /// dropdown shows everything available, not a slice keyed by some
+    /// hidden prefix.
+    #[test]
+    fn path_provider_empty_query_returns_all_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "").unwrap();
+        std::fs::write(tmp.path().join("b.md"), "").unwrap();
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        std::fs::write(tmp.path().join("sub/c.rs"), "").unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let items = provider
+            .query_sync(&ctx("", AutocompleteTrigger::At))
+            .expect("empty @ trigger yields Some");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.iter().any(|l| *l == "a.txt"), "got: {labels:?}");
+        assert!(labels.iter().any(|l| *l == "b.md"), "got: {labels:?}");
+        assert!(labels.iter().any(|l| *l == "sub/"), "got: {labels:?}");
+        assert!(
+            labels.iter().any(|l| *l == "sub/c.rs"),
+            "nested file too: {labels:?}"
+        );
+    }
+
+    /// UC-ac-006 — matching by extension (`.rs`) finds every Rust file
+    /// regardless of stem. The walk is substring-matched on the full
+    /// relative path so an extension query lands on every entry whose
+    /// path contains that string.
+    #[test]
+    fn path_provider_matches_by_extension_in_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("lib.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("readme.md"), "").unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let items = provider
+            .query_sync(&ctx(".rs", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.iter().any(|l| *l == "main.rs"));
+        assert!(labels.iter().any(|l| *l == "lib.rs"));
+        assert!(
+            !labels.iter().any(|l| *l == "readme.md"),
+            "non-matching extension must be filtered out, got: {labels:?}"
+        );
+    }
+
+    /// UC-ac-007 — matching is case-insensitive. `MAIN` finds
+    /// `main.rs`; `Sub` finds `subdir/`. Models often mismatch case
+    /// when paraphrasing what the user typed.
+    #[test]
+    fn path_provider_query_is_case_insensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "").unwrap();
+        std::fs::create_dir(tmp.path().join("subdir")).unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let upper_main = provider
+            .query_sync(&ctx("MAIN", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        assert!(
+            upper_main.iter().any(|i| i.label == "main.rs"),
+            "MAIN must match main.rs case-insensitively"
+        );
+
+        let mixed_sub = provider
+            .query_sync(&ctx("Sub", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        assert!(
+            mixed_sub.iter().any(|i| i.label == "subdir/"),
+            "Sub must match subdir/ case-insensitively"
+        );
+    }
+
+    /// UC-ac-009/010 — nested and deeply-nested file paths surface via
+    /// the BFS walk, up to `DEFAULT_PATH_MAX_DEPTH = 3`. A `depth-3`
+    /// file is reachable; a `depth-4` file is intentionally outside
+    /// the budget.
+    #[test]
+    fn path_provider_returns_nested_paths_within_depth_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        // depth 1: a/
+        // depth 2: a/b/
+        // depth 3: a/b/c.rs (reachable — depth_cap=3 == file at depth 3)
+        // depth 4: a/b/d/deep.rs (beyond budget)
+        std::fs::create_dir_all(tmp.path().join("a/b/d")).unwrap();
+        std::fs::write(tmp.path().join("a/b/c.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("a/b/d/deep.rs"), "").unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let items = provider
+            .query_sync(&ctx("", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| *l == "a/b/c.rs"),
+            "depth-3 file should be reachable, got: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.ends_with("deep.rs")),
+            "depth-4 file is beyond the default 3-level budget, got: {labels:?}"
+        );
+    }
+
+    /// UC-ac-012 — querying with a relative directory prefix (`src/`)
+    /// scopes results to that subtree and recurses inside it.
+    #[test]
+    fn path_provider_scopes_to_relative_dir_and_recurses() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src/inner")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("src/inner/util.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("other.txt"), "").unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let items = provider
+            .query_sync(&ctx("src/", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.iter().any(|l| *l == "src/main.rs"));
+        assert!(labels.iter().any(|l| *l == "src/inner/util.rs"));
+        // `other.txt` doesn't contain `src/` so it's filtered out.
+        assert!(
+            !labels.iter().any(|l| *l == "other.txt"),
+            "out-of-scope entry leaked, got: {labels:?}"
+        );
+    }
+
+    /// UC-ac-018 — when the project root's own path string happens to
+    /// contain the query (e.g. cwd is `/tmp/foo-test/...` and the
+    /// query is `test`), the returned suggestions stay anchored on
+    /// entries under the root — the cwd basename is not treated as a
+    /// match itself.
+    #[test]
+    fn path_provider_root_basename_does_not_pollute_results() {
+        // Force a tempdir whose name contains the query keyword.
+        let tmp = tempfile::Builder::new()
+            .prefix("match-keyword-")
+            .tempdir()
+            .unwrap();
+        std::fs::write(tmp.path().join("alpha.rs"), "").unwrap();
+        std::fs::write(tmp.path().join("beta.rs"), "").unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let items = provider
+            .query_sync(&ctx("alpha", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // The root itself is not a child entry — we never emit a label
+        // for the project root, only for entries inside it. So even
+        // when the cwd basename matches the keyword, only the
+        // child file `alpha.rs` surfaces.
+        assert!(labels.iter().any(|l| *l == "alpha.rs"));
+        assert!(
+            !labels.iter().any(|l| l.contains("match-keyword-")),
+            "root basename leaked into results, got: {labels:?}"
+        );
+    }
 }

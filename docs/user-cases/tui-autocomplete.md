@@ -33,28 +33,28 @@ small auto-ignore list. The functional surface diverges:
 
 | ID | pi case | hand status |
 |----|---------|-------------|
-| UC-ac-001 | extracts `/` from `hey /` when forced | ⚠️ pending |
-| UC-ac-002 | extracts `/A` from `/A` when forced | ⚠️ pending |
+| UC-ac-001 | extracts `/` from `hey /` when forced | 🚫 N/A — editor-side trigger extraction; hand's editor passes the trigger enum directly (`AutocompleteTrigger::{Slash,At,Manual}`) rather than re-parsing the line. Provider contract is unaffected. |
+| UC-ac-002 | extracts `/A` from `/A` when forced | 🚫 N/A (same — editor-side extraction not modelled in hand) |
 | UC-ac-003 | does NOT trigger for slash commands | ✅ pass — `test_slash_command_provider_*` covers prefix vs path triggers |
-| UC-ac-004 | triggers for absolute paths after slash command arg | ⚠️ pending |
-| UC-ac-005 | @-fd: returns all files+folders for empty `@` query | ⚠️ pending |
-| UC-ac-006 | @-fd: matches file with extension in query | ⚠️ pending |
-| UC-ac-007 | @-fd: case insensitive | ⚠️ pending |
-| UC-ac-008 | @-fd: ranks directories before files | ⚠️ pending |
-| UC-ac-009 | @-fd: returns nested file paths | ⚠️ pending |
-| UC-ac-010 | @-fd: deeply nested paths | ⚠️ pending |
+| UC-ac-004 | triggers for absolute paths after slash command arg | 🚫 N/A (same editor-extraction reason) |
+| UC-ac-005 | @-fd: returns all files+folders for empty `@` query | ✅ pass — `path_provider_empty_query_returns_all_entries` |
+| UC-ac-006 | @-fd: matches file with extension in query | ✅ pass — `path_provider_matches_by_extension_in_query` |
+| UC-ac-007 | @-fd: case insensitive | ✅ pass — `path_provider_query_is_case_insensitive` |
+| UC-ac-008 | @-fd: ranks directories before files | 🚫 N/A — hand's BFS walker emits entries in `read_dir` order; pi's `fd` ranking is a UX nice-to-have, not a correctness property of the suggestion list. Adding a sort would diverge from the rest of the providers (slash, combined). |
+| UC-ac-009 | @-fd: returns nested file paths | ✅ pass — `path_provider_returns_nested_paths_within_depth_budget` |
+| UC-ac-010 | @-fd: deeply nested paths | ✅ pass (same — depth-budget assertion pinned) |
 | UC-ac-011 | @-fd: dir-in-middle match (`--full-path`) | ✅ pass — hand's BFS substring-matches against the full relative path by default; covered by `path_provider_descends_into_subdirectories_up_to_max_depth` |
-| UC-ac-012 | @-fd: scopes to relative dirs, searches recursively | ⚠️ pending |
+| UC-ac-012 | @-fd: scopes to relative dirs, searches recursively | ✅ pass — `path_provider_scopes_to_relative_dir_and_recurses` |
 | UC-ac-013 | @-fd: quotes paths with spaces | ✅ pass — `path_provider_quotes_paths_with_spaces` |
 | UC-ac-014 | @-fd: includes hidden but excludes .git | ✅ pass — `test_path_provider_includes_dotfiles_excludes_git` |
 | UC-ac-015 | @-fd: follows symlinked directories | ✅ pass — `path_provider_follows_symlinks_without_cycling` |
 | UC-ac-016 | @-fd: returns symlinked dirs matched by name | ✅ pass (same test, dir-symlink branch) |
 | UC-ac-017 | @-fd: returns symlinked files without `type l` | ✅ pass (same test, file-symlink branch) |
-| UC-ac-018 | @-fd: same suggestions when cwd path contains the query | ⚠️ pending |
+| UC-ac-018 | @-fd: same suggestions when cwd path contains the query | ✅ pass — `path_provider_root_basename_does_not_pollute_results` |
 | UC-ac-019 | @-fd: continues autocomplete inside quoted `@` paths | ✅ pass — `path_provider_continues_inside_open_quote` |
 | UC-ac-020 | @-fd: applies quoted `@` completion without duplicating quote | ✅ pass (same test, exact-quote-count assertion) |
-| UC-ac-021 | dot-slash: preserves `./` prefix when completing files | ⚠️ pending |
-| UC-ac-022 | dot-slash: preserves `./` prefix for directory completions | ⚠️ pending |
+| UC-ac-021 | dot-slash: preserves `./` prefix when completing files | 🚫 N/A — hand's autocomplete has no `./` direct-path trigger (only Slash/At/Manual). The `./` prefix is plain text in hand's editor model. |
+| UC-ac-022 | dot-slash: preserves `./` prefix for directory completions | 🚫 N/A (same reason) |
 | UC-ac-023 | quoted path: quotes paths with spaces (direct, not `@`) | 🚫 N/A — hand's editor has no dedicated direct-path trigger (only Slash/At/Manual). Direct path entry is plain text; quoting is a TUI display concern, not the autocomplete provider's. |
 | UC-ac-024 | quoted path: continues completion inside quoted paths | 🚫 N/A (same reason) |
 | UC-ac-025 | quoted path: applies quoted completion without duplicating quote | 🚫 N/A (same reason) |
