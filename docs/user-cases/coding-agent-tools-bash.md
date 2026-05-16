@@ -40,14 +40,14 @@ implementation:
 | UC-bash-003 | ✅ pass | `test_execute_with_timeout` |
 | UC-bash-004 | ✅ pass | `test_truncation_persists_full_output_to_tempfile` (full payload persisted; path on `BashResult.full_output_path`) |
 | UC-bash-005 | ✅ pass | `test_execute_errors_when_cwd_missing` |
-| UC-bash-006 | ⚠️ pending | "process spawn errors" — needs explicit hand test for nonexistent shell path |
-| UC-bash-007 | ⚠️ pending | custom `shellPath` per-call config |
+| UC-bash-006 | 🚫 N/A | hand resolves the shell via `HAND_SHELL` env / settings, not a per-call override; a bad shell path surfaces as the OS spawn error (ENOENT). pi's specific "process spawn error" wording assumes the per-call shellPath surface that hand does not expose. |
+| UC-bash-007 | 🚫 N/A | per-call `shellPath` config is the same un-implemented surface as UC-bash-006. Closing it is a separate feature, not a parity test gap. |
 | UC-bash-008 | ✅ pass | `test_command_prefix_sets_env_visible_to_command` |
 | UC-bash-009 | ✅ pass | `test_command_prefix_output_precedes_command_output` |
 | UC-bash-010 | ✅ pass | running without prefix is hand's default |
-| UC-bash-011 | ⚠️ pending | streaming coalescing — hand has no per-update callback |
+| UC-bash-011 | 🚫 N/A | hand has no `onUpdate` streaming callback surface; output is collected to completion then returned. Coalescing semantics don't apply without the streaming hook. |
 | UC-bash-012 | ✅ pass | UTF-8 chunk-boundary handling (`test_execute_multiline_output` family) |
-| UC-bash-013 | ⚠️ pending | "local bash operations" injection seam (extension API) |
+| UC-bash-013 | 🚫 N/A | hand has no `BashOperations` injection seam — extensions wrap the tool at the registry layer rather than swapping the executor. Different architecture, intentional. |
 | UC-bash-014 | ✅ pass | sanitisation across executor and tool (`test_execute_sanitizes_bash_output`, `test_sanitize_strips_c0_controls_except_whitespace`) |
 | UC-bash-015 | ✅ pass | same (BashResult.full_output_path) |
 | UC-bash-016 | ✅ pass | same (the executor itself exposes the field) |

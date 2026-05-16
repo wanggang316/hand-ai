@@ -37,7 +37,7 @@ proposal.
 | UC-as-001 | 🚫 N/A | the OAuth refresh + lockfile-compromise recovery pathway depends on a refresh-under-lock subsystem hand has not landed (`proper-lockfile.onCompromised` equivalent + Anthropic OAuth refresh client). Sync `get_api_key` exists; the async refresh dance is a separate feature port, not a parity fix at the auth_storage layer. Re-open this case once the OAuth refresh client lands. |
 | UC-as-002 | ✅ pass | `save_then_load_round_trips_api_key` + manual external-edit verification by reading the file mid-flight (covered as a property of the load-edit-save flow) |
 | UC-as-003 | ✅ pass | `remove_drops_provider` (covers the remove half of "preserves unrelated external edits") |
-| UC-as-004 | ⚠️ pending | "malformed file is not overwritten after load error" — hand reloads on every read but does NOT write back on parse failure (load returns the error); behaviour believed correct, needs explicit test |
+| UC-as-004 | ✅ pass | `malformed_file_is_not_overwritten_when_set_runs` — `set` calls `load()` first; the JSON parse error propagates and `save` never runs |
 | UC-as-005 | ✅ pass | `reload_refreshes_cache_from_disk`, `reload_failure_preserves_cache_and_records_error`, `set_updates_cache_in_lockstep` |
 | UC-as-006 | ✅ pass | `get_auth_status_redacts_secrets`, `get_auth_status_unconfigured_provider_has_no_source` |
 | UC-as-007 | ✅ pass | `runtime_override_beats_stored_api_key` |

@@ -57,11 +57,11 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 
 | ID | Status | Verified-by |
 |----|--------|-------------|
-| UC-args-001 | ⚠️ pending | `--version` — clap auto prints+exits, doesn't set a field |
+| UC-args-001 | 🚫 N/A | clap's `--version` auto-prints and exits the process; there is no `version: bool` field to assert against. Pi's flag-as-field shape is intentionally not replicated. |
 | UC-args-002 | ✅ pass | `version_flag` rebound to `-v` via ArgAction::Version; `--verbose` no longer has a short |
-| UC-args-003 | ⚠️ pending | `--version` precedence — clap exits before parsing rest |
-| UC-args-004 | ⚠️ pending | `--help` — clap auto |
-| UC-args-005 | ⚠️ pending | `-h` — clap auto |
+| UC-args-003 | 🚫 N/A | `--version` exits clap before any other flag is parsed; "precedence over other args" is automatic and untestable as a field. |
+| UC-args-004 | 🚫 N/A | clap's `--help` auto-prints and exits — same shape as UC-args-001. |
+| UC-args-005 | 🚫 N/A | `-h` shorthand is wired by clap automatically — same shape as UC-args-004. |
 | UC-args-006 | ✅ pass | `parses_print_flag` |
 | UC-args-007 | ✅ pass | `parses_short_prompt` |
 | UC-args-008 | ✅ pass | `parses_prompt_with_yaml_frontmatter` |
@@ -100,7 +100,7 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-041 | 🚫 N/A | no theme subsystem to disable |
 | UC-args-042 | ✅ pass | `parses_no_context_files_flag` |
 | UC-args-043 | ✅ pass | `nc_short_alias_rewrites_to_no_context_files` |
-| UC-args-044 | ⚠️ pending | hand has `verbose` field; verify parse equivalence |
+| UC-args-044 | ✅ pass | `parses_verbose_long_form` |
 | UC-args-045 | ✅ pass | `parses_offline_flag` |
 | UC-args-046 | ✅ pass | `parses_no_tools_flag` |
 | UC-args-047 | ✅ pass | `nt_short_alias_rewrites_to_no_tools` |
@@ -108,7 +108,7 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-049 | ✅ pass | `nbt_short_alias_rewrites_to_no_builtin_tools` |
 | UC-args-050 | ✅ pass | `parses_tools_csv` (long form; pi takes the same CSV) |
 | UC-args-051 | ✅ pass | `parses_tools_short_t` |
-| UC-args-052 | ⚠️ pending | combination — needs both `--no-tools` and `--tools` together; clap may enforce mutual exclusion |
+| UC-args-052 | ✅ pass | `parses_no_tools_and_tools_together` — both fields land on the struct; runtime resolves precedence (no_tools wins) downstream |
 | UC-args-053 | ✅ pass | duplicate of UC-args-048 — `parses_no_builtin_tools_flag` |
 | UC-args-054 | ✅ pass | `positional_plain_text_lands_in_messages` |
 | UC-args-055 | ✅ pass | `positional_at_file_lands_in_file_args` |
@@ -116,7 +116,7 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-057 | 🚫 N/A | hand's clap rejects unknown flags by design (typo-safe UX); pi's lenient capture into `unknownFlags` would break hand's strict-parsing contract |
 | UC-args-058 | 🚫 N/A | same |
 | UC-args-059 | 🚫 N/A | same |
-| UC-args-060 | ⚠️ pending | complex combo — most components covered; needs end-to-end probe |
+| UC-args-060 | ✅ pass | `parses_complex_combo_end_to_end` — provider + model + extensions + tools + positional messages + `@file` all parse without collision |
 
 ## Cases
 

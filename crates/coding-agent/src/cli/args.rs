@@ -349,6 +349,69 @@ mod tests {
         assert!(args.no_tools);
     }
 
+    /// UC-args-044 — `--verbose` toggles the verbose flag. Hand
+    /// dropped the `-v` short to make room for `--version`, so only
+    /// the long form parses (this is documented in the conversion
+    /// notes alongside UC-args-002).
+    #[test]
+    fn parses_verbose_long_form() {
+        let args =
+            Args::try_parse_from(["hand", "--verbose"]).expect("--verbose should parse");
+        assert!(args.verbose, "--verbose must set the flag");
+    }
+
+    /// UC-args-052 — supplying both `--no-tools` and `--tools <csv>`
+    /// together is accepted at the parse layer; both fields land on
+    /// the `Args` struct unchanged. Precedence (no_tools wins at
+    /// runtime tool selection) is enforced downstream rather than at
+    /// the clap level so a config-driven `--tools` from a wrapper
+    /// script does not error out when an interactive user supplies
+    /// `--no-tools` on top.
+    #[test]
+    fn parses_no_tools_and_tools_together() {
+        let args = Args::try_parse_from(["hand", "--no-tools", "--tools", "read"])
+            .expect("combination must parse — runtime resolves precedence");
+        assert!(args.no_tools, "--no-tools sets the flag");
+        assert_eq!(
+            args.tools.as_deref(),
+            Some("read"),
+            "--tools value still lands on the struct"
+        );
+    }
+
+    /// UC-args-060 — end-to-end "kitchen sink" composition: provider,
+    /// model, several extensions, a tools CSV, a positional message,
+    /// and a `@file` reference all parse and land on their respective
+    /// fields without colliding. This is a smoke test for the
+    /// trailing_var_arg + named-flag interaction.
+    #[test]
+    fn parses_complex_combo_end_to_end() {
+        let args = Args::try_parse_from([
+            "hand",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-sonnet-4",
+            "--extension",
+            "ext-one",
+            "--extension",
+            "ext-two",
+            "--tools",
+            "read,grep",
+            "review",
+            "the",
+            "patch",
+            "@notes.md",
+        ])
+        .expect("kitchen-sink combo must parse");
+        assert_eq!(args.provider, Some("anthropic".into()));
+        assert_eq!(args.model, Some("claude-sonnet-4".into()));
+        assert_eq!(args.extensions, vec!["ext-one", "ext-two"]);
+        assert_eq!(args.tools, Some("read,grep".into()));
+        assert_eq!(args.messages(), vec!["review", "the", "patch"]);
+        assert_eq!(args.file_args(), vec!["notes.md"]);
+    }
+
     #[test]
     fn rejects_unknown_flag() {
         let result = Args::try_parse_from(["hand", "--unknown-flag"]);

@@ -692,6 +692,32 @@ mod tests {
         assert!(matches!(err, AuthStorageError::Json { .. }), "got: {err:?}",);
     }
 
+    /// UC-as-004 — a malformed auth.json is NOT overwritten when a
+    /// subsequent `set` lands. `set` calls `load()` first; the JSON
+    /// parse error propagates back to the caller and `save` never
+    /// runs, so an externally-corrupted file stays exactly as the
+    /// editor / git conflict left it. Pi guards the same property.
+    #[test]
+    fn malformed_file_is_not_overwritten_when_set_runs() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("auth.json");
+        let malformed = "{not json — left by an interrupted editor";
+        fs::write(&path, malformed).unwrap();
+
+        let s = AuthStorage::at(&path);
+        let outcome = s.set("anthropic", AuthRecord::api_key("sk-new"));
+        assert!(
+            outcome.is_err(),
+            "set must fail when load fails, got: {outcome:?}"
+        );
+        // File untouched — byte-for-byte preserved.
+        let after = fs::read_to_string(&path).expect("file still readable");
+        assert_eq!(
+            after, malformed,
+            "set must not have written valid JSON over the corrupt file"
+        );
+    }
+
     #[test]
     fn non_object_root_returns_invalid_error() {
         let dir = TempDir::new().unwrap();

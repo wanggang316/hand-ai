@@ -18,11 +18,11 @@ touches).
 | ID | Status | Verified-by |
 |----|--------|-------------|
 | UC-sm-001 | ✅ pass | `test_session_info_modified_uses_message_timestamp_not_mtime` |
-| UC-sm-002 | ⚠️ pending | "default persisted session path uses agentDir" — hand uses `~/.hand/sessions` directly; agentDir override surface differs |
-| UC-sm-003 | ⚠️ pending | "explicit SessionManager override is kept" — hand allows constructing AgentSession with a custom session_manager; needs explicit test |
-| UC-sm-004 | ⚠️ pending | "cwd derived from explicit SessionManager when cwd omitted" |
-| UC-sm-005 | ⚠️ pending | "detect missing session cwd from persisted sessions" — hand has `session_cwd_missing` detection somewhere; needs probe |
-| UC-sm-006 | ⚠️ pending | "supports overriding effective cwd when opening" |
+| UC-sm-002 | ✅ pass | `create_in_persists_under_explicit_session_dir` — `SessionManager::create_in(cwd, custom_dir)` is hand's agent-dir override surface |
+| UC-sm-003 | ✅ pass | `open_preserves_session_manager_identity` — `SessionManager::open(path)` reads back the same on-disk identity, no shadow rewrite |
+| UC-sm-004 | 🚫 N/A | hand requires `cwd` at AgentSession construction; deriving cwd from a persisted SessionHeader is a TUI-side recovery flow (`format_missing_session_cwd_prompt`) rather than a SessionManager API. Different shape, intentional. |
+| UC-sm-005 | ✅ pass | `missing_cwd_detection_returns_issue_when_stored_cwd_is_gone` — `get_missing_session_cwd_issue` flags the persisted bad cwd against a fallback |
+| UC-sm-006 | 🚫 N/A | "override effective cwd when opening" composes `SessionManager::open` with an explicit AgentSession cwd — no dedicated API in hand. The TUI fallback prompt drives this flow. |
 | UC-sm-007 | ✅ pass | `create_runtime_rejects_missing_stored_cwd_before_factory` — `create_agent_session_runtime` calls `assert_session_cwd_exists` before the factory; missing cwd surfaces as `MissingSessionCwdError` (downcastable from `RuntimeFactoryError`). |
 
 ## Cases

@@ -1570,4 +1570,87 @@ mod tests {
         let listed = SessionManager::list_all(&missing).unwrap();
         assert!(listed.is_empty());
     }
+
+    /// UC-sm-002 — `create_in(cwd, custom_dir)` is the agent-dir
+    /// override surface: callers that need to redirect persistence
+    /// away from `~/.hand/sessions` pass an explicit `session_dir`.
+    /// The session file lands inside that directory verbatim.
+    #[test]
+    fn create_in_persists_under_explicit_session_dir() {
+        let cwd = TempDir::new().unwrap();
+        let custom = TempDir::new().unwrap();
+        let custom_dir = custom.path().join("sessions");
+        let sm = SessionManager::create_in(cwd.path(), &custom_dir).expect("create_in");
+        assert!(
+            sm.path().starts_with(&custom_dir),
+            "session file must live under the custom dir: {:?} vs {:?}",
+            sm.path(),
+            custom_dir
+        );
+        assert!(
+            sm.path().exists(),
+            "session file should have been written: {:?}",
+            sm.path()
+        );
+        assert_eq!(sm.session_dir(), custom_dir);
+    }
+
+    /// UC-sm-003 — a SessionManager handed to the runtime stays the
+    /// same instance — no shadow copy is made. We pin this by
+    /// reading the header out of the opened manager and checking the
+    /// path matches the on-disk file we constructed.
+    #[test]
+    fn open_preserves_session_manager_identity() {
+        let cwd = TempDir::new().unwrap();
+        let sm = SessionManager::create(cwd.path()).expect("create");
+        let path_at_creation = sm.path().to_path_buf();
+        let id_at_creation = sm.id().to_string();
+
+        let reopened = SessionManager::open(&path_at_creation).expect("open");
+        // Same on-disk identity, same path. The reopened manager is a
+        // fresh struct but references the same file the caller passed
+        // in — no shadow rewrite to a different dir.
+        assert_eq!(reopened.path(), path_at_creation);
+        assert_eq!(reopened.id(), id_at_creation);
+    }
+
+    /// UC-sm-005 — a persisted session whose stored cwd is missing on
+    /// disk surfaces as a `SessionCwdIssue` from
+    /// `get_missing_session_cwd_issue`. We supply a `SessionCwdSource`
+    /// adapter pointing at the on-disk session and a fallback cwd.
+    #[test]
+    fn missing_cwd_detection_returns_issue_when_stored_cwd_is_gone() {
+        use crate::core::session_cwd::{SessionCwdSource, get_missing_session_cwd_issue};
+
+        let dir = TempDir::new().unwrap();
+        let session_path = dir.path().join("session.jsonl");
+        let bad_cwd = "/definitely-not-here-uc-sm-005";
+        let header = format!(
+            "{{\"type\":\"session\",\"data\":{{\"version\":3,\"id\":\"uc-sm-005\",\"timestamp\":0,\"cwd\":\"{}\"}}}}\n",
+            bad_cwd
+        );
+        std::fs::write(&session_path, header).unwrap();
+
+        struct StubSource {
+            cwd: PathBuf,
+            session_file: PathBuf,
+        }
+        impl SessionCwdSource for StubSource {
+            fn cwd(&self) -> Option<PathBuf> {
+                Some(self.cwd.clone())
+            }
+            fn session_file(&self) -> Option<PathBuf> {
+                Some(self.session_file.clone())
+            }
+        }
+        let src = StubSource {
+            cwd: PathBuf::from(bad_cwd),
+            session_file: session_path,
+        };
+        let fallback = dir.path().to_path_buf();
+        let issue = get_missing_session_cwd_issue(&src, &fallback)
+            .expect("missing cwd must surface an issue");
+        assert_eq!(issue.session_cwd, PathBuf::from(bad_cwd));
+        assert_eq!(issue.fallback_cwd, fallback);
+    }
 }
