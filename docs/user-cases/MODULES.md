@@ -28,17 +28,25 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-cli-initial-message.md | pi-mono/packages/coding-agent/test/initial-message.test.ts | coding-agent | 3 | 3 | 0 | 0 |
 | coding-agent-utils-version-check.md | pi-mono/packages/coding-agent/test/version-check.test.ts | coding-agent | 4 | 3 | 0 | 1 |
 | coding-agent-utils-paths.md | pi-mono/packages/coding-agent/test/paths.test.ts | coding-agent | 10 | 10 | 0 | 0 |
+| coding-agent-core-settings-manager.md | pi-mono/packages/coding-agent/test/settings-manager.test.ts | coding-agent | 17 | 9 | 0 | 8 |
+| coding-agent-theme-export.md | pi-mono/packages/coding-agent/test/theme-export.test.ts | coding-agent | 2 | 0 | 0 | 2 |
+| coding-agent-assistant-message.md | pi-mono/packages/coding-agent/test/assistant-message.test.ts | coding-agent | 2 | 2 | 0 | 0 |
+| coding-agent-config.md | pi-mono/packages/coding-agent/test/config.test.ts | coding-agent | 9 | 0 | 0 | 9 |
+| coding-agent-plan-mode-utils.md | pi-mono/packages/coding-agent/test/plan-mode-utils.test.ts | coding-agent | 33 | 0 | 0 | 33 |
+| coding-agent-core-skills.md | pi-mono/packages/coding-agent/test/skills.test.ts | coding-agent | 28 | 11 | 0 | 17 |
+| coding-agent-core-resource-loader.md | pi-mono/packages/coding-agent/test/resource-loader.test.ts | coding-agent | 19 | 0 | 0 | 19 |
+| coding-agent-session-selector-path-delete.md | pi-mono/packages/coding-agent/test/session-selector-path-delete.test.ts | coding-agent | 7 | 0 | 0 | 7 |
 
 A `—` in any column means "not yet measured" — the file hasn't been
 authored yet, or the count hasn't been recomputed since the last edit.
 
 ## Rollup
 
-- **Total cases authored:** 363
-- **Pass:** 325
+- **Total cases authored:** 480
+- **Pass:** 347
 - **Fail:** 0
 - **Pending:** 0
-- **N/A (architectural divergence):** 38
+- **N/A (architectural divergence):** 133
 
 The suite reached **0 fail / 0 pending** on 2026-05-16. Every case is
 either ✅ verified by a `#[test]` or 🚫 N/A with a written reason
