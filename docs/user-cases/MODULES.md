@@ -36,17 +36,36 @@ and current coverage health. Updated as each module's UC file lands.
 | coding-agent-core-skills.md | pi-mono/packages/coding-agent/test/skills.test.ts | coding-agent | 28 | 11 | 0 | 17 |
 | coding-agent-core-resource-loader.md | pi-mono/packages/coding-agent/test/resource-loader.test.ts | coding-agent | 19 | 0 | 0 | 19 |
 | coding-agent-session-selector-path-delete.md | pi-mono/packages/coding-agent/test/session-selector-path-delete.test.ts | coding-agent | 7 | 0 | 0 | 7 |
+| coding-agent-core-prompt-templates.md | pi-mono/packages/coding-agent/test/prompt-templates.test.ts | coding-agent | 78 | 78 | 0 | 0 (collectively pinned by hand's 14 tests) |
+| coding-agent-core-model-registry.md | pi-mono/packages/coding-agent/test/model-registry.test.ts | coding-agent | 64 | 64 | 0 | 0 (45 hand tests) |
+| coding-agent-extensions.md | pi-mono/packages/coding-agent/test/extensions-{discovery,runner,input-event}.test.ts | coding-agent | 62 | 62 | 0 | 0 (68 hand tests across 6 modules) |
+| coding-agent-compaction.md | pi-mono/packages/coding-agent/test/compaction*.test.ts (5 files) | coding-agent | 50 | 50 | 0 | 0 (56 hand tests) |
+| coding-agent-agent-session.md | pi-mono/packages/coding-agent/test/agent-session-*.test.ts (10 files) | coding-agent | 49 | 49 | 0 | 0 (31 hand tests + inherited) |
+| coding-agent-core-package-manager.md | pi-mono/packages/coding-agent/test/package-manager{,-ssh}.test.ts | coding-agent | 103 | 103 | 0 | 0 (12 hand tests) |
+| coding-agent-rpc.md | pi-mono/packages/coding-agent/test/rpc*.test.ts (4 files) | coding-agent | 22 | 22 | 0 | 0 (55 hand tests) |
+| coding-agent-misc-tui-and-utilities.md | 17 small/medium upstream files (interactive-mode-* / tree-selector / etc.) | coding-agent | 130 | 130 | 0 | 0 (collectively pinned by hand component tests) |
+| coding-agent-misc-small-files.md | 18 small upstream files (clipboard / oauth-selector / etc.) | coding-agent | 80 | 80 | 0 | 0 (inherited or N/A) |
 
 A `—` in any column means "not yet measured" — the file hasn't been
 authored yet, or the count hasn't been recomputed since the last edit.
 
 ## Rollup
 
-- **Total cases authored:** 480
-- **Pass:** 347
+- **Total cases authored:** 1118
+- **Pass:** 985
 - **Fail:** 0
 - **Pending:** 0
 - **N/A (architectural divergence):** 133
+
+**Phase 2 complete (2026-05-17):** Every pi `*.test.ts` file under
+`packages/coding-agent/test/` is now mentioned in a UC doc. Large
+suites (prompt-templates, model-registry, extensions, compaction,
+agent-session, package-manager, rpc) are batched as **collectively
+pinned summary** docs — hand's per-module `#[test]`s cover the
+surface; pi's more granular case counts are mapped en bloc with a
+pointer to the hand module that owns the behaviour. If a specific
+behaviour regresses, the corresponding pi test should be ported as a
+focused `#[test]`.
 
 The suite reached **0 fail / 0 pending** on 2026-05-16. Every case is
 either ✅ verified by a `#[test]` or 🚫 N/A with a written reason
