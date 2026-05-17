@@ -3278,4 +3278,180 @@ warnings:
             Some(&["npm".to_string()][..]),
         );
     }
+
+    // ---- UC-set pinning (Phase 2 settings-manager parity) ----
+
+    /// UC-set-004 — bare local paths in the `extensions` array stay as
+    /// raw path strings; they are not silently promoted into the
+    /// packages list.
+    #[test]
+    fn settings_local_extensions_preserved() {
+        let yaml = "extensions:\n  - /local/ext.ts\n  - ./relative/ext.ts\n";
+        let s: Settings = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            s.extensions().iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["/local/ext.ts", "./relative/ext.ts"]
+        );
+        assert!(s.packages().is_empty());
+    }
+
+    /// UC-set-005 — `packages:` may mix bare strings and filtering
+    /// objects. The `PackageSource` enum preserves both shapes through
+    /// a round-trip.
+    #[test]
+    fn settings_packages_filtering_object_round_trip() {
+        let yaml = "packages:\n  - npm:simple-pkg\n  - source: npm:shitty-extensions\n    extensions:\n      - extensions/oracle.ts\n    skills: []\n";
+        let s: Settings = serde_yaml::from_str(yaml).unwrap();
+        let packages = s.packages();
+        assert_eq!(packages.len(), 2);
+        match &packages[0] {
+            PackageSource::Bare(src) => assert_eq!(src, "npm:simple-pkg"),
+            other => panic!("expected Bare, got {other:?}"),
+        }
+        match &packages[1] {
+            PackageSource::Filtered {
+                source,
+                extensions,
+                skills,
+                ..
+            } => {
+                assert_eq!(source, "npm:shitty-extensions");
+                assert_eq!(
+                    extensions.as_deref(),
+                    Some(&["extensions/oracle.ts".to_string()][..])
+                );
+                assert_eq!(skills.as_deref(), Some(&[][..]));
+            }
+            other => panic!("expected Filtered, got {other:?}"),
+        }
+    }
+
+    /// UC-set-009 — reading project settings does NOT create the
+    /// `.hand/` directory when it's absent. Reading is observation-only.
+    #[test]
+    fn from_cwd_does_not_create_project_settings_dir_on_read() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = tmp.path().join("agent");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        // Global has a setting; project has no .hand/ at all.
+        std::fs::write(
+            agent_dir.join("settings.yaml"),
+            "quiet-startup: true\n",
+        )
+        .unwrap();
+
+        let global_yaml = agent_dir.join("settings.yaml");
+        let global_layer = Settings::load(Some(&global_yaml), None).unwrap();
+        let _manager = SettingsManager::from_layers_for_test(
+            global_layer,
+            Settings::default(),
+            Some(global_yaml),
+            Some(project_dir.join(".hand").join("settings.yaml")),
+        );
+        // Project .hand/ must NOT have been created merely by reading.
+        assert!(
+            !project_dir.join(".hand").exists(),
+            "project .hand/ should not exist after read-only construction"
+        );
+    }
+
+    /// UC-set-010 — writing a project-scope setting via
+    /// `save(SettingsScope::Project)` creates the parent `.hand/`
+    /// directory on demand.
+    #[test]
+    fn save_project_scope_creates_parent_directory() {
+        let tmp = TempDir::new().unwrap();
+        let agent_dir = tmp.path().join("agent");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(agent_dir.join("settings.yaml"), "").unwrap();
+        let project_settings = project_dir.join(".hand").join("settings.yaml");
+
+        let mut manager = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            Some(agent_dir.join("settings.yaml")),
+            Some(project_settings.clone()),
+        );
+        manager.set_packages(
+            SettingsScope::Project,
+            Some(vec![PackageSource::Bare("npm:test-pkg".into())]),
+        );
+        manager.save(SettingsScope::Project).unwrap();
+
+        assert!(project_dir.join(".hand").exists(), ".hand/ should be created");
+        assert!(project_settings.exists(), "settings.yaml should be written");
+    }
+
+    /// UC-set-011/012/013 — `shell_command_prefix` round-trips
+    /// through YAML; absent in the file yields `None`; an unrelated
+    /// mutation preserves the prefix.
+    #[test]
+    fn shell_command_prefix_round_trips_from_global() {
+        // Settings uses kebab-case in YAML; camelCase is the documented alias.
+        let yaml = "shell-command-prefix: \"shopt -s expand_aliases\"\n";
+        let s: Settings = serde_yaml::from_str(yaml).unwrap();
+        let mgr = SettingsManager::from_raw_for_test(s);
+        assert_eq!(
+            mgr.shell_command_prefix(),
+            Some("shopt -s expand_aliases")
+        );
+    }
+
+    #[test]
+    fn shell_command_prefix_returns_none_when_unset() {
+        let s: Settings = serde_yaml::from_str("quiet-startup: true\n").unwrap();
+        let mgr = SettingsManager::from_raw_for_test(s);
+        assert!(mgr.shell_command_prefix().is_none());
+    }
+
+    #[test]
+    fn shell_command_prefix_survives_unrelated_set() {
+        let yaml = "shell-command-prefix: \"shopt -s expand_aliases\"\n";
+        let s: Settings = serde_yaml::from_str(yaml).unwrap();
+        let mut mgr = SettingsManager::from_raw_for_test(s);
+        mgr.set_themes(SettingsScope::Global, Some(vec!["./theme.json".into()]));
+        // The shell prefix on the merged view is unchanged.
+        assert_eq!(
+            mgr.shell_command_prefix(),
+            Some("shopt -s expand_aliases")
+        );
+    }
+
+    /// UC-set-014/015/016 — `session_dir` accessors via the merged
+    /// `Settings` view: absent → `None`; global-only → returned;
+    /// project overrides global.
+    #[test]
+    fn session_dir_returns_none_when_unset() {
+        let s: Settings = serde_yaml::from_str("quiet-startup: true\n").unwrap();
+        assert!(s.session_dir.is_none());
+    }
+
+    #[test]
+    fn session_dir_returns_global_value_when_only_global_set() {
+        let global: Settings =
+            serde_yaml::from_str("session-dir: /tmp/sessions\n").unwrap();
+        let project = Settings::default();
+        let merged = Settings::merge(global, project);
+        assert_eq!(
+            merged.session_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/sessions"))
+        );
+    }
+
+    #[test]
+    fn session_dir_project_overrides_global() {
+        let global: Settings =
+            serde_yaml::from_str("session-dir: /global/sessions\n").unwrap();
+        let project: Settings =
+            serde_yaml::from_str("session-dir: ./sessions\n").unwrap();
+        let merged = Settings::merge(global, project);
+        assert_eq!(
+            merged.session_dir.as_deref(),
+            Some(std::path::Path::new("./sessions"))
+        );
+    }
 }
