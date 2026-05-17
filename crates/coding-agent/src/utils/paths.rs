@@ -93,4 +93,57 @@ mod tests {
         assert!(is_local_path("file:///etc/hosts"));
         assert!(is_local_path("ftp://example.com"));
     }
+
+    /// UC-paths-002 — a symlink to a regular file resolves to the
+    /// target's canonical path. The link itself is dereferenced.
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_follows_file_symlink_to_target() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target.txt");
+        let link = tmp.path().join("link.txt");
+        std::fs::write(&target, "hello").unwrap();
+        symlink(&target, &link).unwrap();
+        // Both the link and the target should canonicalize to the same
+        // path. Compare via canonicalize on the target directly so we
+        // sidestep any macOS /var → /private/var indirection.
+        let resolved = canonicalize_path(&link);
+        let expected = std::fs::canonicalize(&target).unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    /// UC-paths-003 — a directory symlink resolves to the canonical
+    /// target directory, not the link path itself.
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_follows_directory_symlink_to_target() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let target_dir = tmp.path().join("target-dir");
+        let link_dir = tmp.path().join("link-dir");
+        std::fs::create_dir(&target_dir).unwrap();
+        symlink(&target_dir, &link_dir).unwrap();
+        let resolved = canonicalize_path(&link_dir);
+        let expected = std::fs::canonicalize(&target_dir).unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    /// UC-paths-005 — a dangling symlink (target does not exist)
+    /// falls back to the raw link path rather than erroring.
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_dangling_symlink_falls_back_to_input() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_target = tmp.path().join("never-existed.txt");
+        let link = tmp.path().join("dangling.txt");
+        symlink(&missing_target, &link).unwrap();
+        // No `target.txt` ever gets written — link points at nothing.
+        let resolved = canonicalize_path(&link);
+        assert_eq!(
+            resolved, link,
+            "dangling symlink must fall back to the raw link path"
+        );
+    }
 }

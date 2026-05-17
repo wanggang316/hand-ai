@@ -24,17 +24,21 @@ and current coverage health. Updated as each module's UC file lands.
 | model-stream-retry.md | hand parity contract (pi has no dedicated retry-classification test file) | model | 8 | 8 | 0 | 0 |
 | tui-keys.md | pi-mono/packages/tui/test/keys.test.ts | tui | 59 | 59 | 0 | 0 |
 | tui-autocomplete.md | pi-mono/packages/tui/test/autocomplete.test.ts | tui | 25 | 16 | 0 | 9 |
+| coding-agent-utils-frontmatter.md | pi-mono/packages/coding-agent/test/frontmatter.test.ts | coding-agent | 8 | 6 | 0 | 2 |
+| coding-agent-cli-initial-message.md | pi-mono/packages/coding-agent/test/initial-message.test.ts | coding-agent | 3 | 3 | 0 | 0 |
+| coding-agent-utils-version-check.md | pi-mono/packages/coding-agent/test/version-check.test.ts | coding-agent | 4 | 3 | 0 | 1 |
+| coding-agent-utils-paths.md | pi-mono/packages/coding-agent/test/paths.test.ts | coding-agent | 10 | 10 | 0 | 0 |
 
 A `—` in any column means "not yet measured" — the file hasn't been
 authored yet, or the count hasn't been recomputed since the last edit.
 
 ## Rollup
 
-- **Total cases authored:** 338
-- **Pass:** 303
+- **Total cases authored:** 363
+- **Pass:** 325
 - **Fail:** 0
 - **Pending:** 0
-- **N/A (architectural divergence):** 35
+- **N/A (architectural divergence):** 38
 
 The suite reached **0 fail / 0 pending** on 2026-05-16. Every case is
 either ✅ verified by a `#[test]` or 🚫 N/A with a written reason
