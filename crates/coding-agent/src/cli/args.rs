@@ -25,7 +25,14 @@ pub struct Args {
     /// with `-`/`--` (e.g. a markdown body whose first line is a YAML
     /// frontmatter fence `---`) so a piped prompt isn't mistaken for a
     /// flag.
-    #[arg(short, long, allow_hyphen_values = true)]
+    ///
+    /// `-p` is intentionally NOT bound here: pi reserves `-p` as the
+    /// short form of `--print` (non-interactive bool, not a value-taking
+    /// flag), so we mirror that and keep `--prompt` long-form only.
+    /// Users supplying a prompt under `--print` should use the
+    /// positional message form (`hand -p "say hi"`) or the long
+    /// `--prompt "say hi"` flag.
+    #[arg(long, allow_hyphen_values = true)]
     pub prompt: Option<String>,
 
     /// Model pattern (e.g., "sonnet", "claude-sonnet:high", "openai/gpt-4o")
@@ -146,8 +153,11 @@ pub struct Args {
     #[arg(long = "skill")]
     pub skills: Vec<String>,
 
-    /// Non-interactive print mode
-    #[arg(long)]
+    /// Non-interactive print mode. Mirrors pi's `--print, -p` shape:
+    /// `-p` is a bool, not a value-taking flag. The prompt comes from
+    /// a positional message (`hand -p "say hi"`), `--prompt`, or
+    /// piped stdin.
+    #[arg(short = 'p', long)]
     pub print: bool,
 
     /// Output mode. `text` (default, final assistant content only) and
@@ -302,22 +312,41 @@ mod tests {
         assert!(args.print);
     }
 
+    /// pi-parity: `-p` is the short form of `--print` (bool), not of
+    /// `--prompt`. A bare `-p` toggles print mode; the prompt is
+    /// supplied via the positional message or `--prompt`.
     #[test]
-    fn parses_short_prompt() {
-        let args = Args::try_parse_from(["hand", "-p", "hello"]).expect("-p <prompt> should parse");
+    fn dash_p_is_print_flag_not_prompt_value() {
+        let args =
+            Args::try_parse_from(["hand", "-p", "hello"]).expect("-p hello should parse");
+        assert!(args.print, "-p must set the print bool");
+        assert!(
+            args.prompt.is_none(),
+            "-p must not consume the next token as a --prompt value"
+        );
+        // The trailing token lands in the positional vec so the
+        // initial-message builder picks it up.
+        assert_eq!(args.messages(), vec!["hello"]);
+    }
+
+    #[test]
+    fn parses_long_prompt_only() {
+        let args = Args::try_parse_from(["hand", "--prompt", "hello"])
+            .expect("--prompt hello should parse");
         assert_eq!(args.prompt, Some("hello".into()));
     }
 
     /// A prompt that starts with YAML frontmatter must not be rejected as
     /// an unknown flag. Without `allow_hyphen_values`, clap treats any
     /// value beginning with `--` (including `---`) as a flag and bails
-    /// before reaching the value parser, so `hand -p "---\ntitle..."`
-    /// would fail at parse time.
+    /// before reaching the value parser, so `hand --prompt "---\ntitle..."`
+    /// would fail at parse time. (Renamed from `-p` after the pi-compat
+    /// alias rebind.)
     #[test]
     fn parses_prompt_with_yaml_frontmatter() {
         let prompt = "---\ntitle: hello\n---\nSay hi.";
-        let args =
-            Args::try_parse_from(["hand", "-p", prompt]).expect("frontmatter prompt should parse");
+        let args = Args::try_parse_from(["hand", "--prompt", prompt])
+            .expect("frontmatter prompt should parse");
         assert_eq!(args.prompt.as_deref(), Some(prompt));
     }
 
