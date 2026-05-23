@@ -167,6 +167,20 @@ impl SessionSetup {
             && !key.is_empty()
         {
             stream_options.base.api_key = Some(key.to_string());
+        } else {
+            // Otherwise, resolve the API key for the chosen provider
+            // from auth.json (the on-disk store) plus env-var fallback.
+            // Without this, when the user has `~/.hand/agent/auth.json`
+            // configured but the env var is NOT exported, the provider
+            // client falls through to its own env-only check and
+            // surfaces `No API key for provider: …` even though the
+            // key is sitting in auth.json.
+            if let Ok(auth_storage) = crate::core::auth_storage::AuthStorage::new()
+                && let Some(key) =
+                    auth_storage.get_api_key(resolved.model.provider.as_str())
+            {
+                stream_options.base.api_key = Some(key);
+            }
         }
 
         // Tool list: `--no-tools` empties it, `--tools` selects a subset,
