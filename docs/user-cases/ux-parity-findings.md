@@ -27,27 +27,27 @@ Output of a user-perspective subagent ran without access to source. 36 findings,
 | 11 | CLI surface | `--rpc` shortcut | rejected | hand accepts both `--rpc` and `--mode rpc` | cosmetic | hand-extra |
 | 12 | CLI surface | `--diagnostics` | rejected | hand prints diagnostics | cosmetic | hand-extra |
 | 13 | CLI surface | `-ns/-ne/-np` short aliases | accepted | only `-nt/-nbt/-nc` aliased; `-ns/-ne/-np` rejected | major | open |
-| 14 | --print | `pi -p "say hi" --provider … --model …` raw bytes | clean: `Hi!\n` | trailing `\n\n\x1b[1;35m>\x1b[0m ` REPL prompt | blocker | open |
-| 15 | --print | `pi --print "say hi" --provider …` (positional + long `--print`) | works | exit 1, "No API key found for Anthropic" | blocker | **fixed (positional)** |
-| 16 | --print | `pi "say hi" -p --provider …` (positional before `-p`) | works | drops into REPL | major | open |
-| 17 | --print | `pi --prompt "msg"` long form | pi rejects | hand accepts | cosmetic | hand-extra |
-| 18 | --print | `echo say hi \| pi -p --provider …` (stdin + bare `-p`) | reads stdin, answers | drops into interactive REPL | blocker | open |
-| 19 | --print + @file | `pi @scenarios.sh "summarize" -p …` | loads file, summarizes | REPL | major | open |
-| 20 | --print + @file | `pi -p "summarize" @/tmp/missing.md …` | exit 1, "File not found: …" | silent exit 0 | blocker | open |
-| 21 | Error msg | `--model totally/fake -p hi` | warns, exit 1, provider 400 visible | silent exit 0, empty stdout | blocker | open |
+| 14 | --print | `pi -p "say hi" --provider … --model …` raw bytes | clean: `Hi!\n` | trailing `\n\n\x1b[1;35m>\x1b[0m ` REPL prompt | blocker | **fixed (-p rebind)** |
+| 15 | --print | `pi --print "say hi" --provider …` (positional + long `--print`) | works | exit 1, "No API key found for Anthropic" | blocker | **fixed** |
+| 16 | --print | `pi "say hi" -p --provider …` (positional before `-p`) | works | drops into REPL | major | **fixed (-p rebind)** |
+| 17 | --print | `pi --prompt "msg"` long form | pi rejects | hand accepts | cosmetic | hand-extra (intentional) |
+| 18 | --print | `echo say hi \| pi -p --provider …` (stdin + bare `-p`) | reads stdin, answers | drops into interactive REPL | blocker | **fixed (-p rebind)** |
+| 19 | --print + @file | `pi @scenarios.sh "summarize" -p …` | loads file, summarizes | REPL | major | **fixed (@file validation)** |
+| 20 | --print + @file | `pi -p "summarize" @/tmp/missing.md …` | exit 1, "File not found: …" | silent exit 0 | blocker | **fixed (@file validation)** |
+| 21 | Error msg | `--model totally/fake -p hi` | warns, exit 1, provider 400 visible | silent exit 0, empty stdout | blocker | **fixed (-p rebind, exit 1)** |
 | 22 | Error msg | `--export` (no arg) | exit 1, one-line | exit 2, clap verbose dump | cosmetic | open |
 | 23 | Error msg | `--export /tmp/missing.jsonl` | "File not found: …" | leaky `Session error: Cannot export an in-memory session…` | major | open |
 | 24 | Error msg | `--fork nonexistent-id …` | "No session found matching '…'" | adds `Error:` prefix | cosmetic | open |
 | 25 | Error msg | `--thinking bogus -p hi …` | warns + proceeds | silently accepted | cosmetic | open |
-| 26 | --mode json | `-p "say hi" --mode json` | full JSONL event stream | plain text + REPL prompt | blocker | open |
-| 27 | Default model | `-p "say hi"` (no flags / env) | falls back to google+auth.json, answers | empty stdout, exit 0 | major | **partially fixed (env var fallback + smart auto-pick)** |
-| 28 | Output formatting | `-p "say hi"` raw bytes | clean `Hi!\n` | leading `\n` + trailing `\n\n\x1b[1;35m>\x1b[0m ` | major | open |
+| 26 | --mode json | `-p "say hi" --mode json` | full JSONL event stream | plain text + REPL prompt | blocker | **fixed (json events now emit; schema differs but shape matches)** |
+| 27 | Default model | `-p "say hi"` (no flags / env) | falls back to google+auth.json, answers | empty stdout, exit 0 | major | **fixed (env var fallback + smart auto-pick)** |
+| 28 | Output formatting | `-p "say hi"` raw bytes | clean `Hi!\n` | leading `\n` + trailing `\n\n\x1b[1;35m>\x1b[0m ` | major | **fixed (-p rebind)** |
 | 29 | Output formatting | `-p …` stderr | OSC 777 notify escape | nothing | cosmetic | open |
 | 30 | Output formatting | `--list-models` dest | stderr | stdout | cosmetic | open |
 | 31 | Output formatting | model catalogue | richer (deepseek-v4-*, gemini-3.1-*) | smaller; has kimi-coding/minimax-cn | cosmetic | open |
 | 32 | --continue | `-c -p "?"  --session-dir /tmp/empty` | finds session elsewhere, answers | exposes internal `Session(...)` wrapper | major | open |
 | 33 | --resume | `-r -p hi --session-dir /tmp/empty` | opens TUI picker | exposes `Session("...")` repr | blocker | open |
-| 34 | Side effects | any invocation in cwd | sessions go to `~/.pi/agent/sessions/` | hand creates `<cwd>/.hand/sessions/` polluting cwd | major | open |
+| 34 | Side effects | any invocation in cwd | sessions go to `~/.pi/agent/sessions/` | hand creates `<cwd>/.hand/sessions/` polluting cwd | major | **fixed (sessions now under ~/.hand/agent/sessions/<flat-cwd>/)** |
 | 35 | Help routing | `--help` | stderr | stdout | cosmetic | open |
 | 36 | Unknown flag | `--bogus` | exit 1, one-line | exit 2, clap dump | cosmetic | open |
 
