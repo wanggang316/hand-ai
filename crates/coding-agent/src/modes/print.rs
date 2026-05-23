@@ -167,8 +167,22 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // The combined message MUST be sent before `--export` evaluates,
     // otherwise we'd export an empty session and drop the prompt.
     let piped_stdin = read_piped_stdin();
-    if let Some(initial) = build_initial_message(piped_stdin.as_deref(), args.prompt.as_deref())
-        && !initial.trim().is_empty()
+    // Positional args land in `messages()` (the @file-stripped variant).
+    // Match pi's print-mode contract: `pi --print "hello there"` should
+    // treat "hello there" as the prompt without needing a separate `-p`.
+    let positional_msg = {
+        let msgs = args.messages();
+        if msgs.is_empty() {
+            None
+        } else {
+            Some(msgs.join(" "))
+        }
+    };
+    if let Some(initial) = build_initial_message(
+        piped_stdin.as_deref(),
+        args.prompt.as_deref(),
+        positional_msg.as_deref(),
+    ) && !initial.trim().is_empty()
     {
         let expanded = expand_at_mentions(&initial, &cwd)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
@@ -636,7 +650,11 @@ fn read_piped_stdin() -> Option<String> {
 /// Returns `None` when neither source contributes content so the caller
 /// can skip the agent send entirely. An empty `--prompt` is treated as
 /// missing.
-fn build_initial_message(stdin: Option<&str>, prompt: Option<&str>) -> Option<String> {
+fn build_initial_message(
+    stdin: Option<&str>,
+    prompt: Option<&str>,
+    positional: Option<&str>,
+) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     if let Some(s) = stdin {
         parts.push(s);
@@ -645,6 +663,11 @@ fn build_initial_message(stdin: Option<&str>, prompt: Option<&str>) -> Option<St
         && !p.is_empty()
     {
         parts.push(p);
+    }
+    if let Some(pos) = positional
+        && !pos.is_empty()
+    {
+        parts.push(pos);
     }
     if parts.is_empty() {
         None
@@ -795,8 +818,11 @@ mod tests {
     #[test]
     fn build_initial_message_concatenates_stdin_and_prompt() {
         // Stdin payloads typically end in \n (line-buffered shell).
-        let combined =
-            build_initial_message(Some("README contents\n"), Some("Summarize the text given"));
+        let combined = build_initial_message(
+            Some("README contents\n"),
+            Some("Summarize the text given"),
+            None,
+        );
         assert_eq!(
             combined.as_deref(),
             Some("README contents\nSummarize the text given")
@@ -804,7 +830,7 @@ mod tests {
 
         // Without a trailing newline on stdin the two strings adjoin
         // directly.
-        let no_nl = build_initial_message(Some("data"), Some("summarize"));
+        let no_nl = build_initial_message(Some("data"), Some("summarize"), None);
         assert_eq!(no_nl.as_deref(), Some("datasummarize"));
     }
 
@@ -812,23 +838,41 @@ mod tests {
     /// where no `--prompt` is provided.
     #[test]
     fn build_initial_message_returns_stdin_alone() {
-        let combined = build_initial_message(Some("just from stdin"), None);
+        let combined = build_initial_message(Some("just from stdin"), None, None);
         assert_eq!(combined.as_deref(), Some("just from stdin"));
     }
 
     /// Prompt alone — `hand --print -p "hello"`. No stdin pipe.
     #[test]
     fn build_initial_message_returns_prompt_alone() {
-        let combined = build_initial_message(None, Some("hello"));
+        let combined = build_initial_message(None, Some("hello"), None);
         assert_eq!(combined.as_deref(), Some("hello"));
+    }
+
+    /// Positional alone — `hand --print "hello there"`. pi-compat.
+    #[test]
+    fn build_initial_message_returns_positional_alone() {
+        let combined = build_initial_message(None, None, Some("hello there"));
+        assert_eq!(combined.as_deref(), Some("hello there"));
+    }
+
+    /// `--prompt` wins over positional when both supplied (positional
+    /// stays appended, matching pi's "first positional message" rule
+    /// for the simple case).
+    #[test]
+    fn build_initial_message_prompt_and_positional_both_present() {
+        let combined =
+            build_initial_message(None, Some("the prompt"), Some("trailing positional"));
+        assert_eq!(combined.as_deref(), Some("the prompttrailing positional"));
     }
 
     /// Neither source — caller should skip the agent send entirely.
     /// `Some("")` for prompt is treated as missing.
     #[test]
     fn build_initial_message_returns_none_when_both_empty() {
-        assert_eq!(build_initial_message(None, None), None);
-        assert_eq!(build_initial_message(None, Some("")), None);
+        assert_eq!(build_initial_message(None, None, None), None);
+        assert_eq!(build_initial_message(None, Some(""), None), None);
+        assert_eq!(build_initial_message(None, None, Some("")), None);
     }
 
     /// Error rendering for `--print` mode emits plain stderr text, no
