@@ -213,7 +213,12 @@ pub struct Args {
     /// already-classified split. The raw vector is preserved here so
     /// the model can audit exactly what shell-supplied arguments were
     /// seen (helpful when debugging clap behaviour against pi-mono).
-    #[arg(trailing_var_arg = true)]
+    // No `trailing_var_arg`: pi accepts flags anywhere on the command
+    // line. With trailing_var_arg, anything after the first positional
+    // arg is captured as positional too, so `hand "msg" --provider X`
+    // would drop `--provider` into the positional vec instead of
+    // parsing it as a named flag. Disabling it costs us nothing because
+    // we already strip `@<path>` tokens at the message-builder level.
     pub positional: Vec<String>,
 
     /// Suppress all auto-download/network operations. When set, the
