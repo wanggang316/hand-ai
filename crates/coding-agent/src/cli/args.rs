@@ -153,6 +153,26 @@ pub struct Args {
     #[arg(long = "skill")]
     pub skills: Vec<String>,
 
+    /// Load an extra prompt-template path (repeatable). pi-parity flag.
+    /// Hand's prompt-template subsystem may not consume every shape pi
+    /// supports; the flag is accepted so user scripts that pass it
+    /// don't break, and the runtime no-ops gracefully when the file
+    /// has no template metadata.
+    #[arg(long = "prompt-template")]
+    pub prompt_templates: Vec<String>,
+
+    /// Disable prompt-template discovery (project, user, and builtin).
+    #[arg(long)]
+    pub no_prompt_templates: bool,
+
+    /// Load an extra theme path (repeatable). pi-parity flag.
+    #[arg(long = "theme")]
+    pub themes: Vec<String>,
+
+    /// Disable theme discovery (project, user, and builtin).
+    #[arg(long)]
+    pub no_themes: bool,
+
     /// Non-interactive print mode. Mirrors pi's `--print, -p` shape:
     /// `-p` is a bool, not a value-taking flag. The prompt comes from
     /// a positional message (`hand -p "say hi"`), `--prompt`, or
@@ -270,6 +290,9 @@ pub fn expand_pi_short_aliases(argv: impl IntoIterator<Item = String>) -> Vec<St
             "-nc" => "--no-context-files".to_string(),
             "-nt" => "--no-tools".to_string(),
             "-nbt" => "--no-builtin-tools".to_string(),
+            "-ns" => "--no-skills".to_string(),
+            "-ne" => "--no-extensions".to_string(),
+            "-np" => "--no-prompt-templates".to_string(),
             _ => arg,
         })
         .collect()
