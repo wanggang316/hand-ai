@@ -84,21 +84,31 @@ impl SessionSetup {
         // exported, hand will pick openrouter rather than erroring on
         // anthropic.
         let explicit_provider = args.provider.as_deref();
-        let fallback_provider: String = if explicit_provider.is_none() && args.model.is_none() {
-            pick_default_provider()
+        let auto_picked: Option<String> = if explicit_provider.is_none() && args.model.is_none() {
+            Some(pick_default_provider())
         } else {
-            "anthropic".to_string()
+            None
         };
+        // Effective provider: explicit > auto-picked > "anthropic" hard-default.
+        let effective_provider: String = explicit_provider
+            .map(String::from)
+            .or_else(|| auto_picked.clone())
+            .unwrap_or_else(|| "anthropic".to_string());
         let model_pattern = args.model.as_deref().unwrap_or_else(|| {
-            model_resolver::default_model_for_provider(
-                explicit_provider.unwrap_or(fallback_provider.as_str()),
-            )
+            model_resolver::default_model_for_provider(effective_provider.as_str())
         });
-        let mut resolved = if explicit_provider.is_none() && model_pattern.contains('/') {
+        let mut resolved = if explicit_provider.is_none() && auto_picked.is_none()
+            && model_pattern.contains('/')
+        {
+            // Only the gateway-style slash routing fires when NO provider
+            // is locked in (neither explicit nor auto-picked). When
+            // auto-picked an openrouter default like
+            // `anthropic/claude-sonnet-4-20250514`, we must keep
+            // openrouter as the provider — re-routing on the slash would
+            // pivot to anthropic and silently fail auth.
             model_resolver::resolve_model(None, model_pattern)
         } else {
-            let provider = explicit_provider.unwrap_or(fallback_provider.as_str());
-            model_resolver::resolve_model(Some(provider), model_pattern)
+            model_resolver::resolve_model(Some(effective_provider.as_str()), model_pattern)
         };
         // When the user passes BOTH `--provider P -m a/b`, treat `a/b` as
         // the literal model id under P (e.g. `--provider openrouter -m
@@ -241,15 +251,23 @@ impl SessionSetup {
 }
 
 /// Auto-pick a default provider when neither `--provider` nor `--model`
-/// is supplied. Walks a priority list and returns the first provider
-/// whose `auth.json` record OR env-var resolves to a non-empty key.
-/// Falls back to `"anthropic"` when nothing is configured.
+/// is supplied. Two-pass strategy so an explicit `auth.json` always
+/// outranks an env-var fallback:
+///
+/// 1. Look for any provider that has an `auth.json` record (any key
+///    that resolves through the on-disk path). The user explicitly
+///    registered this provider via `hand --provider X --api-key …`,
+///    so respect that intent.
+/// 2. Walk the priority list and return the first provider whose
+///    env-var (`OPENROUTER_API_KEY`, `GEMINI_API_KEY`, etc.) resolves.
+/// 3. Fall back to `"anthropic"` so the eventual error message is
+///    actionable.
 fn pick_default_provider() -> String {
     const PRIORITY: &[&str] = &[
         "anthropic",
+        "openrouter",
         "google",
         "openai",
-        "openrouter",
         "vercel-ai-gateway",
         "zai",
         "deepseek",
@@ -266,6 +284,19 @@ fn pick_default_provider() -> String {
         Ok(a) => a,
         Err(_) => return "anthropic".to_string(),
     };
+    // Pass 1: explicit on-disk auth.json record wins. Walk PRIORITY in
+    // order so the result is deterministic when multiple providers are
+    // configured.
+    if let Ok(records) = auth.load() {
+        for provider in PRIORITY {
+            if records.contains_key(*provider) {
+                return (*provider).to_string();
+            }
+        }
+    }
+    // Pass 2: env-var fallback. PRIORITY again, this time hitting
+    // `get_api_key` (which now layers env vars in) but skipping
+    // providers that already lost pass 1.
     for provider in PRIORITY {
         if auth.get_api_key(provider).is_some() {
             return (*provider).to_string();
