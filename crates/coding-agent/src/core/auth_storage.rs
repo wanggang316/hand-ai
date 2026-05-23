@@ -454,7 +454,13 @@ impl AuthStorage {
     /// 2. The on-disk record's ApiKey field (resolved through the
     ///    config-value pipeline so `!command` and env-var lookups
     ///    work transparently).
-    /// 3. None when neither layer has a credential.
+    /// 3. Per-provider environment variable lookup
+    ///    (`OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) via the
+    ///    `model::env_api_keys::get_env_api_key_by_str` helper. This
+    ///    is the pi-compatible behaviour: a user who exported
+    ///    `OPENROUTER_API_KEY` in their shell can run `hand` without
+    ///    first registering the key into `auth.json`.
+    /// 4. None when no layer has a credential.
     ///
     /// OAuth records are NOT resolved by this method — callers handle
     /// the OAuth refresh dance separately.
@@ -468,12 +474,16 @@ impl AuthStorage {
         {
             return Some(rt);
         }
-        match self.get(provider).ok().flatten() {
-            Some(AuthRecord::ApiKey { key }) => {
+        if let Some(AuthRecord::ApiKey { key }) = self.get(provider).ok().flatten()
+            && let Some(resolved) =
                 crate::core::resolve_config_value::resolve_config_value(&key)
-            }
-            _ => None,
+        {
+            return Some(resolved);
         }
+        // Env-var fallback — matches pi which reads $OPENAI_API_KEY /
+        // $GEMINI_API_KEY / etc. when auth.json has no entry. See
+        // crates/model/src/env_api_keys.rs for the per-provider table.
+        model::env_api_keys::get_env_api_key_by_str(provider)
     }
 
     fn has_runtime_override(&self, provider: &str) -> bool {
