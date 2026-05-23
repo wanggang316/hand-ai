@@ -132,8 +132,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_rpc(cli).await;
     }
 
-    // Non-interactive print mode: single prompt + exit.
-    if cli.print {
+    // Non-interactive print mode: single prompt + exit. Auto-promote
+    // when stdin is piped — `echo "msg" | hand` should behave as
+    // `echo "msg" | hand --print`, not drop into the line REPL with
+    // its banner. Matches what scripts actually expect.
+    let auto_print = {
+        use std::io::IsTerminal;
+        !cli.print && !io::stdin().is_terminal()
+    };
+    if cli.print || auto_print {
         timings::print();
         return modes::print::run(cli).await;
     }
