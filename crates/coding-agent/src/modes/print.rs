@@ -178,6 +178,12 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             Some(msgs.join(" "))
         }
     };
+    // pi-parity: `@<path>` tokens anywhere in argv are file references.
+    // Validate each up front; missing files surface as
+    // `Error: File not found: <path>` with exit 1 BEFORE we hit the
+    // provider (so a typo doesn't burn an API call and stay silent).
+    let file_args_block = load_file_args(&args.file_args(), &cwd)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if let Some(initial) = build_initial_message(
         piped_stdin.as_deref(),
         args.prompt.as_deref(),
@@ -186,7 +192,11 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     {
         let expanded = expand_at_mentions(&initial, &cwd)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        session.send_message(&expanded).await?;
+        let with_files = match file_args_block.as_deref() {
+            Some(block) => format!("{block}\n\n{expanded}"),
+            None => expanded,
+        };
+        session.send_message(&with_files).await?;
     }
 
     // After the prompt has run, honor `--export` by writing the now-
@@ -650,6 +660,35 @@ fn read_piped_stdin() -> Option<String> {
 /// Returns `None` when neither source contributes content so the caller
 /// can skip the agent send entirely. An empty `--prompt` is treated as
 /// missing.
+/// Load every `@<path>` reference into a single concatenated block
+/// suitable for prepending to the user's prompt. Each file is wrapped
+/// in a `<file path="…">…</file>` envelope so the model can attribute
+/// the content. Missing files surface as `File not found: <path>` —
+/// pi's wording — and the caller fails fast with exit 1 rather than
+/// silently sending an unsubstituted prompt.
+///
+/// Returns `Ok(None)` when `paths` is empty.
+fn load_file_args(paths: &[String], cwd: &std::path::Path) -> Result<Option<String>, String> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let mut parts = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let resolved = if std::path::Path::new(raw).is_absolute() {
+            std::path::PathBuf::from(raw)
+        } else {
+            cwd.join(raw)
+        };
+        if !resolved.exists() {
+            return Err(format!("File not found: {raw}"));
+        }
+        let body = std::fs::read_to_string(&resolved)
+            .map_err(|e| format!("Failed to read {raw}: {e}"))?;
+        parts.push(format!("<file path=\"{raw}\">\n{body}\n</file>"));
+    }
+    Ok(Some(parts.join("\n")))
+}
+
 fn build_initial_message(
     stdin: Option<&str>,
     prompt: Option<&str>,
