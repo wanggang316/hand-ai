@@ -23,7 +23,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // pi-mono would see clap reject `-nc` as `-n -c` (two unknown
     // shorts).
     let argv = hand_coding_agent::cli::args::expand_pi_short_aliases(std::env::args());
-    let cli = Args::parse_from(argv);
+    // Match pi's exit-code convention: parse errors yield exit 1
+    // (clap's default is 2) and a single-line `Error: <one-line>`
+    // message instead of a multi-line usage dump on stderr. Help and
+    // version still use clap's built-in handler (exit 0, full output).
+    let cli = Args::try_parse_from(argv).unwrap_or_else(|e| {
+        match e.kind() {
+            clap::error::ErrorKind::DisplayHelp
+            | clap::error::ErrorKind::DisplayVersion
+            | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+                // Let clap render help/version verbatim, then exit 0.
+                e.exit();
+            }
+            _ => {
+                // Collapse the multi-line clap rendering into the
+                // single most informative line and surface as
+                // `Error: <text>` on stderr, exit 1.
+                let raw = format!("{e}");
+                let first_line = raw.lines().find(|l| !l.is_empty()).unwrap_or("");
+                let cleaned = first_line.trim_start_matches("error: ").trim();
+                eprintln!("Error: {cleaned}");
+                std::process::exit(1);
+            }
+        }
+    });
     timings::time("parse_args");
 
     // `--offline` flips on the same env-var guard the tools-manager
