@@ -127,11 +127,24 @@ impl SessionSetup {
             resolved.model.base_url = base.to_string();
         }
 
-        let thinking_level = args
-            .thinking
-            .as_deref()
-            .and_then(model_resolver::parse_thinking_level)
-            .or(resolved.thinking_level);
+        // pi-parity: an unrecognised `--thinking` value yields a
+        // `Warning: Invalid thinking level "<value>". Valid values: …`
+        // on stderr and falls back to the suffix from the model
+        // pattern (or no thinking level at all). Silently ignoring
+        // would let a typo silently disable reasoning.
+        let thinking_level = match args.thinking.as_deref() {
+            Some(raw) if !raw.is_empty() => match model_resolver::parse_thinking_level(raw) {
+                Some(level) => Some(level),
+                None => {
+                    eprintln!(
+                        "Warning: Invalid thinking level \"{raw}\". \
+                         Valid values: off, minimal, low, medium, high, xhigh"
+                    );
+                    resolved.thinking_level
+                }
+            },
+            _ => resolved.thinking_level,
+        };
 
         let mut stream_options = SimpleStreamOptions::default();
         if let Some(level) = thinking_level {
