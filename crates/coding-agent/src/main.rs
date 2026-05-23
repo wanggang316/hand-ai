@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     timings::reset();
     // Rewrite pi-style multi-char short flags (`-nc`, `-nt`, `-nbt`)
     // before clap sees argv. Without this, scripts written against
-    // pi-mono would see clap reject `-nc` as `-n -c` (two unknown
+    // Plain clap would reject `-nc` as `-n -c` (two unknown
     // shorts).
     let argv = hand_coding_agent::cli::args::expand_pi_short_aliases(std::env::args());
     // Match pi's exit-code convention: parse errors yield exit 1
@@ -72,13 +72,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         && cli.prompt.is_none()
         && matches!(
             first.as_str(),
-            "install" | "remove" | "uninstall" | "config" | "update" | "list"
+            "install"
+                | "remove"
+                | "uninstall"
+                | "config"
+                | "update"
+                | "list"
+                | "search"
         )
     {
         eprintln!(
-            "Error: `hand {first}` is a pi extension-management subcommand that hand has not yet ported.\n\
-             For now: edit ~/.hand/agent/settings.yaml directly, or open the project in pi for package management.\n\
-             Tracked: docs/user-cases/ux-parity-findings.md UC-cli-001..005."
+            "Error: `hand {first}` is an extension-management subcommand that is not yet implemented.\n\
+             For now: edit ~/.hand/agent/settings.yaml directly to manage packages."
         );
         std::process::exit(1);
     }

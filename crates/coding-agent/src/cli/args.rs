@@ -57,7 +57,7 @@ pub struct Args {
     /// Resume a previous session by ID (or path). `--session` is an
     /// alias for the same behaviour. Accepts a bare `--resume` or
     /// `-r` (no value) — that resolves to "resume the most recent
-    /// session" downstream, matching upstream pi semantics. With a
+    /// session" downstream, matching the reference behaviour. With a
     /// value, the value is the session id or path.
     ///
     /// Wire shape: `Option<String>` where `Some("")` means "bare
@@ -135,7 +135,7 @@ pub struct Args {
 
     /// Load an extra extension by path (repeatable). Each entry points
     /// at a subprocess-extension binary or directory. Matches the
-    /// upstream pi-mono surface so scripts can list extensions on the
+    /// the reference CLI surface so scripts can list extensions on the
     /// CLI without having to write a settings entry.
     #[arg(short = 'e', long = "extension")]
     pub extensions: Vec<String>,
@@ -207,7 +207,7 @@ pub struct Args {
     pub models: Vec<String>,
 
     /// Enable verbose logging. Note: there is NO `-v` short binding —
-    /// `-v` is reserved for `--version` (matches upstream pi
+    /// `-v` is reserved for `--version` (matches the reference CLI
     /// convention). Use `--verbose` (the long form) to enable verbose
     /// logging.
     #[arg(long)]
@@ -232,7 +232,7 @@ pub struct Args {
     /// Use [`Args::messages`] / [`Args::file_args`] to read the
     /// already-classified split. The raw vector is preserved here so
     /// the model can audit exactly what shell-supplied arguments were
-    /// seen (helpful when debugging clap behaviour against pi-mono).
+    /// seen (helpful when debugging clap behaviour against the reference CLI).
     // No `trailing_var_arg`: pi accepts flags anywhere on the command
     // line. With trailing_var_arg, anything after the first positional
     // arg is captured as positional too, so `hand "msg" --provider X`
@@ -253,7 +253,7 @@ pub struct Args {
 
 impl Args {
     /// The plain-text subset of positional arguments — entries that
-    /// do NOT start with `@`. Matches upstream pi's `messages` field
+    /// do NOT start with `@`. Matches the reference CLI's `messages` field
     /// shape.
     pub fn messages(&self) -> Vec<String> {
         self.positional
@@ -265,7 +265,7 @@ impl Args {
 
     /// The `@<path>` subset of positional arguments — entries that
     /// start with `@`, with the leading `@` stripped. Matches
-    /// upstream pi's `file_args` field shape.
+    /// the reference CLI's `file_args` field shape.
     pub fn file_args(&self) -> Vec<String> {
         self.positional
             .iter()
@@ -274,7 +274,7 @@ impl Args {
     }
 }
 
-/// Rewrite pi-mono-style multi-character short flags (`-nc`, `-nt`,
+/// Rewrite the reference CLI-style multi-character short flags (`-nc`, `-nt`,
 /// `-nbt`) into their canonical long forms before clap parses argv.
 ///
 /// clap can bind `-X` (single char) or `--name` (long) but not `-Xyz`
@@ -648,7 +648,7 @@ mod tests {
     }
 
     /// `-t` is the short form of `--tools` (CSV-shaped value), matching
-    /// upstream pi-mono.
+    /// the reference CLI.
     #[test]
     fn parses_tools_short_t() {
         let args = Args::try_parse_from(["hand", "-t", "read,bash"]).unwrap();
@@ -714,7 +714,7 @@ mod tests {
 
     /// Bare `--resume` (no value following) is now accepted; it
     /// resolves to `Some("")` which downstream code interprets as
-    /// "resume the most recent session". Matches upstream pi's
+    /// "resume the most recent session". Matches the reference CLI's
     /// boolean-style `--resume` invocation.
     #[test]
     fn parses_bare_resume_without_value() {
@@ -771,7 +771,7 @@ mod tests {
     }
 
     /// Plain-text positional arguments land in `messages()` —
-    /// matches upstream pi's `messages: string[]`.
+    /// matches the reference CLI's `messages: string[]`.
     #[test]
     fn positional_plain_text_lands_in_messages() {
         let args = Args::try_parse_from(["hand", "hello", "world"]).unwrap();
@@ -780,7 +780,7 @@ mod tests {
     }
 
     /// `@<path>` positionals land in `file_args()` with the leading
-    /// `@` stripped — matches upstream pi's `file_args: string[]`.
+    /// `@` stripped — matches the reference CLI's `file_args: string[]`.
     #[test]
     fn positional_at_file_lands_in_file_args() {
         let args =
