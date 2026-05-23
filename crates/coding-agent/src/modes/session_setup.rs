@@ -76,14 +76,28 @@ impl SessionSetup {
         // `--provider` was given, defer provider selection to the resolver
         // so the slash can drive routing (e.g. `--model deepseek/deepseek-r1`
         // resolves to openrouter without us pre-pinning anthropic).
+        //
+        // When neither `--provider` nor `--model` is supplied, auto-pick the
+        // first configured provider (auth.json record OR env-var key) in a
+        // known priority order. This matches pi's "default google" UX in
+        // spirit but smarter: if the user has only `OPENROUTER_API_KEY`
+        // exported, hand will pick openrouter rather than erroring on
+        // anthropic.
         let explicit_provider = args.provider.as_deref();
+        let fallback_provider: String = if explicit_provider.is_none() && args.model.is_none() {
+            pick_default_provider()
+        } else {
+            "anthropic".to_string()
+        };
         let model_pattern = args.model.as_deref().unwrap_or_else(|| {
-            model_resolver::default_model_for_provider(explicit_provider.unwrap_or("anthropic"))
+            model_resolver::default_model_for_provider(
+                explicit_provider.unwrap_or(fallback_provider.as_str()),
+            )
         });
         let mut resolved = if explicit_provider.is_none() && model_pattern.contains('/') {
             model_resolver::resolve_model(None, model_pattern)
         } else {
-            let provider = explicit_provider.unwrap_or("anthropic");
+            let provider = explicit_provider.unwrap_or(fallback_provider.as_str());
             model_resolver::resolve_model(Some(provider), model_pattern)
         };
         // When the user passes BOTH `--provider P -m a/b`, treat `a/b` as
@@ -211,6 +225,40 @@ impl SessionSetup {
             no_skills: self.no_skills,
         }
     }
+}
+
+/// Auto-pick a default provider when neither `--provider` nor `--model`
+/// is supplied. Walks a priority list and returns the first provider
+/// whose `auth.json` record OR env-var resolves to a non-empty key.
+/// Falls back to `"anthropic"` when nothing is configured.
+fn pick_default_provider() -> String {
+    const PRIORITY: &[&str] = &[
+        "anthropic",
+        "google",
+        "openai",
+        "openrouter",
+        "vercel-ai-gateway",
+        "zai",
+        "deepseek",
+        "groq",
+        "cerebras",
+        "xai",
+        "mistral",
+        "kimi-coding",
+        "huggingface",
+        "fireworks",
+        "minimax",
+    ];
+    let auth = match crate::core::auth_storage::AuthStorage::new() {
+        Ok(a) => a,
+        Err(_) => return "anthropic".to_string(),
+    };
+    for provider in PRIORITY {
+        if auth.get_api_key(provider).is_some() {
+            return (*provider).to_string();
+        }
+    }
+    "anthropic".to_string()
 }
 
 /// Resolve a prompt input string. If `input` resolves to an existing
