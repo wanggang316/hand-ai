@@ -238,10 +238,15 @@ impl AgentSession {
 
         // Create or resume session
         let session_manager = if let Some(session_id) = &config.resume_session {
+            // Match the writer side: when no explicit session_dir is
+            // configured, sessions live under
+            // `~/.hand/agent/sessions/<flattened-cwd>/`. Using the old
+            // cwd-relative `.hand/sessions` path here would silently
+            // miss every session written by the new layout.
             let session_dir = config
                 .session_dir
                 .clone()
-                .unwrap_or_else(|| config.cwd.join(".hand").join("sessions"));
+                .unwrap_or_else(|| SessionManager::default_session_dir(&config.cwd));
             let path = session_dir.join(format!("{}.jsonl", session_id));
             SessionManager::open(&path)?
         } else if config.no_session {

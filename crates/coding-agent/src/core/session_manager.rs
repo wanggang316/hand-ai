@@ -1007,7 +1007,7 @@ impl SessionManager {
     /// touching the user's real `~/.hand/`. When neither `HAND_HOME`
     /// nor `$HOME` resolves, falls back to `<cwd>/.hand/sessions` so
     /// tests and ephemeral runs still have a deterministic location.
-    pub(crate) fn default_session_dir(cwd: &Path) -> PathBuf {
+    pub fn default_session_dir(cwd: &Path) -> PathBuf {
         let home = std::env::var_os("HAND_HOME")
             .map(PathBuf::from)
             .or_else(dirs::home_dir);

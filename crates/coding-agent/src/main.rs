@@ -913,8 +913,12 @@ fn resolve_session_path(cwd: &std::path::Path, source: &str) -> PathBuf {
     if path.exists() {
         return path;
     }
-    // Try as session ID in default dir
-    let session_dir = cwd.join(".hand").join("sessions");
+    // Sessions now live under the home-based, flattened-cwd layout
+    // (`~/.hand/agent/sessions/<flattened-cwd>/`); the lookup must
+    // match the writer side or `--session <id>` / `--fork <id>` /
+    // `--resume <id>` will fail to find sessions that were written
+    // in this directory.
+    let session_dir = hand_coding_agent::SessionManager::default_session_dir(cwd);
     let candidate = session_dir.join(format!("{}.jsonl", source));
     if candidate.exists() {
         return candidate;
