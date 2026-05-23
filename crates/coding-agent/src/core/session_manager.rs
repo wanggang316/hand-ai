@@ -347,6 +347,19 @@ pub fn find_most_recent_session(session_dir: &Path) -> Option<PathBuf> {
 /// the file and confirm the first line parses as a `SessionEntry::Session`.
 /// Used by [`find_most_recent_session`] to skip corrupted / unrelated
 /// `.jsonl` files without loading the whole content.
+/// Flatten an absolute cwd into a single directory name suitable for
+/// nesting under `~/.hand/agent/sessions/`. Mirrors pi's flattening
+/// (`/Users/x/proj` → `--Users-x-proj--`): replaces every path
+/// separator with a single `-`, and wraps the result with leading +
+/// trailing `--` so it's unambiguously a flattened-cwd marker.
+fn flatten_cwd_for_session_dir(cwd: &Path) -> String {
+    let s = cwd.to_string_lossy();
+    // pi uses leading and trailing `--`; the path itself becomes a
+    // single token where every separator collapses to one `-`.
+    let body = s.replace(std::path::MAIN_SEPARATOR, "-");
+    format!("-{body}--")
+}
+
 fn is_valid_session_file(path: &Path) -> bool {
     use std::io::Read;
     let mut file = match std::fs::File::open(path) {
@@ -960,24 +973,21 @@ impl SessionManager {
     /// Sorted by `modified` descending. Missing directories yield an
     /// empty list (not an error).
     pub fn list_all(root: &Path) -> Result<Vec<SessionInfo>, CodingAgentError> {
+        // `root` is treated as the user's HOME-equivalent: we scan
+        // `<root>/.hand/agent/sessions/*/` since the new layout stores
+        // every project's sessions under HOME, with each project keyed
+        // by a flattened-cwd subdir. Production callers pass HOME;
+        // tests pass a tempdir and set HAND_HOME so writers land in
+        // the same place.
+        let root_sessions = root.join(".hand").join("agent").join("sessions");
         let mut sessions = Vec::new();
 
-        // root itself, if it's a project dir
-        sessions.extend(list_sessions_from_dir(
-            &root.join(".hand").join("sessions"),
-        )?);
-
-        // one level of children
-        if let Ok(read_dir) = std::fs::read_dir(root) {
+        if let Ok(read_dir) = std::fs::read_dir(&root_sessions) {
             for entry in read_dir.flatten() {
                 if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                     continue;
                 }
-                let child_session_dir = entry.path().join(".hand").join("sessions");
-                if !child_session_dir.is_dir() {
-                    continue;
-                }
-                sessions.extend(list_sessions_from_dir(&child_session_dir)?);
+                sessions.extend(list_sessions_from_dir(&entry.path())?);
             }
         }
 
@@ -985,8 +995,30 @@ impl SessionManager {
         Ok(sessions)
     }
 
-    fn default_session_dir(cwd: &Path) -> PathBuf {
-        cwd.join(".hand").join("sessions")
+    /// Default session storage location. Sessions live under
+    /// `~/.hand/agent/sessions/<flattened-cwd>/` — the cwd is encoded
+    /// as a single directory name with path separators replaced by
+    /// `-` so every project gets its own subdir without polluting
+    /// the project tree itself. Mirrors pi's `~/.pi/agent/sessions/`
+    /// layout.
+    ///
+    /// `HAND_HOME` env var overrides the home-dir lookup when set;
+    /// tests use this to redirect persistence into a tempdir without
+    /// touching the user's real `~/.hand/`. When neither `HAND_HOME`
+    /// nor `$HOME` resolves, falls back to `<cwd>/.hand/sessions` so
+    /// tests and ephemeral runs still have a deterministic location.
+    pub(crate) fn default_session_dir(cwd: &Path) -> PathBuf {
+        let home = std::env::var_os("HAND_HOME")
+            .map(PathBuf::from)
+            .or_else(dirs::home_dir);
+        match home {
+            Some(home) => home
+                .join(".hand")
+                .join("agent")
+                .join("sessions")
+                .join(flatten_cwd_for_session_dir(cwd)),
+            None => cwd.join(".hand").join("sessions"),
+        }
     }
 
     fn flush(&self) -> Result<(), CodingAgentError> {
@@ -1044,6 +1076,45 @@ mod tests {
     use model::UserMessage;
     use tempfile::TempDir;
 
+    /// Process-wide mutex guarding `HAND_HOME` env-var mutations.
+    /// Tests that need to redirect the session root acquire it via
+    /// `scoped_hand_home`; this serialises them so the env-var
+    /// override doesn't race across parallel test threads.
+    static HAND_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII guard for tests that need to redirect `default_session_dir`
+    /// at a chosen home. Acquires `HAND_HOME_LOCK` on construction and
+    /// holds it until drop, so tests that touch the same env var run
+    /// one at a time even under cargo's parallel runner.
+    struct ScopedHandHome {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<std::ffi::OsString>,
+    }
+    impl Drop for ScopedHandHome {
+        fn drop(&mut self) {
+            // SAFETY: HAND_HOME_LOCK is held for the duration of the
+            // mutation, so no other test thread reads/writes the env
+            // var concurrently.
+            unsafe {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("HAND_HOME", v),
+                    None => std::env::remove_var("HAND_HOME"),
+                }
+            }
+        }
+    }
+    fn scoped_hand_home(root: &Path) -> ScopedHandHome {
+        let lock = HAND_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let prev = std::env::var_os("HAND_HOME");
+        // SAFETY: HAND_HOME_LOCK is held.
+        unsafe {
+            std::env::set_var("HAND_HOME", root);
+        }
+        ScopedHandHome { _lock: lock, prev }
+    }
+
     #[test]
     fn test_session_in_memory() {
         let mut mgr = SessionManager::in_memory();
@@ -1070,6 +1141,7 @@ mod tests {
     #[test]
     fn test_session_create_and_open() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let mgr = SessionManager::create(dir.path()).unwrap();
         let id = mgr.id().to_string();
         let path = mgr.path().to_path_buf();
@@ -1081,6 +1153,7 @@ mod tests {
     #[test]
     fn test_session_persist_messages() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let mut mgr = SessionManager::create(dir.path()).unwrap();
 
         mgr.append_message(Message::User(UserMessage::new_text("hello")))
@@ -1096,6 +1169,7 @@ mod tests {
     #[test]
     fn test_session_list() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         SessionManager::create(dir.path()).unwrap();
         SessionManager::create(dir.path()).unwrap();
 
@@ -1176,6 +1250,7 @@ mod tests {
     #[test]
     fn test_load_entries_from_file_round_trips_real_session() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let mut mgr = SessionManager::create(dir.path()).unwrap();
         mgr.append_message(Message::User(UserMessage::new_text("hello")))
             .unwrap();
@@ -1193,12 +1268,13 @@ mod tests {
     #[test]
     fn test_find_most_recent_session_picks_latest_mtime() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let older = SessionManager::create(dir.path()).unwrap();
         // Tiny sleep so mtimes differ even on coarse filesystems.
         std::thread::sleep(std::time::Duration::from_millis(20));
         let newer = SessionManager::create(dir.path()).unwrap();
 
-        let found = find_most_recent_session(&dir.path().join(".hand").join("sessions"))
+        let found = find_most_recent_session(&SessionManager::default_session_dir(dir.path()))
             .expect("should find a session");
         assert_eq!(found, newer.path());
         assert_ne!(found, older.path());
@@ -1207,8 +1283,9 @@ mod tests {
     #[test]
     fn test_find_most_recent_session_skips_invalid_files() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let mgr = SessionManager::create(dir.path()).unwrap();
-        let session_dir = dir.path().join(".hand").join("sessions");
+        let session_dir = SessionManager::default_session_dir(dir.path());
 
         // Add a stray `.jsonl` file that has no session header — should be ignored.
         std::fs::write(
@@ -1231,6 +1308,7 @@ mod tests {
     #[test]
     fn test_fork_from_preserves_all_non_header_entries() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let mut source = SessionManager::create(dir.path()).unwrap();
         let msg_id = source
             .append_message(Message::User(UserMessage::new_text("first")))
@@ -1303,6 +1381,7 @@ mod tests {
     #[test]
     fn test_fork_from_round_trips_through_disk() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let mut source = SessionManager::create(dir.path()).unwrap();
         source
             .append_message(Message::User(UserMessage::new_text("hi")))
@@ -1345,6 +1424,7 @@ mod tests {
     #[test]
     fn test_build_session_info_extracts_first_message_and_name() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let mut mgr = SessionManager::create(dir.path()).unwrap();
         mgr.append_message(Message::User(UserMessage::new_text("hello world")))
             .unwrap();
@@ -1365,6 +1445,7 @@ mod tests {
     #[test]
     fn test_build_session_info_no_messages_yields_placeholder() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let mgr = SessionManager::create(dir.path()).unwrap();
         let info = build_session_info(mgr.path()).unwrap().unwrap();
         assert_eq!(info.first_message, "(no messages)");
@@ -1376,6 +1457,7 @@ mod tests {
     #[test]
     fn test_build_session_info_label_clear_returns_none() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let mut mgr = SessionManager::create(dir.path()).unwrap();
         mgr.append_label("first").unwrap();
         // Clear via append_label with an empty string — empty trims
@@ -1429,6 +1511,7 @@ mod tests {
     #[test]
     fn test_list_returns_modified_descending() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         let older = SessionManager::create(dir.path()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         let newer = SessionManager::create(dir.path()).unwrap();
@@ -1456,7 +1539,8 @@ mod tests {
     #[test]
     fn test_session_info_modified_uses_message_timestamp_not_mtime() {
         let dir = TempDir::new().unwrap();
-        let session_dir = dir.path().join(".hand").join("sessions");
+        let _g = scoped_hand_home(dir.path());
+        let session_dir = SessionManager::default_session_dir(dir.path());
         std::fs::create_dir_all(&session_dir).unwrap();
         let path = session_dir.join("frozen.jsonl");
 
@@ -1492,7 +1576,8 @@ mod tests {
     #[test]
     fn test_session_info_modified_falls_back_to_mtime_when_no_messages() {
         let dir = TempDir::new().unwrap();
-        let session_dir = dir.path().join(".hand").join("sessions");
+        let _g = scoped_hand_home(dir.path());
+        let session_dir = SessionManager::default_session_dir(dir.path());
         std::fs::create_dir_all(&session_dir).unwrap();
         let path = session_dir.join("empty.jsonl");
 
@@ -1520,8 +1605,9 @@ mod tests {
     #[test]
     fn test_list_skips_corrupted_jsonl() {
         let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
         SessionManager::create(dir.path()).unwrap();
-        let session_dir = dir.path().join(".hand").join("sessions");
+        let session_dir = SessionManager::default_session_dir(dir.path());
         std::fs::write(session_dir.join("garbage.jsonl"), "not json\n").unwrap();
 
         let listed = SessionManager::list(dir.path()).unwrap();
@@ -1531,6 +1617,7 @@ mod tests {
     #[test]
     fn test_list_all_finds_sessions_across_projects() {
         let root = TempDir::new().unwrap();
+        let _g = scoped_hand_home(root.path());
 
         let proj_a = root.path().join("a");
         std::fs::create_dir_all(&proj_a).unwrap();
@@ -1540,7 +1627,6 @@ mod tests {
         std::fs::create_dir_all(&proj_b).unwrap();
         let _b = SessionManager::create(&proj_b).unwrap();
 
-        // root itself has no .hand dir — should still work
         let listed = SessionManager::list_all(root.path()).unwrap();
         assert_eq!(listed.len(), 2);
         // Each cwd should be the project, not the root
@@ -1552,6 +1638,9 @@ mod tests {
     #[test]
     fn test_list_all_includes_root_when_root_has_sessions() {
         let root = TempDir::new().unwrap();
+        // Pin HAND_HOME so `create` writes (and `list_all` reads)
+        // under root rather than the user's real ~/.hand/.
+        let _g = scoped_hand_home(root.path());
         // root itself is a project with sessions
         let _root_session = SessionManager::create(root.path()).unwrap();
         // and a child too
@@ -1602,6 +1691,7 @@ mod tests {
     #[test]
     fn open_preserves_session_manager_identity() {
         let cwd = TempDir::new().unwrap();
+        let _g = scoped_hand_home(cwd.path());
         let sm = SessionManager::create(cwd.path()).expect("create");
         let path_at_creation = sm.path().to_path_buf();
         let id_at_creation = sm.id().to_string();
