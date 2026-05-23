@@ -38,7 +38,7 @@ Output of a user-perspective subagent ran without access to source. 36 findings,
 | 22 | Error msg | `--export` (no arg) | exit 1, one-line | exit 2, clap verbose dump | cosmetic | open |
 | 23 | Error msg | `--export /tmp/missing.jsonl` | "File not found: …" | leaky `Session error: Cannot export an in-memory session…` | major | open |
 | 24 | Error msg | `--fork nonexistent-id …` | "No session found matching '…'" | adds `Error:` prefix | cosmetic | open |
-| 25 | Error msg | `--thinking bogus -p hi …` | warns + proceeds | silently accepted | cosmetic | open |
+| 25 | Error msg | `--thinking bogus -p hi …` | warns + proceeds | silently accepted | cosmetic | **fixed (warns + falls through)** |
 | 26 | --mode json | `-p "say hi" --mode json` | full JSONL event stream | plain text + REPL prompt | blocker | **fixed (json events now emit; schema differs but shape matches)** |
 | 27 | Default model | `-p "say hi"` (no flags / env) | falls back to google+auth.json, answers | empty stdout, exit 0 | major | **fixed (env var fallback + smart auto-pick)** |
 | 28 | Output formatting | `-p "say hi"` raw bytes | clean `Hi!\n` | leading `\n` + trailing `\n\n\x1b[1;35m>\x1b[0m ` | major | **fixed (-p rebind)** |
@@ -49,7 +49,13 @@ Output of a user-perspective subagent ran without access to source. 36 findings,
 | 33 | --resume | `-r -p hi --session-dir /tmp/empty` | opens TUI picker | exposes `Session("...")` repr | blocker | open |
 | 34 | Side effects | any invocation in cwd | sessions go to `~/.pi/agent/sessions/` | hand creates `<cwd>/.hand/sessions/` polluting cwd | major | **fixed (sessions now under ~/.hand/agent/sessions/<flat-cwd>/)** |
 | 35 | Help routing | `--help` | stderr | stdout | cosmetic | open |
-| 36 | Unknown flag | `--bogus` | exit 1, one-line | exit 2, clap dump | cosmetic | open |
+| 32 | --continue empty dir | `-c -p "?"  --session-dir /tmp/empty` | "No previous session found" + new session | now correctly resolves home-based sessions; multi-turn `--continue` end-to-end verified | major | **fixed (lookup path aligned with writer)** |
+| 33 | --resume empty dir | `-r -p hi --session-dir /tmp/empty` | TUI picker | error wording dropped `Session error:` prefix; lookup now finds home-based sessions | blocker | **fixed** |
+| 36 | Unknown flag | `--bogus` | exit 1, one-line | exit 2, clap dump | cosmetic | **fixed (exit 1 + single-line)** |
+| 37 | (new) pi-mono refs in `--help` | `hand --help \| grep pi-mono` | n/a | "pi-mono" / "upstream pi" in flag descriptions | medium | **fixed (scrubbed)** |
+| 38 | (new) `hand --continue` end-to-end | `hand -p "remember 42"; hand --continue -p "what?"` | works | works (was reading cwd-relative path; now home-based) | blocker | **fixed** |
+| 39 | (new) piped stdin no -p | `echo msg \| hand …` | print mode | REPL banner pollution | medium | **fixed (auto-promote to --print when stdin not a TTY)** |
+| 40 | (new) auto-pick provider regression | auto-pick on auth.json+env | openrouter | google (404'd) | high | **fixed (two-pass: auth.json wins over env)** |
 
 ## Skipped (TTY-required)
 
