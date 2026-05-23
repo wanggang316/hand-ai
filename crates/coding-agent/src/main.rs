@@ -39,6 +39,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // pi-parity stub subcommands. When the first positional matches a
+    // pi extension-management command, we surface a clean
+    // "not implemented" exit-1 message instead of treating the keyword
+    // as a free-text prompt. Once hand grows the package-manager
+    // integration these can dispatch into real handlers.
+    if let Some(first) = cli.positional.first()
+        && !cli.print
+        && cli.prompt.is_none()
+        && matches!(
+            first.as_str(),
+            "install" | "remove" | "uninstall" | "config" | "update" | "list"
+        )
+    {
+        eprintln!(
+            "Error: `hand {first}` is a pi extension-management subcommand that hand has not yet ported.\n\
+             For now: edit ~/.hand/agent/settings.yaml directly, or open the project in pi for package management.\n\
+             Tracked: docs/user-cases/ux-parity-findings.md UC-cli-001..005."
+        );
+        std::process::exit(1);
+    }
+
     // Handle --diagnostics: print system report and exit. Runs before
     // logging setup so the report is the only thing on stdout.
     if cli.diagnostics {
