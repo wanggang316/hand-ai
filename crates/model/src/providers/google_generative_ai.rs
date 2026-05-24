@@ -229,6 +229,29 @@ fn stream_google(
     }
 }
 
+/// Normalize a configured base URL for the Google Generative AI API.
+///
+/// This call site appends `/v1beta/models/<id>:streamGenerateContent`
+/// to whatever base URL it gets. The models.json catalogue ships
+/// `https://generativelanguage.googleapis.com/v1beta` as the baseUrl
+/// — concatenating directly would produce `…/v1beta/v1beta/models/…`
+/// and Google returns 404. So strip a trailing `/v1beta` or `/v1` (and
+/// any trailing slashes) if present, and substitute the canonical
+/// host when the configured value is empty. Tolerating either form
+/// lets custom proxies and self-hosted endpoints configure whichever
+/// style they expose.
+fn normalize_base_url(configured: &str) -> String {
+    if configured.is_empty() {
+        return "https://generativelanguage.googleapis.com".to_string();
+    }
+    let trimmed = configured.trim_end_matches('/');
+    trimmed
+        .strip_suffix("/v1beta")
+        .or_else(|| trimmed.strip_suffix("/v1"))
+        .unwrap_or(trimmed)
+        .to_string()
+}
+
 async fn stream_google_inner(
     client: reqwest::Client,
     model: Model,
@@ -242,11 +265,7 @@ async fn stream_google_inner(
         .or_else(|| env_api_keys::get_env_api_key(&model.provider))
         .ok_or_else(|| format!("No API key found for provider: {}", model.provider.as_str()))?;
 
-    let base_url = if model.base_url.is_empty() {
-        "https://generativelanguage.googleapis.com".to_string()
-    } else {
-        model.base_url.trim_end_matches('/').to_string()
-    };
+    let base_url = normalize_base_url(&model.base_url);
 
     let url = format!(
         "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
@@ -335,6 +354,57 @@ mod tests {
             compat: None,
             thinking_level_map: None,
         }
+    }
+
+    /// Regression for issue #12. The catalogue ships
+    /// `https://generativelanguage.googleapis.com/v1beta` as the
+    /// model's baseUrl, and the request builder appends
+    /// `/v1beta/models/<id>:streamGenerateContent`. Without
+    /// normalization the assembled URL is doubled and Google returns
+    /// 404. The helper must strip the trailing `/v1beta` so the
+    /// request lands on the real endpoint.
+    #[test]
+    fn normalize_base_url_strips_trailing_v1beta_suffix() {
+        assert_eq!(
+            normalize_base_url("https://generativelanguage.googleapis.com/v1beta"),
+            "https://generativelanguage.googleapis.com"
+        );
+        assert_eq!(
+            normalize_base_url("https://generativelanguage.googleapis.com/v1beta/"),
+            "https://generativelanguage.googleapis.com"
+        );
+    }
+
+    /// A custom proxy that drops the version segment (e.g. a private
+    /// gateway hosting only one Gemini version) is left untouched
+    /// — the request builder will still tack on `/v1beta/models/…`.
+    #[test]
+    fn normalize_base_url_leaves_non_versioned_proxy_untouched() {
+        assert_eq!(
+            normalize_base_url("https://my-proxy.example.com/gemini"),
+            "https://my-proxy.example.com/gemini"
+        );
+    }
+
+    /// Some legacy configs ship `/v1` instead of `/v1beta`. Strip
+    /// that too so the appended `/v1beta/models/…` doesn't end up
+    /// nested under `/v1/v1beta/`.
+    #[test]
+    fn normalize_base_url_also_strips_v1_suffix() {
+        assert_eq!(
+            normalize_base_url("https://generativelanguage.googleapis.com/v1"),
+            "https://generativelanguage.googleapis.com"
+        );
+    }
+
+    /// An empty configured baseUrl falls back to the canonical host
+    /// rather than producing `/v1beta/models/…` as a relative URL.
+    #[test]
+    fn normalize_base_url_uses_canonical_host_when_empty() {
+        assert_eq!(
+            normalize_base_url(""),
+            "https://generativelanguage.googleapis.com"
+        );
     }
 
     #[test]
