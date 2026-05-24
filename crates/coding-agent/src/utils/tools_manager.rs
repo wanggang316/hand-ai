@@ -412,6 +412,12 @@ pub struct EnsureOptions {
     pub platform: Platform,
     /// Target arch. Defaults to the host via [`Arch::current`].
     pub arch: Arch,
+    /// Consult `$PATH` for a system install before downloading. Defaults
+    /// to `true`. Set `false` in tests that need to exercise the
+    /// download → cache path deterministically — without this, a test
+    /// host with `rg` already on `$PATH` short-circuits to
+    /// `ToolPath::System(...)` and the cache branch never runs.
+    pub allow_system_lookup: bool,
 }
 
 impl EnsureOptions {
@@ -421,6 +427,7 @@ impl EnsureOptions {
             offline: is_offline_env(),
             platform: Platform::current(),
             arch: Arch::current(),
+            allow_system_lookup: true,
         }
     }
 }
@@ -460,9 +467,11 @@ fn locate_existing(tool: Tool, tools_dir: &Path, options: &EnsureOptions) -> Opt
         return Some(ToolPath::Cached(cached));
     }
 
-    for name in tool.system_binary_names() {
-        if command_exists(name) {
-            return Some(ToolPath::System((*name).to_string()));
+    if options.allow_system_lookup {
+        for name in tool.system_binary_names() {
+            if command_exists(name) {
+                return Some(ToolPath::System((*name).to_string()));
+            }
         }
     }
     None
@@ -648,6 +657,7 @@ mod tests {
             offline: false,
             platform: Platform::Linux,
             arch: Arch::X86_64,
+            allow_system_lookup: false,
         };
 
         let result = ensure_tool(Tool::Ripgrep, &tools_dir, &fetcher, options)
@@ -667,6 +677,7 @@ mod tests {
             offline: true,
             platform: Platform::Linux,
             arch: Arch::X86_64,
+            allow_system_lookup: true,
         };
         let result = ensure_tool(Tool::Fd, dir.path(), &fetcher, options)
             .await
@@ -686,6 +697,7 @@ mod tests {
             offline: false,
             platform: Platform::Android,
             arch: Arch::Aarch64,
+            allow_system_lookup: true,
         };
         // Cache empty; Android cannot use Linux binaries → None.
         let result = ensure_tool(Tool::Fd, dir.path(), &fetcher, options)
@@ -708,6 +720,7 @@ mod tests {
             offline: false,
             platform: Platform::Linux,
             arch: Arch::X86_64,
+            allow_system_lookup: false,
         };
         let result = ensure_tool(Tool::Ripgrep, &tools_dir, &fetcher, options)
             .await
@@ -733,6 +746,7 @@ mod tests {
             offline: false,
             platform: Platform::Linux,
             arch: Arch::X86_64,
+            allow_system_lookup: false,
         };
         let result = ensure_tool(Tool::Ripgrep, &tools_dir, &fetcher, options)
             .await
