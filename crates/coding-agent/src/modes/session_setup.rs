@@ -72,22 +72,35 @@ impl SessionSetup {
         // Model: provider-default unless `--model` is explicit; thinking-level
         // CLI flag wins over the suffix embedded in the model pattern.
         //
-        // When `--model` carries a gateway-style slashed id and no explicit
-        // `--provider` was given, defer provider selection to the resolver
-        // so the slash can drive routing (e.g. `--model deepseek/deepseek-r1`
-        // resolves to openrouter without us pre-pinning anthropic).
+        // Provider selection when `--provider` is absent:
         //
-        // When neither `--provider` nor `--model` is supplied, auto-pick the
-        // first configured provider (auth.json record OR env-var key) in a
-        // known priority order. This matches pi's "default google" UX in
-        // spirit but smarter: if the user has only `OPENROUTER_API_KEY`
-        // exported, hand will pick openrouter rather than erroring on
-        // anthropic.
+        // 1. Slashed `--model a/b` defers to the resolver — the slash
+        //    drives routing (e.g. `--model deepseek/deepseek-r1` →
+        //    openrouter).
+        // 2. Bare `--model <id>` (no slash) looks the id up in the
+        //    catalogue. If exactly one provider hosts that id, use it.
+        //    This prevents `--model gemini-2.5-flash` from silently
+        //    falling back to anthropic and erroring on auth.
+        // 3. No `--model` at all auto-picks the first configured
+        //    provider (auth.json record OR env-var key) in a known
+        //    priority order. So a user with only OPENROUTER_API_KEY
+        //    exported lands on openrouter rather than anthropic.
         let explicit_provider = args.provider.as_deref();
-        let auto_picked: Option<String> = if explicit_provider.is_none() && args.model.is_none() {
-            Some(pick_default_provider())
-        } else {
+        let auto_picked: Option<String> = if explicit_provider.is_some() {
             None
+        } else if let Some(ref model_pat) = args.model {
+            // Only attempt inference for bare ids; slashed ids
+            // already self-route in resolve_model(None, …) below.
+            if model_pat.contains('/') {
+                None
+            } else {
+                model_resolver::infer_provider_for_model_id(
+                    model_pat,
+                    PROVIDER_PRIORITY,
+                )
+            }
+        } else {
+            Some(pick_default_provider())
         };
         // Effective provider: explicit > auto-picked > "anthropic" hard-default.
         let effective_provider: String = explicit_provider
@@ -276,42 +289,43 @@ impl SessionSetup {
 ///    env-var (`OPENROUTER_API_KEY`, `GEMINI_API_KEY`, etc.) resolves.
 /// 3. Fall back to `"anthropic"` so the eventual error message is
 ///    actionable.
+const PROVIDER_PRIORITY: &[&str] = &[
+    "anthropic",
+    "openrouter",
+    "google",
+    "openai",
+    "vercel-ai-gateway",
+    "zai",
+    "deepseek",
+    "groq",
+    "cerebras",
+    "xai",
+    "mistral",
+    "kimi-coding",
+    "huggingface",
+    "fireworks",
+    "minimax",
+];
+
 fn pick_default_provider() -> String {
-    const PRIORITY: &[&str] = &[
-        "anthropic",
-        "openrouter",
-        "google",
-        "openai",
-        "vercel-ai-gateway",
-        "zai",
-        "deepseek",
-        "groq",
-        "cerebras",
-        "xai",
-        "mistral",
-        "kimi-coding",
-        "huggingface",
-        "fireworks",
-        "minimax",
-    ];
     let auth = match crate::core::auth_storage::AuthStorage::new() {
         Ok(a) => a,
         Err(_) => return "anthropic".to_string(),
     };
-    // Pass 1: explicit on-disk auth.json record wins. Walk PRIORITY in
-    // order so the result is deterministic when multiple providers are
-    // configured.
+    // Pass 1: explicit on-disk auth.json record wins. Walk the
+    // priority list in order so the result is deterministic when
+    // multiple providers are configured.
     if let Ok(records) = auth.load() {
-        for provider in PRIORITY {
+        for provider in PROVIDER_PRIORITY {
             if records.contains_key(*provider) {
                 return (*provider).to_string();
             }
         }
     }
-    // Pass 2: env-var fallback. PRIORITY again, this time hitting
-    // `get_api_key` (which now layers env vars in) but skipping
-    // providers that already lost pass 1.
-    for provider in PRIORITY {
+    // Pass 2: env-var fallback. Walk the priority list again, this
+    // time hitting `get_api_key` (which layers env vars in) but
+    // skipping providers that already lost pass 1.
+    for provider in PROVIDER_PRIORITY {
         if auth.get_api_key(provider).is_some() {
             return (*provider).to_string();
         }

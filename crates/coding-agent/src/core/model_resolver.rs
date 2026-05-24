@@ -402,6 +402,56 @@ fn default_base_url_for(provider: model::types::Provider) -> String {
     }
 }
 
+/// Infer the provider for a bare model id by scanning the catalogue.
+///
+/// Used when the user passes `--model <id>` without `--provider` and
+/// the id contains no slash (slashed ids drive routing through
+/// `resolve_model(None, "a/b")` already). The pattern's
+/// `:thinking-level` suffix and any `provider/` prefix are stripped
+/// before lookup.
+///
+/// When exactly one provider hosts the id (e.g. `claude-opus-4-7`
+/// under `anthropic`), that provider is returned. When multiple
+/// providers host the same id (e.g. `gemini-2.5-flash` exists under
+/// `google`, `google-vertex`, and `google-gemini-cli`), the `priority`
+/// list breaks the tie deterministically — the first priority entry
+/// that hosts the id wins. Pass an empty slice for a strict-only
+/// lookup that returns `None` on any ambiguity.
+///
+/// Returns the provider key (case as registered in the catalogue), or
+/// `None` when nothing matches or the ambiguity can't be resolved
+/// from the priority list — the caller falls back to its own default.
+pub fn infer_provider_for_model_id(
+    model_pattern: &str,
+    priority: &[&str],
+) -> Option<String> {
+    let (pattern_provider, bare_id, _thinking) = parse_model_pattern(model_pattern);
+    // Slashed ids drive their own routing — don't override that here.
+    if pattern_provider.is_some() {
+        return None;
+    }
+    if bare_id.is_empty() {
+        return None;
+    }
+    let needle = bare_id.to_lowercase();
+    let hosts: Vec<String> = model::get_provider_keys()
+        .into_iter()
+        .filter(|p| {
+            model::get_models(p)
+                .iter()
+                .any(|m| m.id.to_lowercase() == needle)
+        })
+        .collect();
+    match hosts.len() {
+        0 => None,
+        1 => hosts.into_iter().next(),
+        _ => priority
+            .iter()
+            .find(|p| hosts.iter().any(|h| h.eq_ignore_ascii_case(p)))
+            .map(|p| (*p).to_string()),
+    }
+}
+
 /// List all available models, optionally filtered by a search pattern.
 pub fn list_models(search: Option<&str>) -> Vec<Model> {
     let mut all_models = Vec::new();
@@ -1421,6 +1471,98 @@ mod tests {
         assert!(default_model_for_provider("anthropic").contains("claude"));
         assert!(default_model_for_provider("openai").contains("gpt"));
         assert!(default_model_for_provider("google").contains("gemini"));
+    }
+
+    /// Mirrors the auth-priority list session_setup uses for tie-
+    /// breaking. Kept here so tests don't depend on session_setup's
+    /// private constant.
+    const TEST_PRIORITY: &[&str] = &[
+        "anthropic",
+        "openrouter",
+        "google",
+        "openai",
+        "vercel-ai-gateway",
+        "zai",
+        "deepseek",
+        "groq",
+        "cerebras",
+        "xai",
+        "mistral",
+        "kimi-coding",
+        "huggingface",
+        "fireworks",
+        "minimax",
+    ];
+
+    /// `--model gemini-2.5-flash` (no `--provider`) must land on
+    /// `google`, not on the historical "anthropic" fallback. Pinned
+    /// against the regression in issue #10 where users hit
+    /// `No API key found for Anthropic` when only their Google key
+    /// was configured. `gemini-2.5-flash` is also hosted under
+    /// `google-vertex` and `google-gemini-cli` in the catalogue, so
+    /// this also exercises priority-based tie-breaking.
+    #[test]
+    fn infer_provider_routes_bare_gemini_id_to_google() {
+        assert_eq!(
+            infer_provider_for_model_id("gemini-2.5-flash", TEST_PRIORITY).as_deref(),
+            Some("google")
+        );
+    }
+
+    /// A `:thinking-level` suffix on the bare id must not block
+    /// inference — strip it before catalogue lookup.
+    #[test]
+    fn infer_provider_ignores_thinking_suffix() {
+        assert_eq!(
+            infer_provider_for_model_id("gemini-2.5-flash:high", TEST_PRIORITY).as_deref(),
+            Some("google")
+        );
+    }
+
+    /// Slashed `provider/id` patterns are out-of-scope for inference;
+    /// the slash already drives routing via `resolve_model(None, …)`.
+    /// Return None so the caller defers to that path.
+    #[test]
+    fn infer_provider_returns_none_for_slashed_id() {
+        assert_eq!(
+            infer_provider_for_model_id("openai/gpt-4o", TEST_PRIORITY),
+            None
+        );
+    }
+
+    /// An id that no provider hosts yields None — caller falls back
+    /// to its default (auto-pick from configured providers, or
+    /// anthropic).
+    #[test]
+    fn infer_provider_returns_none_for_unknown_id() {
+        assert_eq!(
+            infer_provider_for_model_id(
+                "definitely-not-a-real-model-zzzzzz",
+                TEST_PRIORITY
+            ),
+            None
+        );
+    }
+
+    /// Empty pattern (`--model ""`) must not match — would otherwise
+    /// lowercase to "" and match every id.
+    #[test]
+    fn infer_provider_returns_none_for_empty_pattern() {
+        assert_eq!(infer_provider_for_model_id("", TEST_PRIORITY), None);
+    }
+
+    /// Strict mode: an empty priority list returns None whenever the
+    /// id is hosted by more than one provider. The caller can use
+    /// this when ambiguity itself should defer to a different path.
+    #[test]
+    fn infer_provider_empty_priority_returns_none_on_ambiguity() {
+        // `gemini-2.5-flash` is hosted by google / google-vertex /
+        // google-gemini-cli, so with no priority hints there's no
+        // single winner.
+        assert_eq!(
+            infer_provider_for_model_id("gemini-2.5-flash", &[]),
+            None
+        );
     }
 
     // -------------------------------------------------------------------
