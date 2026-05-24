@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // before clap sees argv. Without this, scripts written against
     // Plain clap would reject `-nc` as `-n -c` (two unknown
     // shorts).
-    let argv = hand_coding_agent::cli::args::expand_pi_short_aliases(std::env::args());
+    let argv = hand_coding_agent::cli::args::expand_short_aliases(std::env::args());
     // Match pi's exit-code convention: parse errors yield exit 1
     // (clap's default is 2) and a single-line `Error: <one-line>`
     // message instead of a multi-line usage dump on stderr. Help and

@@ -15,9 +15,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
     version = VERSION,
     long_about = "Hand is an interactive AI coding agent that helps you write, edit, and understand code.",
     // Disable clap's auto-generated `-V/--version` so we can rebind
-    // `-v` to version (pi convention) without it colliding with
-    // `-v/--verbose`. The replacement is declared as an explicit
-    // `Args::version_flag` field below using ArgAction::Version.
+    // `-v` to `--version` without it colliding with `-v/--verbose`.
+    // The replacement is declared as an explicit `Args::version_flag`
+    // field below using ArgAction::Version.
     disable_version_flag = true,
 )]
 pub struct Args {
@@ -26,12 +26,11 @@ pub struct Args {
     /// frontmatter fence `---`) so a piped prompt isn't mistaken for a
     /// flag.
     ///
-    /// `-p` is intentionally NOT bound here: pi reserves `-p` as the
-    /// short form of `--print` (non-interactive bool, not a value-taking
-    /// flag), so we mirror that and keep `--prompt` long-form only.
-    /// Users supplying a prompt under `--print` should use the
-    /// positional message form (`hand -p "say hi"`) or the long
-    /// `--prompt "say hi"` flag.
+    /// `-p` is intentionally NOT bound here: it is reserved as the
+    /// short form of `--print` (a boolean toggle, not a value-taking
+    /// flag), so `--prompt` is long-form only. Under `--print`, supply
+    /// the prompt as a positional message (`hand -p "say hi"`) or via
+    /// `--prompt "say hi"`.
     #[arg(long, allow_hyphen_values = true)]
     pub prompt: Option<String>,
 
@@ -55,14 +54,9 @@ pub struct Args {
     pub base_url: Option<String>,
 
     /// Resume a previous session by ID (or path). `--session` is an
-    /// alias for the same behaviour. Accepts a bare `--resume` or
-    /// `-r` (no value) — that resolves to "resume the most recent
-    /// session" downstream, matching the reference behaviour. With a
-    /// value, the value is the session id or path.
-    ///
-    /// Wire shape: `Option<String>` where `Some("")` means "bare
-    /// --resume invoked, pick latest" and `Some(<id>)` means an
-    /// explicit id/path was supplied.
+    /// alias. A bare `--resume` or `-r` (no value) resumes the most
+    /// recent session; supplying a value selects an explicit session
+    /// id or path.
     #[arg(short, long, alias = "session", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
 
@@ -97,10 +91,7 @@ pub struct Args {
     #[arg(short = 't', long)]
     pub tools: Option<String>,
 
-    /// Disable all tools. `-nt` is accepted as a short-form alias via
-    /// the [`expand_pi_short_aliases`] argv rewrite — clap can't
-    /// natively bind multi-char tokens to a single `-` prefix, so the
-    /// rewrite happens before clap sees argv.
+    /// Disable all tools. `-nt` is accepted as a short-form alias.
     #[arg(long)]
     pub no_tools: bool,
 
@@ -115,9 +106,8 @@ pub struct Args {
 
     /// Disable auto-loading of project context files (HAND.md,
     /// .hand/context.md). Useful when scripts need a reproducible system
-    /// prompt that doesn't pick up uncommitted local files. The
-    /// short-form alias `-nc` is rewritten by [`expand_pi_short_aliases`]
-    /// before clap parses argv.
+    /// prompt that doesn't pick up uncommitted local files. `-nc` is
+    /// the short-form alias.
     #[arg(long)]
     pub no_context_files: bool,
 
@@ -134,9 +124,8 @@ pub struct Args {
     pub no_skills: bool,
 
     /// Load an extra extension by path (repeatable). Each entry points
-    /// at a subprocess-extension binary or directory. Matches the
-    /// the reference CLI surface so scripts can list extensions on the
-    /// CLI without having to write a settings entry.
+    /// at a subprocess-extension binary or directory, so scripts can
+    /// list extensions on the CLI without writing a settings entry.
     #[arg(short = 'e', long = "extension")]
     pub extensions: Vec<String>,
 
@@ -153,11 +142,8 @@ pub struct Args {
     #[arg(long = "skill")]
     pub skills: Vec<String>,
 
-    /// Load an extra prompt-template path (repeatable). pi-parity flag.
-    /// Hand's prompt-template subsystem may not consume every shape pi
-    /// supports; the flag is accepted so user scripts that pass it
-    /// don't break, and the runtime no-ops gracefully when the file
-    /// has no template metadata.
+    /// Load an extra prompt-template path (repeatable). The runtime
+    /// no-ops gracefully when the file has no template metadata.
     #[arg(long = "prompt-template")]
     pub prompt_templates: Vec<String>,
 
@@ -165,7 +151,7 @@ pub struct Args {
     #[arg(long)]
     pub no_prompt_templates: bool,
 
-    /// Load an extra theme path (repeatable). pi-parity flag.
+    /// Load an extra theme path (repeatable).
     #[arg(long = "theme")]
     pub themes: Vec<String>,
 
@@ -173,10 +159,9 @@ pub struct Args {
     #[arg(long)]
     pub no_themes: bool,
 
-    /// Non-interactive print mode. Mirrors pi's `--print, -p` shape:
-    /// `-p` is a bool, not a value-taking flag. The prompt comes from
-    /// a positional message (`hand -p "say hi"`), `--prompt`, or
-    /// piped stdin.
+    /// Non-interactive print mode. `-p` is a bool, not a value-taking
+    /// flag. The prompt comes from a positional message
+    /// (`hand -p "say hi"`), `--prompt`, or piped stdin.
     #[arg(short = 'p', long)]
     pub print: bool,
 
@@ -207,9 +192,7 @@ pub struct Args {
     pub models: Vec<String>,
 
     /// Enable verbose logging. Note: there is NO `-v` short binding —
-    /// `-v` is reserved for `--version` (matches the reference CLI
-    /// convention). Use `--verbose` (the long form) to enable verbose
-    /// logging.
+    /// `-v` is reserved for `--version`. Use the long form `--verbose`.
     #[arg(long)]
     pub verbose: bool,
 
@@ -224,21 +207,14 @@ pub struct Args {
 
     /// Trailing positional arguments. Each entry is either:
     /// - a `@<path>` reference — the leading `@` is stripped and the
-    ///   remainder lands in `file_args()` (the file's contents are
-    ///   loaded into the prompt at run time).
-    /// - any other string — plain prompt text that lands in
-    ///   `messages()`.
-    ///
-    /// Use [`Args::messages`] / [`Args::file_args`] to read the
-    /// already-classified split. The raw vector is preserved here so
-    /// the model can audit exactly what shell-supplied arguments were
-    /// seen (helpful when debugging clap behaviour against the reference CLI).
-    // No `trailing_var_arg`: pi accepts flags anywhere on the command
-    // line. With trailing_var_arg, anything after the first positional
-    // arg is captured as positional too, so `hand "msg" --provider X`
-    // would drop `--provider` into the positional vec instead of
-    // parsing it as a named flag. Disabling it costs us nothing because
-    // we already strip `@<path>` tokens at the message-builder level.
+    ///   file's contents are loaded into the prompt at run time.
+    /// - any other string — plain prompt text.
+    // No `trailing_var_arg`: flags are accepted anywhere on the
+    // command line. With trailing_var_arg, anything after the first
+    // positional arg would also be captured as positional, so
+    // `hand "msg" --provider X` would drop `--provider` into the
+    // positional vec. Disabling it costs us nothing because we strip
+    // `@<path>` tokens at the message-builder level.
     pub positional: Vec<String>,
 
     /// Suppress all auto-download/network operations. When set, the
@@ -253,8 +229,7 @@ pub struct Args {
 
 impl Args {
     /// The plain-text subset of positional arguments — entries that
-    /// do NOT start with `@`. Matches the reference CLI's `messages` field
-    /// shape.
+    /// do NOT start with `@`.
     pub fn messages(&self) -> Vec<String> {
         self.positional
             .iter()
@@ -264,8 +239,7 @@ impl Args {
     }
 
     /// The `@<path>` subset of positional arguments — entries that
-    /// start with `@`, with the leading `@` stripped. Matches
-    /// the reference CLI's `file_args` field shape.
+    /// start with `@`, with the leading `@` stripped.
     pub fn file_args(&self) -> Vec<String> {
         self.positional
             .iter()
@@ -274,8 +248,8 @@ impl Args {
     }
 }
 
-/// Rewrite the reference CLI-style multi-character short flags (`-nc`, `-nt`,
-/// `-nbt`) into their canonical long forms before clap parses argv.
+/// Rewrite multi-character short flags (`-nc`, `-nt`, `-nbt`, …) into
+/// their canonical long forms before clap parses argv.
 ///
 /// clap can bind `-X` (single char) or `--name` (long) but not `-Xyz`
 /// (multi-char single-dash), so a user scripting `hand -nc` against
@@ -284,7 +258,7 @@ impl Args {
 /// the canonical clap shape AND lets user scripts keep working.
 ///
 /// Returns a new Vec; the input is consumed.
-pub fn expand_pi_short_aliases(argv: impl IntoIterator<Item = String>) -> Vec<String> {
+pub fn expand_short_aliases(argv: impl IntoIterator<Item = String>) -> Vec<String> {
     argv.into_iter()
         .map(|arg| match arg.as_str() {
             "-nc" => "--no-context-files".to_string(),
@@ -340,9 +314,9 @@ mod tests {
         assert!(args.print);
     }
 
-    /// pi-parity: `-p` is the short form of `--print` (bool), not of
-    /// `--prompt`. A bare `-p` toggles print mode; the prompt is
-    /// supplied via the positional message or `--prompt`.
+    /// `-p` is the short form of `--print` (bool), not of `--prompt`.
+    /// A bare `-p` toggles print mode; the prompt is supplied via the
+    /// positional message or `--prompt`.
     #[test]
     fn dash_p_is_print_flag_not_prompt_value() {
         let args =
@@ -368,8 +342,7 @@ mod tests {
     /// an unknown flag. Without `allow_hyphen_values`, clap treats any
     /// value beginning with `--` (including `---`) as a flag and bails
     /// before reaching the value parser, so `hand --prompt "---\ntitle..."`
-    /// would fail at parse time. (Renamed from `-p` after the pi-compat
-    /// alias rebind.)
+    /// would fail at parse time.
     #[test]
     fn parses_prompt_with_yaml_frontmatter() {
         let prompt = "---\ntitle: hello\n---\nSay hi.";
@@ -647,8 +620,7 @@ mod tests {
         assert!(res.is_err(), "--mode binary should be rejected");
     }
 
-    /// `-t` is the short form of `--tools` (CSV-shaped value), matching
-    /// the reference CLI.
+    /// `-t` is the short form of `--tools` (CSV-shaped value).
     #[test]
     fn parses_tools_short_t() {
         let args = Args::try_parse_from(["hand", "-t", "read,bash"]).unwrap();
@@ -657,12 +629,12 @@ mod tests {
 
     /// `-nt` is the short-form alias for `--no-tools`. Because clap
     /// can't bind multi-char tokens to a single `-`, the argv rewrite
-    /// `expand_pi_short_aliases` translates `-nt`→`--no-tools` before
+    /// `expand_short_aliases` translates `-nt`→`--no-tools` before
     /// clap parses.
     #[test]
     fn nt_short_alias_rewrites_to_no_tools() {
         let argv =
-            expand_pi_short_aliases(vec!["hand".to_string(), "-nt".to_string()]);
+            expand_short_aliases(vec!["hand".to_string(), "-nt".to_string()]);
         let args = Args::try_parse_from(argv).expect("-nt should rewrite to --no-tools");
         assert!(args.no_tools);
     }
@@ -671,7 +643,7 @@ mod tests {
     #[test]
     fn nbt_short_alias_rewrites_to_no_builtin_tools() {
         let argv =
-            expand_pi_short_aliases(vec!["hand".to_string(), "-nbt".to_string()]);
+            expand_short_aliases(vec!["hand".to_string(), "-nbt".to_string()]);
         let args =
             Args::try_parse_from(argv).expect("-nbt should rewrite to --no-builtin-tools");
         assert!(args.no_builtin_tools);
@@ -681,7 +653,7 @@ mod tests {
     #[test]
     fn nc_short_alias_rewrites_to_no_context_files() {
         let argv =
-            expand_pi_short_aliases(vec!["hand".to_string(), "-nc".to_string()]);
+            expand_short_aliases(vec!["hand".to_string(), "-nc".to_string()]);
         let args =
             Args::try_parse_from(argv).expect("-nc should rewrite to --no-context-files");
         assert!(args.no_context_files);
@@ -712,10 +684,9 @@ mod tests {
         assert!(args.no_builtin_tools);
     }
 
-    /// Bare `--resume` (no value following) is now accepted; it
+    /// Bare `--resume` (no value following) is accepted; it
     /// resolves to `Some("")` which downstream code interprets as
-    /// "resume the most recent session". Matches the reference CLI's
-    /// boolean-style `--resume` invocation.
+    /// "resume the most recent session".
     #[test]
     fn parses_bare_resume_without_value() {
         let args = Args::try_parse_from(["hand", "--resume"]).expect("--resume bare");
@@ -770,8 +741,7 @@ mod tests {
         assert_eq!(args.extensions, vec!["a".to_string(), "b".to_string()]);
     }
 
-    /// Plain-text positional arguments land in `messages()` —
-    /// matches the reference CLI's `messages: string[]`.
+    /// Plain-text positional arguments land in `messages()`.
     #[test]
     fn positional_plain_text_lands_in_messages() {
         let args = Args::try_parse_from(["hand", "hello", "world"]).unwrap();
@@ -780,7 +750,7 @@ mod tests {
     }
 
     /// `@<path>` positionals land in `file_args()` with the leading
-    /// `@` stripped — matches the reference CLI's `file_args: string[]`.
+    /// `@` stripped.
     #[test]
     fn positional_at_file_lands_in_file_args() {
         let args =
