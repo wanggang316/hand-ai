@@ -586,6 +586,23 @@ impl InteractiveMode {
                                     install_loader(&loader_for_events, "Working…");
                                     emit_terminal_progress(ProgressState::Indeterminate);
                                 }
+                                // Hide the loader as soon as the assistant
+                                // message begins producing text — the
+                                // streaming chunks themselves are the
+                                // "working" indicator from there on. The
+                                // bordered loader gets re-rendered every
+                                // diff pass and, when streamed content
+                                // pushes past the viewport, the
+                                // up-N-lines cursor moves stop landing
+                                // on the right row and we leak duplicate
+                                // `Working… / esc cancel` lines into
+                                // scrollback. Hiding it during streaming
+                                // sidesteps that entirely.
+                                hand_agent::types::AgentEvent::MessageStart {
+                                    message: model::Message::Assistant(_),
+                                } => {
+                                    clear_loader(&loader_for_events);
+                                }
                                 hand_agent::types::AgentEvent::AgentEnd { .. } => {
                                     clear_loader(&loader_for_events);
                                     emit_terminal_progress(ProgressState::Clear);
