@@ -13,5 +13,5 @@ pub use config_selector::{
 };
 pub use file_processor::{FileProcessorError, ProcessedFiles, process_file_arguments};
 pub use initial_message::{InitialMessageInput, InitialMessageResult, build_initial_message};
-pub use list_models::list_models as print_model_list;
+pub use list_models::{list_models_for_cli, print_models_table};
 pub use session_picker::{SessionPickerError, select_session};

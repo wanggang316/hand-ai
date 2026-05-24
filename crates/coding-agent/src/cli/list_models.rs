@@ -1,52 +1,114 @@
-//! Print the auth-filtered model catalog with optional fuzzy search.
+//! `--list-models` implementation.
 //!
-//! TS reference: `cli/list-models.ts`. The bare `model` crate already ships
-//! its own `model-cli list-models` for the unfiltered catalog; this helper
-//! is the coding-agent-side enhanced view that:
+//! Resolves the available-models catalogue (filtered to providers whose
+//! credentials are configured) and renders it as a six-column table
+//! (`provider`, `model`, `context`, `max-out`, `thinking`, `images`).
 //!
-//! - filters by `ModelRegistry::available()` (drops models whose provider
-//!   has no configured auth);
-//! - surfaces any registry load error via `ModelRegistry::error()`;
-//! - supports an optional fuzzy search pattern via [`hand_tui::fuzzy_filter`];
-//! - renders an aligned table with `provider`, `model`, `context`, `max-out`,
-//!   `thinking`, `images` columns.
+//! An optional search pattern narrows the list using a three-pass
+//! strategy that avoids the false-positive avalanche of plain fuzzy
+//! matching:
 //!
-//! Output is written to `stdout` for the table and `stderr` for the load-
-//! error warning, using ANSI escape codes (yellow warning, no other colour),
-//! matching the rest of `coding-agent`'s CLI output style.
+//! 1. Exact provider-name match (case-insensitive) — `--list-models
+//!    openai` returns OpenAI models, not `openrouter/*`.
+//! 2. Case-insensitive substring on `<provider> <id>`.
+//! 3. Fuzzy match as a last-resort "did you mean?" mode.
 
-use std::path::Path;
+use model::Model;
+use model::types::InputType;
 
-use hand_tui::fuzzy_filter;
-use model::types::{InputType, Model};
-
-use crate::core::auth_guidance::no_models_available_message;
+use crate::core::auth_storage::AuthStorage;
 use crate::core::model_registry::ModelRegistry;
+use crate::core::model_resolver;
+
+/// Resolve the catalogue shown by `--list-models`. Filters to providers
+/// whose credentials are configured (env var or auth.json). Falls back
+/// to the unfiltered catalogue when auth.json is unreadable so the
+/// command never returns a misleading empty list.
+pub fn list_models_for_cli(search: Option<&str>) -> Vec<Model> {
+    let auth = match AuthStorage::new() {
+        Ok(a) => a,
+        Err(_) => return model_resolver::list_models(search),
+    };
+    let registry = ModelRegistry::create(auth);
+    // Surface models.json load errors on stderr so users discover broken
+    // configs instead of silently losing custom models or overrides.
+    if let Some(err) = registry.error() {
+        eprintln!("\x1b[33mWarning: {err}\x1b[0m");
+    }
+    let mut models = registry.available();
+    if let Some(pattern) = search.filter(|s| !s.is_empty()) {
+        models = filter_models_by_pattern(models, pattern);
+    }
+    models.sort_by(|a, b| {
+        a.provider
+            .as_str()
+            .cmp(b.provider.as_str())
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    models
+}
+
+/// Apply the three-pass search filter (exact provider → substring →
+/// fuzzy) to a candidate list. Extracted so it can be unit-tested
+/// without an `AuthStorage`.
+pub(crate) fn filter_models_by_pattern(models: Vec<Model>, pattern: &str) -> Vec<Model> {
+    use hand_tui::fuzzy_filter;
+
+    let needle = pattern.to_lowercase();
+
+    let provider_exact: Vec<Model> = models
+        .iter()
+        .filter(|m| m.provider.as_str().eq_ignore_ascii_case(&needle))
+        .cloned()
+        .collect();
+    if !provider_exact.is_empty() {
+        return provider_exact;
+    }
+
+    let substring: Vec<Model> = models
+        .iter()
+        .filter(|m| {
+            let haystack = format!("{} {}", m.provider.as_str(), m.id).to_lowercase();
+            haystack.contains(&needle)
+        })
+        .cloned()
+        .collect();
+    if !substring.is_empty() {
+        return substring;
+    }
+
+    let haystacks: Vec<String> = models
+        .iter()
+        .map(|m| format!("{} {}", m.provider.as_str(), m.id))
+        .collect();
+    let haystack_refs: Vec<&str> = haystacks.iter().map(String::as_str).collect();
+    let matches = fuzzy_filter(pattern, &haystack_refs);
+    matches.into_iter().map(|(i, _)| models[i].clone()).collect()
+}
 
 /// Format a token count as a short human-readable string.
 ///
 /// `200_000 -> "200K"`, `1_000_000 -> "1M"`, `1_500_000 -> "1.5M"`.
-fn format_token_count(count: u64) -> String {
-    if count >= 1_000_000 {
-        let millions = count as f64 / 1_000_000.0;
-        if (millions.fract()).abs() < f64::EPSILON {
-            format!("{}M", millions as u64)
+fn format_token_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        let m = n as f64 / 1_000_000.0;
+        if (m.fract()).abs() < f64::EPSILON {
+            format!("{}M", m as u64)
         } else {
-            format!("{:.1}M", millions)
+            format!("{m:.1}M")
         }
-    } else if count >= 1_000 {
-        let thousands = count as f64 / 1_000.0;
-        if (thousands.fract()).abs() < f64::EPSILON {
-            format!("{}K", thousands as u64)
+    } else if n >= 1_000 {
+        let k = n as f64 / 1_000.0;
+        if (k.fract()).abs() < f64::EPSILON {
+            format!("{}K", k as u64)
         } else {
-            format!("{:.1}K", thousands)
+            format!("{k:.1}K")
         }
     } else {
-        count.to_string()
+        n.to_string()
     }
 }
 
-/// One row in the rendered table.
 struct Row {
     provider: String,
     model: String,
@@ -63,97 +125,18 @@ impl Row {
             model: m.id.clone(),
             context: format_token_count(m.context_window),
             max_out: format_token_count(m.max_tokens),
-            thinking: if m.reasoning { "yes" } else { "no" }.to_string(),
+            thinking: if m.reasoning { "yes" } else { "no" }.into(),
             images: if m.input.contains(&InputType::Image) {
                 "yes"
             } else {
                 "no"
             }
-            .to_string(),
+            .into(),
         }
     }
 }
 
-/// Print the model catalog. Returns the number of rows actually printed
-/// (zero when the registry is empty or the search produces no matches).
-///
-/// `docs_path` is forwarded to [`no_models_available_message`] when the
-/// registry yields nothing — the helper mirrors `auth-guidance` by taking
-/// the docs directory as an explicit parameter rather than embedding a
-/// filesystem assumption.
-pub fn list_models(
-    registry: &ModelRegistry,
-    search_pattern: Option<&str>,
-    docs_path: &Path,
-) -> usize {
-    if let Some(err) = registry.error() {
-        // Yellow warning to stderr, matching TS `chalk.yellow(...)`.
-        eprintln!("\x1b[33mWarning: errors loading models.json:\n{err}\x1b[0m");
-    }
-
-    let models = registry.available();
-    if models.is_empty() {
-        println!("{}", no_models_available_message(docs_path));
-        return 0;
-    }
-
-    let mut filtered: Vec<Model> = match search_pattern {
-        Some(pattern) if !pattern.is_empty() => {
-            // Build the haystack `"<provider> <id>"` exactly as TS does so
-            // search behaviour matches.
-            let haystacks: Vec<String> = models
-                .iter()
-                .map(|m| format!("{} {}", m.provider.as_str(), m.id))
-                .collect();
-            let haystack_refs: Vec<&str> = haystacks.iter().map(String::as_str).collect();
-            let matches = fuzzy_filter(pattern, &haystack_refs);
-            matches
-                .into_iter()
-                .map(|(i, _)| models[i].clone())
-                .collect()
-        }
-        _ => models,
-    };
-
-    if filtered.is_empty() {
-        // The pattern is guaranteed `Some(non-empty)` here because the
-        // empty/None branch returns the full list above.
-        let pattern = search_pattern.unwrap_or("");
-        println!("No models matching \"{pattern}\"");
-        return 0;
-    }
-
-    // Sort by provider, then by id (TS `localeCompare`; the ASCII subset
-    // we care about agrees with byte ordering).
-    filtered.sort_by(|a, b| {
-        a.provider
-            .as_str()
-            .cmp(b.provider.as_str())
-            .then_with(|| a.id.cmp(&b.id))
-    });
-
-    let rows: Vec<Row> = filtered.iter().map(Row::from_model).collect();
-
-    // Header labels (lowercase, matching TS).
-    let header = Row {
-        provider: "provider".to_string(),
-        model: "model".to_string(),
-        context: "context".to_string(),
-        max_out: "max-out".to_string(),
-        thinking: "thinking".to_string(),
-        images: "images".to_string(),
-    };
-
-    let widths = column_widths(&header, &rows);
-    print_row(&header, &widths);
-    for row in &rows {
-        print_row(row, &widths);
-    }
-
-    rows.len()
-}
-
-struct Widths {
+struct ColumnWidths {
     provider: usize,
     model: usize,
     context: usize,
@@ -162,8 +145,8 @@ struct Widths {
     images: usize,
 }
 
-fn column_widths(header: &Row, rows: &[Row]) -> Widths {
-    let mut w = Widths {
+fn column_widths(header: &Row, rows: &[Row]) -> ColumnWidths {
+    let mut w = ColumnWidths {
         provider: header.provider.len(),
         model: header.model.len(),
         context: header.context.len(),
@@ -182,27 +165,70 @@ fn column_widths(header: &Row, rows: &[Row]) -> Widths {
     w
 }
 
-fn print_row(row: &Row, widths: &Widths) {
-    println!(
-        "{:<pw$}  {:<mw$}  {:<cw$}  {:<ow$}  {:<tw$}  {:<iw$}",
-        row.provider,
-        row.model,
-        row.context,
-        row.max_out,
-        row.thinking,
-        row.images,
-        pw = widths.provider,
-        mw = widths.model,
-        cw = widths.context,
-        ow = widths.max_out,
-        tw = widths.thinking,
-        iw = widths.images,
-    );
+/// Render the model catalogue as a six-column table. Header labels are
+/// lowercase so the output stays stable for downstream diff/snapshot
+/// harnesses.
+pub fn print_models_table(models: &[Model]) {
+    let header = Row {
+        provider: "provider".into(),
+        model: "model".into(),
+        context: "context".into(),
+        max_out: "max-out".into(),
+        thinking: "thinking".into(),
+        images: "images".into(),
+    };
+    let rows: Vec<Row> = models.iter().map(Row::from_model).collect();
+    let w = column_widths(&header, &rows);
+    let print = |r: &Row| {
+        println!(
+            "{:<pw$}  {:<mw$}  {:<cw$}  {:<ow$}  {:<tw$}  {:<iw$}",
+            r.provider,
+            r.model,
+            r.context,
+            r.max_out,
+            r.thinking,
+            r.images,
+            pw = w.provider,
+            mw = w.model,
+            cw = w.context,
+            ow = w.max_out,
+            tw = w.thinking,
+            iw = w.images,
+        );
+    };
+    print(&header);
+    for r in &rows {
+        print(r);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use model::types::{Api, Cost, Provider};
+
+    fn mk_model(provider: Provider, id: &str) -> Model {
+        Model {
+            id: id.into(),
+            name: id.into(),
+            api: Api::OpenAICompletions,
+            provider,
+            base_url: "https://example.com".into(),
+            reasoning: false,
+            input: vec![InputType::Text],
+            cost: Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 1_024,
+            max_tokens: 256,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        }
+    }
 
     #[test]
     fn formats_token_counts_below_thousand() {
@@ -226,26 +252,11 @@ mod tests {
 
     #[test]
     fn row_from_model_renders_thinking_and_image_flags() {
-        let m = Model {
-            id: "gpt-x".into(),
-            name: "GPT X".into(),
-            api: model::types::Api::OpenAICompletions,
-            provider: model::types::Provider::OpenAI,
-            base_url: "https://example.com".into(),
-            reasoning: true,
-            input: vec![InputType::Text, InputType::Image],
-            cost: model::types::Cost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: 200_000,
-            max_tokens: 8_192,
-            headers: None,
-            compat: None,
-            thinking_level_map: None,
-        };
+        let mut m = mk_model(Provider::OpenAI, "gpt-x");
+        m.reasoning = true;
+        m.input = vec![InputType::Text, InputType::Image];
+        m.context_window = 200_000;
+        m.max_tokens = 8_192;
         let row = Row::from_model(&m);
         assert_eq!(row.provider, "openai");
         assert_eq!(row.model, "gpt-x");
@@ -257,27 +268,7 @@ mod tests {
 
     #[test]
     fn row_without_image_input_reports_no() {
-        let m = Model {
-            id: "text-only".into(),
-            name: "Text Only".into(),
-            api: model::types::Api::OpenAICompletions,
-            provider: model::types::Provider::OpenAI,
-            base_url: "https://example.com".into(),
-            reasoning: false,
-            input: vec![InputType::Text],
-            cost: model::types::Cost {
-                input: 0.0,
-                output: 0.0,
-                cache_read: 0.0,
-                cache_write: 0.0,
-            },
-            context_window: 1_024,
-            max_tokens: 256,
-            headers: None,
-            compat: None,
-            thinking_level_map: None,
-        };
-        let row = Row::from_model(&m);
+        let row = Row::from_model(&mk_model(Provider::OpenAI, "text-only"));
         assert_eq!(row.thinking, "no");
         assert_eq!(row.images, "no");
         assert_eq!(row.context, "1.0K");
@@ -318,5 +309,58 @@ mod tests {
         // Header longer than any data row.
         assert_eq!(widths.context, "context".len());
         assert_eq!(widths.thinking, "thinking".len());
+    }
+
+    /// `--list-models openai` must return OpenAI models only. The
+    /// pre-fix fuzzy implementation matched `o-p-e-n-a-i` scattered
+    /// across `openrouter/*` ids and returned hundreds of false
+    /// positives.
+    #[test]
+    fn pattern_exact_provider_match_wins_over_substring() {
+        let models = vec![
+            mk_model(Provider::OpenAI, "gpt-4o"),
+            mk_model(Provider::Openrouter, "anthropic/claude-3-opus"),
+            mk_model(Provider::Openrouter, "openai/gpt-4o"),
+        ];
+        let kept = filter_models_by_pattern(models, "openai");
+        let ids: Vec<&str> = kept.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-4o"], "exact provider match must drop openrouter/*");
+    }
+
+    /// When no provider matches the needle exactly, fall through to a
+    /// case-insensitive substring on `<provider> <id>`. A user typing
+    /// a partial id like `claude` should get every claude-family model
+    /// regardless of provider, but not unrelated entries.
+    #[test]
+    fn pattern_substring_match_catches_id_fragments() {
+        let models = vec![
+            mk_model(Provider::Anthropic, "claude-3-opus"),
+            mk_model(Provider::Openrouter, "anthropic/claude-3-haiku"),
+            mk_model(Provider::OpenAI, "gpt-4o"),
+        ];
+        let kept = filter_models_by_pattern(models, "claude");
+        let ids: Vec<&str> = kept.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["claude-3-opus", "anthropic/claude-3-haiku"]);
+    }
+
+    /// Fuzzy is the last-resort "did you mean…?" pass — it should
+    /// only fire when both exact and substring return nothing.
+    #[test]
+    fn pattern_falls_through_to_fuzzy_only_when_strict_passes_miss() {
+        // "gpO" matches neither provider exactly nor as a substring of
+        // "openai gpt-4o", but fuzzy `g-p-O` finds it.
+        let models = vec![mk_model(Provider::OpenAI, "gpt-4o")];
+        let kept = filter_models_by_pattern(models, "gpO");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "gpt-4o");
+    }
+
+    /// A pattern that matches nothing at any tier returns an empty
+    /// list (so the caller can emit "No models matching …").
+    #[test]
+    fn pattern_with_no_match_at_any_tier_returns_empty() {
+        let models = vec![mk_model(Provider::OpenAI, "gpt-4o")];
+        let kept = filter_models_by_pattern(models, "zzzzz-does-not-exist");
+        assert!(kept.is_empty());
     }
 }

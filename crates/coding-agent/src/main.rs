@@ -18,15 +18,14 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     timings::reset();
-    // Rewrite pi-style multi-char short flags (`-nc`, `-nt`, `-nbt`)
-    // before clap sees argv. Without this, scripts written against
-    // Plain clap would reject `-nc` as `-n -c` (two unknown
-    // shorts).
+    // Rewrite multi-char short flags (`-nc`, `-nt`, `-nbt`, …) before
+    // clap sees argv. Without this, scripts using them would be
+    // rejected as e.g. `-n -c` (two unknown shorts).
     let argv = hand_coding_agent::cli::args::expand_short_aliases(std::env::args());
-    // Match pi's exit-code convention: parse errors yield exit 1
-    // (clap's default is 2) and a single-line `Error: <one-line>`
-    // message instead of a multi-line usage dump on stderr. Help and
-    // version still use clap's built-in handler (exit 0, full output).
+    // Parse errors yield exit 1 (clap's default is 2) and a single-line
+    // `Error: <one-line>` message instead of a multi-line usage dump
+    // on stderr. Help and version still use clap's built-in handler
+    // (exit 0, full output).
     let cli = Args::try_parse_from(argv).unwrap_or_else(|e| {
         match e.kind() {
             clap::error::ErrorKind::DisplayHelp
@@ -104,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // context, max-out, thinking, images) filtered to providers that
     // have credentials configured (env var or auth.json).
     if let Some(ref search) = cli.list_models {
-        let models = list_models_for_cli(search.as_deref());
+        let models = hand_coding_agent::cli::list_models_for_cli(search.as_deref());
         if models.is_empty() {
             if let Some(pat) = search.as_deref().filter(|s| !s.is_empty()) {
                 println!("No models matching \"{pat}\"");
@@ -113,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             return Ok(());
         }
-        print_models_table(&models);
+        hand_coding_agent::cli::print_models_table(&models);
         return Ok(());
     }
 
@@ -671,179 +670,6 @@ fn handle_agent_event(event: &hand_agent::types::AgentEvent) {
             let _ = io::stderr().flush();
         }
         _ => {}
-    }
-}
-
-/// Resolve the model list shown by `--list-models`, filtered to
-/// providers whose credentials are configured (env var or auth.json).
-/// Only surfaces models the user can actually call. Falls back to the
-/// unfiltered catalogue when auth.json is unreadable (so the command
-/// never returns a misleading "no models").
-fn list_models_for_cli(search: Option<&str>) -> Vec<model::Model> {
-    use hand_coding_agent::core::auth_storage::AuthStorage;
-    use hand_coding_agent::core::model_registry::ModelRegistry;
-    use hand_tui::fuzzy_filter;
-
-    let auth = match AuthStorage::new() {
-        Ok(a) => a,
-        Err(_) => return model_resolver::list_models(search),
-    };
-    let registry = ModelRegistry::create(auth);
-    // Surface models.json load errors on stderr so users discover
-    // broken configs instead of silently losing custom models or
-    // overrides.
-    if let Some(err) = registry.error() {
-        eprintln!("\x1b[33mWarning: {err}\x1b[0m");
-    }
-    let mut models = registry.available();
-    if let Some(pattern) = search.filter(|s| !s.is_empty()) {
-        let needle = pattern.to_lowercase();
-        // Pass 1: exact provider name (case-insensitive) — `--list-models
-        // openai` should return openai's models, NOT openrouter's that
-        // happen to share the substring.
-        let provider_exact: Vec<model::Model> = models
-            .iter()
-            .filter(|m| m.provider.as_str().eq_ignore_ascii_case(&needle))
-            .cloned()
-            .collect();
-        if !provider_exact.is_empty() {
-            models = provider_exact;
-        } else {
-            // Pass 2: case-insensitive substring on `<provider> <id>`.
-            // Stricter than fuzzy — `openai` won't match `openrouter` or
-            // `ai21` just because the characters appear in order.
-            let kept: Vec<model::Model> = models
-                .iter()
-                .filter(|m| {
-                    let haystack =
-                        format!("{} {}", m.provider.as_str(), m.id).to_lowercase();
-                    haystack.contains(&needle)
-                })
-                .cloned()
-                .collect();
-            // Only fall through to fuzzy when substring also returns
-            // nothing — that's the last-resort "did you mean…?" mode.
-            if !kept.is_empty() {
-                models = kept;
-            } else {
-                let haystacks: Vec<String> = models
-                    .iter()
-                    .map(|m| format!("{} {}", m.provider.as_str(), m.id))
-                    .collect();
-                let haystack_refs: Vec<&str> =
-                    haystacks.iter().map(String::as_str).collect();
-                let matches = fuzzy_filter(pattern, &haystack_refs);
-                models = matches.into_iter().map(|(i, _)| models[i].clone()).collect();
-            }
-        }
-    }
-    models.sort_by(|a, b| {
-        a.provider
-            .as_str()
-            .cmp(b.provider.as_str())
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    models
-}
-
-/// Render the model catalog as a six-column table (provider, model,
-/// context, max-out, thinking, images). Header labels are lowercase
-/// so the output stays stable for any downstream diff or snapshot
-/// harness consuming this command.
-fn print_models_table(models: &[model::Model]) {
-    use model::types::InputType;
-
-    fn fmt_tokens(n: u64) -> String {
-        if n >= 1_000_000 {
-            let m = n as f64 / 1_000_000.0;
-            if (m.fract()).abs() < f64::EPSILON {
-                format!("{}M", m as u64)
-            } else {
-                format!("{m:.1}M")
-            }
-        } else if n >= 1_000 {
-            let k = n as f64 / 1_000.0;
-            if (k.fract()).abs() < f64::EPSILON {
-                format!("{}K", k as u64)
-            } else {
-                format!("{k:.1}K")
-            }
-        } else {
-            n.to_string()
-        }
-    }
-
-    struct Row {
-        provider: String,
-        model: String,
-        context: String,
-        max_out: String,
-        thinking: String,
-        images: String,
-    }
-
-    let header = Row {
-        provider: "provider".into(),
-        model: "model".into(),
-        context: "context".into(),
-        max_out: "max-out".into(),
-        thinking: "thinking".into(),
-        images: "images".into(),
-    };
-
-    let rows: Vec<Row> = models
-        .iter()
-        .map(|m| Row {
-            provider: m.provider.as_str().to_string(),
-            model: m.id.clone(),
-            context: fmt_tokens(m.context_window),
-            max_out: fmt_tokens(m.max_tokens),
-            thinking: if m.reasoning { "yes" } else { "no" }.into(),
-            images: if m.input.contains(&InputType::Image) {
-                "yes"
-            } else {
-                "no"
-            }
-            .into(),
-        })
-        .collect();
-
-    let mut w = (
-        header.provider.len(),
-        header.model.len(),
-        header.context.len(),
-        header.max_out.len(),
-        header.thinking.len(),
-        header.images.len(),
-    );
-    for r in &rows {
-        w.0 = w.0.max(r.provider.len());
-        w.1 = w.1.max(r.model.len());
-        w.2 = w.2.max(r.context.len());
-        w.3 = w.3.max(r.max_out.len());
-        w.4 = w.4.max(r.thinking.len());
-        w.5 = w.5.max(r.images.len());
-    }
-    let print = |r: &Row| {
-        println!(
-            "{:<pw$}  {:<mw$}  {:<cw$}  {:<ow$}  {:<tw$}  {:<iw$}",
-            r.provider,
-            r.model,
-            r.context,
-            r.max_out,
-            r.thinking,
-            r.images,
-            pw = w.0,
-            mw = w.1,
-            cw = w.2,
-            ow = w.3,
-            tw = w.4,
-            iw = w.5,
-        );
-    };
-    print(&header);
-    for r in &rows {
-        print(r);
     }
 }
 
