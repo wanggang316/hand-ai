@@ -697,17 +697,45 @@ fn list_models_for_cli(search: Option<&str>) -> Vec<model::Model> {
     }
     let mut models = registry.available();
     if let Some(pattern) = search.filter(|s| !s.is_empty()) {
-        let haystacks: Vec<String> = models
+        let needle = pattern.to_lowercase();
+        // Pass 1: exact provider name (case-insensitive) — `--list-models
+        // openai` should return openai's models, NOT openrouter's that
+        // happen to share the substring.
+        let provider_exact: Vec<model::Model> = models
             .iter()
-            .map(|m| format!("{} {}", m.provider.as_str(), m.id))
+            .filter(|m| m.provider.as_str().eq_ignore_ascii_case(&needle))
+            .cloned()
             .collect();
-        let haystack_refs: Vec<&str> = haystacks.iter().map(String::as_str).collect();
-        let matches = fuzzy_filter(pattern, &haystack_refs);
-        let kept: Vec<model::Model> = matches
-            .into_iter()
-            .map(|(i, _)| models[i].clone())
-            .collect();
-        models = kept;
+        if !provider_exact.is_empty() {
+            models = provider_exact;
+        } else {
+            // Pass 2: case-insensitive substring on `<provider> <id>`.
+            // Stricter than fuzzy — `openai` won't match `openrouter` or
+            // `ai21` just because the characters appear in order.
+            let kept: Vec<model::Model> = models
+                .iter()
+                .filter(|m| {
+                    let haystack =
+                        format!("{} {}", m.provider.as_str(), m.id).to_lowercase();
+                    haystack.contains(&needle)
+                })
+                .cloned()
+                .collect();
+            // Only fall through to fuzzy when substring also returns
+            // nothing — that's the last-resort "did you mean…?" mode.
+            if !kept.is_empty() {
+                models = kept;
+            } else {
+                let haystacks: Vec<String> = models
+                    .iter()
+                    .map(|m| format!("{} {}", m.provider.as_str(), m.id))
+                    .collect();
+                let haystack_refs: Vec<&str> =
+                    haystacks.iter().map(String::as_str).collect();
+                let matches = fuzzy_filter(pattern, &haystack_refs);
+                models = matches.into_iter().map(|(i, _)| models[i].clone()).collect();
+            }
+        }
     }
     models.sort_by(|a, b| {
         a.provider
