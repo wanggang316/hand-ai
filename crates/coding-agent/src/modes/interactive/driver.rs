@@ -2732,6 +2732,22 @@ fn last_n_assistant_texts(session: &AgentSession, n: usize) -> Vec<String> {
 /// on the parsed [`ExportFormat`].
 fn apply_export(chat: &ChatList, session: &AgentSession, path: &Path, fmt: ExportFormat) {
     use crate::core::export::{export_to_html, export_to_jsonl};
+    // Refuse to silently overwrite an existing file. pi-side issue #8:
+    // users testing exports against a path they already used lose the
+    // previous transcript without warning. Tell them to delete first
+    // or pick a new name. Markdown short-circuits in its own arm
+    // below since it's not yet implemented.
+    if path.exists() && !matches!(fmt, ExportFormat::Markdown) {
+        push_status(
+            chat,
+            format!(
+                "[/export: {} already exists. Delete it or choose a different path.]",
+                path.display()
+            ),
+            Some(RED_FG),
+        );
+        return;
+    }
     match fmt {
         ExportFormat::Jsonl | ExportFormat::Json => {
             // For `.json` we still copy the JSONL stream verbatim — a
@@ -4109,6 +4125,33 @@ mod tests {
         assert!(
             joined.contains("exported to"),
             "expected status message, got {joined:?}"
+        );
+    }
+
+    /// pi-side issue #8: `/export <path>` must refuse to overwrite a
+    /// file that already exists. The user lost a previous transcript
+    /// by reusing the same path; the new contract is "delete or
+    /// choose a different path", surfaced as a red status line, with
+    /// the file's bytes left untouched.
+    #[tokio::test]
+    async fn export_refuses_to_overwrite_existing_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let output = dir.path().join("existing.html");
+        let original = "PREVIOUS-CONTENT-DO-NOT-CLOBBER";
+        std::fs::write(&output, original).unwrap();
+
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = SlashCommandAction::Export(output.clone(), ExportFormat::Html);
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+
+        // File untouched.
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), original);
+        // Status surfaces the refusal.
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(
+            joined.contains("already exists"),
+            "expected overwrite-refusal status, got {joined:?}"
         );
     }
 
