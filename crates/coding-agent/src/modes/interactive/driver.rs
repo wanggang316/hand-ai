@@ -575,57 +575,68 @@ impl InteractiveMode {
         let assistant_for_events = Arc::clone(&assistant_handle);
         let usage_for_events = Arc::clone(&usage);
         let loader_for_events = Arc::clone(&loader_slot);
-        let event_pump = tokio::spawn(async move {
+        let _event_pump = tokio::spawn(async move {
             let mut rx = event_rx;
             while !stop_for_events.load(Ordering::Relaxed) {
-                match rx.recv().await {
-                    Some(ev) => {
-                        match &ev {
-                            AgentSessionEvent::Agent(agent_ev) => match agent_ev.as_ref() {
-                                hand_agent::types::AgentEvent::AgentStart => {
-                                    install_loader(&loader_for_events, "Working…");
-                                    emit_terminal_progress(ProgressState::Indeterminate);
-                                }
-                                hand_agent::types::AgentEvent::AgentEnd { .. } => {
-                                    clear_loader(&loader_for_events);
-                                    emit_terminal_progress(ProgressState::Clear);
-                                }
-                                hand_agent::types::AgentEvent::MessageEnd {
-                                    message: model::Message::Assistant(a),
-                                } => {
-                                    accumulate_usage(&usage_for_events, &a.usage);
-                                }
-                                _ => {}
-                            },
-                            AgentSessionEvent::CompactionStart => {
-                                install_loader(&loader_for_events, "Compacting context…");
-                                emit_terminal_progress(ProgressState::Indeterminate);
-                            }
-                            AgentSessionEvent::CompactionEnd { .. } => {
-                                clear_loader(&loader_for_events);
-                                emit_terminal_progress(ProgressState::Clear);
-                            }
-                            AgentSessionEvent::Error(msg) => {
-                                clear_loader(&loader_for_events);
-                                emit_terminal_progress(ProgressState::Error);
-                                push_error(&chat_for_events, msg.as_str());
-                            }
-                            AgentSessionEvent::SessionInfoChanged { .. } => {
-                                // The TUI rebuilds its session-info footer
-                                // on the next render tick from `session.label()`.
-                                // No event-time action required.
-                            }
+                // Poll the stop flag while waiting for events so `/quit`
+                // unblocks this task even when no agent activity is in
+                // flight. Without the timeout, `rx.recv().await` parks
+                // forever (the channel sender is held by the live
+                // session subscriber), and `event_pump.await` after
+                // `tui.run()` hangs the whole process.
+                let received = tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    rx.recv(),
+                )
+                .await;
+                let ev = match received {
+                    Ok(Some(ev)) => ev,
+                    Ok(None) => break,    // channel closed
+                    Err(_) => continue,   // timeout — re-check stop flag
+                };
+                match &ev {
+                    AgentSessionEvent::Agent(agent_ev) => match agent_ev.as_ref() {
+                        hand_agent::types::AgentEvent::AgentStart => {
+                            install_loader(&loader_for_events, "Working…");
+                            emit_terminal_progress(ProgressState::Indeterminate);
                         }
-                        let updates = dispatch_event(&ev);
-                        apply_updates_to_chat(
-                            &chat_for_events,
-                            &tools_for_events,
-                            &assistant_for_events,
-                            updates,
-                        );
+                        hand_agent::types::AgentEvent::AgentEnd { .. } => {
+                            clear_loader(&loader_for_events);
+                            emit_terminal_progress(ProgressState::Clear);
+                        }
+                        hand_agent::types::AgentEvent::MessageEnd {
+                            message: model::Message::Assistant(a),
+                        } => {
+                            accumulate_usage(&usage_for_events, &a.usage);
+                        }
+                        _ => {}
+                    },
+                    AgentSessionEvent::CompactionStart => {
+                        install_loader(&loader_for_events, "Compacting context…");
+                        emit_terminal_progress(ProgressState::Indeterminate);
                     }
-                    None => break,
+                    AgentSessionEvent::CompactionEnd { .. } => {
+                        clear_loader(&loader_for_events);
+                        emit_terminal_progress(ProgressState::Clear);
+                    }
+                    AgentSessionEvent::Error(msg) => {
+                        clear_loader(&loader_for_events);
+                        emit_terminal_progress(ProgressState::Error);
+                        push_error(&chat_for_events, msg.as_str());
+                    }
+                    AgentSessionEvent::SessionInfoChanged { .. } => {
+                        // The TUI rebuilds its session-info footer
+                        // on the next render tick from `session.label()`.
+                        // No event-time action required.
+                    }
                 }
+                let updates = dispatch_event(&ev);
+                apply_updates_to_chat(
+                    &chat_for_events,
+                    &tools_for_events,
+                    &assistant_for_events,
+                    updates,
+                );
             }
         });
 
@@ -634,7 +645,7 @@ impl InteractiveMode {
         let loader_for_tick = Arc::clone(&loader_slot);
         let stop_for_tick = Arc::clone(&stop);
         let tick_render = tui.render_handle();
-        let tick_task = tokio::spawn(async move {
+        let _tick_task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(LOADER_TICK_MS));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while !stop_for_tick.load(Ordering::Relaxed) {
@@ -710,7 +721,7 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
         let stop_handle_for_agent = Arc::clone(&stop_handle);
         let agent_cwd = cwd.clone();
         let agent_mounter = tui.overlay_mounter();
-        let agent_task = tokio::spawn(async move {
+        let _agent_task = tokio::spawn(async move {
             let mut session = session;
             let cwd = agent_cwd;
             let mounter = agent_mounter;
@@ -743,8 +754,18 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
                     (p.text.take(), std::mem::take(&mut p.quit))
                 };
                 if quit {
+                    // Restore terminal cooked mode + cursor, then
+                    // hard-exit. Going through the normal `tui.stop()`
+                    // → `tui.run()` returns → main cleanup path
+                    // hangs because the stdin reader is parked in
+                    // tokio::io::stdin (a blocking OS thread the
+                    // runtime cannot cancel); the user-visible
+                    // symptom of issue #7 is exactly this.
                     unsafe { stop_handle_for_agent.stop() };
-                    break;
+                    // Give the run loop a beat to call
+                    // shutdown_terminal before we yank the process.
+                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                    std::process::exit(0);
                 }
                 if let Some(text) = submitted {
                     let trimmed = text.trim().to_string();
@@ -783,8 +804,17 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
                                 refresh_footer(&session, &cwd, &agent_footer, &agent_usage);
                                 refresh_editor_border(&session, &agent_editor);
                                 if matches!(outcome, SlashOutcome::Quit) {
+                                    // Same hard-exit as the bare
+                                    // `quit` pending path above —
+                                    // tokio::io::stdin's blocking
+                                    // thread makes graceful teardown
+                                    // hang otherwise.
                                     unsafe { stop_handle_for_agent.stop() };
-                                    break;
+                                    tokio::time::sleep(
+                                        std::time::Duration::from_millis(80),
+                                    )
+                                    .await;
+                                    std::process::exit(0);
                                 }
                             }
                             SlashCommandResult::Unknown => {
@@ -835,12 +865,16 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
         // task (or stdin closes).
         tui.run().await?;
 
-        // Shutdown.
+        // Shutdown. Signal every background task; the tui has already
+        // restored the terminal (shutdown_terminal runs inside the
+        // run loop on its way out). We don't await the spawned tasks
+        // because the stdin reader sits inside `tokio::io::stdin()`,
+        // which is backed by a blocking OS thread that the runtime
+        // cannot cancel — `event_pump.await` / `tick_task.await`
+        // would block forever for normal `/quit`. Exit the process
+        // directly; tokio reaps the runtime as part of teardown.
         stop.store(true, Ordering::Relaxed);
-        let _ = agent_task.await;
-        let _ = event_pump.await;
-        let _ = tick_task.await;
-        Ok(())
+        std::process::exit(0);
     }
 }
 
