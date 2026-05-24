@@ -1115,6 +1115,22 @@ impl SettingsManager {
         }
     }
 
+    /// Construct with a caller-supplied merged settings snapshot. Test-
+    /// only — bypasses the global/project layer load so the test can
+    /// pin a specific `default_provider` / `default_thinking_level`
+    /// without writing YAML to disk.
+    #[doc(hidden)]
+    pub fn from_settings_for_test(settings: Settings) -> Self {
+        Self {
+            settings,
+            global_layer: Settings::default(),
+            project_layer: Settings::default(),
+            project_path: None,
+            global_path: None,
+            watch_handle: None,
+        }
+    }
+
     /// Borrow the merged settings.
     pub fn current(&self) -> &Settings {
         &self.settings

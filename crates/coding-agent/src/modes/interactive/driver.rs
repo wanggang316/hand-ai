@@ -2237,15 +2237,21 @@ async fn mount_settings_selector(
 }
 
 /// Build the read-only entries displayed by `/settings`. Surfaces a
-/// curated subset of the settings (theme, auto-compact,
-/// hide-thinking-block, terminal.show-images, terminal.clear-on-shrink,
-/// quiet-startup). Each entry carries the live value from
-/// `SettingsManager::current()` so the dialog reflects what's
-/// actually in effect for this session, not just a static list.
+/// curated subset of the merged settings. The first three entries are
+/// the effective defaults that drive new sessions (provider, model,
+/// thinking level) — UAT-013 / issue #16 pinned that these must be
+/// visible so users can confirm a project-level override is in
+/// effect. The remaining entries are interactive toggles (theme,
+/// auto-compact, etc.) whose changes flow back via
+/// `SettingsSelectorEvent::Changed`.
+///
+/// Each entry carries the live value from `SettingsManager::current()`
+/// so the dialog reflects what's actually in effect for this session,
+/// not just a static list.
 pub(crate) fn build_settings_entries(
     manager: &crate::core::settings::SettingsManager,
 ) -> Vec<SettingEntry> {
-    use crate::core::settings::ThemeSetting;
+    use crate::core::settings::{ThemeSetting, ThinkingLevelSetting};
 
     let s = manager.current();
 
@@ -2262,7 +2268,44 @@ pub(crate) fn build_settings_entries(
         ThemeSetting::System => 3,
     };
 
+    let provider_display = s
+        .default_provider
+        .clone()
+        .unwrap_or_else(|| "(none — falls back to auto-pick)".to_string());
+    let model_display = s
+        .default_model
+        .clone()
+        .unwrap_or_else(|| "(none — provider default)".to_string());
+    let thinking_display = match s.default_thinking_level {
+        Some(ThinkingLevelSetting::Off) => "off".to_string(),
+        Some(ThinkingLevelSetting::Minimal) => "minimal".to_string(),
+        Some(ThinkingLevelSetting::Low) => "low".to_string(),
+        Some(ThinkingLevelSetting::Medium) => "medium".to_string(),
+        Some(ThinkingLevelSetting::High) => "high".to_string(),
+        Some(ThinkingLevelSetting::Xhigh) => "xhigh".to_string(),
+        None => "(unset)".to_string(),
+    };
+
     vec![
+        SettingEntry {
+            key: "default_provider".to_string(),
+            value: SettingValue::String(provider_display),
+            description: "Effective default provider (after global + project merge)."
+                .to_string(),
+        },
+        SettingEntry {
+            key: "default_model".to_string(),
+            value: SettingValue::String(model_display),
+            description: "Effective default model (after global + project merge)."
+                .to_string(),
+        },
+        SettingEntry {
+            key: "default_thinking_level".to_string(),
+            value: SettingValue::String(thinking_display),
+            description:
+                "Effective default reasoning effort for thinking-capable models."
+                    .to_string(),
+        },
         SettingEntry {
             key: "theme".to_string(),
             value: SettingValue::Enum {
@@ -3945,6 +3988,74 @@ mod tests {
             }
             other => panic!("expected enum value, got {other:?}"),
         }
+    }
+
+    /// Issue #16 / UAT-013: the effective `default_provider`,
+    /// `default_model`, and `default_thinking_level` must be visible
+    /// in `/settings` so a user can confirm that a project-level
+    /// override took effect. Before this fix the dialog rendered
+    /// theme / toggles only — there was no way to see whether the
+    /// project's `default_thinking_level: high` was actually live.
+    #[test]
+    fn settings_entries_expose_effective_provider_model_and_thinking_overrides() {
+        use crate::core::settings::{Settings, SettingsManager, ThinkingLevelSetting};
+
+        let mut settings = Settings::default();
+        settings.default_provider = Some("anthropic".to_string());
+        settings.default_model = Some("claude-opus-4-7".to_string());
+        settings.default_thinking_level = Some(ThinkingLevelSetting::High);
+
+        let manager = SettingsManager::from_settings_for_test(settings);
+        let entries = build_settings_entries(&manager);
+
+        let find = |key: &str| -> String {
+            entries
+                .iter()
+                .find(|e| e.key == key)
+                .unwrap_or_else(|| panic!("missing {key} entry"))
+                .value
+                .to_string()
+        };
+
+        assert_eq!(find("default_provider"), "anthropic");
+        assert_eq!(find("default_model"), "claude-opus-4-7");
+        assert_eq!(find("default_thinking_level"), "high");
+    }
+
+    /// When the effective settings have nothing configured for these
+    /// fields, the rows still appear — with explicit "unset" /
+    /// "(none — …)" hints so the user knows the auto-pick path is in
+    /// effect, not that the dialog is broken.
+    #[test]
+    fn settings_entries_render_unset_overrides_with_explicit_placeholders() {
+        use crate::core::settings::{Settings, SettingsManager};
+
+        let mut settings = Settings::default();
+        settings.default_provider = None;
+        settings.default_model = None;
+        settings.default_thinking_level = None;
+
+        let manager = SettingsManager::from_settings_for_test(settings);
+        let entries = build_settings_entries(&manager);
+
+        let find = |key: &str| -> String {
+            entries
+                .iter()
+                .find(|e| e.key == key)
+                .unwrap_or_else(|| panic!("missing {key} entry"))
+                .value
+                .to_string()
+        };
+
+        assert!(
+            find("default_provider").contains("none"),
+            "default_provider must render a placeholder when unset"
+        );
+        assert!(
+            find("default_model").contains("none"),
+            "default_model must render a placeholder when unset"
+        );
+        assert_eq!(find("default_thinking_level"), "(unset)");
     }
 
     #[tokio::test]
