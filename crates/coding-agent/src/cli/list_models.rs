@@ -20,10 +20,20 @@ use crate::core::auth_storage::AuthStorage;
 use crate::core::model_registry::ModelRegistry;
 use crate::core::model_resolver;
 
-/// Resolve the catalogue shown by `--list-models`. Filters to providers
-/// whose credentials are configured (env var or auth.json). Falls back
-/// to the unfiltered catalogue when auth.json is unreadable so the
-/// command never returns a misleading empty list.
+/// Resolve the catalogue shown by `--list-models`.
+///
+/// Default behaviour: filter to providers whose credentials are
+/// configured (env var or auth.json) so the user sees what they can
+/// actually call. Two escape hatches keep the command useful in
+/// configurations where that filter would hide everything:
+///
+/// 1. auth.json unreadable → fall back to the unfiltered catalogue.
+/// 2. no providers configured AND `registry.available()` is empty →
+///    fall back to the unfiltered catalogue. This is the discovery
+///    case: a fresh install needs to see what's possible before it can
+///    decide which provider to configure. Issue #15 / UAT-002 pinned
+///    this — the prior behaviour returned `No models found.` which was
+///    misleading (the catalogue isn't empty, the auth.json is).
 pub fn list_models_for_cli(search: Option<&str>) -> Vec<Model> {
     let auth = match AuthStorage::new() {
         Ok(a) => a,
@@ -35,7 +45,7 @@ pub fn list_models_for_cli(search: Option<&str>) -> Vec<Model> {
     if let Some(err) = registry.error() {
         eprintln!("\x1b[33mWarning: {err}\x1b[0m");
     }
-    let mut models = registry.available();
+    let mut models = pick_pool(registry.available());
     if let Some(pattern) = search.filter(|s| !s.is_empty()) {
         models = filter_models_by_pattern(models, pattern);
     }
@@ -46,6 +56,20 @@ pub fn list_models_for_cli(search: Option<&str>) -> Vec<Model> {
             .then_with(|| a.id.cmp(&b.id))
     });
     models
+}
+
+/// Decide which catalogue to surface based on what the auth-filtered
+/// registry returned. Non-empty input is the user's "providers I can
+/// actually call" set; an empty input is the no-credentials case, in
+/// which we fall back to the full unfiltered catalogue so the user can
+/// discover available providers. Extracted so the fallback rule can be
+/// unit-tested without an `AuthStorage`.
+pub(crate) fn pick_pool(available: Vec<Model>) -> Vec<Model> {
+    if available.is_empty() {
+        model_resolver::list_models(None)
+    } else {
+        available
+    }
 }
 
 /// Apply the three-pass search filter (exact provider → substring →
@@ -362,5 +386,34 @@ mod tests {
         let models = vec![mk_model(Provider::OpenAI, "gpt-4o")];
         let kept = filter_models_by_pattern(models, "zzzzz-does-not-exist");
         assert!(kept.is_empty());
+    }
+
+    /// No credentials configured (`registry.available()` returned empty)
+    /// must fall back to the full unfiltered catalogue. A fresh install
+    /// running `hand --list-models` needs to discover what's possible
+    /// before it can decide which provider to configure. Pinned against
+    /// issue #15 / UAT-002 where the prior behaviour was a misleading
+    /// `No models found.`
+    #[test]
+    fn pick_pool_falls_back_to_full_catalogue_when_no_providers_configured() {
+        let pool = pick_pool(Vec::new());
+        assert!(
+            !pool.is_empty(),
+            "fresh install (no auth) must surface the unfiltered catalogue"
+        );
+    }
+
+    /// When the registry already returns providers, the auth-filtered
+    /// list wins — don't drown the user in models they can't call.
+    #[test]
+    fn pick_pool_keeps_auth_filtered_list_when_present() {
+        let configured = vec![
+            mk_model(Provider::OpenAI, "gpt-4o"),
+            mk_model(Provider::Anthropic, "claude-opus-4-7"),
+        ];
+        let pool = pick_pool(configured.clone());
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool[0].id, configured[0].id);
+        assert_eq!(pool[1].id, configured[1].id);
     }
 }
