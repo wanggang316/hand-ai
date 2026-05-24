@@ -244,7 +244,7 @@ impl SlashCommandTable {
                 Self::help_text().to_string(),
             )),
 
-            "model" => SlashCommandResult::Handled(if cmd.args.is_empty() {
+            "model" | "models" => SlashCommandResult::Handled(if cmd.args.is_empty() {
                 SlashCommandAction::OpenModelSelector
             } else {
                 SlashCommandAction::ModelByPattern(cmd.args.clone())
@@ -361,7 +361,7 @@ impl SlashCommandTable {
 Commands:
   /quit, /exit, /q     Exit the session
   /help, /h            Show this help
-  /model [pattern]     Open model selector / inline-resolve a pattern
+  /model, /models      Open model selector / inline-resolve a pattern
   /session             Show active model
   /hotkeys             Show keyboard shortcuts
   /clear               Clear chat scrollback (history kept)
@@ -558,6 +558,32 @@ mod tests {
         match SlashCommandTable::dispatch(&parsed, &ctx()) {
             SlashCommandResult::Handled(SlashCommandAction::OpenModelSelector) => {}
             other => panic!("expected OpenModelSelector, got {:?}", other),
+        }
+    }
+
+    /// `/models` (plural) must alias `/model`. The registry advertises
+    /// it for autocomplete, but the dispatcher previously fell through
+    /// to `Unknown` and emitted `Unknown command: /models. Type /help
+    /// for available commands.` Pinned against issue #17 / UAT-014.
+    #[test]
+    fn dispatches_bare_models_alias_opens_selector() {
+        let parsed = ParsedSlashCommand::parse("/models").unwrap();
+        match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::OpenModelSelector) => {}
+            other => panic!("expected OpenModelSelector, got {:?}", other),
+        }
+    }
+
+    /// `/models <pattern>` must resolve the pattern inline, matching
+    /// the singular form.
+    #[test]
+    fn dispatches_models_with_pattern_resolves_inline() {
+        let parsed = ParsedSlashCommand::parse("/models gpt-4o").unwrap();
+        match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::ModelByPattern(p)) => {
+                assert_eq!(p, "gpt-4o");
+            }
+            other => panic!("expected ModelByPattern, got {:?}", other),
         }
     }
 
