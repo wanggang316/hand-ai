@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            asset: hand-${{ github.ref_name }}-darwin-arm64.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-13
+            asset: hand-${{ github.ref_name }}-darwin-x86_64.tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            asset: hand-${{ github.ref_name }}-linux-x86_64.tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --bin hand --target ${{ matrix.target }}
+
+      - name: Strip binary
+        run: strip target/${{ matrix.target }}/release/hand
+
+      - name: Package tarball
+        run: |
+          mkdir -p dist
+          # Layout inside the tarball: hand-<version>/{hand,README.md,LICENSE}.
+          # `tar -C` keeps the prefix clean — extractors land on a versioned
+          # directory rather than scattering files into cwd.
+          STAGE="$(mktemp -d)"
+          PKG="hand-${GITHUB_REF_NAME}"
+          mkdir -p "$STAGE/$PKG"
+          cp target/${{ matrix.target }}/release/hand "$STAGE/$PKG/"
+          cp README.md "$STAGE/$PKG/" 2>/dev/null || true
+          cp LICENSE "$STAGE/$PKG/" 2>/dev/null || true
+          tar -C "$STAGE" -czf "dist/${{ matrix.asset }}" "$PKG"
+          ls -la dist/
+
+      - name: Generate SHA-256 checksum
+        run: |
+          cd dist
+          if command -v shasum >/dev/null; then
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+          cat "${{ matrix.asset }}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -la dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # The tag itself (`v0.1.0` etc.) is implicit from the trigger.
+          # `generate_release_notes: true` lets GitHub auto-build the
+          # "What's Changed" section from PRs/commits since the previous
+          # tag — works even for the first release (falls back to all
+          # commits on the default branch).
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            dist/hand-*.tar.gz
+            dist/hand-*.tar.gz.sha256
+          fail_on_unmatched_files: true
