@@ -160,27 +160,29 @@ The full history remains in the JSONL file. Configure via settings.
 
 ## Settings
 
-Edit JSON files directly:
+Edit YAML files directly:
 
 | Location | Scope |
 |----------|-------|
-| `~/.hand/agent/settings.json` | Global (all projects) |
-| `<cwd>/.hand/settings.json` | Project (overrides global) |
+| `~/.hand/agent/settings.yaml` | Global (all projects) |
+| `<cwd>/.hand/settings.yaml` | Project (overrides global) |
+
+Keys accept both kebab-case (canonical) and snake_case forms.
 
 Available settings:
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| `default_provider` | Default provider | `"anthropic"` |
-| `default_model` | Default model ID | `"claude-sonnet-4-20250514"` |
-| `default_thinking_level` | Thinking level | `null` |
-| `shell_path` | Shell for bash tool | System default |
-| `shell_command_prefix` | Prefix for shell commands | `null` |
-| `theme` | Theme name | `"dark"` |
+| `default-provider` | Default provider | `"anthropic"` |
+| `default-model` | Default model ID | `"claude-sonnet-4-20250514"` |
+| `default-thinking-level` | Thinking level (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`) | `null` |
+| `shell-path` | Shell for bash tool | System default |
+| `shell-command-prefix` | Prefix for shell commands | `null` |
+| `theme` | Theme name (`dark`/`light`/`high-contrast`/`system`) | `"dark"` |
 | `compaction.enabled` | Enable auto-compaction | `true` |
 | `compaction.threshold` | Context % trigger | `0.8` |
-| `retry.max_retries` | Max retries on error | `3` |
-| `quiet_startup` | Suppress startup info | `false` |
+| `retry.max-retries` | Max retries on error | `3` |
+| `quiet-startup` | Suppress startup info | `false` |
 
 ---
 
