@@ -4,6 +4,7 @@
 //! AI providers (OpenAI, Anthropic, Google, etc.) through a common API.
 
 pub mod api_registry;
+pub mod capabilities;
 pub mod cli;
 pub mod client;
 pub mod env_api_keys;
@@ -45,6 +46,9 @@ pub use models::{
 pub use api_registry::{
     ApiProvider, ApiProviderRegistry, AssistantMessageEventStream, BoxedApiProvider,
 };
+
+// Re-export from capabilities
+pub use capabilities::{ApiCapabilities, ProviderCapabilities};
 
 // Re-export from client
 pub use client::{Client, ClientError};
