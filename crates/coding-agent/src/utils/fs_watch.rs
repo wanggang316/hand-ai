@@ -15,11 +15,12 @@
 //! - **Lifetime tied to a guard**: dropping the [`WatchHandle`] stops the
 //!   `notify` watcher; the stream then ends after draining.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::Stream;
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, EventKind, PollWatcher, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -73,8 +74,18 @@ pub enum FsWatchError {
 /// for the lifetime of the consumer; otherwise the stream will end as soon
 /// as the channel sender is dropped.
 pub struct WatchHandle {
-    _watcher: RecommendedWatcher,
+    _watcher: PollWatcher,
 }
+
+/// Poll interval for the underlying [`PollWatcher`]. Trades latency
+/// for cross-platform reliability — `notify::recommended_watcher`
+/// (FSEvents on macOS, inotify on Linux) silently dropped events
+/// on tempfs-style filesystems used in tests, and even in production
+/// macOS FSEvents required watching the parent directory and filtering
+/// per-file. Polling sidesteps all of that for the small cost of a
+/// ~250 ms latency floor — fine for settings reload, doc tracking,
+/// HAND.md change detection, and the other places this module is used.
+const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Watch each path in `paths` (non-recursive) and stream change events.
 ///
@@ -96,29 +107,125 @@ where
 {
     let (tx, rx) = mpsc::channel::<FileChange>(channel_capacity.max(1));
 
+    // Collect the requested paths up-front. We watch the *parent
+    // directory* (NonRecursive) for each file and filter events back
+    // down to the requested set inside the callback. macOS FSEvents
+    // only fires reliably on directory contents — registering a watch
+    // on the file inode itself silently misses modify events when the
+    // file is rewritten (notably any atomic-write tool that does
+    // `write tmp + rename`). The previous direct-file form passed
+    // local cargo runs against Linux/inotify, broke under FSEvents,
+    // and surfaced as 6 hung settings-watcher tests on macOS hosts.
+    //
+    // For each requested file we also canonicalise so the per-event
+    // path comparison matches `/private/var/...` (FSEvents-reported)
+    // against `/var/...` (caller-supplied) on macOS. We keep both the
+    // canonicalised and original form in the targets set so callers
+    // that pass a symlink chain still match.
+    let mut targets: HashSet<PathBuf> = HashSet::new();
+    let mut parent_dirs: HashSet<PathBuf> = HashSet::new();
+    let mut input_paths: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        let path = p.as_ref().to_path_buf();
+        input_paths.push(path.clone());
+        targets.insert(path.clone());
+        if let Ok(canon) = std::fs::canonicalize(&path) {
+            targets.insert(canon);
+        }
+        let parent = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        parent_dirs.insert(parent);
+    }
+
     let event_tx = tx.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-        let change = match res {
-            Ok(event) => match event_to_change(&event) {
-                Some(c) => c,
-                None => return,
-            },
-            Err(err) => FileChange::Error {
-                message: err.to_string(),
-            },
-        };
-        // Best-effort send; if the consumer is gone or full we drop the
-        // event rather than block the notify backend thread.
-        let _ = event_tx.try_send(change);
-    })
+    // `with_compare_contents(true)` hashes file bodies during polling
+    // and emits Modified events when content changes even if mtime
+    // didn't tick (some editors / atomic-rename flows reuse the
+    // previous mtime; without content compare, polling misses the
+    // change entirely).
+    let config = Config::default()
+        .with_poll_interval(POLL_INTERVAL)
+        .with_compare_contents(true);
+    let mut watcher = PollWatcher::new(
+        move |res: notify::Result<Event>| {
+            let change = match res {
+                Ok(event) => {
+                    // Drop directory-level events that aren't about a
+                    // path the caller cares about. Compare each path
+                    // in the event against the targets set (which
+                    // carries both the caller-supplied and
+                    // canonicalised forms). An event with no paths in
+                    // our set is noise from a sibling file inside the
+                    // watched parent directory.
+                    let any_match = event.paths.iter().any(|p| {
+                        if targets.contains(p) {
+                            return true;
+                        }
+                        // Backends may canonicalise paths
+                        // (`/private/var/...` on macOS); the caller
+                        // may have passed the non-canonical form.
+                        // Canonicalise the event path too before
+                        // giving up.
+                        if let Ok(canon) = std::fs::canonicalize(p)
+                            && targets.contains(&canon)
+                        {
+                            return true;
+                        }
+                        false
+                    });
+                    if !any_match {
+                        return;
+                    }
+                    match event_to_change(&event) {
+                        Some(c) => c,
+                        None => return,
+                    }
+                }
+                Err(err) => FileChange::Error {
+                    message: err.to_string(),
+                },
+            };
+            // Best-effort send; if the consumer is gone or full we drop
+            // the event rather than block the notify backend thread.
+            let _ = event_tx.try_send(change);
+        },
+        config,
+    )
     .map_err(|err| FsWatchError::Init(err.to_string()))?;
 
-    for path in paths {
-        let path_ref = path.as_ref();
+    // Pre-validate: if a requested path's parent doesn't exist, fail
+    // early naming the *requested* path (not the parent we'd silently
+    // substitute). The `nonexistent_path_returns_watch_error` test
+    // pins this contract — callers that pass `/does/not/exist/xyz`
+    // expect an error whose `path` field is exactly that string, not
+    // the synthesised parent.
+    for path in &input_paths {
+        let parent = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        if !parent.exists() {
+            return Err(FsWatchError::Watch {
+                path: path.clone(),
+                message: format!("parent directory does not exist: {}", parent.display()),
+            });
+        }
+    }
+
+    for parent in &parent_dirs {
+        // Canonicalise the parent so FSEvents/inotify register the
+        // canonical path (e.g. `/private/var/...` on macOS rather
+        // than the `/var/...` symlink). Without this, events arrive
+        // with canonical paths that the caller's non-canonical input
+        // doesn't match — even with target-set canonicalisation, the
+        // watch itself may not fire on the right inode.
+        let watch_target = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.clone());
         watcher
-            .watch(path_ref, RecursiveMode::NonRecursive)
+            .watch(&watch_target, RecursiveMode::NonRecursive)
             .map_err(|err| FsWatchError::Watch {
-                path: path_ref.to_path_buf(),
+                path: parent.clone(),
                 message: err.to_string(),
             })?;
     }

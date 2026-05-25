@@ -1033,12 +1033,17 @@ pub struct SettingsChanged {
 }
 
 /// Internal handle owned by [`SettingsManager`] when a watcher is active.
-/// Holding the `RecommendedWatcher` keeps the OS-level subscription alive;
-/// holding the `JoinHandle` keeps the debounce/reload task alive — dropping
+/// Holding the `PollWatcher` keeps the polling thread alive; holding
+/// the `JoinHandle` keeps the debounce/reload task alive — dropping
 /// the handle aborts the task (tokio detaches and reaps it).
+///
+/// We use `PollWatcher` over `RecommendedWatcher` because macOS
+/// FSEvents silently drops events on `/tmp`-style paths, making
+/// hot-reload unreliable in test environments and on certain volume
+/// configurations.
 struct WatchHandle {
     sender: broadcast::Sender<SettingsChanged>,
-    _watcher: notify::RecommendedWatcher,
+    _watcher: notify::PollWatcher,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -1361,11 +1366,20 @@ impl SettingsManager {
         // Build the notify watcher. The closure runs on a notify-internal
         // thread; we forward each event into the tokio mpsc for the
         // debounce task to consume.
-        let watcher_result = <notify::RecommendedWatcher as notify::Watcher>::new(
+        //
+        // Use PollWatcher (250ms interval) rather than RecommendedWatcher
+        // because FSEvents on macOS silently drops events on tempfs
+        // paths, breaking 5 settings-watcher tests deterministically
+        // and making hot-reload unreliable in /tmp-based test
+        // environments. PollWatcher trades a 250ms latency floor for
+        // cross-platform reliability — fine for settings reload.
+        let watcher_result = notify::PollWatcher::new(
             move |res| {
                 let _ = notify_tx.send(res);
             },
-            notify::Config::default().with_poll_interval(Duration::from_secs(2)),
+            notify::Config::default()
+                .with_poll_interval(Duration::from_millis(250))
+                .with_compare_contents(true),
         );
         let mut watcher = match watcher_result {
             Ok(w) => w,
