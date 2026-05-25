@@ -1757,8 +1757,8 @@ mod tests {
     fn apply_chunk_usage_writes_back_input_output_and_total() {
         let mut model = test_model(Provider::OpenAI);
         model.cost = Cost {
-            input: 1.0,    // $1 per million input tokens
-            output: 2.0,   // $2 per million output tokens
+            input: 1.0,  // $1 per million input tokens
+            output: 2.0, // $2 per million output tokens
             cache_read: 0.0,
             cache_write: 0.0,
         };

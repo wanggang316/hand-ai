@@ -107,7 +107,10 @@ pub(crate) fn filter_models_by_pattern(models: Vec<Model>, pattern: &str) -> Vec
         .collect();
     let haystack_refs: Vec<&str> = haystacks.iter().map(String::as_str).collect();
     let matches = fuzzy_filter(pattern, &haystack_refs);
-    matches.into_iter().map(|(i, _)| models[i].clone()).collect()
+    matches
+        .into_iter()
+        .map(|(i, _)| models[i].clone())
+        .collect()
 }
 
 /// Format a token count as a short human-readable string.
@@ -348,7 +351,11 @@ mod tests {
         ];
         let kept = filter_models_by_pattern(models, "openai");
         let ids: Vec<&str> = kept.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["gpt-4o"], "exact provider match must drop openrouter/*");
+        assert_eq!(
+            ids,
+            vec!["gpt-4o"],
+            "exact provider match must drop openrouter/*"
+        );
     }
 
     /// When no provider matches the needle exactly, fall through to a

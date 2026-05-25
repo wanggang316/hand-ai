@@ -464,14 +464,18 @@ impl PathAutocompleteProvider {
         let query_lower = stripped.to_lowercase();
 
         let mut out = Vec::new();
-        // Cycle guard so a symlink loop (a/b → a) doesn't blow the queue.
-        let mut visited: std::collections::HashSet<std::path::PathBuf> =
-            std::collections::HashSet::new();
+        // No global "visited" set: the old shape (canon-keyed across the
+        // whole walk) silently blocked sibling-alias directories like
+        // `link-to-pkg → pkg` because `pkg` had already been descended
+        // by the time the iteration order reached `link-to-pkg`. The
+        // user expects to see both paths surface. Recursion is bounded
+        // by `max_depth` + `max_entries`, which is enough to handle the
+        // pathological `link-to-self → self` and ancestor-loop cases
+        // without losing sibling aliases. The dir-iteration order on
+        // ext4 (no sort) used to hide this on macOS HFS+/APFS (which
+        // sorts) and surface only in CI.
         let mut queue: std::collections::VecDeque<(std::path::PathBuf, usize)> =
             std::collections::VecDeque::new();
-        if let Ok(canon) = self.root.canonicalize() {
-            visited.insert(canon);
-        }
         queue.push_back((self.root.clone(), 0));
 
         while let Some((dir, depth)) = queue.pop_front() {
@@ -504,10 +508,15 @@ impl PathAutocompleteProvider {
                 // suggestion-rendering and recursion. We also include
                 // plain symlinks-to-files in the result list.
                 let file_type = entry.file_type().ok();
-                let is_symlink = file_type.as_ref().map(|ft| ft.is_symlink()).unwrap_or(false);
+                let is_symlink = file_type
+                    .as_ref()
+                    .map(|ft| ft.is_symlink())
+                    .unwrap_or(false);
                 let is_dir_direct = file_type.as_ref().map(|ft| ft.is_dir()).unwrap_or(false);
                 let target_is_dir = if is_symlink {
-                    std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false)
+                    std::fs::metadata(&path)
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false)
                 } else {
                     false
                 };
@@ -522,12 +531,12 @@ impl PathAutocompleteProvider {
                     // Quote-wrap when the path contains spaces — the
                     // editor needs an unambiguous span to splice. When
                     // the caller is already inside an open quote
-                    // (`quoted_input` true), emit a single closing `"`
-                    // so the splice doesn't duplicate the opening one.
+                    // (`quoted_input` true), emit `@"…"` so the splice
+                    // closes the open quote without duplicating the
+                    // opening one. Both branches produce the same
+                    // wrapped form, so collapse the conditional.
                     let needs_quotes = label.contains(' ') || quoted_input;
-                    let insert = if quoted_input {
-                        format!("@\"{label}\"")
-                    } else if needs_quotes {
+                    let insert = if needs_quotes {
                         format!("@\"{label}\"")
                     } else {
                         format!("@{label}")
@@ -541,17 +550,7 @@ impl PathAutocompleteProvider {
                 }
 
                 if treat_as_dir && depth + 1 < self.max_depth {
-                    // Symlink-cycle guard: canonicalize the target, skip
-                    // if already visited. Plain (non-symlink) dirs are
-                    // tree-structured so they can't cycle.
-                    let canon = path.canonicalize().ok();
-                    let already_seen = canon
-                        .as_ref()
-                        .map(|c| !visited.insert(c.clone()))
-                        .unwrap_or(false);
-                    if !already_seen {
-                        queue.push_back((path, depth + 1));
-                    }
+                    queue.push_back((path, depth + 1));
                 }
             }
         }
@@ -1146,13 +1145,10 @@ mod tests {
             .query_sync(&ctx("", AutocompleteTrigger::At))
             .expect("empty @ trigger yields Some");
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.iter().any(|l| *l == "a.txt"), "got: {labels:?}");
-        assert!(labels.iter().any(|l| *l == "b.md"), "got: {labels:?}");
-        assert!(labels.iter().any(|l| *l == "sub/"), "got: {labels:?}");
-        assert!(
-            labels.iter().any(|l| *l == "sub/c.rs"),
-            "nested file too: {labels:?}"
-        );
+        assert!(labels.contains(&"a.txt"), "got: {labels:?}");
+        assert!(labels.contains(&"b.md"), "got: {labels:?}");
+        assert!(labels.contains(&"sub/"), "got: {labels:?}");
+        assert!(labels.contains(&"sub/c.rs"), "nested file too: {labels:?}");
     }
 
     /// UC-ac-006 — matching by extension (`.rs`) finds every Rust file
@@ -1171,10 +1167,10 @@ mod tests {
             .query_sync(&ctx(".rs", AutocompleteTrigger::At))
             .expect("at returns Some");
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.iter().any(|l| *l == "main.rs"));
-        assert!(labels.iter().any(|l| *l == "lib.rs"));
+        assert!(labels.contains(&"main.rs"));
+        assert!(labels.contains(&"lib.rs"));
         assert!(
-            !labels.iter().any(|l| *l == "readme.md"),
+            !labels.contains(&"readme.md"),
             "non-matching extension must be filtered out, got: {labels:?}"
         );
     }
@@ -1227,7 +1223,7 @@ mod tests {
             .expect("at returns Some");
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(
-            labels.iter().any(|l| *l == "a/b/c.rs"),
+            labels.contains(&"a/b/c.rs"),
             "depth-3 file should be reachable, got: {labels:?}"
         );
         assert!(
@@ -1251,11 +1247,11 @@ mod tests {
             .query_sync(&ctx("src/", AutocompleteTrigger::At))
             .expect("at returns Some");
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.iter().any(|l| *l == "src/main.rs"));
-        assert!(labels.iter().any(|l| *l == "src/inner/util.rs"));
+        assert!(labels.contains(&"src/main.rs"));
+        assert!(labels.contains(&"src/inner/util.rs"));
         // `other.txt` doesn't contain `src/` so it's filtered out.
         assert!(
-            !labels.iter().any(|l| *l == "other.txt"),
+            !labels.contains(&"other.txt"),
             "out-of-scope entry leaked, got: {labels:?}"
         );
     }
@@ -1284,7 +1280,7 @@ mod tests {
         // for the project root, only for entries inside it. So even
         // when the cwd basename matches the keyword, only the
         // child file `alpha.rs` surfaces.
-        assert!(labels.iter().any(|l| *l == "alpha.rs"));
+        assert!(labels.contains(&"alpha.rs"));
         assert!(
             !labels.iter().any(|l| l.contains("match-keyword-")),
             "root basename leaked into results, got: {labels:?}"

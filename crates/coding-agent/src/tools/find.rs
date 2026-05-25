@@ -416,10 +416,7 @@ mod tests {
 
         let result = execute_find(dir.path(), json!({"pattern": "**/*.txt"}));
         let text = get_text(&result);
-        assert!(
-            text.contains("visible.txt"),
-            "visible must surface: {text}"
-        );
+        assert!(text.contains("visible.txt"), "visible must surface: {text}");
         assert!(
             text.contains(".secret/hidden.txt") || text.contains(".secret\\hidden.txt"),
             "hidden but non-gitignored file must surface: {text}"

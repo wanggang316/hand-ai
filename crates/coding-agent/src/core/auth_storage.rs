@@ -351,12 +351,7 @@ impl AuthStorage {
     /// `reload()` first; uncached callers see fresh state on every
     /// call.
     pub fn get(&self, provider: &str) -> Result<Option<AuthRecord>, AuthStorageError> {
-        if let Some(map) = self
-            .cached
-            .lock()
-            .expect("cached mutex poisoned")
-            .as_ref()
-        {
+        if let Some(map) = self.cached.lock().expect("cached mutex poisoned").as_ref() {
             return Ok(map.get(provider).cloned());
         }
         Ok(self.load()?.remove(provider))
@@ -386,9 +381,7 @@ impl AuthStorage {
         let mut records = self.load()?;
         if records.remove(provider).is_some() {
             self.save(&records)?;
-            if let Some(cached) =
-                self.cached.lock().expect("cached mutex poisoned").as_mut()
-            {
+            if let Some(cached) = self.cached.lock().expect("cached mutex poisoned").as_mut() {
                 *cached = records;
             }
         }
@@ -475,8 +468,7 @@ impl AuthStorage {
             return Some(rt);
         }
         if let Some(AuthRecord::ApiKey { key }) = self.get(provider).ok().flatten()
-            && let Some(resolved) =
-                crate::core::resolve_config_value::resolve_config_value(&key)
+            && let Some(resolved) = crate::core::resolve_config_value::resolve_config_value(&key)
         {
             return Some(resolved);
         }
@@ -503,16 +495,10 @@ impl AuthStorage {
     pub fn reload(&self) {
         match self.load() {
             Ok(map) => {
-                *self
-                    .cached
-                    .lock()
-                    .expect("cached mutex poisoned") = Some(map);
+                *self.cached.lock().expect("cached mutex poisoned") = Some(map);
             }
             Err(e) => {
-                self.errors
-                    .lock()
-                    .expect("errors mutex poisoned")
-                    .push(e);
+                self.errors.lock().expect("errors mutex poisoned").push(e);
             }
         }
     }
@@ -521,10 +507,7 @@ impl AuthStorage {
     /// `reload()`. Each error is yielded exactly once — re-draining
     /// after a successful drain returns an empty `Vec`.
     pub fn drain_errors(&self) -> Vec<AuthStorageError> {
-        let mut buf = self
-            .errors
-            .lock()
-            .expect("errors mutex poisoned");
+        let mut buf = self.errors.lock().expect("errors mutex poisoned");
         std::mem::take(&mut *buf)
     }
 }
@@ -865,8 +848,7 @@ mod tests {
         s.set("anthropic", AuthRecord::api_key("v1")).unwrap();
         s.reload();
         // External writer mutates the file out-of-band.
-        let raw =
-            r#"{"anthropic": {"type": "api_key", "key": "v2"}}"#;
+        let raw = r#"{"anthropic": {"type": "api_key", "key": "v2"}}"#;
         std::fs::write(s.path(), raw).unwrap();
         // Pre-reload: cache still holds v1.
         match s.get("anthropic").unwrap() {
@@ -928,7 +910,8 @@ mod tests {
     fn runtime_override_beats_stored_api_key() {
         let dir = TempDir::new().unwrap();
         let s = storage_in(&dir);
-        s.set("anthropic", AuthRecord::api_key("stored-key")).unwrap();
+        s.set("anthropic", AuthRecord::api_key("stored-key"))
+            .unwrap();
         s.set_runtime_api_key("anthropic", "runtime-key");
 
         assert_eq!(s.get_api_key("anthropic").as_deref(), Some("runtime-key"));
@@ -944,7 +927,8 @@ mod tests {
     fn remove_runtime_override_reverts_to_stored() {
         let dir = TempDir::new().unwrap();
         let s = storage_in(&dir);
-        s.set("anthropic", AuthRecord::api_key("stored-key")).unwrap();
+        s.set("anthropic", AuthRecord::api_key("stored-key"))
+            .unwrap();
         s.set_runtime_api_key("anthropic", "runtime-key");
         s.remove_runtime_api_key("anthropic");
 

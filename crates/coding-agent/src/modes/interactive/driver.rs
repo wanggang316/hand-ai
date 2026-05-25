@@ -584,15 +584,12 @@ impl InteractiveMode {
                 // forever (the channel sender is held by the live
                 // session subscriber), and `event_pump.await` after
                 // `tui.run()` hangs the whole process.
-                let received = tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
-                    rx.recv(),
-                )
-                .await;
+                let received =
+                    tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
                 let ev = match received {
                     Ok(Some(ev)) => ev,
-                    Ok(None) => break,    // channel closed
-                    Err(_) => continue,   // timeout — re-check stop flag
+                    Ok(None) => break,  // channel closed
+                    Err(_) => continue, // timeout — re-check stop flag
                 };
                 match &ev {
                     AgentSessionEvent::Agent(agent_ev) => match agent_ev.as_ref() {
@@ -810,10 +807,7 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
                                     // thread makes graceful teardown
                                     // hang otherwise.
                                     unsafe { stop_handle_for_agent.stop() };
-                                    tokio::time::sleep(
-                                        std::time::Duration::from_millis(80),
-                                    )
-                                    .await;
+                                    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                                     std::process::exit(0);
                                 }
                             }
@@ -2290,21 +2284,18 @@ pub(crate) fn build_settings_entries(
         SettingEntry {
             key: "default_provider".to_string(),
             value: SettingValue::String(provider_display),
-            description: "Effective default provider (after global + project merge)."
-                .to_string(),
+            description: "Effective default provider (after global + project merge).".to_string(),
         },
         SettingEntry {
             key: "default_model".to_string(),
             value: SettingValue::String(model_display),
-            description: "Effective default model (after global + project merge)."
-                .to_string(),
+            description: "Effective default model (after global + project merge).".to_string(),
         },
         SettingEntry {
             key: "default_thinking_level".to_string(),
             value: SettingValue::String(thinking_display),
-            description:
-                "Effective default reasoning effort for thinking-capable models."
-                    .to_string(),
+            description: "Effective default reasoning effort for thinking-capable models."
+                .to_string(),
         },
         SettingEntry {
             key: "theme".to_string(),
@@ -4000,10 +3991,12 @@ mod tests {
     fn settings_entries_expose_effective_provider_model_and_thinking_overrides() {
         use crate::core::settings::{Settings, SettingsManager, ThinkingLevelSetting};
 
-        let mut settings = Settings::default();
-        settings.default_provider = Some("anthropic".to_string());
-        settings.default_model = Some("claude-opus-4-7".to_string());
-        settings.default_thinking_level = Some(ThinkingLevelSetting::High);
+        let settings = Settings {
+            default_provider: Some("anthropic".to_string()),
+            default_model: Some("claude-opus-4-7".to_string()),
+            default_thinking_level: Some(ThinkingLevelSetting::High),
+            ..Settings::default()
+        };
 
         let manager = SettingsManager::from_settings_for_test(settings);
         let entries = build_settings_entries(&manager);
@@ -4030,10 +4023,12 @@ mod tests {
     fn settings_entries_render_unset_overrides_with_explicit_placeholders() {
         use crate::core::settings::{Settings, SettingsManager};
 
-        let mut settings = Settings::default();
-        settings.default_provider = None;
-        settings.default_model = None;
-        settings.default_thinking_level = None;
+        let settings = Settings {
+            default_provider: None,
+            default_model: None,
+            default_thinking_level: None,
+            ..Settings::default()
+        };
 
         let manager = SettingsManager::from_settings_for_test(settings);
         let entries = build_settings_entries(&manager);

@@ -319,8 +319,7 @@ mod tests {
     /// positional message or `--prompt`.
     #[test]
     fn dash_p_is_print_flag_not_prompt_value() {
-        let args =
-            Args::try_parse_from(["hand", "-p", "hello"]).expect("-p hello should parse");
+        let args = Args::try_parse_from(["hand", "-p", "hello"]).expect("-p hello should parse");
         assert!(args.print, "-p must set the print bool");
         assert!(
             args.prompt.is_none(),
@@ -385,8 +384,7 @@ mod tests {
     /// notes alongside UC-args-002).
     #[test]
     fn parses_verbose_long_form() {
-        let args =
-            Args::try_parse_from(["hand", "--verbose"]).expect("--verbose should parse");
+        let args = Args::try_parse_from(["hand", "--verbose"]).expect("--verbose should parse");
         assert!(args.verbose, "--verbose must set the flag");
     }
 
@@ -633,8 +631,7 @@ mod tests {
     /// clap parses.
     #[test]
     fn nt_short_alias_rewrites_to_no_tools() {
-        let argv =
-            expand_short_aliases(vec!["hand".to_string(), "-nt".to_string()]);
+        let argv = expand_short_aliases(vec!["hand".to_string(), "-nt".to_string()]);
         let args = Args::try_parse_from(argv).expect("-nt should rewrite to --no-tools");
         assert!(args.no_tools);
     }
@@ -642,20 +639,16 @@ mod tests {
     /// `-nbt` is the short-form alias for `--no-builtin-tools`.
     #[test]
     fn nbt_short_alias_rewrites_to_no_builtin_tools() {
-        let argv =
-            expand_short_aliases(vec!["hand".to_string(), "-nbt".to_string()]);
-        let args =
-            Args::try_parse_from(argv).expect("-nbt should rewrite to --no-builtin-tools");
+        let argv = expand_short_aliases(vec!["hand".to_string(), "-nbt".to_string()]);
+        let args = Args::try_parse_from(argv).expect("-nbt should rewrite to --no-builtin-tools");
         assert!(args.no_builtin_tools);
     }
 
     /// `-nc` is the short-form alias for `--no-context-files`.
     #[test]
     fn nc_short_alias_rewrites_to_no_context_files() {
-        let argv =
-            expand_short_aliases(vec!["hand".to_string(), "-nc".to_string()]);
-        let args =
-            Args::try_parse_from(argv).expect("-nc should rewrite to --no-context-files");
+        let argv = expand_short_aliases(vec!["hand".to_string(), "-nc".to_string()]);
+        let args = Args::try_parse_from(argv).expect("-nc should rewrite to --no-context-files");
         assert!(args.no_context_files);
     }
 
@@ -664,8 +657,7 @@ mod tests {
     #[test]
     fn parses_models_csv() {
         let args =
-            Args::try_parse_from(["hand", "--models", "gpt-4o,claude-sonnet,gemini-pro"])
-                .unwrap();
+            Args::try_parse_from(["hand", "--models", "gpt-4o,claude-sonnet,gemini-pro"]).unwrap();
         assert_eq!(
             args.models,
             vec![
@@ -721,8 +713,7 @@ mod tests {
         assert_eq!(single.extensions, vec!["./my-ext".to_string()]);
         let short = Args::try_parse_from(["hand", "-e", "./short-ext"]).unwrap();
         assert_eq!(short.extensions, vec!["./short-ext".to_string()]);
-        let repeated =
-            Args::try_parse_from(["hand", "-e", "./a", "--extension", "./b"]).unwrap();
+        let repeated = Args::try_parse_from(["hand", "-e", "./a", "--extension", "./b"]).unwrap();
         assert_eq!(
             repeated.extensions,
             vec!["./a".to_string(), "./b".to_string()]
@@ -735,8 +726,7 @@ mod tests {
     /// when this flag is set.
     #[test]
     fn parses_no_extensions_with_explicit_entries() {
-        let args =
-            Args::try_parse_from(["hand", "--no-extensions", "-e", "a", "-e", "b"]).unwrap();
+        let args = Args::try_parse_from(["hand", "--no-extensions", "-e", "a", "-e", "b"]).unwrap();
         assert!(args.no_extensions);
         assert_eq!(args.extensions, vec!["a".to_string(), "b".to_string()]);
     }
@@ -745,7 +735,10 @@ mod tests {
     #[test]
     fn positional_plain_text_lands_in_messages() {
         let args = Args::try_parse_from(["hand", "hello", "world"]).unwrap();
-        assert_eq!(args.messages(), vec!["hello".to_string(), "world".to_string()]);
+        assert_eq!(
+            args.messages(),
+            vec!["hello".to_string(), "world".to_string()]
+        );
         assert!(args.file_args().is_empty());
     }
 
@@ -753,8 +746,7 @@ mod tests {
     /// `@` stripped.
     #[test]
     fn positional_at_file_lands_in_file_args() {
-        let args =
-            Args::try_parse_from(["hand", "@README.md", "@src/main.ts"]).unwrap();
+        let args = Args::try_parse_from(["hand", "@README.md", "@src/main.ts"]).unwrap();
         assert_eq!(
             args.file_args(),
             vec!["README.md".to_string(), "src/main.ts".to_string()]
@@ -766,8 +758,8 @@ mod tests {
     /// in `messages()`, `@`-prefixed entries land in `file_args()`.
     #[test]
     fn positional_mixed_messages_and_file_args() {
-        let args = Args::try_parse_from(["hand", "@file.txt", "explain this", "@image.png"])
-            .unwrap();
+        let args =
+            Args::try_parse_from(["hand", "@file.txt", "explain this", "@image.png"]).unwrap();
         assert_eq!(
             args.file_args(),
             vec!["file.txt".to_string(), "image.png".to_string()]
@@ -780,8 +772,7 @@ mod tests {
     fn parses_skill_single_and_repeated() {
         let single = Args::try_parse_from(["hand", "--skill", "./skill-a"]).unwrap();
         assert_eq!(single.skills, vec!["./skill-a".to_string()]);
-        let repeated =
-            Args::try_parse_from(["hand", "--skill", "./a", "--skill", "./b"]).unwrap();
+        let repeated = Args::try_parse_from(["hand", "--skill", "./a", "--skill", "./b"]).unwrap();
         assert_eq!(repeated.skills, vec!["./a".to_string(), "./b".to_string()]);
     }
 }

@@ -71,13 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         && cli.prompt.is_none()
         && matches!(
             first.as_str(),
-            "install"
-                | "remove"
-                | "uninstall"
-                | "config"
-                | "update"
-                | "list"
-                | "search"
+            "install" | "remove" | "uninstall" | "config" | "update" | "list" | "search"
         )
     {
         eprintln!(

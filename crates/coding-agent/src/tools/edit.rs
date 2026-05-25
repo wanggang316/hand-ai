@@ -81,9 +81,10 @@ async fn execute_edit(cwd: &Path, args: serde_json::Value) -> ToolResult {
             Ok(v) => v,
             Err(e) => return ToolResult::error(e),
         };
-        return with_file_mutation_queue(&path, async move {
-            run_multi_edit(&path_for_async, &edits)
-        })
+        return with_file_mutation_queue(
+            &path,
+            async move { run_multi_edit(&path_for_async, &edits) },
+        )
         .await;
     }
 
@@ -185,21 +186,19 @@ fn run_multi_edit(path: &Path, edits: &[EditEntry]) -> ToolResult {
 
     // BOM handling: strip a leading U+FEFF for matching, remember the
     // byte length to re-prepend it on write.
-    let (bom, content): (&str, String) = if let Some(stripped) = raw_content.strip_prefix('\u{FEFF}')
-    {
-        ("\u{FEFF}", stripped.to_string())
-    } else {
-        ("", raw_content.clone())
-    };
+    let (bom, content): (&str, String) =
+        if let Some(stripped) = raw_content.strip_prefix('\u{FEFF}') {
+            ("\u{FEFF}", stripped.to_string())
+        } else {
+            ("", raw_content.clone())
+        };
 
     // CRLF tolerance per-edit. Same rules as the single-edit path.
     let file_has_crlf = content.contains("\r\n");
     let crlf_aligned: Vec<(String, String)> = edits
         .iter()
         .map(|e| {
-            let old = if file_has_crlf
-                && !e.old_text.contains("\r\n")
-                && e.old_text.contains('\n')
+            let old = if file_has_crlf && !e.old_text.contains("\r\n") && e.old_text.contains('\n')
             {
                 e.old_text.replace('\n', "\r\n")
             } else if !file_has_crlf && e.old_text.contains("\r\n") {
@@ -207,9 +206,7 @@ fn run_multi_edit(path: &Path, edits: &[EditEntry]) -> ToolResult {
             } else {
                 e.old_text.clone()
             };
-            let new = if file_has_crlf
-                && !e.new_text.contains("\r\n")
-                && e.new_text.contains('\n')
+            let new = if file_has_crlf && !e.new_text.contains("\r\n") && e.new_text.contains('\n')
             {
                 e.new_text.replace('\n', "\r\n")
             } else if !file_has_crlf && e.new_text.contains("\r\n") {
@@ -231,12 +228,7 @@ fn run_multi_edit(path: &Path, edits: &[EditEntry]) -> ToolResult {
         let nc = normalize_for_fuzzy_match(&content);
         let ne: Vec<(String, String)> = crlf_aligned
             .iter()
-            .map(|(o, n)| {
-                (
-                    normalize_for_fuzzy_match(o),
-                    normalize_for_fuzzy_match(n),
-                )
-            })
+            .map(|(o, n)| (normalize_for_fuzzy_match(o), normalize_for_fuzzy_match(n)))
             .collect();
         (nc, ne)
     } else {
@@ -595,8 +587,7 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         let text = get_text(&result);
         assert!(
-            text.contains("Error code: EACCES")
-                || text.contains("Error code: PermissionDenied"),
+            text.contains("Error code: EACCES") || text.contains("Error code: PermissionDenied"),
             "expected EACCES (or platform-named permission code), got: {text}"
         );
         assert!(text.contains("Could not edit file:"));
@@ -1166,11 +1157,7 @@ mod tests {
     async fn test_edit_multi_edit_fuzzy_matching_applies() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("fuzzy-multi.txt");
-        std::fs::write(
-            &file,
-            "name = \u{201C}widget\u{201D};\nrange: 1\u{2013}5\n",
-        )
-        .unwrap();
+        std::fs::write(&file, "name = \u{201C}widget\u{201D};\nrange: 1\u{2013}5\n").unwrap();
 
         let result = execute_edit(
             dir.path(),

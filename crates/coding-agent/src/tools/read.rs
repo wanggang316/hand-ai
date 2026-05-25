@@ -485,7 +485,10 @@ mod tests {
     fn test_read_default_line_cap_footer_matches_pi_wording() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("big.txt");
-        let content: String = (1..=2500).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n");
+        let content: String = (1..=2500)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(&file, &content).unwrap();
 
         let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
@@ -513,7 +516,10 @@ mod tests {
     fn test_read_user_limit_footer_emits_remaining_count() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("limited.txt");
-        let content: String = (1..=100).map(|i| format!("Line {i}")).collect::<Vec<_>>().join("\n");
+        let content: String = (1..=100)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(&file, &content).unwrap();
 
         let result = execute_read(
@@ -529,10 +535,7 @@ mod tests {
         // Verify only the first 10 lines surfaced.
         assert!(text.contains("Line 1"));
         assert!(text.contains("Line 10"));
-        assert!(
-            !text.contains("Line 11"),
-            "line 11 leaked past limit=10"
-        );
+        assert!(!text.contains("Line 11"), "line 11 leaked past limit=10");
     }
 
     /// Byte-cap truncation footer reads
@@ -544,7 +547,10 @@ mod tests {
         let file = dir.path().join("wide.txt");
         // ~100 KB of body across 500 lines of ~200 chars each.
         let line = "x".repeat(200);
-        let content: String = (1..=500).map(|_| line.clone()).collect::<Vec<_>>().join("\n");
+        let content: String = (1..=500)
+            .map(|_| line.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(&file, &content).unwrap();
 
         let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
@@ -587,7 +593,10 @@ mod tests {
         std::fs::write(&file, &content).unwrap();
 
         let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
-        let details = result.details.as_ref().expect("details should be populated");
+        let details = result
+            .details
+            .as_ref()
+            .expect("details should be populated");
         let truncation = details
             .get("truncation")
             .expect("details.truncation expected");
@@ -621,7 +630,9 @@ mod tests {
         let file = dir.path().join("image.txt");
         // 1×1 transparent PNG payload, base64-decoded inline.
         let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==";
-        let png_bytes = base64::engine::general_purpose::STANDARD.decode(png_b64).unwrap();
+        let png_bytes = base64::engine::general_purpose::STANDARD
+            .decode(png_b64)
+            .unwrap();
         std::fs::write(&file, &png_bytes).unwrap();
 
         let result = execute_read(dir.path(), json!({"path": file.to_str().unwrap()}));
@@ -638,7 +649,10 @@ mod tests {
         });
         let img = image_block.expect("result should include an image block");
         assert_eq!(img.mime_type, "image/png");
-        assert!(!img.data.is_empty(), "image data should be the base64 payload");
+        assert!(
+            !img.data.is_empty(),
+            "image data should be the base64 payload"
+        );
     }
 
     /// A file with an image-suggesting extension but text content
@@ -654,7 +668,10 @@ mod tests {
         let text = get_text(&result);
         assert!(text.contains("definitely not a png"));
         assert!(
-            !result.content.iter().any(|c| matches!(c, model::ToolResultContent::Image(_))),
+            !result
+                .content
+                .iter()
+                .any(|c| matches!(c, model::ToolResultContent::Image(_))),
             "no image block expected"
         );
     }
@@ -665,7 +682,10 @@ mod tests {
     fn test_read_user_limit_truncation_emits_limit_kind() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("limited.txt");
-        let content: String = (1..=100).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
+        let content: String = (1..=100)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         std::fs::write(&file, &content).unwrap();
         let result = execute_read(
             dir.path(),

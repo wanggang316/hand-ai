@@ -1830,7 +1830,10 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(msg.contains("s_does_not_exist"), "got: {msg}");
-        assert!(msg.contains(".hand/agent/sessions"), "primary path missing: {msg}");
+        assert!(
+            msg.contains(".hand/agent/sessions"),
+            "primary path missing: {msg}"
+        );
         assert!(msg.contains(".hand/sessions"), "legacy path missing: {msg}");
     }
 
@@ -2323,8 +2326,7 @@ mod tests {
             Some("test".into()),
         );
 
-        let mut session =
-            AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
 
         session
             .send_message("hello once")
@@ -2332,10 +2334,7 @@ mod tests {
             .expect("send_message ok");
 
         let ctx = session.session_manager.build_context();
-        let user_count = ctx
-            .iter()
-            .filter(|m| matches!(m, Message::User(_)))
-            .count();
+        let user_count = ctx.iter().filter(|m| matches!(m, Message::User(_))).count();
         let assistant_count = ctx
             .iter()
             .filter(|m| matches!(m, Message::Assistant(_)))

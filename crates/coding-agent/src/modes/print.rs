@@ -682,8 +682,8 @@ fn load_file_args(paths: &[String], cwd: &std::path::Path) -> Result<Option<Stri
         if !resolved.exists() {
             return Err(format!("File not found: {raw}"));
         }
-        let body = std::fs::read_to_string(&resolved)
-            .map_err(|e| format!("Failed to read {raw}: {e}"))?;
+        let body =
+            std::fs::read_to_string(&resolved).map_err(|e| format!("Failed to read {raw}: {e}"))?;
         parts.push(format!("<file path=\"{raw}\">\n{body}\n</file>"));
     }
     Ok(Some(parts.join("\n")))
@@ -900,8 +900,7 @@ mod tests {
     /// for the simple case).
     #[test]
     fn build_initial_message_prompt_and_positional_both_present() {
-        let combined =
-            build_initial_message(None, Some("the prompt"), Some("trailing positional"));
+        let combined = build_initial_message(None, Some("the prompt"), Some("trailing positional"));
         assert_eq!(combined.as_deref(), Some("the prompttrailing positional"));
     }
 

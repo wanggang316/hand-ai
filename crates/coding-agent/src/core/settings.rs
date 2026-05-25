@@ -2044,10 +2044,7 @@ mod tests {
         let s = Settings::load(Some(&p), None).unwrap();
         assert_eq!(s.default_provider.as_deref(), Some("anthropic"));
         assert_eq!(s.default_model.as_deref(), Some("claude-opus-4-7"));
-        assert_eq!(
-            s.default_thinking_level,
-            Some(ThinkingLevelSetting::High)
-        );
+        assert_eq!(s.default_thinking_level, Some(ThinkingLevelSetting::High));
     }
 
     #[test]
@@ -3354,7 +3351,10 @@ warnings:
         let yaml = "extensions:\n  - /local/ext.ts\n  - ./relative/ext.ts\n";
         let s: Settings = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
-            s.extensions().iter().map(String::as_str).collect::<Vec<_>>(),
+            s.extensions()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
             vec!["/local/ext.ts", "./relative/ext.ts"]
         );
         assert!(s.packages().is_empty());
@@ -3401,11 +3401,7 @@ warnings:
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(&project_dir).unwrap();
         // Global has a setting; project has no .hand/ at all.
-        std::fs::write(
-            agent_dir.join("settings.yaml"),
-            "quiet-startup: true\n",
-        )
-        .unwrap();
+        std::fs::write(agent_dir.join("settings.yaml"), "quiet-startup: true\n").unwrap();
 
         let global_yaml = agent_dir.join("settings.yaml");
         let global_layer = Settings::load(Some(&global_yaml), None).unwrap();
@@ -3447,7 +3443,10 @@ warnings:
         );
         manager.save(SettingsScope::Project).unwrap();
 
-        assert!(project_dir.join(".hand").exists(), ".hand/ should be created");
+        assert!(
+            project_dir.join(".hand").exists(),
+            ".hand/ should be created"
+        );
         assert!(project_settings.exists(), "settings.yaml should be written");
     }
 
@@ -3460,10 +3459,7 @@ warnings:
         let yaml = "shell-command-prefix: \"shopt -s expand_aliases\"\n";
         let s: Settings = serde_yaml::from_str(yaml).unwrap();
         let mgr = SettingsManager::from_raw_for_test(s);
-        assert_eq!(
-            mgr.shell_command_prefix(),
-            Some("shopt -s expand_aliases")
-        );
+        assert_eq!(mgr.shell_command_prefix(), Some("shopt -s expand_aliases"));
     }
 
     #[test]
@@ -3480,10 +3476,7 @@ warnings:
         let mut mgr = SettingsManager::from_raw_for_test(s);
         mgr.set_themes(SettingsScope::Global, Some(vec!["./theme.json".into()]));
         // The shell prefix on the merged view is unchanged.
-        assert_eq!(
-            mgr.shell_command_prefix(),
-            Some("shopt -s expand_aliases")
-        );
+        assert_eq!(mgr.shell_command_prefix(), Some("shopt -s expand_aliases"));
     }
 
     /// UC-set-014/015/016 — `session_dir` accessors via the merged
@@ -3497,8 +3490,7 @@ warnings:
 
     #[test]
     fn session_dir_returns_global_value_when_only_global_set() {
-        let global: Settings =
-            serde_yaml::from_str("session-dir: /tmp/sessions\n").unwrap();
+        let global: Settings = serde_yaml::from_str("session-dir: /tmp/sessions\n").unwrap();
         let project = Settings::default();
         let merged = Settings::merge(global, project);
         assert_eq!(
@@ -3509,10 +3501,8 @@ warnings:
 
     #[test]
     fn session_dir_project_overrides_global() {
-        let global: Settings =
-            serde_yaml::from_str("session-dir: /global/sessions\n").unwrap();
-        let project: Settings =
-            serde_yaml::from_str("session-dir: ./sessions\n").unwrap();
+        let global: Settings = serde_yaml::from_str("session-dir: /global/sessions\n").unwrap();
+        let project: Settings = serde_yaml::from_str("session-dir: ./sessions\n").unwrap();
         let merged = Settings::merge(global, project);
         assert_eq!(
             merged.session_dir.as_deref(),

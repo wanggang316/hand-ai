@@ -135,10 +135,7 @@ impl SessionSetup {
             if model_pat.contains('/') {
                 None
             } else {
-                model_resolver::infer_provider_for_model_id(
-                    model_pat,
-                    PROVIDER_PRIORITY,
-                )
+                model_resolver::infer_provider_for_model_id(model_pat, PROVIDER_PRIORITY)
             }
         } else {
             Some(pick_default_provider())
@@ -159,7 +156,8 @@ impl SessionSetup {
             .unwrap_or_else(|| {
                 model_resolver::default_model_for_provider(effective_provider.as_str())
             });
-        let mut resolved = if explicit_provider.is_none() && auto_picked.is_none()
+        let mut resolved = if explicit_provider.is_none()
+            && auto_picked.is_none()
             && model_pattern.contains('/')
         {
             // Only the gateway-style slash routing fires when NO provider
@@ -242,8 +240,7 @@ impl SessionSetup {
             // surfaces `No API key for provider: …` even though the
             // key is sitting in auth.json.
             if let Ok(auth_storage) = crate::core::auth_storage::AuthStorage::new()
-                && let Some(key) =
-                    auth_storage.get_api_key(resolved.model.provider.as_str())
+                && let Some(key) = auth_storage.get_api_key(resolved.model.provider.as_str())
             {
                 stream_options.base.api_key = Some(key);
             }
@@ -563,12 +560,7 @@ mod tests {
         )
         .unwrap();
 
-        let args = Args::try_parse_from([
-            "hand",
-            "--cwd",
-            cwd.to_str().unwrap(),
-        ])
-        .expect("parse");
+        let args = Args::try_parse_from(["hand", "--cwd", cwd.to_str().unwrap()]).expect("parse");
         let setup = SessionSetup::resolve(&args).expect("resolve");
 
         assert_eq!(
@@ -651,12 +643,7 @@ mod tests {
             "default-provider: anthropic\ndefault-model: claude-opus-4-7\n",
         )
         .unwrap();
-        let args = Args::try_parse_from([
-            "hand",
-            "--cwd",
-            cwd.to_str().unwrap(),
-        ])
-        .expect("parse");
+        let args = Args::try_parse_from(["hand", "--cwd", cwd.to_str().unwrap()]).expect("parse");
         let setup = SessionSetup::resolve(&args).expect("resolve");
         assert!(
             setup.model.id.contains("opus-4-7") || setup.model.id.contains("opus-4.7"),

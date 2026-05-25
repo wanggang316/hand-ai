@@ -152,10 +152,7 @@ fn execute_grep(cwd: &Path, args: serde_json::Value) -> ToolResult {
                 // contain `-LINENUM-` instead of `:LINENUM:` after the path,
                 // so a line containing `:NN:` after a non-empty path
                 // segment counts as a match.
-                let match_count = clipped
-                    .lines()
-                    .filter(|line| is_match_line(line))
-                    .count();
+                let match_count = clipped.lines().filter(|line| is_match_line(line)).count();
                 if match_count >= limit {
                     clipped.push_str(&format!(
                         "\n[{} matches limit reached. Use limit={} for more, or refine pattern]",
@@ -473,10 +470,7 @@ mod tests {
             .join("\n");
         std::fs::write(dir.path().join("limited.txt"), lines).unwrap();
 
-        let result = execute_grep(
-            dir.path(),
-            json!({"pattern": "match", "limit": 2}),
-        );
+        let result = execute_grep(dir.path(), json!({"pattern": "match", "limit": 2}));
         let text = get_text(&result);
         assert!(
             text.contains("matches limit reached"),
@@ -507,10 +501,7 @@ mod tests {
             .join("\n");
         std::fs::write(dir.path().join("aliased.txt"), lines).unwrap();
 
-        let result = execute_grep(
-            dir.path(),
-            json!({"pattern": "match", "max_matches": 1}),
-        );
+        let result = execute_grep(dir.path(), json!({"pattern": "match", "max_matches": 1}));
         let text = get_text(&result);
         assert!(text.contains("match line 1"));
         assert!(

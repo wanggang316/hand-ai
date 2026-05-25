@@ -365,21 +365,24 @@ mod tests {
         // Each line is ~50 chars; 2000 lines ≈ 100 KB.
         let cmd = "for i in $(seq 1 2000); do printf 'line %04d %s\\n' $i \
                    'padding-padding-padding-padding'; done";
-        let result = execute_bash(
-            cmd,
-            dir.path(),
-            "/bin/bash",
-            BashExecutorOptions::default(),
-        )
-        .await
-        .unwrap();
+        let result = execute_bash(cmd, dir.path(), "/bin/bash", BashExecutorOptions::default())
+            .await
+            .unwrap();
 
-        assert!(result.truncated, "expected truncation, output len: {}", result.output.len());
+        assert!(
+            result.truncated,
+            "expected truncation, output len: {}",
+            result.output.len()
+        );
         let path = result
             .full_output_path
             .as_ref()
             .expect("full_output_path should be Some when truncated");
-        assert!(path.exists(), "full-output file must exist on disk: {}", path.display());
+        assert!(
+            path.exists(),
+            "full-output file must exist on disk: {}",
+            path.display()
+        );
         let persisted = std::fs::read_to_string(path).unwrap();
         // The persisted payload should contain both head and tail —
         // proves it's the full pre-truncation buffer, not just the

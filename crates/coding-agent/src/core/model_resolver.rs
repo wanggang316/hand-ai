@@ -421,10 +421,7 @@ fn default_base_url_for(provider: model::types::Provider) -> String {
 /// Returns the provider key (case as registered in the catalogue), or
 /// `None` when nothing matches or the ambiguity can't be resolved
 /// from the priority list — the caller falls back to its own default.
-pub fn infer_provider_for_model_id(
-    model_pattern: &str,
-    priority: &[&str],
-) -> Option<String> {
+pub fn infer_provider_for_model_id(model_pattern: &str, priority: &[&str]) -> Option<String> {
     let (pattern_provider, bare_id, _thinking) = parse_model_pattern(model_pattern);
     // Slashed ids drive their own routing — don't override that here.
     if pattern_provider.is_some() {
@@ -1555,10 +1552,7 @@ mod tests {
     #[test]
     fn infer_provider_returns_none_for_unknown_id() {
         assert_eq!(
-            infer_provider_for_model_id(
-                "definitely-not-a-real-model-zzzzzz",
-                TEST_PRIORITY
-            ),
+            infer_provider_for_model_id("definitely-not-a-real-model-zzzzzz", TEST_PRIORITY),
             None
         );
     }
@@ -1578,10 +1572,7 @@ mod tests {
         // `gemini-2.5-flash` is hosted by google / google-vertex /
         // google-gemini-cli, so with no priority hints there's no
         // single winner.
-        assert_eq!(
-            infer_provider_for_model_id("gemini-2.5-flash", &[]),
-            None
-        );
+        assert_eq!(infer_provider_for_model_id("gemini-2.5-flash", &[]), None);
     }
 
     // -------------------------------------------------------------------

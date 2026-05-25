@@ -127,7 +127,6 @@ pub fn build_system_prompt(options: BuildSystemPromptOptions<'_>) -> String {
     tool_section
         .push_str("- Show file paths clearly when referring to code locations in responses.\n");
     if !options.tools.is_empty() {
-
         let has_read = options.tools.iter().any(|t| t == "read");
         let has_bash = options.tools.iter().any(|t| t == "bash");
         let has_grep = options.tools.iter().any(|t| t == "grep");

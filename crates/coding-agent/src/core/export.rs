@@ -234,13 +234,13 @@ mod tests {
             assistant_blocks, 2,
             "expected 2 assistant blocks, got {assistant_blocks}"
         );
-        assert_eq!(tool_blocks, 1, "expected 1 tool-result block, got {tool_blocks}");
+        assert_eq!(
+            tool_blocks, 1,
+            "expected 1 tool-result block, got {tool_blocks}"
+        );
         // Spot-check the actual assistant text is present so we don't
         // get fooled by the count alone.
-        assert!(
-            content.contains("Got it."),
-            "first assistant text missing"
-        );
+        assert!(content.contains("Got it."), "first assistant text missing");
         assert!(
             content.contains("You said: Remember 42."),
             "second assistant text missing"
@@ -323,7 +323,11 @@ mod tests {
         let ctx = reopened.build_context();
         assert_eq!(ctx.len(), 4, "expected 4 messages, got {ctx:?}");
         assert!(matches!(ctx[0], Message::User(_)));
-        assert!(matches!(ctx[1], Message::Assistant(_)), "second message must be assistant, got {:?}", ctx[1]);
+        assert!(
+            matches!(ctx[1], Message::Assistant(_)),
+            "second message must be assistant, got {:?}",
+            ctx[1]
+        );
         assert!(matches!(ctx[2], Message::User(_)));
         assert!(matches!(ctx[3], Message::Assistant(_)));
 
