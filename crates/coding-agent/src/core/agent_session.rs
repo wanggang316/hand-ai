@@ -243,12 +243,41 @@ impl AgentSession {
             // `~/.hand/agent/sessions/<flattened-cwd>/`. Using the old
             // cwd-relative `.hand/sessions` path here would silently
             // miss every session written by the new layout.
+            //
+            // Issue #20: tolerate legacy `<cwd>/.hand/sessions/<id>.jsonl`
+            // too — older binaries (and runs that fell through the
+            // no-HOME path of `default_session_dir`) wrote sessions
+            // there, and `--export --resume <id>` was failing for users
+            // whose session files predate the home-based layout. Try
+            // the primary location first, then the legacy fallback, and
+            // surface both paths in the error message when neither
+            // resolves.
             let session_dir = config
                 .session_dir
                 .clone()
                 .unwrap_or_else(|| SessionManager::default_session_dir(&config.cwd));
-            let path = session_dir.join(format!("{}.jsonl", session_id));
-            SessionManager::open(&path)?
+            let primary = session_dir.join(format!("{}.jsonl", session_id));
+            let legacy = config
+                .cwd
+                .join(".hand")
+                .join("sessions")
+                .join(format!("{}.jsonl", session_id));
+            let resolved = if primary.exists() {
+                primary
+            } else if legacy.exists() && legacy != primary {
+                legacy
+            } else {
+                // Neither path exists — try open on primary so the
+                // existing not-found error path fires, but supplement
+                // with both attempted locations in the message so
+                // users see what was actually checked.
+                return Err(CodingAgentError::Session(format!(
+                    "Session \"{session_id}\" not found. Looked in:\n  - {primary}\n  - {legacy}",
+                    primary = primary.display(),
+                    legacy = legacy.display(),
+                )));
+            };
+            SessionManager::open(&resolved)?
         } else if config.no_session {
             // --no-session: pure in-memory, no JSONL file under
             // .hand/sessions.
@@ -1714,6 +1743,85 @@ mod tests {
             session_dir: None,
             no_skills: false,
         }
+    }
+
+    /// Issue #20: `--export --resume <id>` was failing for users whose
+    /// session lived at the legacy `<cwd>/.hand/sessions/<id>.jsonl`
+    /// path — the resume lookup only consulted the home-based primary
+    /// location. The fallback now tolerates the legacy layout so older
+    /// sessions still resolve.
+    #[test]
+    fn resume_falls_back_to_legacy_cwd_session_dir() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let session_id = "s_test_legacy_123";
+        // Seed a fake session file at the legacy `<cwd>/.hand/sessions/`
+        // location. Minimum-viable JSONL: a header line so SessionManager::open
+        // accepts the file.
+        let legacy_dir = cwd.join(".hand").join("sessions");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        // JSONL entries are wrapped in {"type": "session", "data": {...}}
+        // per the SessionEntry envelope.
+        let header = format!(
+            "{{\"type\":\"session\",\"data\":{{\"version\":3,\"id\":\"{session_id}\",\"timestamp\":0,\"cwd\":\"{}\"}}}}\n",
+            cwd.display()
+        );
+        fs::write(legacy_dir.join(format!("{session_id}.jsonl")), header).unwrap();
+
+        // Point HAND_HOME at a fresh dir so the "primary" lookup misses
+        // — that forces the fallback path. Don't touch the user's real
+        // ~/.hand.
+        let fake_home = TempDir::new().unwrap();
+        // SAFETY: tests run single-threaded under cargo's default
+        // unless --test-threads is set higher; this test reads/writes
+        // HAND_HOME without lock so callers in parallel would race —
+        // accept the risk for now, mark with serial_test if it bites.
+        unsafe {
+            std::env::set_var("HAND_HOME", fake_home.path());
+        }
+
+        let mut config = test_config(cwd.to_path_buf());
+        config.resume_session = Some(session_id.to_string());
+        let result = AgentSession::new_with_skill_dirs(config, vec![], None, None);
+
+        unsafe {
+            std::env::remove_var("HAND_HOME");
+        }
+
+        let session = result.expect("legacy session must resolve via fallback");
+        assert_eq!(session.session_id(), session_id);
+    }
+
+    /// When neither the primary nor the legacy session path exists, the
+    /// error message must surface BOTH attempted locations so the user
+    /// can see exactly where to drop their session file. Pre-fix the
+    /// error said only `No session header found in <primary>` and
+    /// hid the legacy location entirely.
+    #[test]
+    fn resume_missing_session_reports_both_attempted_paths() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+
+        let fake_home = TempDir::new().unwrap();
+        unsafe {
+            std::env::set_var("HAND_HOME", fake_home.path());
+        }
+
+        let mut config = test_config(cwd.to_path_buf());
+        config.resume_session = Some("s_does_not_exist".to_string());
+        let result = AgentSession::new_with_skill_dirs(config, vec![], None, None);
+
+        unsafe {
+            std::env::remove_var("HAND_HOME");
+        }
+
+        let msg = match result {
+            Ok(_) => panic!("missing session must error"),
+            Err(e) => e.to_string(),
+        };
+        assert!(msg.contains("s_does_not_exist"), "got: {msg}");
+        assert!(msg.contains(".hand/agent/sessions"), "primary path missing: {msg}");
+        assert!(msg.contains(".hand/sessions"), "legacy path missing: {msg}");
     }
 
     /// `AgentSession::new_with_skill_dirs` discovers a project skill and
