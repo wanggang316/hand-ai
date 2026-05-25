@@ -14,6 +14,12 @@ categories = ["api-bindings", "asynchronous"]
 # helpers. Tests/harness consumers must opt in with `--features faux`.
 default = []
 faux = []
+# Enables the user-facing CLI surface (`model::cli` module + `model-cli`
+# binary). Off by default so library embedders don't compile the argparse
+# / OAuth-flow / interactive-chat code into their binaries. Build the CLI
+# with `cargo build -p model --features cli` or
+# `cargo install --features cli`.
+cli = []
 
 [[bin]]
 name = "generate_models"
@@ -22,6 +28,7 @@ path = "src/generate_models.rs"
 [[bin]]
 name = "model-cli"
 path = "src/bin/model_cli.rs"
+required-features = ["cli"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

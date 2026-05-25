@@ -5,6 +5,7 @@
 
 pub mod api_registry;
 pub mod capabilities;
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod client;
 pub mod env_api_keys;
