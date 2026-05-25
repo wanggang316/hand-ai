@@ -116,7 +116,19 @@ pub struct ProcessTerminal {
 
 impl ProcessTerminal {
     pub fn new() -> std::io::Result<Self> {
-        let (cols, rows) = terminal::size().unwrap_or((80, 24));
+        // crossterm returns the kernel-reported TIOCGWINSZ. When the
+        // process is attached to a PTY whose size was never set (e.g.
+        // `pty.fork()` from a test harness without TIOCSWINSZ), the
+        // kernel reports (0, 0) — perfectly valid, no error, just
+        // useless. The overlay compositor in `overlay.rs` then clamps
+        // the overlay to 0×0 and renders nothing visible (root cause
+        // behind issue #16's PTY-only failure mode). Substitute the
+        // 80×24 fallback in both the error and zero-dimension cases
+        // so the TUI degrades gracefully instead of silently going
+        // blank.
+        let (raw_cols, raw_rows) = terminal::size().unwrap_or((80, 24));
+        let cols = if raw_cols == 0 { 80 } else { raw_cols };
+        let rows = if raw_rows == 0 { 24 } else { raw_rows };
         Ok(Self {
             capabilities: TerminalCapabilities::default(),
             columns: cols,
@@ -306,8 +318,15 @@ impl Terminal for ProcessTerminal {
 
     fn refresh_size(&mut self) {
         if let Ok((cols, rows)) = terminal::size() {
-            self.columns = cols;
-            self.rows = rows;
+            // Same (0, 0) PTY-resize gotcha as `ProcessTerminal::new`
+            // (see comment there). If a kernel reports zero, keep the
+            // previous non-zero dimensions instead of clobbering them.
+            if cols > 0 {
+                self.columns = cols;
+            }
+            if rows > 0 {
+                self.rows = rows;
+            }
         }
     }
 

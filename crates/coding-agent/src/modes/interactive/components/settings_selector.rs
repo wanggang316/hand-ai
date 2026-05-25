@@ -283,4 +283,49 @@ mod tests {
         assert!(blob.contains("autocompact"));
         assert!(blob.contains("transport"));
     }
+
+    /// Issue #16 / UAT-013: the rendered settings overlay must
+    /// include the literal effective values (e.g. `default_provider:
+    /// anthropic`, `default_thinking_level: high`) so a PTY probe can
+    /// see them. Previously the dialog rendered theme/toggles only;
+    /// the user's UAT-013 verification waited for "high" to appear in
+    /// the overlay output and timed out. With the
+    /// `default_provider` / `default_model` / `default_thinking_level`
+    /// entries added, both the key name and the resolved string
+    /// value must round-trip through render.
+    #[test]
+    fn render_surfaces_string_valued_default_entries() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let entries = vec![
+            SettingEntry {
+                key: "default_provider".into(),
+                value: SettingValue::String("anthropic".into()),
+                description: "Effective default provider.".into(),
+            },
+            SettingEntry {
+                key: "default_model".into(),
+                value: SettingValue::String("claude-opus-4-7".into()),
+                description: "Effective default model.".into(),
+            },
+            SettingEntry {
+                key: "default_thinking_level".into(),
+                value: SettingValue::String("high".into()),
+                description: "Effective default thinking level.".into(),
+            },
+        ];
+        let component = SettingsSelectorComponent::new(entries, 10, tx);
+        let blob = component.render(80).join("\n");
+        assert!(
+            blob.contains("default_provider") && blob.contains("anthropic"),
+            "provider key + value missing from render: {blob}"
+        );
+        assert!(
+            blob.contains("default_model") && blob.contains("claude-opus-4-7"),
+            "model key + value missing from render: {blob}"
+        );
+        assert!(
+            blob.contains("default_thinking_level") && blob.contains("high"),
+            "thinking key + value missing from render: {blob}"
+        );
+    }
 }
