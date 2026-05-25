@@ -323,6 +323,7 @@ impl SessionSetup {
             no_context_files: self.no_context_files,
             session_dir: self.session_dir.clone(),
             no_skills: self.no_skills,
+            base_dir: None,
         }
     }
 }

@@ -798,6 +798,7 @@ mod tests {
             no_context_files: true,
             session_dir: Some(tmp.path().join(".hand").join("sessions")),
             no_skills: true,
+            base_dir: None,
         };
         let mut session = AgentSession::new(cfg, vec![]).expect("session new");
         session

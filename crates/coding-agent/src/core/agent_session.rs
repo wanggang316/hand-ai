@@ -114,6 +114,19 @@ pub struct AgentSessionConfig {
     /// When `true`, skip skill discovery entirely. Backs the
     /// `--no-skills` CLI flag.
     pub no_skills: bool,
+    /// Override for the agent data root (replacement for `~/.hand/agent`).
+    ///
+    /// When `Some(base)`, sessions land under `base/sessions/<flattened-cwd>/`.
+    /// When `None`, the existing default applies (`HAND_HOME` env var, then
+    /// `dirs::home_dir().join(".hand/agent")`, then `<cwd>/.hand/sessions`).
+    ///
+    /// Embedders (Tauri, sandboxed apps) should pass their per-app data
+    /// directory (e.g. `app.path().app_data_dir()`) so persistent state
+    /// stays inside the host application instead of the user's home.
+    ///
+    /// `session_dir` (above) still takes precedence when set, since that
+    /// flag is an explicit per-session override.
+    pub base_dir: Option<PathBuf>,
 }
 
 /// The main agent session coordinating all subsystems.
@@ -252,10 +265,12 @@ impl AgentSession {
             // the primary location first, then the legacy fallback, and
             // surface both paths in the error message when neither
             // resolves.
-            let session_dir = config
-                .session_dir
-                .clone()
-                .unwrap_or_else(|| SessionManager::default_session_dir(&config.cwd));
+            let session_dir = config.session_dir.clone().unwrap_or_else(|| {
+                SessionManager::default_session_dir_with_base(
+                    config.base_dir.as_deref(),
+                    &config.cwd,
+                )
+            });
             let primary = session_dir.join(format!("{}.jsonl", session_id));
             let legacy = config
                 .cwd
@@ -284,6 +299,10 @@ impl AgentSession {
             SessionManager::in_memory()
         } else if let Some(dir) = &config.session_dir {
             SessionManager::create_in(&config.cwd, dir)?
+        } else if let Some(base) = &config.base_dir {
+            let dir =
+                SessionManager::default_session_dir_with_base(Some(base.as_path()), &config.cwd);
+            SessionManager::create_in(&config.cwd, &dir)?
         } else {
             SessionManager::create(&config.cwd)?
         };
@@ -394,6 +413,7 @@ impl AgentSession {
                 no_context_files: true,
                 session_dir: None,
                 no_skills: true,
+                base_dir: None,
             },
             session_manager: SessionManager::in_memory(),
             settings_manager: SettingsManager::in_memory(),
@@ -1673,6 +1693,34 @@ mod tests {
         assert_eq!(session.label(), Some("hello world"));
     }
 
+    /// `AgentSessionConfig::base_dir` routes the JSONL file under the
+    /// provided root instead of the user's home dir. Verifies the
+    /// path-rewriting contract embedders (Tauri, sandboxed apps)
+    /// depend on: sessions belong inside `<base_dir>/sessions/<flattened-cwd>/`.
+    #[test]
+    fn base_dir_override_routes_session_storage_under_provided_root() {
+        let base = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let mut cfg = test_config(cwd.path().to_path_buf());
+        cfg.base_dir = Some(base.path().to_path_buf());
+
+        let mut session = AgentSession::new(cfg, vec![]).expect("session creates under base_dir");
+
+        let path = session.session_manager_mut().path().to_path_buf();
+        assert!(
+            path.starts_with(base.path()),
+            "session path {path:?} must live under base_dir {:?}",
+            base.path()
+        );
+        // Defence in depth: ensure the path actually nests under
+        // `<base>/sessions/<flattened-cwd>/` (not just any descendant).
+        assert!(
+            path.components()
+                .any(|c| c.as_os_str() == std::ffi::OsStr::new("sessions")),
+            "session path {path:?} must traverse a 'sessions' segment"
+        );
+    }
+
     /// abort_bash on a session with no in-flight bash must return
     /// false (nothing to cancel) and leave is_bash_running at false.
     /// The contract was always there but no test pinned it after the
@@ -1752,6 +1800,7 @@ mod tests {
             no_context_files: false,
             session_dir: None,
             no_skills: false,
+            base_dir: None,
         }
     }
 

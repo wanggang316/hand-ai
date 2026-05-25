@@ -1008,6 +1008,22 @@ impl SessionManager {
     /// nor `$HOME` resolves, falls back to `<cwd>/.hand/sessions` so
     /// tests and ephemeral runs still have a deterministic location.
     pub fn default_session_dir(cwd: &Path) -> PathBuf {
+        Self::default_session_dir_with_base(None, cwd)
+    }
+
+    /// Like [`Self::default_session_dir`] but honors an explicit base
+    /// directory when provided.
+    ///
+    /// When `base` is `Some(b)`, sessions land under
+    /// `b/sessions/<flattened-cwd>/` — used by embedders (Tauri,
+    /// sandboxed apps) that route persistent state through their own
+    /// per-app data directory instead of the user's home. When `None`,
+    /// falls back to `HAND_HOME` env, then `dirs::home_dir()`, then
+    /// `<cwd>/.hand/sessions` (mirrors the previous behaviour).
+    pub fn default_session_dir_with_base(base: Option<&Path>, cwd: &Path) -> PathBuf {
+        if let Some(base) = base {
+            return base.join("sessions").join(flatten_cwd_for_session_dir(cwd));
+        }
         let home = std::env::var_os("HAND_HOME")
             .map(PathBuf::from)
             .or_else(dirs::home_dir);
@@ -1113,6 +1129,44 @@ mod tests {
             std::env::set_var("HAND_HOME", root);
         }
         ScopedHandHome { _lock: lock, prev }
+    }
+
+    #[test]
+    fn default_session_dir_with_base_routes_through_provided_root() {
+        // base_dir override: sessions land under <base>/sessions/<flattened-cwd>/.
+        // No HAND_HOME mutation needed — base override should bypass the env-var
+        // and home-dir lookup entirely.
+        let cwd = std::path::PathBuf::from("/tmp/projx");
+        let base = std::path::PathBuf::from("/var/app-data/hand");
+        let dir = SessionManager::default_session_dir_with_base(Some(&base), &cwd);
+
+        assert!(
+            dir.starts_with(&base),
+            "session dir should be rooted under base, got {dir:?}"
+        );
+        assert!(
+            dir.to_string_lossy().contains("/sessions/"),
+            "session dir should nest under 'sessions/', got {dir:?}"
+        );
+        // Flattened cwd marker (leading + trailing `--`) must appear so the
+        // path is unambiguously a cwd-encoded subdir, not the literal `projx`.
+        let last = dir.file_name().expect("dir has a final component");
+        assert!(
+            last.to_string_lossy().starts_with('-') && last.to_string_lossy().ends_with("--"),
+            "final component should be a flattened-cwd marker, got {last:?}"
+        );
+    }
+
+    #[test]
+    fn default_session_dir_with_base_none_matches_default() {
+        // base=None must behave identically to the legacy entry point.
+        let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
+        let cwd = std::path::PathBuf::from("/tmp/projy");
+
+        let via_helper = SessionManager::default_session_dir_with_base(None, &cwd);
+        let via_default = SessionManager::default_session_dir(&cwd);
+        assert_eq!(via_helper, via_default);
     }
 
     #[test]
