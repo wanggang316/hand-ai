@@ -2357,7 +2357,7 @@ fn build_login_provider_list(session: &AgentSession) -> Vec<AuthSelectorProvider
         };
         out.push(AuthSelectorProvider { id, name, status });
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 
