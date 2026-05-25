@@ -1448,6 +1448,25 @@ mod tests {
         );
     }
 
+    /// Issue #18: `--model openrouter/openai/gpt-4o-mini` (with the
+    /// provider name as the first slash segment) must route to the
+    /// `openrouter` provider and keep the full `openai/gpt-4o-mini` as
+    /// the model id. Before the session-setup fix the slash was split
+    /// only on the first `/`, so the pattern resolved as provider
+    /// "openrouter" with model id "openai/gpt-4o-mini" — that part is
+    /// correct here, the test pins it.
+    #[test]
+    fn resolve_model_no_provider_with_provider_prefix_three_segments() {
+        let result = resolve_model(None, "openrouter/openai/gpt-4o-mini");
+        assert_eq!(result.model.id, "openai/gpt-4o-mini");
+        assert_eq!(
+            result.model.provider.as_str(),
+            "openrouter",
+            "expected openrouter, got {}",
+            result.model.provider.as_str()
+        );
+    }
+
     #[test]
     fn test_list_models_no_filter() {
         let models = list_models(None);

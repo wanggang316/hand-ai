@@ -69,17 +69,38 @@ impl SessionSetup {
             )));
         }
 
-        // Load the merged project + global settings. Used as the
-        // fallback layer below `--provider`/`--model`/`--thinking`
-        // CLI flags. A read failure (missing dir, malformed YAML
-        // already surfaced upstream) silently drops to defaults so a
-        // bad project file never blocks `--help`-style smoke runs.
+        // Load the project + global settings layers. Used as a
+        // fallback below the CLI flags. A read failure silently drops
+        // to defaults so a bad project file never blocks `--help`-
+        // style smoke runs.
+        //
+        // IMPORTANT: read from the RAW layers (`project_layer()` /
+        // `global_layer()`), not the merged `current()`. The merged
+        // snapshot folds in `Settings::defaults()` which bakes in
+        // `default_provider = Some("anthropic")` as the floor — using
+        // the merged value here would clobber the slash-driven
+        // inference path (issue #18 reproduction: `--model
+        // openrouter/openai/gpt-4o-mini` would silently land on
+        // anthropic because the "baked default" beat the slash).
         let settings_manager = crate::core::settings::SettingsManager::from_cwd(&cwd).ok();
-        let settings_defaults = settings_manager.as_ref().map(|m| m.current());
-        let settings_provider: Option<&str> =
-            settings_defaults.and_then(|s| s.default_provider.as_deref());
-        let settings_model: Option<&str> =
-            settings_defaults.and_then(|s| s.default_model.as_deref());
+        let settings_provider: Option<String> = settings_manager.as_ref().and_then(|m| {
+            m.project_layer()
+                .default_provider
+                .clone()
+                .or_else(|| m.global_layer().default_provider.clone())
+        });
+        let settings_model: Option<String> = settings_manager.as_ref().and_then(|m| {
+            m.project_layer()
+                .default_model
+                .clone()
+                .or_else(|| m.global_layer().default_model.clone())
+        });
+        let settings_thinking: Option<crate::core::settings::ThinkingLevelSetting> =
+            settings_manager.as_ref().and_then(|m| {
+                m.project_layer()
+                    .default_thinking_level
+                    .or(m.global_layer().default_thinking_level)
+            });
 
         // Model: provider-default unless `--model` is explicit; thinking-level
         // CLI flag wins over the suffix embedded in the model pattern.
@@ -106,7 +127,7 @@ impl SessionSetup {
         let explicit_provider = args.provider.as_deref();
         let auto_picked: Option<String> = if explicit_provider.is_some() {
             None
-        } else if let Some(p) = settings_provider {
+        } else if let Some(p) = settings_provider.as_deref() {
             Some(p.to_string())
         } else if let Some(ref model_pat) = args.model {
             // Only attempt inference for bare ids; slashed ids
@@ -134,7 +155,7 @@ impl SessionSetup {
         let model_pattern = args
             .model
             .as_deref()
-            .or(settings_model)
+            .or(settings_model.as_deref())
             .unwrap_or_else(|| {
                 model_resolver::default_model_for_provider(effective_provider.as_str())
             });
@@ -186,9 +207,7 @@ impl SessionSetup {
         // An unrecognised `--thinking` value yields a stderr warning
         // and falls back to the settings-then-pattern chain — silently
         // ignoring would let a typo silently disable reasoning.
-        let settings_thinking = settings_defaults
-            .and_then(|s| s.default_thinking_level)
-            .map(thinking_setting_to_runtime);
+        let settings_thinking = settings_thinking.map(thinking_setting_to_runtime);
         let thinking_level = match args.thinking.as_deref() {
             Some(raw) if !raw.is_empty() => match model_resolver::parse_thinking_level(raw) {
                 Some(level) => Some(level),
@@ -591,6 +610,33 @@ mod tests {
             "openai",
             "--provider must win over settings.default-provider"
         );
+    }
+
+    /// Issue #18: `--model openrouter/openai/gpt-4o-mini` (no
+    /// `--provider`) must route to openrouter and keep the
+    /// `openai/gpt-4o-mini` id. The reproduction errored with
+    /// `No API key found for Anthropic` — the slashed pattern was
+    /// reaching `pick_default_provider` instead of the resolver's
+    /// slash-routing path.
+    #[test]
+    fn slashed_model_with_provider_prefix_routes_to_provider_no_cli_flag() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let args = Args::try_parse_from([
+            "hand",
+            "--cwd",
+            tmp.path().to_str().unwrap(),
+            "--model",
+            "openrouter/openai/gpt-4o-mini",
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert_eq!(
+            setup.model.provider.as_str(),
+            "openrouter",
+            "slashed `--model openrouter/openai/gpt-4o-mini` must route to openrouter, got {}",
+            setup.model.provider.as_str()
+        );
+        assert_eq!(setup.model.id, "openai/gpt-4o-mini");
     }
 
     /// `default-model` from settings.yaml should drive the model
