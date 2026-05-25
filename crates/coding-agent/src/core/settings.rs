@@ -34,11 +34,11 @@ pub struct Settings {
     /// `None`, so global-only semantics fall out of the merge rules.
     #[serde(alias = "lastChangelogVersion")]
     pub last_changelog_version: Option<String>,
-    #[serde(alias = "defaultProvider")]
+    #[serde(alias = "defaultProvider", alias = "default_provider")]
     pub default_provider: Option<String>,
-    #[serde(alias = "defaultModel")]
+    #[serde(alias = "defaultModel", alias = "default_model")]
     pub default_model: Option<String>,
-    #[serde(alias = "defaultThinkingLevel")]
+    #[serde(alias = "defaultThinkingLevel", alias = "default_thinking_level")]
     pub default_thinking_level: Option<ThinkingLevelSetting>,
     /// Streaming transport mode. Default when unset is
     /// [`TransportSetting::Auto`] — read via the accessor on
@@ -959,11 +959,21 @@ fn parse_yaml_with_warning(path: &Path, content: &str) -> Result<Settings, Setti
     // one whose result we keep.
     if let Ok(serde_yaml::Value::Mapping(map)) = serde_yaml::from_str::<serde_yaml::Value>(content)
     {
+        // Both kebab-case (canonical) and snake_case forms are
+        // accepted on the wire — the field-level `#[serde(alias = "…")]`
+        // attributes register the snake_case alternates as valid
+        // identifiers, so the suppress-warning list has to mirror them
+        // or users following the JSON-style examples would still see
+        // "ignoring unknown settings key" warnings.
         let known: &[&str] = &[
             "last-changelog-version",
+            "last_changelog_version",
             "default-provider",
+            "default_provider",
             "default-model",
+            "default_model",
             "default-thinking-level",
+            "default_thinking_level",
             "transport",
             "steering-mode",
             "follow-up-mode",
@@ -1999,6 +2009,31 @@ mod tests {
         assert!((s.compaction.threshold() - 0.7).abs() < f32::EPSILON);
         // Untouched sub-fields still default.
         assert_eq!(s.compaction.keep_recent_tokens(), 32_000);
+    }
+
+    /// Users following the JSON-shaped examples in docs frequently
+    /// write `default_provider` / `default_thinking_level` (snake_case)
+    /// rather than the kebab-case canonical form. Issue #16's
+    /// reproduction body specifically uses snake_case. Accept both
+    /// styles so the project-level YAML drives the session as the user
+    /// expects, with no "ignoring unknown settings key" warning.
+    #[test]
+    fn snake_case_aliases_populate_default_provider_model_and_thinking() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(
+            &dir,
+            "settings.yaml",
+            "default_provider: anthropic\n\
+             default_model: claude-opus-4-7\n\
+             default_thinking_level: high\n",
+        );
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.default_provider.as_deref(), Some("anthropic"));
+        assert_eq!(s.default_model.as_deref(), Some("claude-opus-4-7"));
+        assert_eq!(
+            s.default_thinking_level,
+            Some(ThinkingLevelSetting::High)
+        );
     }
 
     #[test]

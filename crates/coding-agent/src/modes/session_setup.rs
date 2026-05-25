@@ -69,25 +69,45 @@ impl SessionSetup {
             )));
         }
 
+        // Load the merged project + global settings. Used as the
+        // fallback layer below `--provider`/`--model`/`--thinking`
+        // CLI flags. A read failure (missing dir, malformed YAML
+        // already surfaced upstream) silently drops to defaults so a
+        // bad project file never blocks `--help`-style smoke runs.
+        let settings_manager = crate::core::settings::SettingsManager::from_cwd(&cwd).ok();
+        let settings_defaults = settings_manager.as_ref().map(|m| m.current());
+        let settings_provider: Option<&str> =
+            settings_defaults.and_then(|s| s.default_provider.as_deref());
+        let settings_model: Option<&str> =
+            settings_defaults.and_then(|s| s.default_model.as_deref());
+
         // Model: provider-default unless `--model` is explicit; thinking-level
         // CLI flag wins over the suffix embedded in the model pattern.
         //
-        // Provider selection when `--provider` is absent:
+        // Provider selection precedence (highest first):
         //
-        // 1. Slashed `--model a/b` defers to the resolver — the slash
+        // 1. `--provider` flag — explicit caller intent.
+        // 2. Project / global `default_provider` from `.hand/settings.yaml`.
+        //    Issue #16 / UAT-013: a user with the YAML set to
+        //    `anthropic` was instead landing on whichever provider
+        //    `pick_default_provider`'s auth-walk found first (e.g.
+        //    `zai`), making the setting silently ignored.
+        // 3. Slashed `--model a/b` defers to the resolver — the slash
         //    drives routing (e.g. `--model deepseek/deepseek-r1` →
         //    openrouter).
-        // 2. Bare `--model <id>` (no slash) looks the id up in the
+        // 4. Bare `--model <id>` (no slash) looks the id up in the
         //    catalogue. If exactly one provider hosts that id, use it.
         //    This prevents `--model gemini-2.5-flash` from silently
         //    falling back to anthropic and erroring on auth.
-        // 3. No `--model` at all auto-picks the first configured
+        // 5. No `--model` at all auto-picks the first configured
         //    provider (auth.json record OR env-var key) in a known
         //    priority order. So a user with only OPENROUTER_API_KEY
         //    exported lands on openrouter rather than anthropic.
         let explicit_provider = args.provider.as_deref();
         let auto_picked: Option<String> = if explicit_provider.is_some() {
             None
+        } else if let Some(p) = settings_provider {
+            Some(p.to_string())
         } else if let Some(ref model_pat) = args.model {
             // Only attempt inference for bare ids; slashed ids
             // already self-route in resolve_model(None, …) below.
@@ -107,9 +127,17 @@ impl SessionSetup {
             .map(String::from)
             .or_else(|| auto_picked.clone())
             .unwrap_or_else(|| "anthropic".to_string());
-        let model_pattern = args.model.as_deref().unwrap_or_else(|| {
-            model_resolver::default_model_for_provider(effective_provider.as_str())
-        });
+        // Model pattern precedence: `--model` flag > settings.default_model >
+        // provider's catalogue default. Settings-driven model defaults
+        // round out the UAT-013 fix so users can pin "anthropic +
+        // claude-opus-4-7" in YAML and have both halves honoured.
+        let model_pattern = args
+            .model
+            .as_deref()
+            .or(settings_model)
+            .unwrap_or_else(|| {
+                model_resolver::default_model_for_provider(effective_provider.as_str())
+            });
         let mut resolved = if explicit_provider.is_none() && auto_picked.is_none()
             && model_pattern.contains('/')
         {
@@ -150,11 +178,17 @@ impl SessionSetup {
             resolved.model.base_url = base.to_string();
         }
 
-        // pi-parity: an unrecognised `--thinking` value yields a
-        // `Warning: Invalid thinking level "<value>". Valid values: …`
-        // on stderr and falls back to the suffix from the model
-        // pattern (or no thinking level at all). Silently ignoring
-        // would let a typo silently disable reasoning.
+        // Thinking-level precedence (highest first):
+        //   1. `--thinking` flag (typo → warn + fall through).
+        //   2. `default_thinking_level` from `.hand/settings.yaml`.
+        //   3. Suffix on the model pattern (`:high`, `:medium`, …).
+        //   4. Whatever the model resolver picked (often None).
+        // An unrecognised `--thinking` value yields a stderr warning
+        // and falls back to the settings-then-pattern chain — silently
+        // ignoring would let a typo silently disable reasoning.
+        let settings_thinking = settings_defaults
+            .and_then(|s| s.default_thinking_level)
+            .map(thinking_setting_to_runtime);
         let thinking_level = match args.thinking.as_deref() {
             Some(raw) if !raw.is_empty() => match model_resolver::parse_thinking_level(raw) {
                 Some(level) => Some(level),
@@ -163,10 +197,10 @@ impl SessionSetup {
                         "Warning: Invalid thinking level \"{raw}\". \
                          Valid values: off, minimal, low, medium, high, xhigh"
                     );
-                    resolved.thinking_level
+                    settings_thinking.or(resolved.thinking_level)
                 }
             },
-            _ => resolved.thinking_level,
+            _ => settings_thinking.or(resolved.thinking_level),
         };
 
         let mut stream_options = SimpleStreamOptions::default();
@@ -306,6 +340,32 @@ const PROVIDER_PRIORITY: &[&str] = &[
     "fireworks",
     "minimax",
 ];
+
+/// Translate the YAML-shaped [`crate::core::settings::ThinkingLevelSetting`]
+/// into the runtime [`model::types::ThinkingLevel`] consumed by the
+/// stream options. The two enums are intentionally separate (one is
+/// settings-layer with `Off`, the other is provider-layer where
+/// `Off` is represented by the absence of a level), so the mapping
+/// lives here at the seam.
+fn thinking_setting_to_runtime(
+    s: crate::core::settings::ThinkingLevelSetting,
+) -> model::types::ThinkingLevel {
+    use crate::core::settings::ThinkingLevelSetting;
+    use model::types::ThinkingLevel;
+    match s {
+        // `Off` in settings means "explicit no-reasoning". The runtime
+        // enum represents that as Minimal — the lowest non-absent
+        // tier — because the resolved.thinking_level chain treats
+        // `None` as "use the model's natural default", which is the
+        // wrong fallback if the user explicitly set Off.
+        ThinkingLevelSetting::Off => ThinkingLevel::Minimal,
+        ThinkingLevelSetting::Minimal => ThinkingLevel::Minimal,
+        ThinkingLevelSetting::Low => ThinkingLevel::Low,
+        ThinkingLevelSetting::Medium => ThinkingLevel::Medium,
+        ThinkingLevelSetting::High => ThinkingLevel::High,
+        ThinkingLevelSetting::Xhigh => ThinkingLevel::Xhigh,
+    }
+}
 
 fn pick_default_provider() -> String {
     let auth = match crate::core::auth_storage::AuthStorage::new() {
@@ -463,6 +523,99 @@ mod tests {
         assert_eq!(
             setup.stream_options.base.api_key.as_deref(),
             Some("sk-test-override-12345"),
+        );
+    }
+
+    /// Issue #16 / UAT-013: a project `.hand/settings.yaml` with
+    /// `default-provider: anthropic` and `default-thinking-level: high`
+    /// must drive the session's effective provider and thinking level,
+    /// even when no CLI flag is given. The prior bug was that
+    /// `SessionSetup::resolve` only consulted CLI args + auth.json,
+    /// silently ignoring the YAML and landing on whatever provider
+    /// `pick_default_provider`'s auth-walk found first (e.g. `zai`).
+    #[test]
+    fn settings_yaml_drives_provider_and_thinking_defaults() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let cwd = tmp.path();
+        std::fs::create_dir_all(cwd.join(".hand")).unwrap();
+        std::fs::write(
+            cwd.join(".hand/settings.yaml"),
+            "default-provider: anthropic\ndefault-thinking-level: high\n",
+        )
+        .unwrap();
+
+        let args = Args::try_parse_from([
+            "hand",
+            "--cwd",
+            cwd.to_str().unwrap(),
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+
+        assert_eq!(
+            setup.model.provider.as_str(),
+            "anthropic",
+            "settings default-provider must drive effective provider"
+        );
+        assert_eq!(
+            setup.stream_options.reasoning,
+            Some(model::types::ThinkingLevel::High),
+            "settings default-thinking-level must drive stream reasoning"
+        );
+    }
+
+    /// An explicit `--provider` on the CLI must beat the settings
+    /// fallback. Precedence is CLI > settings > auto-pick.
+    #[test]
+    fn cli_provider_overrides_settings_yaml() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let cwd = tmp.path();
+        std::fs::create_dir_all(cwd.join(".hand")).unwrap();
+        std::fs::write(
+            cwd.join(".hand/settings.yaml"),
+            "default-provider: anthropic\n",
+        )
+        .unwrap();
+
+        let args = Args::try_parse_from([
+            "hand",
+            "--cwd",
+            cwd.to_str().unwrap(),
+            "--provider",
+            "openai",
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert_eq!(
+            setup.model.provider.as_str(),
+            "openai",
+            "--provider must win over settings.default-provider"
+        );
+    }
+
+    /// `default-model` from settings.yaml should drive the model
+    /// pattern when no `--model` flag was given. CLI flag still wins.
+    #[test]
+    fn settings_yaml_drives_default_model() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let cwd = tmp.path();
+        std::fs::create_dir_all(cwd.join(".hand")).unwrap();
+        std::fs::write(
+            cwd.join(".hand/settings.yaml"),
+            "default-provider: anthropic\ndefault-model: claude-opus-4-7\n",
+        )
+        .unwrap();
+        let args = Args::try_parse_from([
+            "hand",
+            "--cwd",
+            cwd.to_str().unwrap(),
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert!(
+            setup.model.id.contains("opus-4-7") || setup.model.id.contains("opus-4.7"),
+            "settings default-model must drive model id, got {}",
+            setup.model.id
         );
     }
 
