@@ -31,7 +31,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
 async-trait = "0.1"
 async-stream = "0.3"
-openai-rust = { git = "https://github.com/wanggang316/openai-rust", tag = "v0.1.0" }
+openai-rust = { git = "https://github.com/wanggang316/openai-rust", tag = "v0.2.1" }
 google-genai-rust = { git = "https://github.com/wanggang316/google-genai-rust", tag = "v0.1.0" }
 futures = "0.3"
 chrono = "0.4"

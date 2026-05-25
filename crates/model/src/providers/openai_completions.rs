@@ -260,6 +260,15 @@ pub fn stream_openai_completions(
 
             capture_chunk_metadata(&chunk.id, &chunk.model, &model.id, &mut output);
 
+            // Terminal usage chunk: when the request opted into
+            // `stream_options.include_usage = true`, the provider emits
+            // a final chunk carrying the call's token counts —
+            // typically with `choices: []`. Capture before the
+            // no-choice short-circuit below so we don't drop it.
+            if let Some(u) = &chunk.usage {
+                apply_chunk_usage(u, &model, &mut output);
+            }
+
             let Some(choice) = chunk.choices.first() else { continue };
 
             if let Some(finish_reason) = &choice.finish_reason {
@@ -315,6 +324,37 @@ fn capture_chunk_metadata(
     if output.response_model.is_none() && !chunk_model.is_empty() && chunk_model != requested_id {
         output.response_model = Some(chunk_model.to_string());
     }
+}
+
+/// Write the OpenAI-shaped chunk usage into the assistant message
+/// and compute the per-call cost.
+///
+/// The OpenAI Completions API and every compatible provider report
+/// per-call totals on the terminal SSE chunk (requires the caller to
+/// set `stream_options.include_usage = true`, which the build_params
+/// path already does for providers with `supports_usage_in_streaming`).
+/// `prompt_tokens` is the raw input including any cache hits; the
+/// convention used by the other providers in this crate (Google,
+/// Anthropic) is to surface the *billed* input separately from
+/// cached reads, so subtract the cached count out of `input` and
+/// surface it under `cache_read`. `saturating_sub` guards against
+/// provider quirks where the cached count exceeds the prompt total.
+fn apply_chunk_usage(
+    chunk_usage: &openai_rust::types::Usage,
+    model: &Model,
+    output: &mut AssistantMessage,
+) {
+    let cached = chunk_usage
+        .prompt_tokens_details
+        .as_ref()
+        .map(|d| d.cached_tokens as u64)
+        .unwrap_or(0);
+    let prompt_total = chunk_usage.prompt_tokens as u64;
+    output.usage.input = prompt_total.saturating_sub(cached);
+    output.usage.output = chunk_usage.completion_tokens as u64;
+    output.usage.cache_read = cached;
+    output.usage.total_tokens = chunk_usage.total_tokens as u64;
+    crate::models::calculate_cost(model, &mut output.usage);
 }
 
 /// Apply a single SSE delta to `output`, returning the events to yield.
@@ -1691,6 +1731,95 @@ mod tests {
             compat: None,
             thinking_level_map: None,
         }
+    }
+
+    fn empty_assistant_message() -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".to_string(),
+            content: Vec::new(),
+            api: Api::OpenAICompletions,
+            provider: Provider::OpenAI,
+            model: "test-model".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    /// Issue hand-ai#13 / openai-rust#1 regression. The terminal stream
+    /// chunk carries `usage`; we must surface it on the assistant
+    /// message (and recompute cost) instead of leaving zeros.
+    #[test]
+    fn apply_chunk_usage_writes_back_input_output_and_total() {
+        let mut model = test_model(Provider::OpenAI);
+        model.cost = Cost {
+            input: 1.0,    // $1 per million input tokens
+            output: 2.0,   // $2 per million output tokens
+            cache_read: 0.0,
+            cache_write: 0.0,
+        };
+        let chunk_usage = openai_rust::types::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            prompt_tokens_details: None,
+        };
+        let mut msg = empty_assistant_message();
+        apply_chunk_usage(&chunk_usage, &model, &mut msg);
+        assert_eq!(msg.usage.input, 100);
+        assert_eq!(msg.usage.output, 50);
+        assert_eq!(msg.usage.cache_read, 0);
+        assert_eq!(msg.usage.total_tokens, 150);
+        // 100 * 1.0/1M + 50 * 2.0/1M = 0.0001 + 0.0001 = 0.0002
+        assert!((msg.usage.cost.total - 0.0002).abs() < 1e-9);
+    }
+
+    /// When the chunk reports `prompt_tokens_details.cached_tokens`,
+    /// the cached portion must be subtracted from billed `input` and
+    /// surfaced under `cache_read` — matching the convention the
+    /// Google/Anthropic providers established in this crate.
+    #[test]
+    fn apply_chunk_usage_subtracts_cached_tokens_from_input() {
+        let model = test_model(Provider::OpenAI);
+        let chunk_usage = openai_rust::types::Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 50,
+            total_tokens: 1050,
+            prompt_tokens_details: Some(openai_rust::types::PromptTokensDetails {
+                cached_tokens: 800,
+            }),
+        };
+        let mut msg = empty_assistant_message();
+        apply_chunk_usage(&chunk_usage, &model, &mut msg);
+        assert_eq!(msg.usage.input, 200, "billed input drops cache portion");
+        assert_eq!(msg.usage.cache_read, 800);
+        assert_eq!(msg.usage.output, 50);
+        assert_eq!(msg.usage.total_tokens, 1050);
+    }
+
+    /// Pathological provider quirk: cached tokens reported as larger
+    /// than the prompt total. Must not panic — saturating_sub clamps
+    /// `input` to zero and the cache_read still surfaces the raw
+    /// value for diagnostics.
+    #[test]
+    fn apply_chunk_usage_handles_cached_greater_than_prompt() {
+        let model = test_model(Provider::OpenAI);
+        let chunk_usage = openai_rust::types::Usage {
+            prompt_tokens: 100,
+            completion_tokens: 10,
+            total_tokens: 110,
+            prompt_tokens_details: Some(openai_rust::types::PromptTokensDetails {
+                cached_tokens: 200,
+            }),
+        };
+        let mut msg = empty_assistant_message();
+        apply_chunk_usage(&chunk_usage, &model, &mut msg);
+        assert_eq!(msg.usage.input, 0, "saturating_sub clamps to zero");
+        assert_eq!(msg.usage.cache_read, 200);
     }
 
     fn affinity_compat(send: bool) -> ResolvedCompat {
