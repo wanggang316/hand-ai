@@ -549,6 +549,7 @@ pub type OnResponseCallback = Arc<dyn Fn(u16, HashMap<String, String>, &Model) +
 
 /// Base options all providers share.
 #[derive(Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -613,6 +614,7 @@ pub type ProviderStreamOptions = StreamOptions;
 
 /// Unified options with reasoning passed to stream_simple() and complete_simple().
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SimpleStreamOptions {
     #[serde(flatten)]
     pub base: StreamOptions,

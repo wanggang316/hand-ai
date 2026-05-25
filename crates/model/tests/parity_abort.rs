@@ -26,10 +26,8 @@ async fn cancellation_during_sleep_emits_aborted_error() {
     let model = faux_model(Api::Faux, Provider::OpenAI, "faux-1");
     let context = Context::default();
     let token = CancellationToken::new();
-    let options = StreamOptions {
-        signal: Some(token.clone()),
-        ..Default::default()
-    };
+    let mut options = StreamOptions::default();
+    options.signal = Some(token.clone());
 
     let stream_token = token.clone();
     tokio::spawn(async move {
@@ -66,10 +64,8 @@ async fn pre_cancelled_token_emits_aborted_error_immediately() {
     let context = Context::default();
     let token = CancellationToken::new();
     token.cancel();
-    let options = StreamOptions {
-        signal: Some(token),
-        ..Default::default()
-    };
+    let mut options = StreamOptions::default();
+    options.signal = Some(token);
 
     let mut stream = provider.stream(model, context, Some(options));
     let mut events: Vec<AssistantMessageEvent> = Vec::new();

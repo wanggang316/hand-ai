@@ -213,10 +213,8 @@ async fn sleep_step_yields_control_and_can_be_cancelled() {
         ],
     );
     let token = CancellationToken::new();
-    let options = StreamOptions {
-        signal: Some(token.clone()),
-        ..Default::default()
-    };
+    let mut options = StreamOptions::default();
+    options.signal = Some(token.clone());
 
     let stream_token = token.clone();
     tokio::spawn(async move {

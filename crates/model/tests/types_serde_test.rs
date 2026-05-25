@@ -39,12 +39,10 @@ fn stream_options_callbacks_clone_arc() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let counter = Arc::new(AtomicUsize::new(0));
     let c2 = counter.clone();
-    let opts = StreamOptions {
-        on_payload: Some(Arc::new(move |_v, _m| {
-            c2.fetch_add(1, Ordering::SeqCst);
-        })),
-        ..Default::default()
-    };
+    let mut opts = StreamOptions::default();
+    opts.on_payload = Some(Arc::new(move |_v, _m| {
+        c2.fetch_add(1, Ordering::SeqCst);
+    }));
     let cloned = opts.clone();
     let p1 = opts.on_payload.as_ref().unwrap();
     let p2 = cloned.on_payload.as_ref().unwrap();

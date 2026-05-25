@@ -36,14 +36,10 @@ async fn azure_base_url_uses_api_key_header() {
         tools: None,
     };
 
-    let options = SimpleStreamOptions {
-        base: StreamOptions {
-            api_key: Some("test-api-key".to_string()),
-            ..Default::default()
-        },
-        reasoning: None,
-        thinking_budgets: None,
-    };
+    let mut base = StreamOptions::default();
+    base.api_key = Some("test-api-key".to_string());
+    let mut options = SimpleStreamOptions::default();
+    options.base = base;
 
     let stream = provider.stream_simple(model, context, Some(options));
     drain_stream(stream).await;
@@ -114,14 +110,10 @@ async fn azure_emits_start_before_error_on_network_failure() {
         tools: None,
     };
 
-    let options = SimpleStreamOptions {
-        base: StreamOptions {
-            api_key: Some("test-key".to_string()),
-            ..Default::default()
-        },
-        reasoning: None,
-        thinking_budgets: None,
-    };
+    let mut base = StreamOptions::default();
+    base.api_key = Some("test-key".to_string());
+    let mut options = SimpleStreamOptions::default();
+    options.base = base;
 
     let mut stream = provider.stream_simple(model, context, Some(options));
     let mut events: Vec<AssistantMessageEvent> = Vec::new();

@@ -971,15 +971,12 @@ mod tests {
 
     #[test]
     fn build_request_options_projects_simple_stream_options() {
-        let simple = model::SimpleStreamOptions {
-            base: model::StreamOptions {
-                temperature: Some(0.7),
-                max_tokens: Some(2048),
-                ..Default::default()
-            },
-            reasoning: Some(model::ThinkingLevel::Medium),
-            thinking_budgets: None,
-        };
+        let mut base = model::StreamOptions::default();
+        base.temperature = Some(0.7);
+        base.max_tokens = Some(2048);
+        let mut simple = model::SimpleStreamOptions::default();
+        simple.base = base;
+        simple.reasoning = Some(model::ThinkingLevel::Medium);
 
         let projected = build_request_options(&simple);
         let json = serde_json::to_string(&projected).expect("serialize");

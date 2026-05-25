@@ -144,6 +144,15 @@ impl ApiProvider for AzureOpenAIResponsesProvider {
             base.max_tokens = opts.max_tokens();
             base.api_key = api_key;
             base.headers = opts.headers().cloned();
+            // Forward cancellation/timeout/retry surface from
+            // SimpleStreamOptions.base — the wrapper in
+            // `stream::stream_simple` installs a combined token into
+            // `opts.base.signal`; dropping it here would silently
+            // un-cancel the SSE loop despite the wrapper's contract.
+            base.signal = opts.base.signal.clone();
+            base.timeout_ms = opts.base.timeout_ms;
+            base.max_retries = opts.base.max_retries;
+            base.max_retry_delay_ms = opts.base.max_retry_delay_ms;
         }
 
         stream_azure_openai_responses(

@@ -58,9 +58,10 @@ async fn vertex_api_key_resolution_uses_explicit_key_first() {
     let stream = provider.stream(
         model,
         context,
-        Some(StreamOptions {
-            api_key: Some("AIzaSyExampleRealisticLookingApiKey123456".to_string()),
-            ..Default::default()
+        Some({
+            let mut o = StreamOptions::default();
+            o.api_key = Some("AIzaSyExampleRealisticLookingApiKey123456".to_string());
+            o
         }),
     );
     drain_stream(stream).await;
@@ -105,9 +106,10 @@ async fn vertex_emits_start_before_error_on_network_failure() {
     let mut stream = provider.stream(
         model,
         context,
-        Some(StreamOptions {
-            api_key: Some("AIzaSyExample".to_string()),
-            ..Default::default()
+        Some({
+            let mut o = StreamOptions::default();
+            o.api_key = Some("AIzaSyExample".to_string());
+            o
         }),
     );
 
@@ -154,9 +156,10 @@ async fn vertex_url_includes_project_and_location() {
     let stream = provider.stream(
         model,
         context,
-        Some(StreamOptions {
-            api_key: Some("AIzaSyExample".to_string()),
-            ..Default::default()
+        Some({
+            let mut o = StreamOptions::default();
+            o.api_key = Some("AIzaSyExample".to_string());
+            o
         }),
     );
     drain_stream(stream).await;

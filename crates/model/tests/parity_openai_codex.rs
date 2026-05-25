@@ -85,11 +85,9 @@ async fn codex_sse_transport_routes_to_correct_url() {
 
     let provider = OpenAICodexResponsesProvider::new().with_base_url(server.base_url.clone());
 
-    let options = StreamOptions {
-        api_key: Some("test-key".to_string()),
-        transport: Some(Transport::Sse),
-        ..Default::default()
-    };
+    let mut options = StreamOptions::default();
+    options.api_key = Some("test-key".to_string());
+    options.transport = Some(Transport::Sse);
 
     let stream = provider.stream(test_model(), test_context(), Some(options));
     drain(stream).await;
@@ -125,11 +123,9 @@ async fn codex_websocket_transport_uses_ws_endpoint() {
     let provider = OpenAICodexResponsesProvider::new()
         .with_base_url("https://codex.example.test/backend-api".to_string());
 
-    let options = StreamOptions {
-        api_key: Some("test-key".to_string()),
-        transport: Some(Transport::Websocket),
-        ..Default::default()
-    };
+    let mut options = StreamOptions::default();
+    options.api_key = Some("test-key".to_string());
+    options.transport = Some(Transport::Websocket);
 
     let mut stream = provider.stream(test_model(), test_context(), Some(options));
     let mut events: Vec<AssistantMessageEvent> = Vec::new();
@@ -210,11 +206,9 @@ async fn codex_cache_affinity_session_header() {
 
     let provider = OpenAICodexResponsesProvider::new().with_base_url(server.base_url.clone());
 
-    let options = StreamOptions {
-        api_key: Some("test-key".to_string()),
-        session_id: Some("sess_abc".to_string()),
-        ..Default::default()
-    };
+    let mut options = StreamOptions::default();
+    options.api_key = Some("test-key".to_string());
+    options.session_id = Some("sess_abc".to_string());
 
     let stream = provider.stream(test_model(), test_context(), Some(options));
     drain(stream).await;

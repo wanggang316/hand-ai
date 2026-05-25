@@ -152,13 +152,13 @@ async fn mistral_reasoning_mode_in_request_body() {
         tools: None,
     };
 
-    let options = SimpleStreamOptions {
-        base: model::types::StreamOptions {
-            api_key: Some("test-key".to_string()),
-            ..Default::default()
-        },
-        reasoning: Some(ThinkingLevel::Medium),
-        thinking_budgets: None,
+    let options = {
+        let mut base = model::types::StreamOptions::default();
+        base.api_key = Some("test-key".to_string());
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o.reasoning = Some(ThinkingLevel::Medium);
+        o
     };
 
     let stream = provider.stream_simple(model.clone(), context, Some(options));
@@ -194,13 +194,12 @@ async fn mistral_reasoning_off_no_mode_flag() {
         tools: None,
     };
 
-    let options = SimpleStreamOptions {
-        base: model::types::StreamOptions {
-            api_key: Some("test-key".to_string()),
-            ..Default::default()
-        },
-        reasoning: None,
-        thinking_budgets: None,
+    let options = {
+        let mut base = model::types::StreamOptions::default();
+        base.api_key = Some("test-key".to_string());
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o
     };
 
     let stream = provider.stream_simple(model.clone(), context, Some(options));
@@ -274,13 +273,12 @@ async fn mistral_provider_normalizes_cross_provider_tool_ids_in_request_body() {
         tools: None,
     };
 
-    let options = SimpleStreamOptions {
-        base: model::types::StreamOptions {
-            api_key: Some("test-key".to_string()),
-            ..Default::default()
-        },
-        reasoning: None,
-        thinking_budgets: None,
+    let options = {
+        let mut base = model::types::StreamOptions::default();
+        base.api_key = Some("test-key".to_string());
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o
     };
 
     let stream = provider.stream_simple(model.clone(), context, Some(options));
@@ -358,13 +356,12 @@ async fn mistral_emits_start_before_error_on_network_failure() {
         tools: None,
     };
 
-    let options = SimpleStreamOptions {
-        base: model::types::StreamOptions {
-            api_key: Some("test-key".to_string()),
-            ..Default::default()
-        },
-        reasoning: None,
-        thinking_budgets: None,
+    let options = {
+        let mut base = model::types::StreamOptions::default();
+        base.api_key = Some("test-key".to_string());
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o
     };
 
     let mut stream = provider.stream_simple(model.clone(), context, Some(options));

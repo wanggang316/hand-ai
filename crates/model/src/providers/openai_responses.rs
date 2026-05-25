@@ -65,6 +65,16 @@ impl ApiProvider for OpenAIResponsesProvider {
             base.max_tokens = opts.max_tokens();
             base.api_key = api_key;
             base.headers = opts.headers().cloned();
+            // Forward cancellation/timeout/retry surface from
+            // SimpleStreamOptions.base — see openai_completions for the
+            // rationale. The wrapper in `stream::stream_simple` installs
+            // a combined token into `opts.base.signal`; dropping it here
+            // would make `stream_simple` un-cancellable through this
+            // provider despite the wrapper's contract.
+            base.signal = opts.base.signal.clone();
+            base.timeout_ms = opts.base.timeout_ms;
+            base.max_retries = opts.base.max_retries;
+            base.max_retry_delay_ms = opts.base.max_retry_delay_ms;
         }
 
         stream_openai_responses(model, context, Some(base))

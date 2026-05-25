@@ -26,7 +26,7 @@ use crate::client::ClientError;
 use crate::transform::transform_messages;
 use crate::types::{
     AssistantMessage, AssistantMessageDiagnostic, AssistantMessageEvent, Context, DiagnosticKind,
-    Message, Model, SimpleStreamOptions, StopReason,
+    Message, Model, SimpleStreamOptions, StopReason, Usage,
 };
 use crate::utils::event_stream::{EventStream, Provenance};
 use async_stream::stream;
@@ -133,7 +133,57 @@ pub fn stream_simple(
             );
 
             let mut retried = false;
-            while let Some(event) = inner_stream.next().await {
+            // Cancellation gate: providers vary in how thoroughly they
+            // honour `options.base.signal` from inside their HTTP / SSE
+            // loops. Wrap each `next().await` in a select against the
+            // combined token so cancellation (user signal OR timeout)
+            // terminates the stream promptly even when a provider is
+            // currently blocked on a long-lived upstream read. The
+            // inner stream future is dropped on the cancelled branch,
+            // which collapses the underlying reqwest connection.
+            loop {
+                let event_opt = tokio::select! {
+                    biased;
+                    _ = combined.cancelled() => None,
+                    ev = inner_stream.next() => ev,
+                };
+                let Some(event) = event_opt else {
+                    if combined.is_cancelled() {
+                        let was_timeout = *timed_out_for_stream.lock().unwrap();
+                        let error_message = if was_timeout {
+                            format!("Request timed out after {}ms", timeout_ms.unwrap_or(0))
+                        } else {
+                            "Request was aborted".to_string()
+                        };
+                        let mut aborted = AssistantMessage {
+                            role: "assistant".to_string(),
+                            api: model_clone.api,
+                            provider: model_clone.provider,
+                            model: model_clone.id.clone(),
+                            content: vec![],
+                            usage: Usage::default(),
+                            stop_reason: StopReason::Aborted,
+                            error_message: Some(error_message),
+                            timestamp: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0),
+                            response_model: None,
+                            response_id: None,
+                            diagnostics: None,
+                        };
+                        if !diagnostics.is_empty() {
+                            attach_diagnostics(&mut aborted, &diagnostics);
+                        }
+                        yield AssistantMessageEvent::Error {
+                            reason: StopReason::Aborted,
+                            error: aborted,
+                        };
+                        return;
+                    }
+                    // Stream ended naturally without a terminal event.
+                    break;
+                };
                 match event {
                     AssistantMessageEvent::Done { reason, mut message } => {
                         if !diagnostics.is_empty() {

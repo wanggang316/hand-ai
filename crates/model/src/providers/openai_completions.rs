@@ -98,6 +98,15 @@ impl crate::api_registry::ApiProvider for OpenAICompletionsProvider {
             base.max_tokens = opts.max_tokens();
             base.api_key = api_key;
             base.headers = opts.headers().cloned();
+            // Cancellation surface: the wrapper in `stream::stream_simple`
+            // installs a combined token (user signal + timeout) into
+            // `opts.base.signal` before calling into us. Forward it so
+            // long-running SSE loops can be interrupted; previously this
+            // field was silently dropped here.
+            base.signal = opts.base.signal.clone();
+            base.timeout_ms = opts.base.timeout_ms;
+            base.max_retries = opts.base.max_retries;
+            base.max_retry_delay_ms = opts.base.max_retry_delay_ms;
         }
 
         let reasoning_effort = if supports_xhigh(&model) {

@@ -38,12 +38,12 @@ async fn stream_simple_with_signal_aborts_mid_stream() {
         token_for_cancel.cancel();
     });
 
-    let options = SimpleStreamOptions {
-        base: model::StreamOptions {
-            signal: Some(token),
-            ..Default::default()
-        },
-        ..Default::default()
+    let options = {
+        let mut base = model::StreamOptions::default();
+        base.signal = Some(token);
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o
     };
     let msg = complete_simple(&registry, &model, Context::default(), Some(options))
         .await
@@ -63,12 +63,12 @@ async fn stream_simple_timeout_aborts_long_request() {
     let registry = faux_registry(provider);
     let model = faux_model(Api::Faux, Provider::OpenAI, "faux-1");
 
-    let options = SimpleStreamOptions {
-        base: model::StreamOptions {
-            timeout_ms: Some(500),
-            ..Default::default()
-        },
-        ..Default::default()
+    let options = {
+        let mut base = model::StreamOptions::default();
+        base.timeout_ms = Some(500);
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o
     };
     let msg = complete_simple(&registry, &model, Context::default(), Some(options))
         .await
@@ -103,14 +103,14 @@ async fn stream_simple_retries_on_503() {
     let registry = faux_registry(provider);
     let model = faux_model(Api::Faux, Provider::OpenAI, "faux-1");
 
-    let options = SimpleStreamOptions {
-        base: model::StreamOptions {
-            max_retries: Some(2),
-            // Compress the backoff so the test stays snappy.
-            max_retry_delay_ms: Some(10),
-            ..Default::default()
-        },
-        ..Default::default()
+    let options = {
+        let mut base = model::StreamOptions::default();
+        base.max_retries = Some(2);
+        // Compress the backoff so the test stays snappy.
+        base.max_retry_delay_ms = Some(10);
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o
     };
     let msg = complete_simple(&registry, &model, Context::default(), Some(options))
         .await
@@ -141,12 +141,12 @@ async fn stream_simple_no_retry_on_400() {
     let registry = faux_registry(provider);
     let model = faux_model(Api::Faux, Provider::OpenAI, "faux-1");
 
-    let options = SimpleStreamOptions {
-        base: model::StreamOptions {
-            max_retries: Some(2),
-            ..Default::default()
-        },
-        ..Default::default()
+    let options = {
+        let mut base = model::StreamOptions::default();
+        base.max_retries = Some(2);
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o
     };
     let msg = complete_simple(&registry, &model, Context::default(), Some(options))
         .await
@@ -161,6 +161,107 @@ async fn stream_simple_no_retry_on_400() {
         *calls.lock().unwrap(),
         1,
         "provider should only be called once"
+    );
+}
+
+/// A provider that intentionally ignores `options.base.signal`. Models
+/// the worst-case real-world implementation (a third-party HTTP provider
+/// that doesn't thread the cancellation token into its SSE loop). The
+/// wrapper's cancellation gate has to terminate the stream regardless.
+struct SignalIgnoringProvider;
+
+impl model::ApiProvider for SignalIgnoringProvider {
+    fn stream(
+        &self,
+        model: model::Model,
+        _context: Context,
+        _options: Option<model::StreamOptions>,
+    ) -> model::AssistantMessageEventStream<'static> {
+        // Never terminates on its own; only the wrapper-level gate can stop it.
+        Box::pin(async_stream::stream! {
+            yield model::AssistantMessageEvent::Start {
+                partial: model::AssistantMessage {
+                    role: "assistant".to_string(),
+                    api: model.api,
+                    provider: model.provider,
+                    model: model.id.clone(),
+                    content: vec![],
+                    usage: Usage::default(),
+                    stop_reason: StopReason::Stop,
+                    error_message: None,
+                    timestamp: 0,
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
+                },
+            };
+            loop {
+                // Long sleep simulates a stuck upstream connection. The
+                // wrapper gate must dispatch cancellation here.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        })
+    }
+
+    fn stream_simple(
+        &self,
+        model: model::Model,
+        context: Context,
+        _options: Option<SimpleStreamOptions>,
+    ) -> model::AssistantMessageEventStream<'static> {
+        // Drop the signal-bearing options on the floor.
+        self.stream(model, context, None)
+    }
+}
+
+#[tokio::test]
+async fn wrapper_cancels_provider_that_ignores_signal() {
+    // Regression guard for the wrapper-level cancellation gate added by
+    // the #32 audit. Without that gate, a provider that drops
+    // `options.base.signal` would leave `complete_simple` hanging
+    // indefinitely on `inner_stream.next().await`.
+    let registry = ApiProviderRegistry::new();
+    registry.register(
+        Api::Faux,
+        Box::new(SignalIgnoringProvider),
+        Some("test".to_string()),
+    );
+    let model = faux_model(Api::Faux, Provider::OpenAI, "faux-1");
+    let token = CancellationToken::new();
+
+    let token_for_cancel = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token_for_cancel.cancel();
+    });
+
+    let options = {
+        let mut base = model::StreamOptions::default();
+        base.signal = Some(token);
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o
+    };
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        complete_simple(&registry, &model, Context::default(), Some(options)),
+    )
+    .await;
+
+    let msg = result
+        .expect("complete_simple must return promptly after cancellation")
+        .expect("complete_simple should resolve into a message");
+
+    assert_eq!(
+        msg.stop_reason,
+        StopReason::Aborted,
+        "wrapper must synthesize an Aborted terminal event when the provider ignores signal"
+    );
+    let err = msg.error_message.as_deref().unwrap_or("");
+    assert!(
+        err.to_ascii_lowercase().contains("aborted"),
+        "expected aborted error message, got {err:?}"
     );
 }
 
