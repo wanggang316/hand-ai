@@ -744,13 +744,27 @@ impl SimpleStreamOptions {
 }
 
 /// Text content block.
+///
+/// `content_type` is `#[serde(skip)]` because every place that
+/// serialises a `TextContent` wraps it in a `tag = "type"` enum
+/// (`UserContentBlock`, `AssistantContentBlock`, `ToolResultContent`)
+/// that already emits `"type":"text"` on the outer object. Emitting
+/// the inner field too produced a duplicate JSON key and broke
+/// deserialization of every session that contained an assistant text
+/// block (issue #19). The field stays in the struct so construction-
+/// site code that reads it keeps compiling; on deserialize the
+/// default fills it back in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextContent {
-    #[serde(rename = "type")]
+    #[serde(skip, default = "default_text_content_type")]
     pub content_type: String,
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none", rename = "textSignature")]
     pub text_signature: Option<String>,
+}
+
+fn default_text_content_type() -> String {
+    "text".to_string()
 }
 
 impl TextContent {
@@ -763,16 +777,22 @@ impl TextContent {
     }
 }
 
-/// Thinking content block.
+/// Thinking content block. See [`TextContent`] for the rationale
+/// behind `#[serde(skip)]` on `content_type` — same duplicate-tag
+/// issue, same fix.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingContent {
-    #[serde(rename = "type")]
+    #[serde(skip, default = "default_thinking_content_type")]
     pub content_type: String,
     pub thinking: String,
     #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingSignature")]
     pub thinking_signature: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redacted: Option<bool>,
+}
+
+fn default_thinking_content_type() -> String {
+    "thinking".to_string()
 }
 
 impl ThinkingContent {
@@ -786,13 +806,18 @@ impl ThinkingContent {
     }
 }
 
-/// Image content block.
+/// Image content block. See [`TextContent`] for the rationale
+/// behind `#[serde(skip)]` on `content_type`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageContent {
-    #[serde(rename = "type")]
+    #[serde(skip, default = "default_image_content_type")]
     pub content_type: String,
     pub data: String,
     pub mime_type: String,
+}
+
+fn default_image_content_type() -> String {
+    "image".to_string()
 }
 
 impl ImageContent {
@@ -805,16 +830,21 @@ impl ImageContent {
     }
 }
 
-/// Tool call content block.
+/// Tool call content block. See [`TextContent`] for the rationale
+/// behind `#[serde(skip)]` on `content_type`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
-    #[serde(rename = "type")]
+    #[serde(skip, default = "default_tool_call_content_type")]
     pub content_type: String,
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none", rename = "thoughtSignature")]
     pub thought_signature: Option<String>,
+}
+
+fn default_tool_call_content_type() -> String {
+    "toolCall".to_string()
 }
 
 impl ToolCall {

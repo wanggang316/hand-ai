@@ -785,7 +785,16 @@ mod tests {
     fn prompt_with_images_and_streaming_behavior_roundtrips() {
         // Image content uses model::types::ImageContent; pull a literal
         // wire payload so we exercise the camelCase fields exactly.
-        let json = r#"{"type":"prompt","id":"7","message":"see image","images":[{"type":"image","data":"AAAA","mime_type":"image/png"}],"streamingBehavior":"followUp"}"#;
+        //
+        // Note: `ImageContent.content_type` is `#[serde(skip)]` because
+        // the model-side types are normally wrapped in a tagged enum
+        // (`UserContentBlock` / `AssistantContentBlock`) that emits
+        // `"type":"image"` itself — keeping the inner field too
+        // produced duplicate JSON keys and broke session loading
+        // (issue #19). RPC consumers may pass a `"type":"image"` field
+        // for clarity (serde will ignore it on parse), but the
+        // re-serialized form omits it.
+        let json = r#"{"type":"prompt","id":"7","message":"see image","images":[{"data":"AAAA","mime_type":"image/png"}],"streamingBehavior":"followUp"}"#;
         let cmd: RpcCommand = roundtrip(json);
         match cmd {
             RpcCommand::Prompt {

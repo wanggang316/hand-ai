@@ -435,6 +435,10 @@ impl AgentSession {
         self.session_manager.append_message(user_msg.clone())?;
 
         let prompts = vec![user_msg];
+        // Capture the prompt count before `prompts` is moved into the
+        // agent loop below — used to skip-already-persisted entries
+        // when writing back `result.messages`.
+        let prompts_len = prompts.len();
 
         // Mark the session as streaming for the duration of this turn.
         // Restored on the happy path below; on cancel/panic the field
@@ -561,8 +565,14 @@ impl AgentSession {
 
         let result = result_outcome.map_err(CodingAgentError::Agent)?;
 
-        // Persist new messages to session
-        for msg in &result.messages {
+        // Persist new messages produced by the loop, skipping the
+        // prompts we already appended upfront at the top of this
+        // method. `result.messages` is `[prompts.., assistant_msgs..]`
+        // (see `run_agent_loop` in `agent_loop.rs`), so re-appending
+        // the first `prompts.len()` entries would double-persist every
+        // user turn — issue #19 surfaced as the user's text appearing
+        // twice in `--export` output for each prompt sent.
+        for msg in result.messages.iter().skip(prompts_len) {
             let _ = self.session_manager.append_message(msg.clone());
         }
 
@@ -2180,6 +2190,41 @@ mod tests {
         }
     }
 
+    /// Mock provider: always emits a single text message and stops.
+    /// Used by tests that need a clean user→assistant turn without
+    /// tool calls.
+    struct TextOnlyProvider {
+        reply: String,
+    }
+
+    impl ApiProvider for TextOnlyProvider {
+        fn stream(
+            &self,
+            _model: model::Model,
+            _context: Context,
+            _options: Option<StreamOptions>,
+        ) -> AssistantMessageEventStream<'static> {
+            let reply = self.reply.clone();
+            Box::pin(async_stream::stream! {
+                let msg = assistant_text_message(&reply);
+                yield AssistantMessageEvent::Start { partial: msg.clone() };
+                yield AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message: msg,
+                };
+            })
+        }
+
+        fn stream_simple(
+            &self,
+            model: model::Model,
+            context: Context,
+            options: Option<SimpleStreamOptions>,
+        ) -> AssistantMessageEventStream<'static> {
+            self.stream(model, context, options.map(|o| o.base))
+        }
+    }
+
     /// Mock provider: turn 1 emits a tool call, turn 2+ emit text and stop.
     struct ToolThenTextProvider {
         tool_name: String,
@@ -2258,6 +2303,51 @@ mod tests {
         m.api = Api::OpenAICompletions;
         m.provider = Provider::OpenAI;
         m
+    }
+
+    /// Issue #19: `send_message` was double-persisting the user
+    /// message — once upfront for crash-resilience, then a second
+    /// time when iterating `result.messages` (which the agent loop
+    /// returns as `[prompts.., assistant_msgs..]`). The duplicate
+    /// surfaced in `--export` HTML as each user turn appearing
+    /// twice. Pin the persistence shape so a future refactor of
+    /// the agent loop's return contract can't quietly regress.
+    #[tokio::test]
+    async fn send_message_persists_user_message_exactly_once() {
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(TextOnlyProvider {
+                reply: "ack".into(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+
+        session
+            .send_message("hello once")
+            .await
+            .expect("send_message ok");
+
+        let ctx = session.session_manager.build_context();
+        let user_count = ctx
+            .iter()
+            .filter(|m| matches!(m, Message::User(_)))
+            .count();
+        let assistant_count = ctx
+            .iter()
+            .filter(|m| matches!(m, Message::Assistant(_)))
+            .count();
+        assert_eq!(
+            user_count, 1,
+            "user message must be persisted exactly once, got {user_count} (full ctx: {ctx:?})"
+        );
+        assert_eq!(
+            assistant_count, 1,
+            "expected one assistant reply, got {assistant_count}"
+        );
     }
 
     #[tokio::test]

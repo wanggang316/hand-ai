@@ -168,6 +168,178 @@ mod tests {
         assert!(content.contains("How are you?"));
     }
 
+    /// Issue #19: HTML export was claimed to render assistant messages
+    /// as User and to drop them altogether. The renderer code path
+    /// itself does the right thing — pin it so any future refactor of
+    /// `export_to_html` doesn't quietly regress, and so we can localise
+    /// the real bug (which lives upstream in `session.messages()` /
+    /// session persistence, not in the rendering pass) without
+    /// guessing.
+    #[test]
+    fn export_html_renders_user_assistant_and_tool_result_distinctly() {
+        use model::types::{
+            Api, AssistantContentBlock, AssistantMessage, Provider, StopReason, TextContent,
+            ToolResultContent, ToolResultMessage, Usage,
+        };
+
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("mixed.html");
+        let messages = vec![
+            Message::User(UserMessage::new_text("Remember 42")),
+            Message::Assistant(AssistantMessage {
+                role: "assistant".into(),
+                content: vec![AssistantContentBlock::Text(TextContent::new("Got it."))],
+                api: Api::OpenAICompletions,
+                provider: Provider::OpenAI,
+                model: "gpt-4o-mini".into(),
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp: 0,
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+            }),
+            Message::User(UserMessage::new_text("What did I say?")),
+            Message::Assistant(AssistantMessage {
+                role: "assistant".into(),
+                content: vec![AssistantContentBlock::Text(TextContent::new(
+                    "You said: Remember 42.",
+                ))],
+                api: Api::OpenAICompletions,
+                provider: Provider::OpenAI,
+                model: "gpt-4o-mini".into(),
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp: 0,
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+            }),
+            Message::ToolResult(ToolResultMessage::new(
+                "tc1",
+                "read",
+                vec![ToolResultContent::Text(TextContent::new("file body"))],
+            )),
+        ];
+
+        export_to_html(&messages, "test-session", "gpt-4o-mini", &output).unwrap();
+        let content = std::fs::read_to_string(&output).unwrap();
+        let user_blocks = content.matches("class=\"message user\"").count();
+        let assistant_blocks = content.matches("class=\"message assistant\"").count();
+        let tool_blocks = content.matches("class=\"message tool-result\"").count();
+        assert_eq!(user_blocks, 2, "expected 2 user blocks, got {user_blocks}");
+        assert_eq!(
+            assistant_blocks, 2,
+            "expected 2 assistant blocks, got {assistant_blocks}"
+        );
+        assert_eq!(tool_blocks, 1, "expected 1 tool-result block, got {tool_blocks}");
+        // Spot-check the actual assistant text is present so we don't
+        // get fooled by the count alone.
+        assert!(
+            content.contains("Got it."),
+            "first assistant text missing"
+        );
+        assert!(
+            content.contains("You said: Remember 42."),
+            "second assistant text missing"
+        );
+    }
+
+    /// Issue #19 (serde probe): does an Assistant Message round-trip
+    /// through serde_json correctly? Pin the on-wire shape so we know
+    /// whether the tag is being emitted and re-parsed.
+    #[test]
+    fn assistant_message_serde_round_trips() {
+        use model::types::{
+            Api, AssistantContentBlock, AssistantMessage, Provider, StopReason, TextContent, Usage,
+        };
+        let m = Message::Assistant(AssistantMessage {
+            role: "assistant".into(),
+            content: vec![AssistantContentBlock::Text(TextContent::new("hi"))],
+            api: Api::OpenAICompletions,
+            provider: Provider::OpenAI,
+            model: "x".into(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        });
+        let s = serde_json::to_string(&m).expect("serialize");
+        eprintln!("[probe-#19] serialized: {s}");
+        let back: Message = serde_json::from_str(&s).expect("deserialize");
+        eprintln!("[probe-#19] deserialized variant: {back:?}");
+        assert!(
+            matches!(back, Message::Assistant(_)),
+            "round-trip lost the Assistant variant: {back:?}"
+        );
+    }
+
+    /// Issue #19 (root-cause probe): write a 4-message session
+    /// (user/assistant/user/assistant) through SessionManager,
+    /// re-open, and check `build_context()`. If this returns a
+    /// User-only list, the bug is in persistence; if it returns all 4
+    /// in order, the bug is in `session.messages()` upstream of the
+    /// exporter.
+    #[test]
+    fn round_trip_session_preserves_assistant_messages_in_build_context() {
+        use model::types::{
+            Api, AssistantContentBlock, AssistantMessage, Provider, StopReason, TextContent, Usage,
+        };
+
+        let dir = TempDir::new().unwrap();
+        let mut mgr = SessionManager::create(dir.path()).unwrap();
+        let asst = |text: &str| {
+            Message::Assistant(AssistantMessage {
+                role: "assistant".into(),
+                content: vec![AssistantContentBlock::Text(TextContent::new(text))],
+                api: Api::OpenAICompletions,
+                provider: Provider::OpenAI,
+                model: "gpt-4o-mini".into(),
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp: 0,
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+            })
+        };
+        mgr.append_message(Message::User(UserMessage::new_text("Remember 42")))
+            .unwrap();
+        mgr.append_message(asst("Got it.")).unwrap();
+        mgr.append_message(Message::User(UserMessage::new_text("What did I say?")))
+            .unwrap();
+        mgr.append_message(asst("You said: Remember 42.")).unwrap();
+
+        let path = mgr.path().to_path_buf();
+        drop(mgr);
+
+        let reopened = SessionManager::open(&path).expect("re-open session");
+        let ctx = reopened.build_context();
+        assert_eq!(ctx.len(), 4, "expected 4 messages, got {ctx:?}");
+        assert!(matches!(ctx[0], Message::User(_)));
+        assert!(matches!(ctx[1], Message::Assistant(_)), "second message must be assistant, got {:?}", ctx[1]);
+        assert!(matches!(ctx[2], Message::User(_)));
+        assert!(matches!(ctx[3], Message::Assistant(_)));
+
+        // And end-to-end: export the rehydrated messages and confirm
+        // assistant blocks land in the HTML.
+        let html_out = dir.path().join("round-trip.html");
+        export_to_html(&ctx, "test-session", "gpt-4o-mini", &html_out).unwrap();
+        let content = std::fs::read_to_string(&html_out).unwrap();
+        let user_blocks = content.matches("class=\"message user\"").count();
+        let assistant_blocks = content.matches("class=\"message assistant\"").count();
+        assert_eq!(user_blocks, 2);
+        assert_eq!(assistant_blocks, 2);
+        assert!(content.contains("Got it."));
+        assert!(content.contains("You said: Remember 42."));
+    }
+
     #[test]
     fn test_export_jsonl_in_memory_fails() {
         let session = SessionManager::in_memory();
