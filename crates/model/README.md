@@ -37,6 +37,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
     let _ = register_builtins; // re-exported for callers with custom registries
 
+    // To pay for only a subset of providers (smaller binary, fewer
+    // transitive deps), build via the fluent ClientBuilder:
+    //
+    //   use model::{Client, Api};
+    //   let _ui_only = Client::builder()
+    //       .with_builtin(Api::AnthropicMessages)
+    //       .with_builtin(Api::OpenAICompletions)
+    //       .with_builtin(Api::GoogleGenerativeAi)
+    //       .build();
+    //
+    // `with_provider(api, custom)` plugs in a provider implemented
+    // outside this crate. `build()` cannot fail; an empty registry is
+    // legal — `stream()` returns `ClientError::ProviderNotFound` at
+    // runtime if a model targets an unregistered Api.
+
     let model = get_model("openai", "gpt-4o").expect("model not found");
     let context = Context {
         system_prompt: Some("You are a concise assistant.".into()),

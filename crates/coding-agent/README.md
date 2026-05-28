@@ -274,9 +274,16 @@ cat README.md | cargo run --bin hand -- --print --prompt "Summarize this"
 | Option | Description |
 |--------|-------------|
 | `-c`, `--continue` | Continue most recent session |
-| `--resume [id]` | Browse/select session or specify ID |
-| `--fork [id]` | Fork a session |
-| `--no-session` | Ephemeral mode |
+| `--resume [id]` | Browse/select session or specify ID (bare `--resume` resumes the most recent) |
+| `--fork [id]` | Fork a session (id can be a full id, a prefix, or an absolute path) |
+| `--no-session` | Ephemeral mode (no on-disk persistence) |
+| `--session-dir <dir>` | Override session storage directory (wins over `--workspace-sessions`) |
+| `--workspace-sessions` | Store sessions under `<cwd>/.hand/sessions/` instead of the home-based default |
+
+Sessions are stored under `~/.hand/agent/sessions/<flattened-cwd>/` by default.
+`--workspace-sessions` opts into a project-local `<cwd>/.hand/sessions/` layout
+so the JSONL files travel with the repo. The id-based `--resume` /
+`--fork` resolvers probe both layouts.
 
 ### Tool Options
 
