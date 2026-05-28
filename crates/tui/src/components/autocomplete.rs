@@ -374,7 +374,14 @@ impl SlashCommandProvider {
                 AutocompleteItem {
                     label: cmd.name.clone(),
                     detail,
-                    insert_text: cmd.name.clone(),
+                    // Include the `/` sigil in the insertion text so
+                    // `accept_autocomplete` (which deletes from the
+                    // trigger char through the cursor) lands a
+                    // well-formed slash command. The path provider
+                    // already follows this convention with `@<label>`;
+                    // mismatching here would strip the `/` and demote
+                    // the command to a plain-text message (issue #59).
+                    insert_text: format!("/{}", cmd.name),
                     kind: AutocompleteItemKind::SlashCommand,
                 }
             })
@@ -687,7 +694,11 @@ mod tests {
         let provider = SlashCommandProvider::new(cmds(&["help", "history", "model", "quit"]));
         let items = provider.query(&ctx("h", AutocompleteTrigger::Slash)).await;
         let names: Vec<_> = items.iter().map(|i| i.insert_text.as_str()).collect();
-        assert_eq!(names, vec!["help", "history"]);
+        // `insert_text` carries the `/` sigil so that
+        // `EditorComponent::accept_autocomplete` (which deletes
+        // trigger+query and inserts insert_text) lands a well-formed
+        // slash command. See #59.
+        assert_eq!(names, vec!["/help", "/history"]);
     }
 
     #[tokio::test]
@@ -706,6 +717,20 @@ mod tests {
         assert!(items.is_empty());
     }
 
+    /// Regression for #59: end-to-end through the real provider —
+    /// the user types `/he`, the popup item's `insert_text` must be
+    /// `/help` (with sigil), not `help`. Without the sigil,
+    /// `EditorComponent::accept_autocomplete` deletes the user's
+    /// `/he` then inserts `help`, producing a plain-text message
+    /// that the LLM gets instead of running the slash command.
+    #[tokio::test]
+    async fn test_slash_command_provider_insert_text_includes_sigil() {
+        let provider = SlashCommandProvider::new(cmds(&["help"]));
+        let items = provider.query(&ctx("he", AutocompleteTrigger::Slash)).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].insert_text, "/help");
+    }
+
     #[tokio::test]
     async fn test_slash_command_provider_item_kind_and_detail() {
         let provider = SlashCommandProvider::new(vec![
@@ -716,7 +741,7 @@ mod tests {
         let item = &items[0];
         assert_eq!(item.kind, AutocompleteItemKind::SlashCommand);
         assert_eq!(item.label, "model");
-        assert_eq!(item.insert_text, "model");
+        assert_eq!(item.insert_text, "/model");
         assert_eq!(item.detail.as_deref(), Some("<id> — Switch model"));
     }
 
