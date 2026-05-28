@@ -29,7 +29,6 @@
 
 use hand_tui::Component;
 use hand_tui::keybindings::{Keybinding, get_keybindings};
-use hand_tui::keys::KeyName;
 use hand_tui::tui::{HandleResult, InputEvent};
 use hand_tui::utils::{truncate_to_width, visible_width};
 use tokio::sync::mpsc;
@@ -203,14 +202,14 @@ impl Component for TreeSelectorComponent {
     fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
         // The Tui dispatches ESC-prefixed sequences (arrows, escape) and
         // single-byte control codes (Enter, Ctrl+C) as `InputEvent::Key`
-        // rather than `InputEvent::Raw`. Encode either form to the
+        // rather than `InputEvent::Raw`. Round either form back to the
         // canonical byte string the keybinding matcher expects so the
-        // picker responds to keyboard input identically regardless of how
-        // the host renders it.
+        // picker responds to keyboard input identically regardless of
+        // how the host renders it.
         let raw_buf;
         let raw: &str = match event {
-            InputEvent::Raw(s) => s.as_str(),
-            InputEvent::Key(key) => match key_to_canonical_bytes(&key.name) {
+            InputEvent::Raw(s) | InputEvent::Paste(s) => s.as_str(),
+            InputEvent::Key(key) => match hand_tui::key_to_canonical_bytes(key) {
                 Some(bytes) => {
                     raw_buf = bytes;
                     raw_buf.as_str()
@@ -244,25 +243,6 @@ impl Component for TreeSelectorComponent {
 
         HandleResult::Ignored
     }
-}
-
-/// Round-trip a parsed key back to the canonical byte sequence the
-/// `Keybinding::matches` matcher expects. Covers the keys used by
-/// list-style selectors (arrows / Enter / Escape / Ctrl+C / Tab). Other
-/// keys return `None` and are ignored.
-fn key_to_canonical_bytes(name: &KeyName) -> Option<String> {
-    Some(match name {
-        KeyName::Up => "\x1b[A".to_string(),
-        KeyName::Down => "\x1b[B".to_string(),
-        KeyName::Right => "\x1b[C".to_string(),
-        KeyName::Left => "\x1b[D".to_string(),
-        KeyName::Enter => "\r".to_string(),
-        KeyName::Escape => "\x1b".to_string(),
-        KeyName::Tab => "\t".to_string(),
-        KeyName::Backspace => "\x7f".to_string(),
-        KeyName::Char(c) => c.to_string(),
-        _ => return None,
-    })
 }
 
 fn pad_line(line: &str, width: u16) -> String {
