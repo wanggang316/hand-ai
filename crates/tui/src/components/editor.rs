@@ -125,22 +125,7 @@ pub struct EditorComponent {
     /// First visible line.
     viewport_top: usize,
     /// Number of visible rows allotted to lines (excludes border).
-    ///
-    /// When `auto_grow_max` is `Some(cap)`, this acts as the *upper
-    /// bound* on render rows — the editor expands to fit content up
-    /// to `cap` rows. The `viewport_height` field is kept as the
-    /// max-cap for backwards compatibility with callers that don't
-    /// opt into auto-grow.
     viewport_height: usize,
-    /// When `Some(cap)`, the editor renders `min(visual_line_count,
-    /// cap).max(1)` rows instead of always painting
-    /// `viewport_height` rows. Empty buffer → one row; pasting a
-    /// long block grows up to `cap`; beyond `cap` it scrolls.
-    ///
-    /// Without this knob the editor reserved fixed dead space at the
-    /// bottom of every interactive session (the "why is the prompt
-    /// 4 rows tall when empty" feedback).
-    auto_grow_max: Option<usize>,
     /// Whether to render a border around the editor.
     border: bool,
     /// Paste marker storage, keyed by id.
@@ -227,7 +212,6 @@ impl EditorComponent {
             focused: true,
             viewport_top: 0,
             viewport_height: 10,
-            auto_grow_max: None,
             border: true,
             paste_markers: HashMap::new(),
             next_paste_id: 0,
@@ -402,26 +386,6 @@ impl EditorComponent {
 
     pub fn with_viewport_height(mut self, height: usize) -> Self {
         self.viewport_height = height;
-        self
-    }
-
-    /// Opt into auto-grow mode: the rendered editor expands to fit
-    /// content up to `cap` rows, and shrinks to a single row when
-    /// empty. Beyond `cap` it scrolls as before.
-    ///
-    /// Without this knob, the editor reserved a fixed number of
-    /// rows even when the buffer was empty — visually wasteful for
-    /// the typical "one-line prompt" interactive case.
-    pub fn with_auto_grow(mut self, cap: usize) -> Self {
-        self.auto_grow_max = Some(cap.max(1));
-        // viewport_height stays as the implementation backstop so
-        // the rest of the editor's scrolling math keeps working.
-        // Bump it to `cap` if it was below — keeps the legacy
-        // `viewport_height: 10` default from clamping auto-grow to
-        // 10 rows when a caller asks for more.
-        if self.viewport_height < cap {
-            self.viewport_height = cap;
-        }
         self
     }
 
@@ -1325,24 +1289,13 @@ impl Component for EditorComponent {
             }
         };
 
-        // Apply viewport. In auto-grow mode, the editor renders
-        // `min(visual.len(), cap).max(1)` rows — empty buffer
-        // collapses to a single input row, multi-line content grows
-        // up to the cap, and the original scrolling behaviour kicks
-        // in beyond that. Without auto-grow we keep the fixed
-        // `viewport_height` shape so callers that depend on a
-        // fixed-height editor (test fixtures, headless rendering)
-        // don't shift under their feet.
-        let effective_height = match self.auto_grow_max {
-            Some(cap) => visual.len().clamp(1, cap),
-            None => self.viewport_height,
-        };
-        let view_end = (self.viewport_top + effective_height).min(visual.len());
+        // Apply viewport.
+        let view_end = (self.viewport_top + self.viewport_height).min(visual.len());
         for line in visual.iter().take(view_end).skip(self.viewport_top) {
             output.push(format_row(line));
         }
         let empty = " ".repeat(display_width);
-        for _ in view_end..(self.viewport_top + effective_height) {
+        for _ in view_end..(self.viewport_top + self.viewport_height) {
             output.push(format_row(&empty));
         }
 
