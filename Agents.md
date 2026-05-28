@@ -36,7 +36,11 @@ read README.md, then ask which module(s) to work on. Based on the answer, read t
 
 ## Changelog
 
-Location: `crates/*/CHANGELOG.md` (each package has its own)
+Location: `CHANGELOG.md` at the workspace root. Tracks user-facing
+changes to the `hand` binary (the `hand-coding-agent` crate). The
+underlying `model` crate versions independently — its public API
+changes are noted in its commit log and version bumps but do not
+get a separate file.
 
 ### Format
 
@@ -61,7 +65,7 @@ Use these sections under `## [Unreleased]`:
 - **Internal changes (from issues)**: `Fixed foo bar ([#123](https://github.com/wanggang316/hand-ai/issues/123))`
 - **External contributions**: `Added feature X ([#456](https://github.com/wanggang316/hand-ai/pull/456) by [@username](https://github.com/username))`
 
-## Adding a New LLM Provider (crates/ai)
+## Adding a New LLM Provider (crates/model)
 
 ## Releasing
 
@@ -99,11 +103,11 @@ These commands can destroy other agents' work:
 git status
 
 # 2. Add ONLY your specific files
-git add crates/ai/src/providers/transform-messages.rs
-git add crates/ai/CHANGELOG.md
+git add crates/model/src/providers/openai_completions.rs
+git add CHANGELOG.md
 
 # 3. Commit
-git commit -m "fix(ai): description"
+git commit -m "fix(model): description"
 
 # 4. Push (pull --rebase if needed, but NEVER reset/checkout)
 git pull --rebase && git push
