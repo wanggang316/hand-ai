@@ -46,7 +46,13 @@ pub async fn run_interactive(args: Args) -> Result<(), Box<dyn std::error::Error
     let setup = SessionSetup::resolve(&args)?;
     let cwd = setup.cwd.clone();
 
-    let resume_session = if args.continue_session {
+    // A bare `--resume` (no value following) lands as `Some("")` from
+    // clap; promote it to `--continue` semantics so the user resumes
+    // the most-recent session in cwd instead of getting a confusing
+    // 'Session "" not found' error.
+    let bare_resume = matches!(args.resume.as_deref(), Some(""));
+    let continue_like = args.continue_session || bare_resume;
+    let resume_session = if continue_like {
         None
     } else {
         args.resume.clone()
@@ -55,7 +61,7 @@ pub async fn run_interactive(args: Args) -> Result<(), Box<dyn std::error::Error
     let base_config = setup.to_config(resume_session);
     let agent_tools = setup.agent_tools;
 
-    let session = build_session(&args, base_config, agent_tools, &cwd)?;
+    let session = build_session(&args, continue_like, base_config, agent_tools, &cwd)?;
 
     InteractiveMode::new(session, cwd).run().await?;
     Ok(())
@@ -65,11 +71,12 @@ pub async fn run_interactive(args: Args) -> Result<(), Box<dyn std::error::Error
 /// in the same way as the legacy `main.rs` flow.
 fn build_session(
     args: &Args,
+    continue_like: bool,
     base_config: AgentSessionConfig,
     agent_tools: Vec<hand_agent::types::AgentTool>,
     cwd: &Path,
 ) -> Result<AgentSession, Box<dyn std::error::Error>> {
-    let session = if args.continue_session {
+    let session = if continue_like {
         match SessionManager::continue_recent(cwd) {
             Ok(sm) => {
                 let config = AgentSessionConfig {

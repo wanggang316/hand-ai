@@ -171,8 +171,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Determine resume id, mirroring the pre-extraction logic: --continue
     // defers to `SessionManager::continue_recent` below; otherwise --resume
-    // is honoured directly.
-    let resume_session = if cli.continue_session {
+    // is honoured directly. A bare `--resume` (no value) lands as `Some("")`
+    // from clap; promote it to `--continue` semantics so users resume the
+    // most-recent session instead of seeing `Session "" not found`.
+    let bare_resume = matches!(cli.resume.as_deref(), Some(""));
+    let continue_like = cli.continue_session || bare_resume;
+    let resume_session = if continue_like {
         None
     } else {
         cli.resume.clone()
@@ -181,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_config = setup.to_config(resume_session);
     let agent_tools = setup.agent_tools;
 
-    let mut session = if cli.continue_session {
+    let mut session = if continue_like {
         // Continue most recent session
         match hand_coding_agent::SessionManager::continue_recent(&cwd) {
             Ok(sm) => {

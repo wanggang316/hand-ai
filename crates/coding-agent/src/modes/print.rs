@@ -42,7 +42,12 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Determine the resume id, mirroring main.rs: --continue defers to
     // SessionManager::continue_recent below, otherwise --resume wins.
-    let resume_session = if args.continue_session {
+    // A bare `--resume` (no value) lands as `Some("")` from clap; promote
+    // it to `--continue` semantics so users resume the most-recent
+    // session instead of seeing `Session "" not found`.
+    let bare_resume = matches!(args.resume.as_deref(), Some(""));
+    let continue_like = args.continue_session || bare_resume;
+    let resume_session = if continue_like {
         None
     } else {
         args.resume.clone()
@@ -50,7 +55,7 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let base_config = setup.to_config(resume_session);
 
-    let mut session = if args.continue_session {
+    let mut session = if continue_like {
         match SessionManager::continue_recent(&cwd) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
