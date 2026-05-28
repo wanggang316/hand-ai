@@ -1489,6 +1489,18 @@ fn push_status(chat: &ChatList, text: String, color_prefix: Option<&str>) {
     request_render();
 }
 
+/// Append a `CustomMessageComponent` (or any other boxed component) to
+/// the chat list and request a render. Mirrors [`push_status`] so the
+/// "mutate shared TUI state, then poke the render loop" invariant is
+/// honoured even from helpers that don't go through `push_status`.
+fn push_component(chat: &ChatList, component: Box<dyn Component>) {
+    {
+        let mut list = chat.lock().expect("chat list mutex poisoned");
+        list.push(component);
+    }
+    request_render();
+}
+
 /// Process-wide handle to the Tui's render-requested flag.
 ///
 /// The Tui main loop polls this flag every `RENDER_TICK_MS` and only paints
@@ -3057,8 +3069,7 @@ fn apply_list_skills(chat: &ChatList, session: &AgentSession) {
         out.trim_end().to_string()
     };
     let component = CustomMessageComponent::new(CustomMessageData::new("skills", body));
-    let mut list = chat.lock().expect("chat list mutex poisoned");
-    list.push(Box::new(component));
+    push_component(chat, Box::new(component));
 }
 
 /// `/extensions` — render the loaded Tier 1 extensions as a custom message.
@@ -3083,8 +3094,7 @@ fn apply_list_extensions(chat: &ChatList, session: &AgentSession) {
         out.trim_end().to_string()
     };
     let component = CustomMessageComponent::new(CustomMessageData::new("extensions", body));
-    let mut list = chat.lock().expect("chat list mutex poisoned");
-    list.push(Box::new(component));
+    push_component(chat, Box::new(component));
 }
 
 /// Locate the on-disk CHANGELOG.md, trying the conventional in-repo
@@ -3174,10 +3184,7 @@ fn maybe_show_changelog_on_update(chat: &ChatList, session: &mut AgentSession) {
         }
         ChangelogStartupAction::Display(body) => {
             let component = CustomMessageComponent::new(CustomMessageData::new("changelog", body));
-            {
-                let mut list = chat.lock().expect("chat list mutex poisoned");
-                list.push(Box::new(component));
-            }
+            push_component(chat, Box::new(component));
             session
                 .settings_mut()
                 .set_last_changelog_version(scope, Some(current_version.to_string()));
@@ -3206,8 +3213,7 @@ fn apply_changelog(chat: &ChatList) {
             .join("\n\n")
     };
     let component = CustomMessageComponent::new(CustomMessageData::new("changelog", body));
-    let mut list = chat.lock().expect("chat list mutex poisoned");
-    list.push(Box::new(component));
+    push_component(chat, Box::new(component));
 }
 
 /// `/reload` — re-read SettingsManager + keybindings from disk so on-disk
