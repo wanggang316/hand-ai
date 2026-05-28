@@ -52,8 +52,6 @@ pub enum ExportFormat {
     Json,
     /// Standalone HTML rendering (uses [`crate::core::export::export_to_html`]).
     Html,
-    /// Markdown rendering — currently routed to a TODO; M6 covers the body.
-    Markdown,
 }
 
 impl ExportFormat {
@@ -66,7 +64,6 @@ impl ExportFormat {
             "jsonl" => Some(Self::Jsonl),
             "json" => Some(Self::Json),
             "html" | "htm" => Some(Self::Html),
-            "md" | "markdown" => Some(Self::Markdown),
             _ => None,
         }
     }
@@ -369,7 +366,7 @@ Commands:
   /new                 Start a fresh session
   /resume              Resume the most recent session
   /copy [n]            Copy last assistant message (or last n) to clipboard
-  /export <path>       Export session (jsonl/json/html/md inferred from ext)
+  /export <path>       Export session (jsonl/json/html inferred from ext)
   /import <path>       Import a session JSONL file in place
   /fork [<entry-id>]   Fork at the given user-message entry (or latest)
   /clone               Clone the current session under a fresh id
@@ -483,14 +480,14 @@ fn parse_path_argument(arg: &str) -> PathBuf {
 fn parse_export(arg: &str) -> SlashCommandAction {
     if arg.is_empty() {
         return SlashCommandAction::ShowText(
-            "Usage: /export <path.jsonl|.json|.html|.md>".to_string(),
+            "Usage: /export <path.jsonl|.json|.html>".to_string(),
         );
     }
     let path = parse_path_argument(arg);
     match ExportFormat::from_path(&path) {
         Some(fmt) => SlashCommandAction::Export(path, fmt),
         None => SlashCommandAction::ShowText(format!(
-            "/export: unsupported extension on {}. Expected .jsonl, .json, .html, or .md.",
+            "/export: unsupported extension on {}. Expected .jsonl, .json, or .html.",
             path.display()
         )),
     }
@@ -715,7 +712,6 @@ mod tests {
             ("/export out.jsonl", ExportFormat::Jsonl),
             ("/export out.json", ExportFormat::Json),
             ("/export out.html", ExportFormat::Html),
-            ("/export out.md", ExportFormat::Markdown),
         ] {
             let parsed = ParsedSlashCommand::parse(input).unwrap();
             match SlashCommandTable::dispatch(&parsed, &ctx()) {

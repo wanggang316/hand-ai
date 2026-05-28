@@ -2789,9 +2789,8 @@ fn apply_export(chat: &ChatList, session: &AgentSession, path: &Path, fmt: Expor
     // Refuse to silently overwrite an existing file. pi-side issue #8:
     // users testing exports against a path they already used lose the
     // previous transcript without warning. Tell them to delete first
-    // or pick a new name. Markdown short-circuits in its own arm
-    // below since it's not yet implemented.
-    if path.exists() && !matches!(fmt, ExportFormat::Markdown) {
+    // or pick a new name.
+    if path.exists() {
         push_status(
             chat,
             format!(
@@ -2837,14 +2836,6 @@ fn apply_export(chat: &ChatList, session: &AgentSession, path: &Path, fmt: Expor
                 Ok(()) => push_status(chat, format!("[exported to {}]", path.display()), None),
                 Err(e) => push_status(chat, format!("[/export failed: {e}]"), Some(RED_FG)),
             }
-        }
-        ExportFormat::Markdown => {
-            // TODO(parity-M6): markdown export lands with the M6 batch.
-            push_status(
-                chat,
-                "[/export: markdown export not yet implemented (tracked in M6)]".to_string(),
-                Some(YELLOW_FG),
-            );
         }
     }
 }
