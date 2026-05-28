@@ -28,3 +28,7 @@ Cargo.lock
 
 # Scheduled-tasks runtime lock (per-session)
 .claude/scheduled_tasks.lock
+
+# Release verification scratch (install.sh writes these alongside
+# tarball downloads when re-verifying a release locally).
+*.sha256
