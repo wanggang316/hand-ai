@@ -889,6 +889,25 @@ impl AgentSession {
         &mut self.settings_manager
     }
 
+    /// Re-read settings from disk and swap them into the running
+    /// session. Used by `/reload` to pick up out-of-band edits to
+    /// `~/.hand/agent/settings.yaml` and `<cwd>/.hand/settings.yaml`
+    /// without restarting. Pre-fix the driver constructed a new
+    /// `SettingsManager` and immediately dropped it, leaving the
+    /// session's own manager untouched and the user staring at stale
+    /// values.
+    ///
+    /// Note: fields that are read once at session construction
+    /// (resolved model, initial system prompt) do NOT change live —
+    /// `/reload` only refreshes settings that downstream code consults
+    /// on demand (compaction thresholds, theme, quiet-startup, etc.).
+    pub fn reload_settings(&mut self) -> Result<(), CodingAgentError> {
+        let fresh = SettingsManager::from_cwd(&self.config.cwd)
+            .map_err(|e| CodingAgentError::Settings(e.to_string()))?;
+        self.settings_manager = fresh;
+        Ok(())
+    }
+
     /// Manually trigger compaction unconditionally — bypasses both the
     /// `auto_compaction_enabled` toggle and the
     /// `compaction::should_compact` token-threshold gate. Returns the
@@ -1832,6 +1851,45 @@ mod tests {
             no_skills: false,
             base_dir: None,
         }
+    }
+
+    /// Issue #48: `/reload` must actually swap the session's
+    /// `SettingsManager`, not just construct a fresh one and drop
+    /// it. Pin the contract by editing a settings file on disk after
+    /// the session is constructed and asserting the running session
+    /// sees the new value after `reload_settings()`.
+    #[test]
+    fn reload_settings_picks_up_on_disk_edits() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        // Seed an initial project-scope settings.yaml.
+        let settings_dir = cwd.join(".hand");
+        fs::create_dir_all(&settings_dir).unwrap();
+        let settings_path = settings_dir.join("settings.yaml");
+        fs::write(&settings_path, "quiet-startup: false\n").unwrap();
+
+        let mut session =
+            AgentSession::new(test_config(cwd.to_path_buf()), vec![]).expect("new session");
+        assert!(
+            !session.settings().current().quiet_startup(),
+            "baseline: quiet-startup must read false"
+        );
+
+        // Mutate the file out-of-band — exactly what /reload exists to
+        // pick up.
+        fs::write(&settings_path, "quiet-startup: true\n").unwrap();
+
+        // Without reload the session still sees the old value.
+        assert!(
+            !session.settings().current().quiet_startup(),
+            "pre-reload: session keeps the original value until reload_settings is called"
+        );
+
+        session.reload_settings().expect("reload ok");
+        assert!(
+            session.settings().current().quiet_startup(),
+            "post-reload: session must observe the on-disk change"
+        );
     }
 
     /// Issue #23 / #28: `--no-context-files` (and its `-nc` alias)

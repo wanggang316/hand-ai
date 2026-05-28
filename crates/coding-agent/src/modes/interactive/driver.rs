@@ -1649,27 +1649,36 @@ pub(crate) async fn apply_slash_action(
         }
         SlashCommandAction::OpenLoginDialog { provider } => {
             let chosen = match provider {
-                Some(p) => {
+                Some(raw) => {
                     // Validate against the live provider catalogue
                     // before opening the paste dialog. Without this any
                     // typo like `/login antrhopic` happily stored a
                     // key under the bogus id that no model ever
                     // resolved against — surfacing as "no credentials"
                     // far away from the actual typo.
+                    //
+                    // Catalogue ids are lowercase (see
+                    // `Provider::as_str`), so canonicalise the user's
+                    // input case-insensitively before lookup — that
+                    // also fixes the OAuth-vs-key-paste fork: `/login
+                    // Anthropic` used to fall through to the API-key
+                    // dialog because `oauth_id_for("Anthropic")` only
+                    // matched lowercase.
+                    let needle = raw.to_ascii_lowercase();
                     let known: std::collections::HashSet<String> =
                         build_login_provider_list(session)
                             .into_iter()
                             .map(|p| p.id)
                             .collect();
-                    if known.contains(&p) {
-                        Some(p)
+                    if known.contains(&needle) {
+                        Some(needle)
                     } else {
                         let mut sorted: Vec<String> = known.into_iter().collect();
                         sorted.sort();
                         push_status(
                             chat,
                             format!(
-                                "[/login: unknown provider {p:?}. Known providers: {}]",
+                                "[/login: unknown provider {raw:?}. Known providers: {}]",
                                 sorted.join(", ")
                             ),
                             Some(RED_FG),
@@ -1712,9 +1721,11 @@ pub(crate) async fn apply_slash_action(
                     };
                     let tokens_before = session.message_count() as u64;
                     let data = CompactionSummaryData::new(summary, tokens_before);
-                    if let Ok(mut list) = chat.lock() {
-                        list.push(Box::new(CompactionSummaryMessageComponent::new(data)));
-                    }
+                    // Route through push_component so the render loop
+                    // is poked; previously the summary block stayed
+                    // buffered until the next unrelated command fired
+                    // request_render() (same class of bug as #38).
+                    push_component(chat, Box::new(CompactionSummaryMessageComponent::new(data)));
                 }
                 Err(e) => push_status(chat, format!("[compact failed: {e}]"), Some(RED_FG)),
             }
@@ -1755,7 +1766,7 @@ pub(crate) async fn apply_slash_action(
             push_status(chat, body, None);
         }
         SlashCommandAction::Reload => {
-            apply_reload(chat, cwd);
+            apply_reload(chat, session);
         }
         SlashCommandAction::OpenScopedModelsSelector => {
             mount_scoped_models_selector(chat, session, mounter).await;
@@ -3259,19 +3270,16 @@ fn apply_changelog(chat: &ChatList) {
 /// / themes from the package source is left to the future ResourceLoader
 /// reload path (TODO(parity)) — those have their own caches and listeners
 /// that aren't yet exposed to the driver.
-fn apply_reload(chat: &ChatList, cwd: &Path) {
+fn apply_reload(chat: &ChatList, session: &mut AgentSession) {
     let mut applied: Vec<&'static str> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
 
-    match crate::core::settings::SettingsManager::from_cwd(cwd) {
-        Ok(manager) => {
-            let _ = manager; // Side-effect only: the manager's `from_cwd`
-            // re-scans the global + project layers. The driver-owned
-            // `AgentSession`'s manager is not swapped here (in-place
-            // session swap is M2.3); `/reload` just proves the disk
-            // contents are current.
-            applied.push("settings");
-        }
+    // Actually swap the session's settings manager with a fresh
+    // read from disk. Pre-fix the driver constructed a manager,
+    // dropped it, and printed "[reloaded settings]" even though
+    // the running session continued using its original values.
+    match session.reload_settings() {
+        Ok(()) => applied.push("settings"),
         Err(e) => failures.push(format!("settings: {e}")),
     }
 
