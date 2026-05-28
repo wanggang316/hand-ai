@@ -1,6 +1,6 @@
 //! Loader component — animated loading spinner.
 //
-// audit: M3.T5 — parity reviewed against pi-tui/loader.ts on 2026-05-07.
+// audit: M3.T5 — parity reviewed against upstream TUI/loader.ts on 2026-05-07.
 // non-goal: TS owns its animation timer (`setInterval`) inside the component;
 // the Rust port keeps timing as an external concern (callers run `tick()` on
 // their own cadence) so we don't need an interval/start/stop API.

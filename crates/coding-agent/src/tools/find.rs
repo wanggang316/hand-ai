@@ -124,8 +124,8 @@ fn execute_find(cwd: &Path, args: serde_json::Value) -> ToolResult {
         // actual git repository by default (it walks up looking for
         // `.git/`). `require_git(false)` makes the walker honour
         // `.gitignore` files even when the tree isn't initialised as a
-        // git repo — this matches how `fd --no-require-git` and pi
-        // behave (pi cares about the file's intent, not whether the
+        // git repo — this matches how `fd --no-require-git` and upstream
+        // behave (upstream cares about the file's intent, not whether the
         // tree was `git init`-ed).
         .require_git(false);
 
@@ -384,7 +384,7 @@ mod tests {
 
     /// `.gitignore` entries are honoured: a file matched by both the
     /// user's pattern AND `.gitignore` is suppressed. A file matched
-    /// only by the pattern (not ignored) surfaces normally. pi achieves
+    /// only by the pattern (not ignored) surfaces normally. upstream achieves
     /// this through `fd`; hand uses the `ignore` crate's `WalkBuilder`
     /// which reads `.gitignore`, `.ignore`, `.git/info/exclude`, and
     /// the global git ignore the same way.
@@ -405,7 +405,7 @@ mod tests {
     }
 
     /// A hidden directory NOT in the auto-ignore list (e.g. `.secret/`)
-    /// AND not in `.gitignore` is walked normally. pi's fd surfaces
+    /// AND not in `.gitignore` is walked normally. the upstream's fd surfaces
     /// these the same way (`fd --hidden` is the default for the tool).
     #[test]
     fn test_find_includes_non_ignored_hidden_dirs() {

@@ -1,6 +1,6 @@
 //! Box component — container with padding and optional background.
 //
-// audit: M3.T5 — parity reviewed against pi-tui/box.ts on 2026-05-07.
+// audit: M3.T5 — parity reviewed against upstream TUI/box.ts on 2026-05-07.
 // non-goal: TS implements a render cache keyed on child output samples;
 // the Rust render pipeline already diff-renders at the frame level
 // (`DiffRenderer`), so an internal Box-level cache is redundant.

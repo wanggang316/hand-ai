@@ -186,7 +186,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
     let mut truncated_by: Option<&'static str> = None;
     if byte_truncated {
         // Byte-cap truncation: a single chunk hit the 50 KB byte budget
-        // before the line cap. pi's wording is
+        // before the line cap. the upstream's wording is
         // `[Showing lines N-M of T (<size> limit). Use offset=M+1 to continue.]`.
         output.push_str(&format!(
             "\n[Showing lines {}-{} of {} ({} limit). Use offset={} to continue.]",
@@ -199,7 +199,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
         truncated_by = Some("bytes");
     } else if last_shown < total_lines {
         if user_limit.is_some() {
-            // User supplied `limit` and we hit it. pi's wording counts
+            // User supplied `limit` and we hit it. the upstream's wording counts
             // the remaining unseen lines from the user's reading frame:
             // `[K more lines in file. Use offset=N+K+1 to continue.]`.
             let remaining = total_lines - last_shown;
@@ -211,7 +211,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
             truncated_by = Some("limit");
         } else {
             // Default 2000-line cap path: no user limit was supplied,
-            // and the byte budget did not fire. pi wording:
+            // and the byte budget did not fire. upstream wording:
             // `[Showing lines N-M of T. Use offset=M+1 to continue.]`.
             output.push_str(&format!(
                 "\n[Showing lines {}-{} of {}. Use offset={} to continue.]",
@@ -229,7 +229,7 @@ fn execute_read(cwd: &Path, args: serde_json::Value) -> ToolResult {
         // Surface a structured `details.truncation` payload alongside
         // the text footer so hosts (UI, log consumers, agent
         // self-prompts) can render the truncation banner natively
-        // without parsing the text. pi exposes the same shape under
+        // without parsing the text. upstream exposes the same shape under
         // `result.details.truncation` — keep field names in lockstep.
         result.with_details(json!({
             "truncation": {
@@ -475,12 +475,12 @@ mod tests {
         );
     }
 
-    /// Default 2000-line truncation footer matches pi's wording exactly:
+    /// Default 2000-line truncation footer matches the upstream's wording exactly:
     /// `[Showing lines 1-2000 of <T>. Use offset=2001 to continue.]`.
     /// The earlier hand wording read
     /// `[Showing lines 1-2000 of <T> total. Use offset/limit to read more.]`,
     /// which forced any consumer parsing the footer (UI, doc tooling,
-    /// agent self-prompts) to handle a different shape than pi.
+    /// agent self-prompts) to handle a different shape than upstream.
     #[test]
     fn test_read_default_line_cap_footer_matches_pi_wording() {
         let dir = TempDir::new().unwrap();
@@ -495,7 +495,7 @@ mod tests {
         let text = get_text(&result);
         assert!(
             text.contains("[Showing lines 1-2000 of 2500. Use offset=2001 to continue.]"),
-            "expected pi-aligned default-cap footer, got tail: {}",
+            "expected upstream-aligned default-cap footer, got tail: {}",
             &text[text.len().saturating_sub(300)..]
         );
         // Negative anchor: the old "total. Use offset/limit to read more"
@@ -509,7 +509,7 @@ mod tests {
 
     /// When the user supplies an explicit `limit` and the file has more
     /// lines beyond it, the footer reads
-    /// `[K more lines in file. Use offset=<M+1> to continue.]` — pi's
+    /// `[K more lines in file. Use offset=<M+1> to continue.]` — upstream's
     /// user-limit truncation wording. K is the count of unseen lines,
     /// `M+1` is the next read offset.
     #[test]
@@ -529,7 +529,7 @@ mod tests {
         let text = get_text(&result);
         assert!(
             text.contains("[90 more lines in file. Use offset=11 to continue.]"),
-            "expected pi-aligned user-limit footer, got tail: {}",
+            "expected upstream-aligned user-limit footer, got tail: {}",
             &text[text.len().saturating_sub(300)..]
         );
         // Verify only the first 10 lines surfaced.
@@ -540,7 +540,7 @@ mod tests {
 
     /// Byte-cap truncation footer reads
     /// `[Showing lines N-M of T (<size> limit). Use offset=M+1 to continue.]`
-    /// per pi. The earlier wording `(50.0KB byte limit)` is gone.
+    /// per upstream. The earlier wording `(50.0KB byte limit)` is gone.
     #[test]
     fn test_read_byte_cap_footer_matches_pi_wording() {
         let dir = TempDir::new().unwrap();
@@ -561,7 +561,7 @@ mod tests {
             footer_regex.contains("Showing lines 1-")
                 && footer_regex.contains("of 500 (")
                 && footer_regex.contains("limit). Use offset="),
-            "expected pi-aligned byte-cap footer, got tail: {}",
+            "expected upstream-aligned byte-cap footer, got tail: {}",
             &text[text.len().saturating_sub(300)..]
         );
         assert!(
@@ -579,7 +579,7 @@ mod tests {
     }
 
     /// Truncated reads carry structured `details.truncation` metadata
-    /// — pi exposes this so hosts can render the truncation banner
+    /// — upstream exposes this so hosts can render the truncation banner
     /// natively without parsing the human-readable text footer.
     /// Schema: `{ truncated, truncated_by, total_lines, output_lines }`.
     #[test]
@@ -622,7 +622,7 @@ mod tests {
 
     /// A file whose bytes start with PNG magic is returned as an
     /// image content block — even when the filename has a misleading
-    /// extension (e.g. `image.txt`). pi anchors this contract; we
+    /// extension (e.g. `image.txt`). the upstream anchors this contract; we
     /// inherit it.
     #[test]
     fn test_read_detects_png_by_magic_not_extension() {

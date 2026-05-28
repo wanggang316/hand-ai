@@ -18,7 +18,7 @@
 //!    pinning, update detection, atomic upgrades.
 //! 3. **Settings persistence** — adding/removing sources from
 //!    `Settings::packages` and writing the YAML back to disk.
-//! 4. **Manifest interpretation** — package.json `pi:` blocks, glob
+//! 4. **Manifest interpretation** — package.json `upstream:` blocks, glob
 //!    pattern allow-lists, `.gitignore`-aware file walking, override
 //!    pattern syntax (`+/-/!`).
 //!
@@ -560,7 +560,7 @@ impl DefaultSourceRegistry {
             InstallScope::User => self.agent_dir.join("npm"),
             InstallScope::Project => self.cwd.join(".hand/npm"),
             InstallScope::Temporary => std::env::temp_dir()
-                .join("pi-extensions/npm")
+                .join("upstream-extensions/npm")
                 .join(short_hash("temporary")),
         }
     }
@@ -823,7 +823,7 @@ impl DefaultSourceRegistry {
     ///   root without running it; we use a deterministic fallback under
     ///   the agent dir to keep the function pure).
     /// - `project`: `<cwd>/.hand/npm/node_modules/<pkg>`.
-    /// - `temporary`: `<tmpdir>/pi-extensions/npm/<hash>/node_modules/<pkg>`.
+    /// - `temporary`: `<tmpdir>/upstream-extensions/npm/<hash>/node_modules/<pkg>`.
     ///
     /// TODO(parity): query the real npm prefix for `user` scope by
     /// invoking `npm root -g` (gated on the install logic port).
@@ -832,7 +832,7 @@ impl DefaultSourceRegistry {
             InstallScope::User => self.agent_dir.join("npm/node_modules").join(&parsed.name),
             InstallScope::Project => self.cwd.join(".hand/npm/node_modules").join(&parsed.name),
             InstallScope::Temporary => std::env::temp_dir()
-                .join("pi-extensions/npm")
+                .join("upstream-extensions/npm")
                 .join(short_hash(&parsed.name))
                 .join("node_modules")
                 .join(&parsed.name),
@@ -854,7 +854,7 @@ impl DefaultSourceRegistry {
                 .join(&parsed.host)
                 .join(&parsed.path),
             InstallScope::Temporary => std::env::temp_dir()
-                .join("pi-extensions")
+                .join("upstream-extensions")
                 .join(format!("git-{}", parsed.host))
                 .join(short_hash(&parsed.path))
                 .join(&parsed.path),
@@ -958,7 +958,7 @@ impl DefaultSourceRegistry {
     /// look for `<root>/{kind}/...` directories. Manifest filters and
     /// allow-lists are deferred.
     ///
-    /// TODO(parity): port `package.json#pi` manifest, glob entries,
+    /// TODO(parity): port `package.json#upstream` manifest, glob entries,
     /// override patterns, and per-kind filter objects.
     fn add_package_resources(
         &self,

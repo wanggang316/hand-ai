@@ -1,6 +1,6 @@
 //! CHANGELOG.md section parser.
 //!
-//! Mirrors `pi-coding-agent`'s `changelog.ts`: scans `## [x.y.z] ...`
+//! Mirrors `upstream coding-agent`'s `changelog.ts`: scans `## [x.y.z] ...`
 //! headings and groups subsequent lines into per-version entries until the
 //! next `##` heading or EOF. Lines that come before any version heading are
 //! ignored; lines that follow a non-versioned `##` heading start a new

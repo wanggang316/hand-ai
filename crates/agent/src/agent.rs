@@ -1,6 +1,6 @@
 //! High-level `Agent` — stateful wrapper around the agent loop.
 //!
-//! Mirrors `pi-agent-core/src/agent.ts`. Owns the transcript, dispatches events
+//! Mirrors `upstream-agent-core/src/agent.ts`. Owns the transcript, dispatches events
 //! to subscribers, manages steering / follow-up queues, and exposes
 //! cancellation via `tokio_util::sync::CancellationToken`.
 

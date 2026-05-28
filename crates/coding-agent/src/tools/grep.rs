@@ -107,7 +107,7 @@ fn execute_grep(cwd: &Path, args: serde_json::Value) -> ToolResult {
         .get("context")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
-    // Accept `limit` (canonical, matches upstream pi naming) and fall
+    // Accept `limit` (canonical, matches upstream upstream naming) and fall
     // back to `max_matches` for backwards compatibility with scripts
     // written against an earlier hand schema. The two name-collide on
     // a single int so there's no ambiguity if both are supplied —
@@ -458,7 +458,7 @@ mod tests {
     }
 
     /// `limit` caps per-file matches and emits a footer pointing at how
-    /// the user can fetch more. The wording matches pi's
+    /// the user can fetch more. The wording matches the upstream's
     /// `[N matches limit reached. Use limit=M for more, or refine pattern]`
     /// so scripts that parse the footer keep working.
     #[test]

@@ -1,6 +1,6 @@
 //! Core agent loop implementation.
 //!
-//! Mirrors the behavior contract of `pi-agent-core/src/agent-loop.ts`:
+//! Mirrors the behavior contract of `upstream-agent-core/src/agent-loop.ts`:
 //!
 //! - prompts → assistant turn → tool execution → tool results → next turn …
 //! - steering messages drained between turns; follow-up drained at the boundary

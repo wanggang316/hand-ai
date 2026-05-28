@@ -1,4 +1,4 @@
-//! Path-related helpers ported from `pi-coding-agent`'s `paths.ts`.
+//! Path-related helpers ported from `upstream coding-agent`'s `paths.ts`.
 //!
 //! Two small utilities:
 //! - [`canonicalize_path`] — best-effort canonicalization that falls back to

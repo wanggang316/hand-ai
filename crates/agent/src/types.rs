@@ -1,6 +1,6 @@
 //! Core types for the agent runtime.
 //!
-//! These types mirror `pi-agent-core` (TypeScript) with idiomatic Rust shapes:
+//! These types mirror `upstream-agent-core` (TypeScript) with idiomatic Rust shapes:
 //! tagged enums for unions, traits/Fn-objects for callbacks, `Result` for errors,
 //! and a `CancellationToken` threaded through every async boundary.
 

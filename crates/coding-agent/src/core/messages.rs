@@ -135,7 +135,7 @@ pub struct CompactionSummaryMessage {
 ///
 /// This is the local Rust analogue of TS `AgentMessage` for the
 /// purposes of [`convert_to_llm`]. When the upstream `AgentMessage`
-/// port lands in `pi-agent-core` (TODO from `rpc::types`), this enum
+/// port lands in `upstream-agent-core` (TODO from `rpc::types`), this enum
 /// can be replaced or re-exported from there.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]

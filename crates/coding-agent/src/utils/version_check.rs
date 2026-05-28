@@ -1,8 +1,8 @@
 //! Version comparison + crates.io update probe.
 //!
-//! Mirrors `pi-coding-agent`'s `version-check.ts`, with two adjustments:
+//! Mirrors `upstream coding-agent`'s `version-check.ts`, with two adjustments:
 //!
-//! 1. The TS source pings `https://pi.dev/api/latest-version`. We replace
+//! 1. The TS source pings `https://upstream.dev/api/latest-version`. We replace
 //!    that with the crates.io public registry endpoint
 //!    (`https://crates.io/api/v1/crates/hand-coding-agent`) since hand-ai
 //!    is distributed via crates.io rather than a custom backend.
@@ -20,7 +20,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use thiserror::Error;
 
-use super::pi_user_agent::hand_user_agent;
+use super::user_agent::hand_user_agent;
 
 /// crates.io endpoint returning the latest published version.
 const CRATES_IO_URL: &str = "https://crates.io/api/v1/crates/hand-coding-agent";

@@ -61,8 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // pi-parity stub subcommands. When the first positional matches a
-    // pi extension-management command, we surface a clean
+    // upstream-parity stub subcommands. When the first positional matches a
+    // upstream extension-management command, we surface a clean
     // "not implemented" exit-1 message instead of treating the keyword
     // as a free-text prompt. Once hand grows the package-manager
     // integration these can dispatch into real handlers.

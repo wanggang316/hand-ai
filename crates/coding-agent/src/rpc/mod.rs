@@ -1,7 +1,7 @@
 //! RPC mode wire protocol.
 //!
 //! This module owns the JSON-line protocol spoken by `hand --mode rpc`
-//! (port of `pi-coding-agent --mode rpc`). It defines:
+//! (port of `upstream coding-agent --mode rpc`). It defines:
 //!
 //! - [`types`]: serde-compatible command, response, and event types that
 //!   round-trip the camelCase JSONL wire format.

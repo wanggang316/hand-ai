@@ -536,7 +536,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("Unknown provider \"nonexistent\""),
-            "expected pi-style message, got: {msg}"
+            "expected upstream-style message, got: {msg}"
         );
         assert!(
             msg.contains("--list-models"),

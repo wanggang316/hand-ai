@@ -1,6 +1,6 @@
 //! Text component — multi-line text display with word wrapping.
 //
-// audit: M3.T5 — parity reviewed against pi-tui/text.ts on 2026-05-07.
+// audit: M3.T5 — parity reviewed against upstream TUI/text.ts on 2026-05-07.
 
 use crate::tui::Component;
 use crate::utils;

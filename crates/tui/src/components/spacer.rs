@@ -1,6 +1,6 @@
 //! Spacer component — empty vertical space.
 //
-// audit: M3.T5 — parity confirmed against pi-tui/spacer.ts on 2026-05-07.
+// audit: M3.T5 — parity confirmed against upstream TUI/spacer.ts on 2026-05-07.
 
 use crate::tui::Component;
 

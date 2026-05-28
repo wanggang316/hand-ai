@@ -1,25 +1,19 @@
 //! Build a `User-Agent` string for outbound HTTP requests.
 //!
-//! The TS source (`pi-user-agent.ts`) inspects `process.versions.bun` and
-//! `process.version` to embed Bun/Node runtime info. Hand-ai is a native
-//! Rust binary, so we substitute the rustc target triple and Cargo build
-//! metadata that's stable at compile time.
-//!
-//! The product token is `hand` to mirror the binary name. The TS source
-//! used `pi`; the new identifier matches the crate name and the binary
-//! name shipped to users.
+//! Embeds the binary version, the host OS, the rustc version it was
+//! compiled with, and the target arch — enough for a provider to
+//! attribute traffic to this client cleanly.
 //!
 //! Example output:
 //! ```text
-//! hand/0.1.0 (macos; rustc/1.85; aarch64)
+//! hand/0.1.1 (macos; rustc/1.85; aarch64)
 //! ```
 
 /// Generate a `User-Agent` string of the form
 /// `hand/<version> (<os>; rustc/<rustc>; <arch>)`.
 ///
 /// `version` is supplied by the caller (typically `env!("CARGO_PKG_VERSION")`)
-/// rather than read from the environment, mirroring the TS contract that
-/// takes the version as an argument.
+/// so the agent never has to read the version out of the environment.
 pub fn hand_user_agent(version: &str) -> String {
     format!(
         "hand/{} ({}; rustc/{}; {})",

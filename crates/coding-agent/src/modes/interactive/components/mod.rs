@@ -16,7 +16,6 @@ pub mod custom_message;
 pub mod daxnuts;
 pub mod diff;
 pub mod dynamic_border;
-pub mod earendil_announcement;
 pub mod extension_editor;
 pub mod extension_input;
 pub mod extension_selector;
@@ -55,10 +54,6 @@ pub use custom_message::{CustomMessageComponent, CustomMessageData};
 pub use daxnuts::DaxnutsComponent;
 pub use diff::render_diff;
 pub use dynamic_border::DynamicBorderComponent;
-pub use earendil_announcement::{
-    BLOG_URL as EARENDIL_BLOG_URL, EarendilAnnouncementComponent,
-    IMAGE_FILENAME as EARENDIL_IMAGE_FILENAME, IMAGE_MAX_WIDTH_CELLS as EARENDIL_IMAGE_MAX_WIDTH,
-};
 pub use extension_editor::{ExtensionEditorComponent, ExtensionEditorEvent};
 pub use extension_input::{ExtensionInputComponent, ExtensionInputEvent};
 pub use extension_selector::{ExtensionSelectorComponent, ExtensionSelectorEvent};

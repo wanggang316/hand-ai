@@ -10,10 +10,10 @@ pub enum CodingAgentError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    // pi prints session-related errors as a bare message (e.g.
+    // upstream prints session-related errors as a bare message (e.g.
     // "No session found matching 'foo'"); the `Session error:` prefix
     // we used to emit leaked an internal variant tag into user-facing
-    // output. Mirror pi's bare form so error messages stay clean.
+    // output. Mirror the upstream's bare form so error messages stay clean.
     #[error("{0}")]
     Session(String),
 

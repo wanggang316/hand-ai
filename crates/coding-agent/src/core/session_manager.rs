@@ -348,13 +348,13 @@ pub fn find_most_recent_session(session_dir: &Path) -> Option<PathBuf> {
 /// Used by [`find_most_recent_session`] to skip corrupted / unrelated
 /// `.jsonl` files without loading the whole content.
 /// Flatten an absolute cwd into a single directory name suitable for
-/// nesting under `~/.hand/agent/sessions/`. Mirrors pi's flattening
+/// nesting under `~/.hand/agent/sessions/`. Mirrors the upstream's flattening
 /// (`/Users/x/proj` → `--Users-x-proj--`): replaces every path
 /// separator with a single `-`, and wraps the result with leading +
 /// trailing `--` so it's unambiguously a flattened-cwd marker.
 fn flatten_cwd_for_session_dir(cwd: &Path) -> String {
     let s = cwd.to_string_lossy();
-    // pi uses leading and trailing `--`; the path itself becomes a
+    // upstream uses leading and trailing `--`; the path itself becomes a
     // single token where every separator collapses to one `-`.
     let body = s.replace(std::path::MAIN_SEPARATOR, "-");
     format!("-{body}--")
@@ -999,7 +999,7 @@ impl SessionManager {
     /// `~/.hand/agent/sessions/<flattened-cwd>/` — the cwd is encoded
     /// as a single directory name with path separators replaced by
     /// `-` so every project gets its own subdir without polluting
-    /// the project tree itself. Mirrors pi's `~/.pi/agent/sessions/`
+    /// the project tree itself. Mirrors the upstream's `~/.upstream/agent/sessions/`
     /// layout.
     ///
     /// `HAND_HOME` env var overrides the home-dir lookup when set;

@@ -43,7 +43,7 @@ pub fn create_edit_tool(cwd: PathBuf) -> AgentTool {
                     "description": "Multi-edit: apply several disjoint replacements \
                                     against the original file content. Each entry \
                                     has `oldText` and `newText`. Matches the upstream \
-                                    pi-mono shape. When supplied, the single-edit \
+                                    upstream shape. When supplied, the single-edit \
                                     parameters are ignored and the call is atomic — \
                                     a failure in any entry rolls back the whole batch.",
                     "items": {
@@ -339,7 +339,7 @@ fn run_edit(path: &Path, old_string: &str, new_string: &str, replace_all: bool) 
         Ok(c) => c,
         Err(e) => {
             // Surface the io::ErrorKind as a named POSIX-style code so
-            // error messages match pi's
+            // error messages match upstream's
             //   "Could not edit file: <path>. Error code: ENOENT."
             // shape. Falls back to the raw display when the kind is
             // not one of the conventional POSIX-mapped variants.
@@ -388,7 +388,7 @@ fn run_edit(path: &Path, old_string: &str, new_string: &str, replace_all: bool) 
     // a normalized space where smart quotes / Unicode dashes / NBSP
     // collapse to their ASCII equivalents. When the fuzzy match
     // succeeds, the replacement happens in the normalized
-    // content — same side effect as pi: smart quotes in the file get
+    // content — same side effect as upstream: smart quotes in the file get
     // rewritten to ASCII as part of the edit. Documented behavior.
     let (content, old_string, new_string): (String, String, String) = if content.contains(crlf_old)
     {
@@ -535,7 +535,7 @@ mod tests {
         assert!(text.contains("not found"));
     }
 
-    /// Editing a path that doesn't exist surfaces the pi-aligned
+    /// Editing a path that doesn't exist surfaces the upstream-aligned
     /// error wording: `Could not edit file: <path>. Error code: ENOENT.`
     /// — code is the POSIX-style name, not the raw Display impl.
     #[tokio::test]
@@ -558,7 +558,7 @@ mod tests {
         );
         assert!(
             text.contains("Could not edit file:"),
-            "expected pi-aligned prefix, got: {text}"
+            "expected upstream-aligned prefix, got: {text}"
         );
     }
 

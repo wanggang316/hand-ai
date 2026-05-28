@@ -194,7 +194,7 @@ pub struct AuthStorage {
     /// is `None`, reads fall through to a fresh disk load. When the
     /// cache is `Some(map)`, the map is the in-memory shadow — used so
     /// a reload that fails to parse the file keeps the previously
-    /// successful snapshot visible to callers (matches pi semantics).
+    /// successful snapshot visible to callers (matches the upstream semantics).
     cached: std::sync::Arc<std::sync::Mutex<Option<HashMap<String, AuthRecord>>>>,
     /// Buffer of parse / IO errors encountered by `reload()`. Drained
     /// via `drain_errors()` so the caller can surface them once each.
@@ -205,7 +205,7 @@ impl AuthStorage {
     /// Default location: `~/.hand/agent/auth.json`.
     ///
     /// Lives under the same `agent/` subdir as `settings.yaml` and matches
-    /// the TS reference (`~/.pi/agent/auth.json`) so the two ports stay
+    /// the TS reference (`~/.upstream/agent/auth.json`) so the two ports stay
     /// wire-compatible if pointed at a shared layout.
     pub fn default_path() -> Result<PathBuf, AuthStorageError> {
         let home = dirs::home_dir().ok_or(AuthStorageError::NoHomeDir)?;
@@ -450,7 +450,7 @@ impl AuthStorage {
     /// 3. Per-provider environment variable lookup
     ///    (`OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) via the
     ///    `model::env_api_keys::get_env_api_key_by_str` helper. This
-    ///    is the pi-compatible behaviour: a user who exported
+    ///    is the upstream-compatible behaviour: a user who exported
     ///    `OPENROUTER_API_KEY` in their shell can run `hand` without
     ///    first registering the key into `auth.json`.
     /// 4. None when no layer has a credential.
@@ -472,7 +472,7 @@ impl AuthStorage {
         {
             return Some(resolved);
         }
-        // Env-var fallback — matches pi which reads $OPENAI_API_KEY /
+        // Env-var fallback — matches the upstream which reads $OPENAI_API_KEY /
         // $GEMINI_API_KEY / etc. when auth.json has no entry. See
         // crates/model/src/env_api_keys.rs for the per-provider table.
         model::env_api_keys::get_env_api_key_by_str(provider)
@@ -748,7 +748,7 @@ mod tests {
     #[test]
     fn wire_shape_matches_typescript_reference() {
         // Pin the on-disk JSON shape so it stays interoperable with
-        // pi-coding-agent. Specifically: top-level is `{provider: rec}`,
+        // upstream coding-agent. Specifically: top-level is `{provider: rec}`,
         // discriminator key is "type", api_key uses "key", oauth uses
         // "access" / "refresh" / "expires" (ms).
         let dir = TempDir::new().unwrap();

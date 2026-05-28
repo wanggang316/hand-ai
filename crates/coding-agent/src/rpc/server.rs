@@ -37,7 +37,7 @@
 //! those inline requires `Arc`-based shared state for the read paths,
 //! which is a follow-up.
 //!
-//! The TS port (`pi-coding-agent/src/modes/rpc/rpc-mode.ts`) is fully
+//! The TS port (`upstream coding-agent/src/modes/rpc/rpc-mode.ts`) is fully
 //! multitasking: it parks the in-flight prompt as a Promise and
 //! continues reading commands so every command type can interrupt a
 //! turn. The Rust port is incrementally getting there, one in-flight

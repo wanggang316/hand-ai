@@ -89,7 +89,7 @@ impl OutputAccumulator {
         let max_rolling_bytes = (max_bytes.saturating_mul(2)).max(1);
         let temp_file_prefix = options
             .temp_file_prefix
-            .unwrap_or_else(|| "pi-output".to_string());
+            .unwrap_or_else(|| "hand-output".to_string());
         Self {
             max_lines,
             max_bytes,

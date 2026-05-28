@@ -701,7 +701,7 @@ impl Settings {
         }
     }
 
-    /// Effective list of pi-extension package sources. Empty when the
+    /// Effective list of upstream-extension package sources. Empty when the
     /// field is unset in both layers.
     pub fn packages(&self) -> &[PackageSource] {
         self.packages.as_deref().unwrap_or(&[])

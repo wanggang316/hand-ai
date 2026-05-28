@@ -1,6 +1,6 @@
 //! Select list component — scrollable selection list.
 //
-// audit: M3.T5 — parity reviewed against pi-tui/select-list.ts on 2026-05-07.
+// audit: M3.T5 — parity reviewed against upstream TUI/select-list.ts on 2026-05-07.
 // non-goal: TS exposes a `truncatePrimary` callback hook for custom column
 // truncation. The Rust port leaves that as future work — the default
 // `utils::truncate_to_width` covers all current call sites.

@@ -1,6 +1,6 @@
 //! Async sleep helper with optional cancellation support.
 //!
-//! Mirrors the TS `sleep(ms, signal?)` helper from `pi-coding-agent`. Rust's
+//! Mirrors the TS `sleep(ms, signal?)` helper from `upstream coding-agent`. Rust's
 //! cancellation idiom is `tokio::select!` over an external future, so this
 //! module exposes:
 //!

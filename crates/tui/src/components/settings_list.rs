@@ -1,6 +1,6 @@
 //! Settings list component — displays and edits key-value settings.
 //
-// audit: M3.T5 — parity reviewed against pi-tui/settings-list.ts on 2026-05-07.
+// audit: M3.T5 — parity reviewed against upstream TUI/settings-list.ts on 2026-05-07.
 // non-goal: TS's `SettingsList` ships with optional fuzzy search input
 // (`enableSearch`) and submenu support (`SettingItem.submenu`). Both are
 // significant subsystems; the Rust port keeps the simpler edit-in-place model

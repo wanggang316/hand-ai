@@ -490,7 +490,7 @@ pub struct LastAssistantTextData {
 }
 
 /// Data for `get_messages`. `messages` is opaque JSON pending the
-/// `AgentMessage` port from `pi-agent-core`. TODO: typed in the agent
+/// `AgentMessage` port from `upstream-agent-core`. TODO: typed in the agent
 /// port phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

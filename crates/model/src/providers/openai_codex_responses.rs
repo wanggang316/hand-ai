@@ -842,10 +842,10 @@ mod tests {
     fn codex_body_preserves_explicit_system_prompt() {
         let body = build_codex_request_body(
             &codex_test_model(),
-            &codex_user_context(Some("You are pi.")),
+            &codex_user_context(Some("You are an assistant.")),
             &StreamOptions::default(),
         );
-        assert_eq!(body["instructions"].as_str(), Some("You are pi."));
+        assert_eq!(body["instructions"].as_str(), Some("You are an assistant."));
     }
 
     /// ChatGPT Codex Responses rejects `store: true` ("Store must be set
@@ -855,7 +855,7 @@ mod tests {
     fn codex_body_pins_store_false() {
         let body = build_codex_request_body(
             &codex_test_model(),
-            &codex_user_context(Some("You are pi.")),
+            &codex_user_context(Some("You are an assistant.")),
             &StreamOptions::default(),
         );
         assert_eq!(body["store"], serde_json::Value::Bool(false));
@@ -907,7 +907,7 @@ mod tests {
     fn codex_body_defaults_text_verbosity_to_low() {
         let body = build_codex_request_body(
             &codex_test_model(),
-            &codex_user_context(Some("You are pi.")),
+            &codex_user_context(Some("You are an assistant.")),
             &StreamOptions::default(),
         );
         assert_eq!(
@@ -927,7 +927,7 @@ mod tests {
     fn codex_body_always_requests_encrypted_reasoning_content() {
         let body = build_codex_request_body(
             &codex_test_model(),
-            &codex_user_context(Some("You are pi.")),
+            &codex_user_context(Some("You are an assistant.")),
             &StreamOptions::default(),
         );
         let include = body
@@ -962,7 +962,7 @@ mod tests {
         };
         let body = build_codex_request_body(
             &codex_test_model(),
-            &codex_user_context(Some("You are pi.")),
+            &codex_user_context(Some("You are an assistant.")),
             &options,
         );
         assert_eq!(
@@ -977,7 +977,7 @@ mod tests {
         use std::collections::HashMap;
         let no_meta = build_codex_request_body(
             &codex_test_model(),
-            &codex_user_context(Some("You are pi.")),
+            &codex_user_context(Some("You are an assistant.")),
             &StreamOptions::default(),
         );
         assert!(
@@ -993,7 +993,7 @@ mod tests {
         };
         let null_meta = build_codex_request_body(
             &codex_test_model(),
-            &codex_user_context(Some("You are pi.")),
+            &codex_user_context(Some("You are an assistant.")),
             &options,
         );
         assert!(
@@ -1016,7 +1016,7 @@ mod tests {
         };
         let body = build_codex_request_body(
             &codex_test_model(),
-            &codex_user_context(Some("You are pi.")),
+            &codex_user_context(Some("You are an assistant.")),
             &options,
         );
         assert_eq!(
@@ -1072,8 +1072,11 @@ mod tests {
         simple.base.api_key = Some("sk-fake".to_string());
         simple.base.transport = Some(Transport::Websocket);
 
-        let mut stream =
-            provider.stream_simple(model, codex_user_context(Some("You are pi.")), Some(simple));
+        let mut stream = provider.stream_simple(
+            model,
+            codex_user_context(Some("You are an assistant.")),
+            Some(simple),
+        );
 
         let mut saw_websocket_error = false;
         while let Some(event) = stream.next().await {

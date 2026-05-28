@@ -1,6 +1,6 @@
 //! Truncated text component — single-line text with truncation.
 //
-// audit: M3.T5 — parity reviewed against pi-tui/truncated-text.ts on 2026-05-07.
+// audit: M3.T5 — parity reviewed against upstream TUI/truncated-text.ts on 2026-05-07.
 
 use crate::tui::Component;
 use crate::utils;

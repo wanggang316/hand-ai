@@ -1,6 +1,6 @@
 //! Input component — single-line text input with cursor and history.
 //
-// audit: M3.T5 — parity reviewed against pi-tui/input.ts on 2026-05-07.
+// audit: M3.T5 — parity reviewed against upstream TUI/input.ts on 2026-05-07.
 // non-goal: TS's `Input` ships with kill-ring (yank/yank-pop), per-input undo
 // stack, bracketed-paste buffering, IME `CURSOR_MARKER`, Kitty CSI-u
 // printable decoding, and word-aware deletes. The Rust port keeps `Input` as

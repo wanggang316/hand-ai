@@ -2586,7 +2586,7 @@ async fn mount_login_key_input(
         }
     });
     // TODO(parity): populate the providers list + OAuth flows from the
-    // pi-ai OAuth registry once it's wired in. For now the dialog runs a
+    // upstream-ai OAuth registry once it's wired in. For now the dialog runs a
     // pure manual-input path: paste an API key and persist it.
     let providers: Vec<crate::modes::interactive::components::LoginProvider> = Vec::new();
     let mut component = LoginDialogComponent::new(&canonical, &providers, None, None, std_tx);
@@ -2912,7 +2912,7 @@ fn last_n_assistant_texts(session: &AgentSession, n: usize) -> Vec<String> {
 /// on the parsed [`ExportFormat`].
 fn apply_export(chat: &ChatList, session: &AgentSession, path: &Path, fmt: ExportFormat) {
     use crate::core::export::{export_to_html, export_to_jsonl};
-    // Refuse to silently overwrite an existing file. pi-side issue #8:
+    // Refuse to silently overwrite an existing file. upstream-side issue #8:
     // users testing exports against a path they already used lose the
     // previous transcript without warning. Tell them to delete first
     // or pick a new name.
@@ -4455,7 +4455,7 @@ mod tests {
         );
     }
 
-    /// pi-side issue #8: `/export <path>` must refuse to overwrite a
+    /// upstream-side issue #8: `/export <path>` must refuse to overwrite a
     /// file that already exists. The user lost a previous transcript
     /// by reusing the same path; the new contract is "delete or
     /// choose a different path", surfaced as a red status line, with

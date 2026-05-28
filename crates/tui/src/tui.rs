@@ -161,7 +161,7 @@ pub trait Focusable: Component {
         self.set_focused(false);
     }
 
-    /// Alias for `focused()` to mirror the pi-tui TS API.
+    /// Alias for `focused()` to mirror the upstream TUI TS API.
     fn is_focused(&self) -> bool {
         self.focused()
     }
@@ -385,7 +385,7 @@ pub type InputListener = Box<dyn FnMut(&InputEvent) -> ListenerResult + Send>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ListenerId(u64);
 
-/// Render tick interval. Mirrors the default in pi-tui (~4ms ≈ 240Hz cap).
+/// Render tick interval. Mirrors the default in upstream TUI (~4ms ≈ 240Hz cap).
 const RENDER_TICK_MS: u64 = 4;
 
 /// Cross-task overlay-mount request, dispatched via the channel returned by

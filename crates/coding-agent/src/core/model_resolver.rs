@@ -545,7 +545,7 @@ pub fn find_exact_model_reference_match<'a>(
 /// suffix) are preferred over dated versions; ties break by id descending.
 fn try_match_model<'a>(model_pattern: &str, available_models: &'a [Model]) -> Option<&'a Model> {
     // An empty pattern would substring-match every id (`contains("")`
-    // is always true). pi returns null in that case; replicate that so
+    // is always true). upstream returns null in that case; replicate that so
     // a bug-shaped empty `--model ""` doesn't silently pick the first
     // catalog row.
     if model_pattern.is_empty() {
@@ -1624,14 +1624,14 @@ mod tests {
         assert!(default_model_id_for_known_provider("not-a-provider").is_none());
     }
 
-    /// Lockstep parity with upstream pi's `defaultModelPerProvider`
+    /// Lockstep parity with upstream the upstream's `defaultModelPerProvider`
     /// snapshot. The default-model-per-provider map shifts each time
     /// a vendor pushes a new GA release; user scripts that omit
     /// `--model` rely on this map to land on the right model.
-    /// Drifting from pi would silently route hand to an older model
+    /// Drifting from upstream would silently route hand to an older model
     /// for the same `hand --provider X` invocation.
     ///
-    /// The pi snapshot at the time of the 2026-05-16 lockstep:
+    /// The upstream snapshot at the time of the 2026-05-16 lockstep:
     ///   openai → gpt-5.4
     ///   openai-codex → gpt-5.5
     ///   zai → glm-5.1
@@ -1640,7 +1640,7 @@ mod tests {
     ///   cerebras → zai-glm-4.7
     ///   vercel-ai-gateway → zai/glm-5.1
     ///
-    /// When pi pushes an update, refresh this test in the same commit
+    /// When upstream pushes an update, refresh this test in the same commit
     /// that updates `default_model_per_provider()` so the snapshot
     /// stays a single source of truth.
     #[test]
@@ -2297,14 +2297,14 @@ mod tests {
     #[test]
     fn find_initial_picks_ai_gateway_default_when_available() {
         // Build the catalog so `vercel-ai-gateway` is present with its
-        // pi-snapshotted default model. The known-default lookup loops
+        // upstream-snapshotted default model. The known-default lookup loops
         // over `default_model_per_provider()` and returns the first
         // matching available row.
         let gateway_default = default_model_per_provider()
             .iter()
             .find(|(p, _)| *p == "vercel-ai-gateway")
             .map(|(_, m)| *m)
-            .expect("ai-gateway entry exists in pi snapshot");
+            .expect("ai-gateway entry exists in upstream snapshot");
         let mut row = fake(model::types::Provider::Anthropic, gateway_default);
         // Force provider field to vercel-ai-gateway via a custom build.
         row.provider = model::types::Provider::from_str("vercel-ai-gateway")

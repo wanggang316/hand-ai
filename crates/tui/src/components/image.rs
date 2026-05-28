@@ -1,7 +1,7 @@
 //! Image component — composes [`crate::terminal_image`] output with a
 //! placeholder fallback for non-graphics terminals.
 //
-// audit: M3.T5 — parity reviewed against pi-tui/image.ts on 2026-05-07.
+// audit: M3.T5 — parity reviewed against upstream TUI/image.ts on 2026-05-07.
 // non-goal: TS keeps a `dimensions` field (raw pixel dims sniffed from the
 // image bytes) to size the render. Our `terminal_image::render_image`
 // auto-derives dimensions, so we don't expose a separate dims setter.

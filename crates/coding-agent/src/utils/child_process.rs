@@ -1,6 +1,6 @@
 //! Spawn helpers around `tokio::process::Command`.
 //!
-//! Mirrors `pi-coding-agent`'s `child-process.ts`, but rebuilt in idiomatic
+//! Mirrors `upstream coding-agent`'s `child-process.ts`, but rebuilt in idiomatic
 //! Rust:
 //!
 //! - The TS file's `waitForChildProcess` exists to paper over Node's

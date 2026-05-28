@@ -328,7 +328,7 @@ mod tests {
     /// dropping the whole section forces the model to infer absence
     /// from a non-existent header, which has produced confused
     /// behaviour in the past (model assumed tools were forthcoming).
-    /// pi anchors this contract in its parse-time tests.
+    /// the upstream anchors this contract in its parse-time tests.
     #[test]
     fn empty_tools_emits_none_placeholder() {
         let prompt = build_system_prompt(BuildSystemPromptOptions {

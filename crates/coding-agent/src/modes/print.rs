@@ -173,7 +173,7 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // otherwise we'd export an empty session and drop the prompt.
     let piped_stdin = read_piped_stdin();
     // Positional args land in `messages()` (the @file-stripped variant).
-    // Match pi's print-mode contract: `pi --print "hello there"` should
+    // Match the upstream's print-mode contract: `upstream --print "hello there"` should
     // treat "hello there" as the prompt without needing a separate `-p`.
     let positional_msg = {
         let msgs = args.messages();
@@ -183,7 +183,7 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             Some(msgs.join(" "))
         }
     };
-    // pi-parity: `@<path>` tokens anywhere in argv are file references.
+    // upstream-parity: `@<path>` tokens anywhere in argv are file references.
     // Validate each up front; missing files surface as
     // `Error: File not found: <path>` with exit 1 BEFORE we hit the
     // provider (so a typo doesn't burn an API call and stay silent).
@@ -669,7 +669,7 @@ fn read_piped_stdin() -> Option<String> {
 /// suitable for prepending to the user's prompt. Each file is wrapped
 /// in a `<file path="…">…</file>` envelope so the model can attribute
 /// the content. Missing files surface as `File not found: <path>` —
-/// pi's wording — and the caller fails fast with exit 1 rather than
+/// the upstream's wording — and the caller fails fast with exit 1 rather than
 /// silently sending an unsubstituted prompt.
 ///
 /// Returns `Ok(None)` when `paths` is empty.
@@ -874,7 +874,7 @@ mod tests {
         assert_eq!(combined.as_deref(), Some("hello"));
     }
 
-    /// Positional alone — `hand --print "hello there"`. pi-compat.
+    /// Positional alone — `hand --print "hello there"`. upstream-compat.
     #[test]
     fn build_initial_message_returns_positional_alone() {
         let combined = build_initial_message(None, None, Some("hello there"));
@@ -882,7 +882,7 @@ mod tests {
     }
 
     /// `--prompt` wins over positional when both supplied (positional
-    /// stays appended, matching pi's "first positional message" rule
+    /// stays appended, matching the upstream's "first positional message" rule
     /// for the simple case).
     #[test]
     fn build_initial_message_prompt_and_positional_both_present() {
