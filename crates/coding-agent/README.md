@@ -291,11 +291,13 @@ Available tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`
 
 | Option | Description |
 |--------|-------------|
-| `-p`, `--prompt <text>` | Initial prompt |
+| `-p`, `--print` | Non-interactive print mode (final answer to stdout) |
+| `--prompt <text>` | Initial prompt (long-form only; `-p` is `--print`) |
 | `-d`, `--cwd <dir>` | Working directory |
 | `--system-prompt <text>` | Override system prompt |
 | `--append-system-prompt <text>` | Append to system prompt |
-| `-v`, `--verbose` | Verbose logging |
+| `--verbose` | Verbose logging (long-form only; `-v` is `--version`) |
+| `-v`, `-V`, `--version` | Print the binary version and exit |
 
 ### Examples
 
