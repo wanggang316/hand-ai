@@ -43,6 +43,11 @@ const PASTE_CHARS_THRESHOLD: usize = 1000;
 /// `ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS` from the TS source.
 const AUTOCOMPLETE_DEBOUNCE_MS: u64 = 20;
 
+/// Maximum number of popup rows rendered under the editor. Longer
+/// result lists window around the selected index so the popup stays
+/// compact even with many candidates.
+const AUTOCOMPLETE_POPUP_MAX_ROWS: usize = 8;
+
 /// Coalescing window for typing-class undo entries. Adjacent inserts of
 /// printable characters within this interval merge into a single entry.
 const UNDO_COALESCE_MS: u64 = 500;
@@ -1167,6 +1172,51 @@ impl EditorComponent {
         self.autocomplete_debounce_until = None;
     }
 
+    /// Apply the currently-selected autocomplete item. Replaces the
+    /// trigger-prefix-plus-query range with the item's `insert_text`
+    /// (so typing `/he<Tab>` produces `/help`, `@RE<Tab>` produces
+    /// `@README.md`, etc.) and clears the popup. No-op when no item
+    /// is active.
+    fn accept_autocomplete(&mut self) {
+        let Some(state) = self.autocomplete_state.as_ref() else {
+            return;
+        };
+        let Some(item) = state.items.get(state.selected) else {
+            self.cancel_autocomplete();
+            return;
+        };
+
+        // `state.context.cursor` is the flat byte offset where the
+        // user was when the popup opened — i.e. the END of the query
+        // prefix. The START of what we replace is that offset minus
+        // the query length. Reconstruct it explicitly from
+        // `detect_trigger` semantics so a stale cursor (the user may
+        // have typed since) still yields the right delete-range.
+        let line = self.current_line();
+        let before: &str = &line[..self.cursor_col];
+        let Some((_, query_byte_start)) = detect_trigger(before) else {
+            // No trigger under the cursor anymore — bail; the buffer
+            // moved past the popup. Drop the state so we don't sit
+            // on stale items.
+            self.cancel_autocomplete();
+            return;
+        };
+        // The trigger byte (`/` or `@`) sits at `query_byte_start - 1`.
+        // The item's `insert_text` already contains the trigger char
+        // (e.g. `/help`, `@README.md`) so the replacement spans from
+        // the trigger char through the current cursor.
+        let trigger_col = query_byte_start.saturating_sub(1);
+        let start_flat = self.flat_offset(self.cursor_line, trigger_col);
+        let end_flat = self.flat_offset(self.cursor_line, self.cursor_col);
+        let insert_text = item.insert_text.clone();
+
+        self.delete_range(start_flat, end_flat - start_flat);
+        // delete_range left the cursor at `start_flat`'s line/col,
+        // which is exactly where the inserted text should land.
+        self.insert_text_no_undo(&insert_text);
+        self.cancel_autocomplete();
+    }
+
     /// After the buffer mutates, decide whether autocomplete should activate.
     /// Recognises slash-command start and `@`-attachment context.
     fn maybe_trigger_autocomplete(&mut self) {
@@ -1351,6 +1401,39 @@ impl Component for EditorComponent {
             });
         }
 
+        // Autocomplete popup. Render below the editor when the active
+        // state has delivered items — the popup is a simple list with
+        // the currently-selected row reverse-video'd. Capped to
+        // AUTOCOMPLETE_POPUP_MAX_ROWS to leave room for chat content.
+        if let Some(state) = self.autocomplete_state.as_ref()
+            && state.delivered
+            && !state.items.is_empty()
+        {
+            let max_rows = AUTOCOMPLETE_POPUP_MAX_ROWS.min(state.items.len());
+            // Window the items around the selected index so the popup
+            // scrolls when the list is longer than max_rows.
+            let half = max_rows / 2;
+            let start = state
+                .selected
+                .saturating_sub(half)
+                .min(state.items.len().saturating_sub(max_rows));
+            for i in start..start + max_rows {
+                let item = &state.items[i];
+                let cursor = if i == state.selected { "▸ " } else { "  " };
+                let detail = match &item.detail {
+                    Some(d) if !d.is_empty() => format!("  \x1b[2m{d}\x1b[0m"),
+                    _ => String::new(),
+                };
+                let raw = format!("{cursor}{}{detail}", item.label);
+                let row = if i == state.selected {
+                    format!("\x1b[7m{raw}\x1b[0m")
+                } else {
+                    raw
+                };
+                output.push(row);
+            }
+        }
+
         output
     }
 
@@ -1432,6 +1515,49 @@ impl EditorComponent {
     fn handle_key(&mut self, key: &Key, raw: &str) -> HandleResult {
         if key.is_release {
             return HandleResult::Ignored;
+        }
+
+        // Autocomplete popup intercept — when the popup is visible
+        // with delivered items, swallow Up/Down/Tab/Enter/Esc so the
+        // user can navigate and accept candidates without those keys
+        // dropping through to the normal editor bindings (which would
+        // e.g. move the cursor through buffer rows or submit the
+        // message). Anything else falls through to the editor and
+        // mutates the buffer, which retriggers maybe_trigger_autocomplete
+        // and refreshes / dismisses the popup naturally.
+        let popup_active = self
+            .autocomplete_state
+            .as_ref()
+            .map(|s| s.delivered && !s.items.is_empty())
+            .unwrap_or(false);
+        if popup_active {
+            match key.name {
+                KeyName::Up => {
+                    if let Some(state) = self.autocomplete_state.as_mut()
+                        && state.selected > 0
+                    {
+                        state.selected -= 1;
+                    }
+                    return HandleResult::Handled;
+                }
+                KeyName::Down => {
+                    if let Some(state) = self.autocomplete_state.as_mut()
+                        && state.selected + 1 < state.items.len()
+                    {
+                        state.selected += 1;
+                    }
+                    return HandleResult::Handled;
+                }
+                KeyName::Tab | KeyName::Enter => {
+                    self.accept_autocomplete();
+                    return HandleResult::Handled;
+                }
+                KeyName::Escape => {
+                    self.cancel_autocomplete();
+                    return HandleResult::Handled;
+                }
+                _ => {}
+            }
         }
 
         // First, try keybindings — they cover named editor actions.
@@ -2374,6 +2500,126 @@ mod tests {
         assert!(state.delivered);
         assert_eq!(state.items.len(), 1);
         assert!(editor.pending_autocomplete_request().is_none());
+    }
+
+    /// Issue #57: the autocomplete popup must actually render below
+    /// the editor when items are delivered. Pre-fix, the editor's
+    /// `render()` ignored `autocomplete_state` entirely so the user
+    /// saw nothing even though the sync providers populated the
+    /// state inline.
+    #[test]
+    fn delivered_popup_renders_under_the_editor() {
+        let mut editor = EditorComponent::new();
+        editor.set_focused(true);
+        editor.set_autocomplete_provider(Arc::new(SyncProvider {
+            items: vec![
+                AutocompleteItem {
+                    label: "help".to_string(),
+                    detail: Some("show help".to_string()),
+                    insert_text: "/help".to_string(),
+                    kind: AutocompleteItemKind::SlashCommand,
+                },
+                AutocompleteItem {
+                    label: "hotkeys".to_string(),
+                    detail: None,
+                    insert_text: "/hotkeys".to_string(),
+                    kind: AutocompleteItemKind::SlashCommand,
+                },
+            ],
+        }));
+        editor.handle_input(&InputEvent::Raw("/".into()));
+        editor.handle_input(&InputEvent::Raw("h".into()));
+
+        let lines = editor.render(80);
+        let body = lines.join("\n");
+        assert!(
+            body.contains("help") && body.contains("hotkeys"),
+            "popup rows missing from render: {body}"
+        );
+        // The selected row reverse-videos itself with `\x1b[7m` and
+        // ends in the reset. Selected defaults to index 0 (the first
+        // delivered item).
+        assert!(
+            body.contains("\x1b[7m▸ help"),
+            "selected row missing reverse-video marker: {body:?}"
+        );
+    }
+
+    /// Issue #57: Tab accepts the highlighted item — the trigger
+    /// substring through the cursor is replaced with the item's
+    /// `insert_text`, the popup dismisses, and a subsequent
+    /// keystroke retriggers normally.
+    #[test]
+    fn tab_accepts_selected_autocomplete_item() {
+        use crate::keys::{Key, KeyEventType, KeyModifiers};
+
+        let mut editor = EditorComponent::new();
+        editor.set_focused(true);
+        editor.set_autocomplete_provider(Arc::new(SyncProvider {
+            items: vec![AutocompleteItem {
+                label: "help".to_string(),
+                detail: None,
+                insert_text: "/help".to_string(),
+                kind: AutocompleteItemKind::SlashCommand,
+            }],
+        }));
+        editor.handle_input(&InputEvent::Raw("/".into()));
+        editor.handle_input(&InputEvent::Raw("h".into()));
+        // Popup is up with one item.
+        assert!(editor.autocomplete_state().is_some());
+
+        let tab = Key {
+            name: KeyName::Tab,
+            modifiers: KeyModifiers::default(),
+            is_release: false,
+            event_type: KeyEventType::Press,
+            base_layout_key: None,
+        };
+        let result = editor.handle_input(&InputEvent::Key(tab));
+        assert_eq!(result, HandleResult::Handled);
+        assert_eq!(editor.text(), "/help");
+        assert!(
+            editor.autocomplete_state().is_none(),
+            "popup should dismiss after accept"
+        );
+    }
+
+    /// Issue #57: Down/Up moves the popup selection without
+    /// disturbing the editor cursor.
+    #[test]
+    fn down_arrow_moves_popup_selection() {
+        use crate::keys::{Key, KeyEventType, KeyModifiers};
+
+        let mut editor = EditorComponent::new();
+        editor.set_focused(true);
+        editor.set_autocomplete_provider(Arc::new(SyncProvider {
+            items: vec![
+                AutocompleteItem {
+                    label: "a".into(),
+                    detail: None,
+                    insert_text: "/a".into(),
+                    kind: AutocompleteItemKind::SlashCommand,
+                },
+                AutocompleteItem {
+                    label: "b".into(),
+                    detail: None,
+                    insert_text: "/b".into(),
+                    kind: AutocompleteItemKind::SlashCommand,
+                },
+            ],
+        }));
+        editor.handle_input(&InputEvent::Raw("/".into()));
+        assert_eq!(editor.autocomplete_state().unwrap().selected, 0);
+
+        let down = Key {
+            name: KeyName::Down,
+            modifiers: KeyModifiers::default(),
+            is_release: false,
+            event_type: KeyEventType::Press,
+            base_layout_key: None,
+        };
+        editor.handle_input(&InputEvent::Key(down));
+        assert_eq!(editor.autocomplete_state().unwrap().selected, 1);
     }
 
     // -- IME -------------------------------------------------------------
