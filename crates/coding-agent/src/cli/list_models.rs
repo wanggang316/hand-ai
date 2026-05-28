@@ -72,14 +72,46 @@ pub(crate) fn pick_pool(available: Vec<Model>) -> Vec<Model> {
     }
 }
 
-/// Apply the three-pass search filter (exact provider → substring →
-/// fuzzy) to a candidate list. Extracted so it can be unit-tested
-/// without an `AuthStorage`.
+/// Apply the four-pass search filter to a candidate list.
+///
+/// 1. **Provider key match** (pattern equals a known provider key,
+///    case-insensitive) — return that provider's full-catalogue
+///    models even if they aren't in the auth-filtered pool. Issue #6
+///    re-opened on this: when a user with only an OpenRouter key
+///    typed `hand --list-models openai`, the auth pool had zero
+///    `openai` rows so the auth-pool-only "exact provider match"
+///    fell through to substring and surfaced `openrouter openai/…`
+///    rows instead. Bypassing the pool when the search is clearly
+///    "show me <provider>'s models" matches user intent.
+/// 2. **Exact provider** within the pool (legacy path, still useful
+///    for non-canonical aliases the catalogue happens to register).
+/// 3. **Substring** on `<provider> <id>`.
+/// 4. **Fuzzy** as last-resort "did you mean…?".
+///
+/// Extracted so the rules are unit-testable without an `AuthStorage`.
 pub(crate) fn filter_models_by_pattern(models: Vec<Model>, pattern: &str) -> Vec<Model> {
     use hand_tui::fuzzy_filter;
 
     let needle = pattern.to_lowercase();
 
+    // Pass 1: pattern names a known provider → surface its
+    // full-catalogue rows, regardless of auth.
+    if model::get_provider_keys()
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(&needle))
+    {
+        let canonical = model::get_provider_keys()
+            .into_iter()
+            .find(|k| k.eq_ignore_ascii_case(&needle))
+            .expect("provider key match was just confirmed");
+        let mut out = model::get_models(&canonical);
+        if !out.is_empty() {
+            out.sort_by(|a, b| a.id.cmp(&b.id));
+            return out;
+        }
+    }
+
+    // Pass 2: exact provider match within the auth-filtered pool.
     let provider_exact: Vec<Model> = models
         .iter()
         .filter(|m| m.provider.as_str().eq_ignore_ascii_case(&needle))
@@ -342,6 +374,12 @@ mod tests {
     /// pre-fix fuzzy implementation matched `o-p-e-n-a-i` scattered
     /// across `openrouter/*` ids and returned hundreds of false
     /// positives.
+    /// Provider-key pass: when the pattern names a known provider,
+    /// only that provider's rows are returned — never the
+    /// `openrouter openai/…` namespaced ids that a naive substring
+    /// search would surface. After the #6 re-open fix, this pulls
+    /// from the full catalogue rather than the input pool, but the
+    /// "no openrouter rows" invariant must still hold.
     #[test]
     fn pattern_exact_provider_match_wins_over_substring() {
         let models = vec![
@@ -350,12 +388,16 @@ mod tests {
             mk_model(Provider::Openrouter, "openai/gpt-4o"),
         ];
         let kept = filter_models_by_pattern(models, "openai");
-        let ids: Vec<&str> = kept.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec!["gpt-4o"],
-            "exact provider match must drop openrouter/*"
-        );
+        assert!(!kept.is_empty(), "openai is a known provider — expected its catalogue");
+        for m in &kept {
+            assert_eq!(
+                m.provider.as_str(),
+                "openai",
+                "every result must be a real openai row, got provider={} for id={}",
+                m.provider.as_str(),
+                m.id,
+            );
+        }
     }
 
     /// When no provider matches the needle exactly, fall through to a
@@ -384,6 +426,43 @@ mod tests {
         let kept = filter_models_by_pattern(models, "gpO");
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, "gpt-4o");
+    }
+
+    /// Issue #6 re-open: a user with only openrouter auth typed
+    /// `hand --list-models openai`. The auth pool contained zero
+    /// `provider == openai` rows, so the prior "exact provider"
+    /// pass found nothing and the substring fallback surfaced
+    /// `openrouter openai/...` rows instead — the opposite of
+    /// what the user asked for. The provider-key pass must bypass
+    /// the auth-filtered pool and pull from the full catalogue
+    /// when the pattern names a known provider.
+    #[test]
+    fn pattern_naming_known_provider_pulls_from_full_catalogue() {
+        // Simulate the "openrouter-only auth" pool: catalogue is
+        // packed with openrouter/* rows but no native `openai`
+        // entries. The user types `openai` — we expect them to see
+        // real openai catalogue entries, NOT `openrouter openai/...`.
+        let pool = vec![
+            mk_model(Provider::Openrouter, "openai/gpt-4o"),
+            mk_model(Provider::Openrouter, "openai/gpt-4o-mini"),
+            mk_model(Provider::Openrouter, "anthropic/claude-3-opus"),
+        ];
+        let kept = filter_models_by_pattern(pool, "openai");
+        // Every returned row must have provider == openai (the real
+        // catalogue, not the openrouter namespaced ids).
+        assert!(
+            !kept.is_empty(),
+            "must surface openai catalogue rows, got empty"
+        );
+        for m in &kept {
+            assert_eq!(
+                m.provider.as_str(),
+                "openai",
+                "expected provider=openai, got {} for id={}",
+                m.provider.as_str(),
+                m.id
+            );
+        }
     }
 
     /// A pattern that matches nothing at any tier returns an empty

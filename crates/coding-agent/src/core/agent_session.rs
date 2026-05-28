@@ -1804,6 +1804,44 @@ mod tests {
         }
     }
 
+    /// Issue #23 / #28: `--no-context-files` (and its `-nc` alias)
+    /// must keep HAND.md content out of the system prompt. Two
+    /// independent reports landed within hours saying the model
+    /// still echoed HAND.md text under the flag, so pin both the
+    /// "no flag → loads HAND.md" baseline and the "flag set → does
+    /// NOT load" promise.
+    #[test]
+    fn no_context_files_keeps_hand_md_out_of_system_prompt() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let token = "SECRET-NO-CONTEXT-FILES-TOKEN-XYZ";
+        fs::write(cwd.join("HAND.md"), token).unwrap();
+
+        // Baseline: without the flag, HAND.md content lands in the
+        // system prompt (so the test below proves something).
+        let mut cfg_with = test_config(cwd.to_path_buf());
+        cfg_with.no_context_files = false;
+        let session_with =
+            AgentSession::new_with_skill_dirs(cfg_with, vec![], None, None).expect("baseline session");
+        let prompt_with = &session_with.context.system_prompt;
+        assert!(
+            prompt_with.contains(token),
+            "baseline (no_context_files=false) must include HAND.md, did not. \
+             Test environment regressed before the fix can be verified."
+        );
+
+        // Real test: flag set, token must NOT appear.
+        let mut cfg_no = test_config(cwd.to_path_buf());
+        cfg_no.no_context_files = true;
+        let session_no =
+            AgentSession::new_with_skill_dirs(cfg_no, vec![], None, None).expect("flagged session");
+        let prompt_no = &session_no.context.system_prompt;
+        assert!(
+            !prompt_no.contains(token),
+            "no_context_files=true must suppress HAND.md, but the token leaked:\n{prompt_no}"
+        );
+    }
+
     /// Issue #20: `--export --resume <id>` was failing for users whose
     /// session lived at the legacy `<cwd>/.hand/sessions/<id>.jsonl`
     /// path — the resume lookup only consulted the home-based primary
