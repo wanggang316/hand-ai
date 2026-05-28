@@ -359,7 +359,25 @@ pub fn compose_overlays(
     let mut max_touched_row: Option<usize> = None;
 
     for (component, options) in overlays {
-        let lines = component.render(width);
+        let m = &options.margin;
+        // Clamp overlay to the viewport's interior (after margins).
+        let avail_w = w.saturating_sub(m.left as usize + m.right as usize);
+        let avail_h = h.saturating_sub(m.top as usize + m.bottom as usize);
+
+        // Render the inner component at the width it will actually
+        // occupy. For a bordered overlay that means avail_w − 2 so a
+        // full-bleed child (e.g. DynamicBorderComponent at 100 cols
+        // inside a 100-col viewport) produces 98 glyphs and fits
+        // between the `│ … │` rails. Previously every overlay rendered
+        // its child at the full viewport width, so any child that
+        // honoured that width by 1 col overflowed the box rails and
+        // wrapped the bottom `│` onto the next visual line — see #39.
+        let render_w = if options.border {
+            avail_w.saturating_sub(2)
+        } else {
+            avail_w
+        };
+        let lines = component.render(render_w as u16);
         if lines.is_empty() {
             continue;
         }
@@ -380,10 +398,6 @@ pub fn compose_overlays(
             continue;
         }
 
-        let m = &options.margin;
-        // Clamp overlay to the viewport's interior (after margins).
-        let avail_w = w.saturating_sub(m.left as usize + m.right as usize);
-        let avail_h = h.saturating_sub(m.top as usize + m.bottom as usize);
         let ov_w = raw_w.min(avail_w).max(1);
         let ov_h = raw_h.min(avail_h).max(1);
 
@@ -605,6 +619,61 @@ mod tests {
             dim_background: false,
             border: false,
         }
+    }
+
+    /// Component that fills its rendered width with `─`. Models the
+    /// `DynamicBorderComponent`-style "horizontal rule" found inside
+    /// `/settings` and other selectors.
+    struct FullBleedRule;
+    impl Component for FullBleedRule {
+        fn render(&self, width: u16) -> Vec<String> {
+            vec!["─".repeat(width as usize)]
+        }
+        fn handle_input(&mut self, _e: &InputEvent) -> HandleResult {
+            HandleResult::Ignored
+        }
+    }
+
+    /// Regression for #39: a bordered overlay whose inner component
+    /// fills its render width with `─` must not produce a row wider
+    /// than the viewport — otherwise the closing `│` wraps and the
+    /// stray `─│` appears one row lower, breaking the box outline.
+    #[test]
+    fn bordered_overlay_full_bleed_child_does_not_overflow_viewport() {
+        let viewport_w = 100u16;
+        let base: Vec<String> = (0..10).map(|_| " ".repeat(viewport_w as usize)).collect();
+        let comp = FullBleedRule;
+        let opts = OverlayOptions {
+            anchor: OverlayAnchor::Center,
+            margin: OverlayMargin::default(),
+            capture_input: false,
+            dim_background: false,
+            border: true,
+        };
+        let overlays: Vec<(&dyn Component, &OverlayOptions)> = vec![(&comp, &opts)];
+        let result = compose_overlays(&base, &overlays, viewport_w, 10);
+
+        for (i, row) in result.iter().enumerate() {
+            let vis = visible_width(row);
+            assert!(
+                vis <= viewport_w as usize,
+                "row {i} ({vis} cols) exceeds viewport ({} cols): {row:?}",
+                viewport_w
+            );
+        }
+
+        // The row carrying the inner rule must hold the rule between
+        // `│` rails, not after them.
+        let rule_row = result
+            .iter()
+            .find(|r| r.contains('─') && r.contains('│'))
+            .expect("a bordered row with the rule is present");
+        // 100-col viewport, no margin, border on: outer 100, inner 98.
+        let dash_count = rule_row.matches('─').count();
+        assert_eq!(
+            dash_count, 98,
+            "inner rule must be (viewport - 2) glyphs; got {dash_count} in {rule_row:?}"
+        );
     }
 
     #[test]
