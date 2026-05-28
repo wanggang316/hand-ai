@@ -337,7 +337,12 @@ impl InteractiveMode {
         let mut editor = EditorComponent::new()
             .with_border(true)
             .with_border_style(hand_tui::components::editor::BorderStyle::Horizontal)
-            .with_viewport_height(4)
+            // Auto-grow: single-row prompt when empty, expands to fit
+            // multi-line input up to 8 rows, scrolls beyond. Replaces
+            // the old fixed 4-row reservation that left visible dead
+            // space below an empty buffer ("why is the prompt this
+            // tall?" feedback).
+            .with_auto_grow(8)
             .with_border_color(BORDER_DIM)
             .with_focused_border_color(BORDER_FOCUS)
             .with_paste_transform(paste_transform)
@@ -898,13 +903,25 @@ fn install_loader(slot: &SharedLoaderSlot, message: impl Into<String>) {
     if let Ok(mut s) = slot.lock() {
         *s = Some(cell);
     }
+    // Without this, the spinner doesn't appear until the next render
+    // tick (~100 ms) — visible flicker on fast-cancel paths.
+    request_render();
 }
 
 /// Remove the mounted loader, if any.
+///
+/// Also forces a re-render so the previously-drawn loader region is
+/// repainted as empty. The spinner-tick task only calls `tick_render`
+/// while a loader is mounted, so clearing the slot without forcing a
+/// render leaves the last "Working…" frame stuck on screen until some
+/// other event happens to trigger a redraw — surfacing as the visual
+/// bug where the spinner stays visible after the assistant's reply
+/// has fully streamed.
 fn clear_loader(slot: &SharedLoaderSlot) {
     if let Ok(mut s) = slot.lock() {
         *s = None;
     }
+    request_render();
 }
 
 /// Execute a `!cmd` (or `!!cmd`) bash invocation submitted from the editor.
