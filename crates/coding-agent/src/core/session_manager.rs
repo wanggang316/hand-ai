@@ -1011,6 +1011,48 @@ impl SessionManager {
         Self::default_session_dir_with_base(None, cwd)
     }
 
+    /// Resolve a user-supplied `--fork` / `--resume` argument to a
+    /// concrete session file. Tries, in order:
+    ///   1. `source` as a literal path (any path that exists on disk).
+    ///   2. `<home-based default_session_dir>/<source>.jsonl` (the
+    ///      modern writer location used by both default and embedder
+    ///      builds — see [`Self::default_session_dir_with_base`]).
+    ///   3. ID-prefix match in the home-based default_session_dir.
+    ///   4. `<cwd>/.hand/sessions/<source>.jsonl` (legacy layout).
+    ///   5. ID-prefix match in the legacy layout.
+    ///
+    /// Falls back to `PathBuf::from(source)` when nothing matches so
+    /// the caller's error message can carry the user's raw input. The
+    /// `base` parameter is honoured the same way as
+    /// [`Self::default_session_dir_with_base`] for embedders that route
+    /// state through their own data directory.
+    pub fn resolve_session_source(base: Option<&Path>, cwd: &Path, source: &str) -> PathBuf {
+        let raw = PathBuf::from(source);
+        if raw.is_file() {
+            return raw;
+        }
+        let home_dir = Self::default_session_dir_with_base(base, cwd);
+        let legacy_dir = cwd.join(".hand").join("sessions");
+        for dir in [&home_dir, &legacy_dir] {
+            let exact = dir.join(format!("{source}.jsonl"));
+            if exact.is_file() {
+                return exact;
+            }
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if let Some(name_str) = name.to_str()
+                        && name_str.starts_with(source)
+                        && name_str.ends_with(".jsonl")
+                    {
+                        return entry.path();
+                    }
+                }
+            }
+        }
+        raw
+    }
+
     /// Like [`Self::default_session_dir`] but honors an explicit base
     /// directory when provided.
     ///
@@ -1155,6 +1197,47 @@ mod tests {
             last.to_string_lossy().starts_with('-') && last.to_string_lossy().ends_with("--"),
             "final component should be a flattened-cwd marker, got {last:?}"
         );
+    }
+
+    /// Issue #27: `--fork <id>` previously only probed the legacy
+    /// `<cwd>/.hand/sessions` directory, so an ID-prefix that referred
+    /// to a session living under the modern home-based layout failed
+    /// with `No session found matching '...'`. `resolve_session_source`
+    /// must consult the home-based dir first (the writer's location),
+    /// support both exact-ID-with-.jsonl and ID-prefix matching, and
+    /// still tolerate the legacy layout as a fallback.
+    #[test]
+    fn resolve_session_source_matches_id_prefix_in_home_based_dir() {
+        let home = TempDir::new().unwrap();
+        let _g = scoped_hand_home(home.path());
+        let cwd = TempDir::new().unwrap();
+        let cwd_path = cwd.path();
+
+        let home_dir = SessionManager::default_session_dir_with_base(None, cwd_path);
+        std::fs::create_dir_all(&home_dir).unwrap();
+        let full_id = "s_19e5db89020_0";
+        let session_file = home_dir.join(format!("{full_id}.jsonl"));
+        // The resolver only needs the file to exist on disk for the
+        // prefix-match branch, so an empty file is enough.
+        std::fs::write(&session_file, "").unwrap();
+
+        // Exact ID (no extension).
+        let resolved = SessionManager::resolve_session_source(None, cwd_path, full_id);
+        assert_eq!(resolved, session_file, "exact ID must resolve");
+
+        // ID-prefix — the issue's exact failure case.
+        let resolved = SessionManager::resolve_session_source(None, cwd_path, "s_19e5db89020");
+        assert_eq!(resolved, session_file, "ID prefix must resolve");
+
+        // Literal absolute path still works (#25 invariant).
+        let resolved =
+            SessionManager::resolve_session_source(None, cwd_path, session_file.to_str().unwrap());
+        assert_eq!(resolved, session_file, "literal path must resolve verbatim");
+
+        // Bogus input falls through to PathBuf::from(source) so the
+        // caller's error message carries the user's raw text.
+        let bogus = SessionManager::resolve_session_source(None, cwd_path, "s_not_a_thing");
+        assert_eq!(bogus, PathBuf::from("s_not_a_thing"));
     }
 
     #[test]

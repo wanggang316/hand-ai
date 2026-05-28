@@ -768,33 +768,7 @@ fn print_help() {
 }
 
 fn resolve_session_path(cwd: &std::path::Path, source: &str) -> PathBuf {
-    let path = PathBuf::from(source);
-    if path.exists() {
-        return path;
-    }
-    // Sessions now live under the home-based, flattened-cwd layout
-    // (`~/.hand/agent/sessions/<flattened-cwd>/`); the lookup must
-    // match the writer side or `--session <id>` / `--fork <id>` /
-    // `--resume <id>` will fail to find sessions that were written
-    // in this directory.
-    let session_dir = hand_coding_agent::SessionManager::default_session_dir(cwd);
-    let candidate = session_dir.join(format!("{}.jsonl", source));
-    if candidate.exists() {
-        return candidate;
-    }
-    // Try prefix match
-    if let Ok(entries) = std::fs::read_dir(&session_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if let Some(name_str) = name.to_str()
-                && name_str.starts_with(source)
-                && name_str.ends_with(".jsonl")
-            {
-                return entry.path();
-            }
-        }
-    }
-    path
+    hand_coding_agent::SessionManager::resolve_session_source(None, cwd, source)
 }
 
 fn execute_shell(cmd: &str) {

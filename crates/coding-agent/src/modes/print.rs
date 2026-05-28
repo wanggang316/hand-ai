@@ -740,27 +740,7 @@ fn format_assistant_error(
 }
 
 fn resolve_session_path(cwd: &std::path::Path, source: &str) -> std::path::PathBuf {
-    let path = std::path::PathBuf::from(source);
-    if path.exists() {
-        return path;
-    }
-    let session_dir = cwd.join(".hand").join("sessions");
-    let candidate = session_dir.join(format!("{}.jsonl", source));
-    if candidate.exists() {
-        return candidate;
-    }
-    if let Ok(entries) = std::fs::read_dir(&session_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if let Some(name_str) = name.to_str()
-                && name_str.starts_with(source)
-                && name_str.ends_with(".jsonl")
-            {
-                return entry.path();
-            }
-        }
-    }
-    path
+    SessionManager::resolve_session_source(None, cwd, source)
 }
 
 #[cfg(test)]
