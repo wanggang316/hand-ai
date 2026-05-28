@@ -77,7 +77,7 @@ fn build_session(
     cwd: &Path,
 ) -> Result<AgentSession, Box<dyn std::error::Error>> {
     let session = if continue_like {
-        match SessionManager::continue_recent(cwd) {
+        match SessionManager::continue_recent_in(cwd, base_config.session_dir.as_deref()) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
                     resume_session: Some(sm.id().to_string()),

@@ -841,6 +841,34 @@ impl SessionManager {
 
     /// Continue the most recent session in the given working directory.
     pub fn continue_recent(cwd: &Path) -> Result<Self, CodingAgentError> {
+        Self::continue_recent_in(cwd, None)
+    }
+
+    /// Same as [`Self::continue_recent`] but searches the explicit
+    /// `--session-dir` override when one is configured. Without this
+    /// distinction, a `--continue --session-dir /tmp/foo` invocation
+    /// would find the most-recent session under the home-based
+    /// default, hand its id to the resume site, and then fail to
+    /// open it because the resume site dutifully looked in
+    /// `--session-dir` (#58). Now the search and the open agree on
+    /// the same directory.
+    pub fn continue_recent_in(
+        cwd: &Path,
+        session_dir: Option<&Path>,
+    ) -> Result<Self, CodingAgentError> {
+        let mut sessions = match session_dir {
+            Some(dir) => list_sessions_from_dir(dir)?,
+            None => return Self::continue_recent_default(cwd),
+        };
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
+        let most_recent = sessions
+            .into_iter()
+            .next()
+            .ok_or_else(|| CodingAgentError::Session("No sessions found to continue".into()))?;
+        Self::open(&most_recent.path)
+    }
+
+    fn continue_recent_default(cwd: &Path) -> Result<Self, CodingAgentError> {
         let sessions = Self::list(cwd)?;
         let most_recent = sessions
             .into_iter()
@@ -1171,6 +1199,38 @@ mod tests {
             std::env::set_var("HAND_HOME", root);
         }
         ScopedHandHome { _lock: lock, prev }
+    }
+
+    /// Issue #58: `--continue --session-dir <X>` must search inside
+    /// `<X>` for the most-recent session, not the home-based default.
+    /// The pre-fix flow found a session under HOME, handed its id to
+    /// the resume site, and then errored because the resume opened
+    /// `<X>/<id>.jsonl` which never existed. The two should agree on
+    /// one directory.
+    #[test]
+    fn continue_recent_in_with_override_searches_that_dir_not_home() {
+        let cwd_dir = TempDir::new().unwrap();
+        let cwd = cwd_dir.path();
+        let override_dir = TempDir::new().unwrap();
+
+        // Empty override → "no sessions" error, NOT a synthetic id
+        // pointing at a session that doesn't exist.
+        match SessionManager::continue_recent_in(cwd, Some(override_dir.path())) {
+            Ok(_) => panic!("empty override should error with no-sessions"),
+            Err(e) => assert!(e.to_string().contains("No sessions"), "wrong error: {e}"),
+        }
+
+        // Seed a session into the override dir → continue picks it up.
+        let id = "s_override_777";
+        let file = override_dir.path().join(format!("{id}.jsonl"));
+        let header = format!(
+            "{{\"type\":\"session\",\"data\":{{\"version\":3,\"id\":\"{id}\",\"timestamp\":0,\"cwd\":\"{}\"}}}}\n",
+            cwd.display()
+        );
+        std::fs::write(&file, header).unwrap();
+        let opened =
+            SessionManager::continue_recent_in(cwd, Some(override_dir.path())).expect("opens");
+        assert_eq!(opened.id(), id);
     }
 
     #[test]

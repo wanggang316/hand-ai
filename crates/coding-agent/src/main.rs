@@ -186,8 +186,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent_tools = setup.agent_tools;
 
     let mut session = if continue_like {
-        // Continue most recent session
-        match hand_coding_agent::SessionManager::continue_recent(&cwd) {
+        // Continue most recent session — honouring --session-dir so the
+        // search and the resume-open agree on which directory holds the
+        // session (#58).
+        match hand_coding_agent::SessionManager::continue_recent_in(
+            &cwd,
+            base_config.session_dir.as_deref(),
+        ) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
                     resume_session: Some(sm.id().to_string()),
