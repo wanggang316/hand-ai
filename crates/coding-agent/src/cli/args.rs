@@ -112,10 +112,22 @@ pub struct Args {
     pub no_context_files: bool,
 
     /// Override the directory used for session storage. Defaults to
-    /// `<cwd>/.hand/sessions`. Useful for CI runs that want sessions
-    /// written to a tmpfs / artifact directory.
+    /// `~/.hand/agent/sessions/<flattened-cwd>/` (or the `base_dir`
+    /// override). Useful for CI runs that want sessions written to a
+    /// tmpfs / artifact directory, or for embedders that route state
+    /// through a custom path. See also `--workspace-sessions` for the
+    /// project-local shortcut.
     #[arg(long)]
     pub session_dir: Option<PathBuf>,
+
+    /// Store the session under `<cwd>/.hand/sessions/` instead of the
+    /// home-based default. Equivalent to passing
+    /// `--session-dir <cwd>/.hand/sessions` but resolves the cwd at
+    /// run time so the same invocation works from any directory.
+    /// Ignored when `--session-dir` is also given (the explicit path
+    /// wins).
+    #[arg(long)]
+    pub workspace_sessions: bool,
 
     /// Disable skill discovery (project, user, and builtin). Useful when
     /// scripts need a baseline system prompt that doesn't pick up

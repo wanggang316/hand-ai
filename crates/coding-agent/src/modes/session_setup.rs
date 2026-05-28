@@ -34,8 +34,11 @@ pub struct SessionSetup {
     pub no_session: bool,
     /// `--no-context-files`: skip auto-loading project context files.
     pub no_context_files: bool,
-    /// `--session-dir <dir>`: override the default `<cwd>/.hand/sessions`
-    /// storage directory.
+    /// Final resolved session storage directory. Carries the value
+    /// of `--session-dir <dir>` when set, falls back to
+    /// `<cwd>/.hand/sessions` when `--workspace-sessions` is set,
+    /// otherwise `None` and the writer takes the home-based default
+    /// from `SessionManager::default_session_dir_with_base`.
     pub session_dir: Option<PathBuf>,
     /// `--no-skills`: skip skill discovery for a reproducible system
     /// prompt.
@@ -291,6 +294,18 @@ impl SessionSetup {
             }
         };
 
+        // `--workspace-sessions` is a shortcut for the project-local
+        // layout; an explicit `--session-dir` wins. Resolve here so
+        // downstream config consumers see a single `session_dir`
+        // field with no extra flag to honour.
+        let session_dir = args.session_dir.clone().or_else(|| {
+            if args.workspace_sessions {
+                Some(cwd.join(".hand").join("sessions"))
+            } else {
+                None
+            }
+        });
+
         Ok(Self {
             cwd,
             model: resolved.model,
@@ -300,7 +315,7 @@ impl SessionSetup {
             custom_guidelines,
             no_session: args.no_session,
             no_context_files: args.no_context_files,
-            session_dir: args.session_dir.clone(),
+            session_dir,
             no_skills: args.no_skills,
         })
     }
@@ -700,6 +715,46 @@ mod tests {
         assert_eq!(
             cfg.session_dir.as_deref(),
             Some(std::path::Path::new("/tmp/custom-sessions")),
+        );
+    }
+
+    /// Issue #24: `--workspace-sessions` (no value) routes sessions
+    /// under `<cwd>/.hand/sessions/` so users (and the UAT-009
+    /// expectation) can opt in to the project-local layout without
+    /// spelling out the path. Explicit `--session-dir` still wins.
+    #[test]
+    fn workspace_sessions_flag_routes_to_cwd_local() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cwd = tmp.path().to_string_lossy().into_owned();
+        let args =
+            Args::try_parse_from(["hand", "--workspace-sessions", "--cwd", &cwd]).expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let expected = tmp.path().join(".hand").join("sessions");
+        assert_eq!(setup.session_dir.as_deref(), Some(expected.as_path()));
+        let cfg = setup.to_config(None);
+        assert_eq!(cfg.session_dir.as_deref(), Some(expected.as_path()));
+    }
+
+    /// When both `--session-dir` and `--workspace-sessions` are
+    /// passed, the explicit path wins — `--workspace-sessions` is
+    /// only the shortcut form of the same setting.
+    #[test]
+    fn explicit_session_dir_beats_workspace_sessions_flag() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cwd = tmp.path().to_string_lossy().into_owned();
+        let args = Args::try_parse_from([
+            "hand",
+            "--workspace-sessions",
+            "--session-dir",
+            "/tmp/explicit-wins",
+            "--cwd",
+            &cwd,
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert_eq!(
+            setup.session_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/explicit-wins"))
         );
     }
 
