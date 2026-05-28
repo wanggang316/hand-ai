@@ -1,6 +1,6 @@
 [package]
 name = "hand-coding-agent"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Interactive terminal coding agent with session management and built-in tools"
 license = "MIT"

@@ -162,6 +162,40 @@ mod tests {
         }
     }
 
+    /// Regression: the shipped `CHANGELOG.md` at the repo root must
+    /// remain parseable. `apply_changelog` and the M5.4 startup
+    /// banner both read it; a header that drifts away from `## [x.y.z]`
+    /// would silently produce 0 entries and a "(no changelog entries
+    /// found)" banner — caught here instead of at runtime.
+    #[test]
+    fn shipped_changelog_at_repo_root_parses_non_empty() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let repo_root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .nth(2)
+            .expect("crates/coding-agent has two ancestors above");
+        let changelog = repo_root.join("CHANGELOG.md");
+        if !changelog.is_file() {
+            // Workspace without a CHANGELOG.md is allowed (e.g. a
+            // bare check-out of just the model crate). The test
+            // exists to guard the file when it IS present.
+            return;
+        }
+        let entries = parse_changelog_file(&changelog).expect("CHANGELOG.md is readable");
+        assert!(
+            !entries.is_empty(),
+            "CHANGELOG.md at {} produced zero parsed entries — \
+             check that headers match `## [x.y.z] - ...`",
+            changelog.display()
+        );
+        // Sanity-check that the newest entry starts with `## [`.
+        assert!(
+            entries[0].content.starts_with("## ["),
+            "first entry content lost its bracketed-version header: {:?}",
+            entries[0].content.lines().next()
+        );
+    }
+
     #[test]
     fn parses_basic_changelog() {
         let input = "\
