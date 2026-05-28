@@ -271,13 +271,25 @@ impl AgentSession {
                     &config.cwd,
                 )
             });
+            // Tolerate a literal `.jsonl` path: `--resume /…/s_xxx.jsonl`
+            // (and any other concrete path the user has on disk) must
+            // not re-append `.jsonl` and miss the file. If the raw
+            // session_id is an existing file path, use it verbatim.
+            let as_path = Path::new(session_id.as_str());
+            let direct = if as_path.is_file() {
+                Some(as_path.to_path_buf())
+            } else {
+                None
+            };
             let primary = session_dir.join(format!("{}.jsonl", session_id));
             let legacy = config
                 .cwd
                 .join(".hand")
                 .join("sessions")
                 .join(format!("{}.jsonl", session_id));
-            let resolved = if primary.exists() {
+            let resolved = if let Some(p) = direct {
+                p
+            } else if primary.exists() {
                 primary
             } else if legacy.exists() && legacy != primary {
                 legacy
@@ -1886,6 +1898,48 @@ mod tests {
         }
 
         let session = result.expect("legacy session must resolve via fallback");
+        assert_eq!(session.session_id(), session_id);
+    }
+
+    /// Issue #25: `--resume` must accept a literal `.jsonl` path
+    /// without re-appending the suffix. Pre-fix, the resume site
+    /// composed `format!("{session_id}.jsonl")` unconditionally and
+    /// produced `…/s_xxx.jsonl.jsonl`, missing the real file. Use a
+    /// session that lives at a path completely unrelated to the
+    /// home-based session_dir so only the verbatim-path branch can
+    /// satisfy the lookup.
+    #[test]
+    fn resume_accepts_literal_jsonl_path_without_double_suffix() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let session_id = "s_literal_path_777";
+
+        // Park the session file under a directory the resolver wouldn't
+        // discover on its own. The primary (home) and legacy (cwd) paths
+        // must both miss; only `direct = as_path.is_file()` can win.
+        let custom_dir = tmp.path().join("anywhere/else");
+        fs::create_dir_all(&custom_dir).unwrap();
+        let session_path = custom_dir.join(format!("{session_id}.jsonl"));
+        let header = format!(
+            "{{\"type\":\"session\",\"data\":{{\"version\":3,\"id\":\"{session_id}\",\"timestamp\":0,\"cwd\":\"{}\"}}}}\n",
+            cwd.display()
+        );
+        fs::write(&session_path, header).unwrap();
+
+        let fake_home = TempDir::new().unwrap();
+        unsafe {
+            std::env::set_var("HAND_HOME", fake_home.path());
+        }
+
+        let mut config = test_config(cwd.to_path_buf());
+        config.resume_session = Some(session_path.to_string_lossy().into_owned());
+        let result = AgentSession::new_with_skill_dirs(config, vec![], None, None);
+
+        unsafe {
+            std::env::remove_var("HAND_HOME");
+        }
+
+        let session = result.expect("literal .jsonl path must resolve verbatim");
         assert_eq!(session.session_id(), session_id);
     }
 
