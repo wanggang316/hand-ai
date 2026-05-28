@@ -59,6 +59,21 @@ impl SessionSetup {
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+        // Fail fast on a bogus `--cwd`. Without this the agent happily
+        // starts with an unreachable working directory; session
+        // persistence silently breaks (no `.hand/` to write into) and
+        // every cwd-relative tool call surfaces a confusing
+        // shell-level "No such file or directory" instead of one
+        // clear up-front error. Only validate when the user supplied
+        // `--cwd` explicitly — falling back to `std::env::current_dir`
+        // means the OS already vouched for the path.
+        if args.cwd.is_some() && !cwd.is_dir() {
+            return Err(CodingAgentError::Other(format!(
+                "--cwd {}: directory does not exist (or is not a directory)",
+                cwd.display(),
+            )));
+        }
+
         // Reject typo'd `--provider` values up-front with a clear error.
         // Without this we'd silently fall back to the default
         // (anthropic) and surface a confusing "No API key found for
@@ -716,6 +731,42 @@ mod tests {
             cfg.session_dir.as_deref(),
             Some(std::path::Path::new("/tmp/custom-sessions")),
         );
+    }
+
+    /// Issue #54: `--cwd <bogus>` must fail fast with a clear error
+    /// rather than silently starting a session whose working
+    /// directory is unreachable (session persistence broken, every
+    /// cwd-relative tool call surfacing confusing shell-level
+    /// errors). Falling back to `std::env::current_dir()` (no --cwd)
+    /// stays unchecked — the OS already vouched for that path.
+    #[test]
+    fn explicit_cwd_must_exist_or_resolve_errors() {
+        // Build a path under a tempdir that we never create.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bogus = tmp.path().join("nonexistent-zzz");
+        assert!(!bogus.exists());
+        let bogus_str = bogus.to_string_lossy().into_owned();
+        let args = Args::try_parse_from(["hand", "--cwd", &bogus_str]).expect("parse");
+        match SessionSetup::resolve(&args) {
+            Ok(_) => panic!("bogus --cwd must fail fast"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("--cwd") && msg.contains("does not exist"),
+                    "unhelpful error: {msg}"
+                );
+            }
+        }
+
+        // A regular file (not a directory) is rejected too.
+        let file = tmp.path().join("plain.txt");
+        std::fs::write(&file, "x").unwrap();
+        let file_str = file.to_string_lossy().into_owned();
+        let args = Args::try_parse_from(["hand", "--cwd", &file_str]).expect("parse");
+        match SessionSetup::resolve(&args) {
+            Ok(_) => panic!("--cwd <file> must fail fast"),
+            Err(e) => assert!(e.to_string().contains("--cwd")),
+        }
     }
 
     /// Issue #24: `--workspace-sessions` (no value) routes sessions
