@@ -1009,6 +1009,12 @@ impl Tui {
             self.cursor_offset_above_bottom = 0;
         }
 
+        // Keep the renderer in sync with the actual viewport: terminal
+        // resizes (and the zero-size PTY fallback in ProcessTerminal)
+        // change the visible row count, and the diff engine needs the
+        // current value for its scroll-aware cursor math.
+        self.renderer.set_viewport_height(height as usize);
+
         let commands = self.renderer.diff(&lines);
         if !prelude.is_empty() || !commands.is_empty() {
             self.terminal.write(&format!("{prelude}{commands}"));

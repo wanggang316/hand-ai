@@ -19,6 +19,21 @@
 pub struct DiffRenderer {
     prev_lines: Vec<String>,
     first_render: bool,
+    /// Terminal viewport height in rows. Set via
+    /// [`Self::set_viewport_height`] before each diff. When `None`,
+    /// the renderer falls back to the legacy "treat prev_lines as
+    /// fully visible" behaviour — fine for fixed-height regions but
+    /// wrong when chat scrollback pushes content past the viewport.
+    ///
+    /// With a viewport set, cursor math uses
+    /// `min(prev_len, viewport)` for the displayed-row count, and
+    /// the shrink-clear path uses cursor-down-without-scroll
+    /// (`\x1b[B`) instead of LF, so a shrinking live region (e.g.
+    /// loader dismissed) doesn't make the terminal scroll the top
+    /// of the region into scrollback. That bug had the editor's
+    /// borders and "Working…" lines leaking into the chat history
+    /// every time the loader cycled.
+    viewport_height: Option<usize>,
 }
 
 impl DiffRenderer {
@@ -26,6 +41,7 @@ impl DiffRenderer {
         Self {
             prev_lines: Vec::new(),
             first_render: true,
+            viewport_height: None,
         }
     }
 
@@ -33,6 +49,15 @@ impl DiffRenderer {
     pub fn reset(&mut self) {
         self.prev_lines.clear();
         self.first_render = true;
+    }
+
+    /// Inform the renderer of the current terminal viewport height
+    /// (in rows). Call this every frame before [`Self::diff`] —
+    /// height changes (resize, fullscreen toggle) need to be picked
+    /// up so the renderer's view of "what's actually visible"
+    /// matches reality.
+    pub fn set_viewport_height(&mut self, height: usize) {
+        self.viewport_height = Some(height);
     }
 
     /// Compare new lines against previous state and generate minimal
@@ -47,6 +72,26 @@ impl DiffRenderer {
 
         let prev_len = self.prev_lines.len();
         let new_len = new_lines.len();
+
+        // Displayed-row counts. When a viewport is set and `prev_len`
+        // exceeds it, the top of the region has already scrolled into
+        // scrollback and is no longer addressable — only the bottom
+        // `viewport` rows are physically on screen. All cursor math
+        // below operates in "displayed rows" so we don't try to
+        // navigate up past the top of the terminal viewport (which
+        // the terminal silently clamps and breaks the cursor invariant).
+        let displayed_prev = self
+            .viewport_height
+            .map(|v| prev_len.min(v))
+            .unwrap_or(prev_len);
+        // `displayed_new` would be needed for symmetric scroll-aware
+        // logic on growth, but the growth path already relies on
+        // terminal-native LF scrolling, so we only need the
+        // `displayed_prev` clamp for the shrink/home-up paths.
+        let _displayed_new = self
+            .viewport_height
+            .map(|v| new_len.min(v))
+            .unwrap_or(new_len);
 
         // Find first changed line.
         let first_changed = self
@@ -77,15 +122,23 @@ impl DiffRenderer {
         commands.push_str("\x1b[?2026h");
 
         // Per the cursor invariant, the cursor is one row past the last
-        // previously rendered line. Home up to row 0 of the region.
-        if prev_len > 0 {
+        // previously rendered line. Home up to row 0 of the *displayed*
+        // region. Using `prev_len` here would silently clamp at the top
+        // of the viewport when `prev_len > viewport`, leaving the cursor
+        // at row 0 instead of the logical region top — every subsequent
+        // movement would then be off by the (prev_len - viewport) delta.
+        if displayed_prev > 0 {
             commands.push('\r');
-            commands.push_str(&format!("\x1b[{prev_len}A"));
+            commands.push_str(&format!("\x1b[{displayed_prev}A"));
         }
 
-        // Move down to the first row that needs a change.
-        if first_changed > 0 {
-            commands.push_str(&format!("\x1b[{first_changed}B"));
+        // Translate the logical-region row indices we want to repaint
+        // into displayed-region coordinates. Rows above the displayed
+        // region are in scrollback and we can't touch them.
+        let scrollback_top = prev_len.saturating_sub(displayed_prev);
+        let first_changed_displayed = first_changed.saturating_sub(scrollback_top);
+        if first_changed_displayed > 0 {
+            commands.push_str(&format!("\x1b[{first_changed_displayed}B"));
         }
 
         // Decide how many rows we'll repaint.
@@ -101,18 +154,31 @@ impl DiffRenderer {
 
         // Repaint rows [first_changed .. render_end). Each line emits a
         // clear + carriage-return + content + CRLF, leaving the cursor at
-        // column 0 of the row immediately below. The trailing CRLF (vs a
-        // bare LF) keeps the next line correctly anchored in raw mode.
-        for line in new_lines.iter().take(render_end).skip(first_changed) {
+        // column 0 of the row immediately below. The trailing CRLF on
+        // the growth path IS intentional — it relies on the terminal's
+        // natural scroll-up-when-at-bottom behaviour to extend the live
+        // region downward as chat appends.
+        let paint_start = first_changed.max(scrollback_top);
+        for line in new_lines.iter().take(render_end).skip(paint_start) {
             commands.push_str("\x1b[2K\r");
             commands.push_str(line);
             commands.push_str("\r\n");
         }
 
-        // Cursor is now at column 0 of row `render_end`.
+        // Track cursor in *logical* region coordinates. Each `\r\n`
+        // above advanced the cursor by one logical row.
         let mut cursor_row = render_end;
 
         // If new content is shorter, clear the leftover prev rows.
+        //
+        // Critically, the shrink path uses `\x1b[B` (cursor-down,
+        // no-scroll) rather than LF. LF at the terminal's bottom row
+        // scrolls the viewport up by 1, which pushes the top of the
+        // live region into scrollback — every loader dismissal would
+        // leak the editor's border + a chat row into permanent
+        // history. CUD just clamps at the bottom row, which is what
+        // we want: rows beyond the visible viewport are already
+        // off-screen anyway, no point pretending to clear them.
         if new_len < prev_len {
             // Skip past any unchanged rows we did not repaint.
             let skip = render_end.saturating_sub(cursor_row);
@@ -120,19 +186,32 @@ impl DiffRenderer {
                 commands.push_str(&format!("\x1b[{skip}B"));
                 cursor_row += skip;
             }
-            // Clear each leftover row.
-            for _ in cursor_row..prev_len {
-                commands.push_str("\x1b[2K\r\n");
+            // Walk through each leftover row that is still on screen.
+            // Logical rows `cursor_row..prev_len`. Clip to the displayed
+            // region: rows past `displayed_prev` (counted from logical
+            // top) are below the terminal's bottom and don't exist on
+            // screen.
+            let leftover_visible_end = prev_len.min(scrollback_top + displayed_prev);
+            for _ in cursor_row..leftover_visible_end {
+                // Clear current line in place, then advance one row
+                // without scrolling.
+                commands.push_str("\x1b[2K");
+                commands.push_str("\x1b[1B\r");
             }
             cursor_row = prev_len;
         }
 
-        // Restore the cursor invariant: we want it exactly `new_len` rows
-        // below the top of the region. Cursor is currently at `cursor_row`.
-        if cursor_row < new_len {
-            commands.push_str(&format!("\x1b[{}B", new_len - cursor_row));
-        } else if cursor_row > new_len {
-            commands.push_str(&format!("\x1b[{}A", cursor_row - new_len));
+        // Restore the cursor invariant: we want it exactly `new_len`
+        // rows below the top of the region (in logical coords).
+        // Movement is in physical terminal rows; we can only move
+        // within the visible viewport. The cursor invariant is
+        // satisfied as long as the displayed-region cursor lands at
+        // row `displayed_new` from its top.
+        let target_logical = new_len;
+        if cursor_row < target_logical {
+            commands.push_str(&format!("\x1b[{}B", target_logical - cursor_row));
+        } else if cursor_row > target_logical {
+            commands.push_str(&format!("\x1b[{}A", cursor_row - target_logical));
         }
 
         commands.push_str("\x1b[?2026l");

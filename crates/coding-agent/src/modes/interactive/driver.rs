@@ -337,7 +337,12 @@ impl InteractiveMode {
         let mut editor = EditorComponent::new()
             .with_border(true)
             .with_border_style(hand_tui::components::editor::BorderStyle::Horizontal)
-            .with_viewport_height(4)
+            // Auto-grow: single-row prompt when empty, expands to fit
+            // multi-line input up to 8 rows, scrolls beyond. The diff
+            // renderer's shrink path is viewport-aware now (see
+            // `DiffRenderer::set_viewport_height`), so live-region
+            // size changes don't leak into scrollback.
+            .with_auto_grow(8)
             .with_border_color(BORDER_DIM)
             .with_focused_border_color(BORDER_FOCUS)
             .with_paste_transform(paste_transform)
@@ -898,13 +903,28 @@ fn install_loader(slot: &SharedLoaderSlot, message: impl Into<String>) {
     if let Ok(mut s) = slot.lock() {
         *s = Some(cell);
     }
+    // Force a redraw — without this the spinner doesn't appear until
+    // the next render tick (~100 ms), visible flicker on fast paths.
+    request_render();
 }
 
 /// Remove the mounted loader, if any.
+///
+/// Forces a re-render. The spinner-tick task only calls `tick_render`
+/// while a loader is mounted, so clearing the slot without a manual
+/// nudge leaves the last "Working…" frame stuck on screen until some
+/// other event happens to trigger a redraw — the user-visible bug
+/// where the spinner stays after the assistant finishes streaming.
+///
+/// This shrink-render exercises the diff renderer's leftover-clear
+/// path, which historically scrolled the terminal up via LF and
+/// leaked the top of the live region into scrollback. That bug is
+/// fixed at the renderer level (see `DiffRenderer::set_viewport_height`).
 fn clear_loader(slot: &SharedLoaderSlot) {
     if let Ok(mut s) = slot.lock() {
         *s = None;
     }
+    request_render();
 }
 
 /// Execute a `!cmd` (or `!!cmd`) bash invocation submitted from the editor.

@@ -125,7 +125,17 @@ pub struct EditorComponent {
     /// First visible line.
     viewport_top: usize,
     /// Number of visible rows allotted to lines (excludes border).
+    ///
+    /// In auto-grow mode (`auto_grow_max = Some(cap)`) this acts as
+    /// the upper bound — the editor expands to fit content up to
+    /// `cap` rows.
     viewport_height: usize,
+    /// When `Some(cap)`, the editor renders
+    /// `clamp(visual_line_count, 1..=cap)` rows instead of always
+    /// painting `viewport_height` rows. Empty buffer → one row;
+    /// multi-line input grows up to `cap`; beyond `cap` it scrolls
+    /// internally as before.
+    auto_grow_max: Option<usize>,
     /// Whether to render a border around the editor.
     border: bool,
     /// Paste marker storage, keyed by id.
@@ -212,6 +222,7 @@ impl EditorComponent {
             focused: true,
             viewport_top: 0,
             viewport_height: 10,
+            auto_grow_max: None,
             border: true,
             paste_markers: HashMap::new(),
             next_paste_id: 0,
@@ -386,6 +397,17 @@ impl EditorComponent {
 
     pub fn with_viewport_height(mut self, height: usize) -> Self {
         self.viewport_height = height;
+        self
+    }
+
+    /// Opt into auto-grow mode: the rendered editor expands to fit
+    /// content up to `cap` rows and shrinks to a single row when
+    /// empty. Beyond `cap` it scrolls internally as before.
+    pub fn with_auto_grow(mut self, cap: usize) -> Self {
+        self.auto_grow_max = Some(cap.max(1));
+        if self.viewport_height < cap {
+            self.viewport_height = cap;
+        }
         self
     }
 
@@ -1289,13 +1311,21 @@ impl Component for EditorComponent {
             }
         };
 
-        // Apply viewport.
-        let view_end = (self.viewport_top + self.viewport_height).min(visual.len());
+        // Apply viewport. In auto-grow mode the editor renders only
+        // as many rows as the content needs (clamped to the cap and
+        // floored at 1). Without auto-grow we keep the legacy
+        // fixed-`viewport_height` shape so test fixtures and headless
+        // callers don't shift.
+        let effective_height = match self.auto_grow_max {
+            Some(cap) => visual.len().clamp(1, cap),
+            None => self.viewport_height,
+        };
+        let view_end = (self.viewport_top + effective_height).min(visual.len());
         for line in visual.iter().take(view_end).skip(self.viewport_top) {
             output.push(format_row(line));
         }
         let empty = " ".repeat(display_width);
-        for _ in view_end..(self.viewport_top + self.viewport_height) {
+        for _ in view_end..(self.viewport_top + effective_height) {
             output.push(format_row(&empty));
         }
 
