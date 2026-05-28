@@ -52,7 +52,7 @@ pub use api_registry::{
 pub use capabilities::{ApiCapabilities, ProviderCapabilities};
 
 // Re-export from client
-pub use client::{Client, ClientError};
+pub use client::{Client, ClientBuilder, ClientError};
 
 // Re-export from stream
 pub use stream::{complete_simple, stream_simple};
