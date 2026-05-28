@@ -377,6 +377,8 @@ Commands:
   /changelog           Show CHANGELOG.md
   /thinking [level]    Open thinking selector / set inline level
   /settings            Open settings selector
+  /scoped-models       Toggle which models the /model quick-cycle reaches
+  /reload              Reload settings and keybindings from disk
   /login               Open login dialog
   /logout              Clear stored auth credentials
   /diagnostics         Show diagnostics report"
@@ -499,6 +501,106 @@ mod tests {
         SlashCommandContext {
             model_id: "claude-sonnet-4".to_string(),
             provider: "anthropic".to_string(),
+        }
+    }
+
+    /// Regression for #37: the autocomplete registry, the dispatch
+    /// table, and the static help-text were three independent sources
+    /// of truth and drifted. This test pins the contract that every
+    /// command name (and its aliases) recognised by the dispatcher is
+    /// also discoverable through the registry. Update both sides when
+    /// adding a new built-in.
+    #[test]
+    fn registry_covers_every_dispatched_command_and_alias() {
+        use crate::core::slash_commands::SlashCommandRegistry;
+        // Mirror of every literal in `SlashCommandTable::dispatch`'s
+        // match arms. Update both when adding a built-in.
+        let dispatched_names: &[&str] = &[
+            "quit",
+            "exit",
+            "q",
+            "help",
+            "h",
+            "model",
+            "models",
+            "hotkeys",
+            "keybindings",
+            "session",
+            "clear",
+            "compact",
+            "new",
+            "resume",
+            "copy",
+            "export",
+            "import",
+            "fork",
+            "clone",
+            "name",
+            "theme",
+            "skills",
+            "extensions",
+            "changelog",
+            "thinking",
+            "settings",
+            "login",
+            "logout",
+            "diagnostics",
+            "reload",
+            "scoped-models",
+            "scoped_models",
+            "tree",
+        ];
+        let registry = SlashCommandRegistry::new();
+        let mut missing = Vec::new();
+        for name in dispatched_names {
+            if registry.find(name).is_none() {
+                missing.push(*name);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "registry is missing dispatched commands: {missing:?}"
+        );
+    }
+
+    /// Regression for #37: help text must list every visible built-in.
+    /// Catches the previous drift where `/reload` and `/scoped-models`
+    /// were dispatched but never mentioned in `/help`.
+    #[test]
+    fn help_text_lists_every_user_visible_builtin() {
+        let txt = SlashCommandTable::help_text();
+        for cmd in [
+            "/quit",
+            "/help",
+            "/model",
+            "/session",
+            "/hotkeys",
+            "/clear",
+            "/compact",
+            "/new",
+            "/resume",
+            "/copy",
+            "/export",
+            "/import",
+            "/fork",
+            "/clone",
+            "/name",
+            "/theme",
+            "/skills",
+            "/extensions",
+            "/changelog",
+            "/thinking",
+            "/settings",
+            "/scoped-models",
+            "/reload",
+            "/login",
+            "/logout",
+            "/diagnostics",
+        ] {
+            assert!(
+                txt.contains(cmd),
+                "/help text missing {cmd}; current text:\n{txt}"
+            );
         }
     }
 

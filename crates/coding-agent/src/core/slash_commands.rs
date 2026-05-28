@@ -123,9 +123,15 @@ impl SlashCommandRegistry {
     }
 
     fn register_builtins(&mut self) {
+        // Keep this list in sync with `SlashCommandTable::dispatch` in
+        // `modes::interactive::slash_commands` and with the static
+        // `help_text` rendered by `/help`. The autocomplete provider
+        // (driver.rs) and `/help` both read from this single source,
+        // so a command that's dispatched but missing here is invisible.
         let builtins = vec![
-            ("help", vec![], "Show available commands", false),
+            ("help", vec!["h"], "Show available commands", false),
             ("quit", vec!["exit", "q"], "Quit the agent", false),
+            ("clear", vec![], "Clear the chat scrollback", false),
             ("model", vec![], "Switch model", true),
             ("models", vec![], "List available models", true),
             ("session", vec![], "Show session info", false),
@@ -141,20 +147,43 @@ impl SlashCommandRegistry {
             ("resume", vec![], "Browse and select session", true),
             ("name", vec![], "Set session display name", true),
             ("fork", vec![], "Fork current session", true),
+            ("clone", vec![], "Clone the current session", false),
             ("export", vec![], "Export session to file", true),
+            (
+                "import",
+                vec![],
+                "Replace current session with a JSONL file",
+                true,
+            ),
             (
                 "copy",
                 vec![],
-                "Copy last assistant message to clipboard",
+                "Copy last assistant message to clipboard (or last [n] with `/copy n`)",
+                true,
+            ),
+            (
+                "hotkeys",
+                vec!["keybindings"],
+                "Show keyboard shortcuts",
                 false,
             ),
-            ("hotkeys", vec![], "Show keyboard shortcuts", false),
             ("changelog", vec![], "Display version info", false),
+            ("skills", vec![], "List discovered skills", false),
+            ("extensions", vec![], "List loaded Tier 1 extensions", false),
+            ("theme", vec![], "Select or set a theme", true),
+            ("login", vec![], "Open the login dialog", true),
+            ("logout", vec![], "Clear stored auth credentials", false),
+            (
+                "diagnostics",
+                vec![],
+                "Run diagnostics into the chat",
+                false,
+            ),
             ("tree", vec![], "Show file tree of directory", true),
             ("reload", vec![], "Reload settings and keybindings", false),
             (
                 "scoped-models",
-                vec![],
+                vec!["scoped_models"],
                 "Toggle which models the `/model` quick-cycle reaches",
                 false,
             ),
