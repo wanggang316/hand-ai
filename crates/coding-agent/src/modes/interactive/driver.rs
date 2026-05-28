@@ -1852,7 +1852,7 @@ async fn apply_slash_action_inner(
             Err(e) => push_status(chat, format!("[/name failed: {e}]"), Some(RED_FG)),
         },
         SlashCommandAction::Theme(arg) => {
-            apply_theme(chat, arg, mounter).await;
+            apply_theme(chat, session, arg, mounter).await;
         }
         SlashCommandAction::ListSkills => {
             apply_list_skills(chat, session);
@@ -3093,7 +3093,21 @@ fn apply_clone(chat: &ChatList, session: &mut AgentSession) {
 }
 
 /// `/theme [name]` — apply a theme inline or open the selector overlay.
-async fn apply_theme(chat: &ChatList, arg: Option<String>, mounter: Option<&OverlayMounter>) {
+///
+/// The live colour swap is a TUI-wide refactor still in flight (every
+/// component currently bakes its ANSI literals at compile time), so
+/// `/theme <name>` persists the pick to settings.yaml via the same
+/// path `/settings → theme` uses (issue #45). The next session
+/// startup reads the value and applies it from the ground up. The
+/// status line surfaces that contract honestly — old behaviour
+/// printed `[theme: <name>]` and silently dropped the resolved theme
+/// object (issue #43).
+async fn apply_theme(
+    chat: &ChatList,
+    session: &mut AgentSession,
+    arg: Option<String>,
+    mounter: Option<&OverlayMounter>,
+) {
     use crate::modes::interactive::theme::{
         available_themes, default_custom_themes_dir, theme_by_name,
     };
@@ -3112,11 +3126,8 @@ async fn apply_theme(chat: &ChatList, arg: Option<String>, mounter: Option<&Over
         };
         match theme_by_name(&name, dir, None) {
             Some(_theme) => {
-                let mut list = chat.lock().expect("chat list mutex poisoned");
-                list.push(Box::new(coloured_text(
-                    format!("[theme: {name}]"),
-                    Some(YELLOW_FG),
-                )));
+                let msg = persist_theme_selection(session, &name);
+                push_status(chat, msg, Some(YELLOW_FG));
             }
             None => push_status(
                 chat,
@@ -3150,11 +3161,8 @@ async fn apply_theme(chat: &ChatList, arg: Option<String>, mounter: Option<&Over
     loop {
         match rx.recv().await {
             Some(ThemeOutcome::Selected(name)) => {
-                let mut list = chat.lock().expect("chat list mutex poisoned");
-                list.push(Box::new(coloured_text(
-                    format!("[theme: {name}]"),
-                    Some(YELLOW_FG),
-                )));
+                let msg = persist_theme_selection(session, &name);
+                push_status(chat, msg, Some(YELLOW_FG));
                 break;
             }
             Some(ThemeOutcome::Cancelled) | None => {
@@ -3168,6 +3176,24 @@ async fn apply_theme(chat: &ChatList, arg: Option<String>, mounter: Option<&Over
         }
     }
     let _ = mounter.hide(handle);
+}
+
+/// Save the picked theme name to the global settings.yaml so the next
+/// session starts with it. Used by both `/theme <name>` and the
+/// theme-selector overlay's `Selected` event. Returns the status-line
+/// text to push into the chat — success / save-error / canonicalise-
+/// error are all conveyed in the same banner so the user sees what
+/// actually happened.
+pub(crate) fn persist_theme_selection(session: &mut AgentSession, name: &str) -> String {
+    let scope = crate::core::settings::SettingsScope::Global;
+    let mgr = session.settings_mut();
+    match mgr.apply_setting_by_id(scope, "theme", name) {
+        Ok(applied) => match mgr.save(scope) {
+            Ok(()) => format!("[theme: {applied} — saved; restart hand for chat colors to update]"),
+            Err(e) => format!("[theme: {applied} (save failed: {e})]"),
+        },
+        Err(e) => format!("[/theme: {e}]"),
+    }
 }
 
 /// `/skills` — render the discovered skills as a custom message.

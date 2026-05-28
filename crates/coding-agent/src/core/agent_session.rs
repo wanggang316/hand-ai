@@ -1860,6 +1860,62 @@ mod tests {
         }
     }
 
+    /// Issue #43: `/theme <name>` must persist the pick (via
+    /// `apply_setting_by_id` + `save`) instead of dropping the
+    /// resolved theme on the floor. The live colour-swap is still
+    /// out of scope (every component bakes its ANSI), but at least
+    /// the next session start picks up the user's choice. Drive the
+    /// driver-side helper that both code paths use.
+    #[test]
+    fn persist_theme_selection_writes_to_global_settings_yaml() {
+        use super::super::super::modes::interactive::driver::persist_theme_selection;
+
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join(".hand").join("agent")).unwrap();
+        // SettingsManager::from_cwd uses dirs::home_dir(), which reads
+        // $HOME on Unix. Redirect to the tmp tree so we don't touch
+        // the real ~/.hand.
+        let prev_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+
+        let cwd = tmp.path().join("workdir");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut session = AgentSession::new(test_config(cwd.clone()), vec![]).expect("new session");
+
+        let msg = persist_theme_selection(&mut session, "light");
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        assert!(
+            msg.contains("light") && msg.contains("saved"),
+            "expected confirmation message, got {msg:?}"
+        );
+        // The pick is on the global layer now.
+        assert_eq!(
+            session
+                .settings()
+                .global_layer()
+                .theme
+                .map(|t| format!("{t:?}")),
+            Some("Light".to_string()),
+        );
+        // And actually serialized to disk so the next process sees it.
+        let yaml_path = home.join(".hand").join("agent").join("settings.yaml");
+        let body = std::fs::read_to_string(&yaml_path).expect("global settings.yaml exists");
+        assert!(
+            body.contains("theme: light"),
+            "settings.yaml missing theme: {body:?}"
+        );
+    }
+
     /// Issue #48: `/reload` must actually swap the session's
     /// `SettingsManager`, not just construct a fresh one and drop
     /// it. Pin the contract by editing a settings file on disk after
