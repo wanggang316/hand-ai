@@ -163,9 +163,23 @@ pub(crate) fn get_disabled_thinking_config(model_id: &str) -> Value {
         // "Disabled" maps to MINIMAL — the smallest knob that still
         // accepts the request shape.
         serde_json::json!({"thinkingLevel": "MINIMAL"})
+    } else if is_gemini25_pro_model(model_id) {
+        // gemini-2.5-pro is thinking-only — `thinkingBudget: 0` is
+        // rejected with "Budget 0 is invalid. This model only works in
+        // thinking mode." Fall back to `-1` (dynamic) so Google picks a
+        // sensible budget, which matches the API's own default.
+        serde_json::json!({"thinkingBudget": -1})
     } else {
         serde_json::json!({"thinkingBudget": 0})
     }
+}
+
+/// Match `gemini-2.5-pro` (and any future minor variant — `2.5-pro-001`,
+/// `2.5-pro-preview`, …). Used to skip `thinkingBudget: 0` for the
+/// thinking-only Pro family.
+pub(crate) fn is_gemini25_pro_model(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    lower.contains("2.5-pro") || lower.contains("2-5-pro")
 }
 
 /// Gemma 4 models accept the same `thinkingLevel` knob as Gemini-3
@@ -1142,6 +1156,41 @@ mod tests {
         assert_eq!(
             get_google_budget("gemini-2.5-flash-lite", ThinkingLevel::High, None),
             24576
+        );
+    }
+
+    /// gemini-2.5-pro is a thinking-only model. The Google API
+    /// rejects `thinkingBudget: 0` with "Budget 0 is invalid. This
+    /// model only works in thinking mode." When the user runs without
+    /// an explicit thinking level, the disabled-thinking config must
+    /// not emit `0` for this family — fall back to `-1` (dynamic) so
+    /// Google picks a sensible default and the call still succeeds.
+    #[test]
+    fn disabled_thinking_config_for_2_5_pro_uses_dynamic_budget() {
+        let config = get_disabled_thinking_config("gemini-2.5-pro");
+        assert_eq!(
+            config,
+            serde_json::json!({"thinkingBudget": -1}),
+            "gemini-2.5-pro must not emit thinkingBudget: 0 in disabled mode"
+        );
+        // Preview / dated variants should land on the same branch so
+        // a future minor bump doesn't silently regress to budget=0.
+        let config = get_disabled_thinking_config("gemini-2.5-pro-preview-05-06");
+        assert_eq!(config, serde_json::json!({"thinkingBudget": -1}));
+    }
+
+    /// 2.5-flash variants accept `thinkingBudget: 0` cleanly and
+    /// disable thinking — that's the desired behaviour and the
+    /// pro-family fix above must not touch them.
+    #[test]
+    fn disabled_thinking_config_for_2_5_flash_keeps_zero() {
+        assert_eq!(
+            get_disabled_thinking_config("gemini-2.5-flash"),
+            serde_json::json!({"thinkingBudget": 0})
+        );
+        assert_eq!(
+            get_disabled_thinking_config("gemini-2.5-flash-lite"),
+            serde_json::json!({"thinkingBudget": 0})
         );
     }
 
