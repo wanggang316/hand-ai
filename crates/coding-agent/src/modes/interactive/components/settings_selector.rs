@@ -28,6 +28,7 @@ use hand_tui::components::settings_list::{
     SettingEntry, SettingValue, SettingsListComponent, SettingsListTheme,
 };
 use hand_tui::keybindings::{Keybinding, get_keybindings};
+use hand_tui::keys::{Key, KeyName};
 use hand_tui::tui::{HandleResult, InputEvent};
 use tokio::sync::mpsc;
 
@@ -123,6 +124,26 @@ impl SettingsSelectorComponent {
     }
 }
 
+/// Synthesize the canonical raw byte sequence for the keys this
+/// selector cares about. Returning `None` falls back to the default
+/// `Ignored` so harmless keys (function keys, mouse, …) don't crash.
+/// We only need the set actively bound below — Up / Down / Enter /
+/// Escape / Ctrl+C — anything outside that is fine to drop.
+fn key_to_raw(key: &Key) -> Option<String> {
+    if key.is_release {
+        return None;
+    }
+    Some(match key.name {
+        KeyName::Escape => "\x1b".to_string(),
+        KeyName::Enter => "\r".to_string(),
+        KeyName::Up => "\x1b[A".to_string(),
+        KeyName::Down => "\x1b[B".to_string(),
+        KeyName::Char('c') if key.modifiers.ctrl => "\x03".to_string(),
+        KeyName::Char(c) => c.to_string(),
+        _ => return None,
+    })
+}
+
 fn value_string(v: &SettingValue) -> String {
     match v {
         SettingValue::Bool(b) => b.to_string(),
@@ -144,8 +165,18 @@ impl Component for SettingsSelectorComponent {
     }
 
     fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
+        // Recover the raw key sequence from either variant. Tui's
+        // input pipeline wraps anything starting with `\x1b` (or a
+        // single control byte) in `InputEvent::Key`, so a real Esc
+        // press arrives as `Key { name: Escape, ... }` — not as
+        // `Raw("\x1b")`. Treating only Raw was issue #56: /settings'
+        // overlay hung because Esc was silently ignored.
         let raw = match event {
-            InputEvent::Raw(s) => s.clone(),
+            InputEvent::Raw(s) | InputEvent::Paste(s) => s.clone(),
+            InputEvent::Key(key) => match key_to_raw(key) {
+                Some(s) => s,
+                None => return HandleResult::Ignored,
+            },
             _ => return HandleResult::Ignored,
         };
 
@@ -235,6 +266,51 @@ mod tests {
             Ok(SettingsSelectorEvent::Cancelled) => {}
             other => panic!("expected Cancelled, got {other:?}"),
         }
+    }
+
+    /// Issue #56: the production Tui pipeline wraps an Esc press in
+    /// `InputEvent::Key { name: Escape, ... }`, NOT `Raw("\x1b")` —
+    /// only the Raw form was matched, so the /settings overlay hung
+    /// until /quit. Pin both wire shapes here.
+    #[test]
+    fn cancel_via_input_event_key_escape_emits_cancelled() {
+        use hand_tui::keys::{KeyEventType, KeyModifiers};
+
+        let (mut c, mut rx) = make();
+        let key = Key {
+            name: KeyName::Escape,
+            modifiers: KeyModifiers::default(),
+            is_release: false,
+            event_type: KeyEventType::Press,
+            base_layout_key: None,
+        };
+        let result = c.handle_input(&InputEvent::Key(key));
+        assert_eq!(result, HandleResult::Handled);
+        match rx.try_recv() {
+            Ok(SettingsSelectorEvent::Cancelled) => {}
+            other => panic!("expected Cancelled, got {other:?}"),
+        }
+    }
+
+    /// Same #56 pattern: navigation keys must also flow through the
+    /// `InputEvent::Key` variant or users can't move the cursor with
+    /// the arrow keys when the production pipeline rewrites them.
+    #[test]
+    fn navigation_via_input_event_key_down_moves_cursor() {
+        use hand_tui::keys::{KeyEventType, KeyModifiers};
+
+        let (mut c, _rx) = make();
+        let initial = c.list().selected_index();
+        let down = Key {
+            name: KeyName::Down,
+            modifiers: KeyModifiers::default(),
+            is_release: false,
+            event_type: KeyEventType::Press,
+            base_layout_key: None,
+        };
+        let result = c.handle_input(&InputEvent::Key(down));
+        assert_eq!(result, HandleResult::Handled);
+        assert_eq!(c.list().selected_index(), initial + 1);
     }
 
     #[test]
