@@ -312,10 +312,29 @@ pub fn should_compact(
 /// Used by `agent_session::do_compact` while the message-list-oriented
 /// `generate_summary` in [`super::compactor`] is being rolled in.
 pub fn build_compaction_prompt(messages: &[Message], file_ops: &FileOperations) -> String {
+    build_compaction_prompt_with(messages, file_ops, None)
+}
+
+/// Variant of [`build_compaction_prompt`] that prepends caller-supplied
+/// steering text — used by `/compact <custom instructions>` so the
+/// summarizer keeps the user's focus (e.g. "preserve the database
+/// schema decisions"). Empty / whitespace-only `custom_instructions`
+/// behaves identically to the legacy form.
+pub fn build_compaction_prompt_with(
+    messages: &[Message],
+    file_ops: &FileOperations,
+    custom_instructions: Option<&str>,
+) -> String {
     let mut prompt = String::from(
         "Summarize the following conversation context concisely. \
          Focus on: key decisions made, files read/modified, important context for continuing.\n\n",
     );
+
+    if let Some(extra) = custom_instructions.map(str::trim).filter(|s| !s.is_empty()) {
+        prompt.push_str("Additional user instructions for this summary: ");
+        prompt.push_str(extra);
+        prompt.push_str("\n\n");
+    }
 
     if !file_ops.read.is_empty() {
         prompt.push_str("Files read: ");
@@ -668,6 +687,29 @@ mod tests {
         let prompt = build_compaction_prompt(&messages, &ops);
         assert!(prompt.contains("Files read: /tmp/foo.rs"));
         assert!(prompt.contains("User: hello"));
+    }
+
+    /// Regression for #46: `/compact <custom>` must forward the user's
+    /// steering text into the summary prompt rather than silently
+    /// dropping it. Whitespace-only steering still behaves as the
+    /// no-custom legacy form so callers don't accidentally inject a
+    /// blank "Additional user instructions" block.
+    #[test]
+    fn build_compaction_prompt_with_includes_custom_instructions() {
+        let messages = vec![Message::User(UserMessage::new_text("hello"))];
+        let ops = FileOperations::default();
+        let prompt = build_compaction_prompt_with(
+            &messages,
+            &ops,
+            Some("focus on the database schema changes"),
+        );
+        assert!(prompt.contains("Additional user instructions"));
+        assert!(prompt.contains("focus on the database schema changes"));
+
+        // Whitespace-only steering must collapse to the legacy prompt.
+        let prompt_blank = build_compaction_prompt_with(&messages, &ops, Some("   \t  "));
+        let prompt_none = build_compaction_prompt(&messages, &ops);
+        assert_eq!(prompt_blank, prompt_none);
     }
 
     #[test]

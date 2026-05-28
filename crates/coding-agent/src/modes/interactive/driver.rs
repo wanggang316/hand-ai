@@ -1649,7 +1649,34 @@ pub(crate) async fn apply_slash_action(
         }
         SlashCommandAction::OpenLoginDialog { provider } => {
             let chosen = match provider {
-                Some(p) => Some(p),
+                Some(p) => {
+                    // Validate against the live provider catalogue
+                    // before opening the paste dialog. Without this any
+                    // typo like `/login antrhopic` happily stored a
+                    // key under the bogus id that no model ever
+                    // resolved against — surfacing as "no credentials"
+                    // far away from the actual typo.
+                    let known: std::collections::HashSet<String> =
+                        build_login_provider_list(session)
+                            .into_iter()
+                            .map(|p| p.id)
+                            .collect();
+                    if known.contains(&p) {
+                        Some(p)
+                    } else {
+                        let mut sorted: Vec<String> = known.into_iter().collect();
+                        sorted.sort();
+                        push_status(
+                            chat,
+                            format!(
+                                "[/login: unknown provider {p:?}. Known providers: {}]",
+                                sorted.join(", ")
+                            ),
+                            Some(RED_FG),
+                        );
+                        None
+                    }
+                }
                 None => mount_login_provider_picker(chat, session, mounter).await,
             };
             if let Some(provider_id) = chosen {
@@ -1673,17 +1700,25 @@ pub(crate) async fn apply_slash_action(
             }
             push_status(chat, "[chat cleared]".to_string(), None);
         }
-        SlashCommandAction::Compact => match session.compact().await {
-            Ok(summary) => {
-                use super::components::{CompactionSummaryData, CompactionSummaryMessageComponent};
-                let tokens_before = session.message_count() as u64;
-                let data = CompactionSummaryData::new(summary, tokens_before);
-                if let Ok(mut list) = chat.lock() {
-                    list.push(Box::new(CompactionSummaryMessageComponent::new(data)));
+        SlashCommandAction::Compact(custom) => {
+            let result = match custom.as_deref() {
+                Some(s) => session.compact_with(s).await,
+                None => session.compact().await,
+            };
+            match result {
+                Ok(summary) => {
+                    use super::components::{
+                        CompactionSummaryData, CompactionSummaryMessageComponent,
+                    };
+                    let tokens_before = session.message_count() as u64;
+                    let data = CompactionSummaryData::new(summary, tokens_before);
+                    if let Ok(mut list) = chat.lock() {
+                        list.push(Box::new(CompactionSummaryMessageComponent::new(data)));
+                    }
                 }
+                Err(e) => push_status(chat, format!("[compact failed: {e}]"), Some(RED_FG)),
             }
-            Err(e) => push_status(chat, format!("[compact failed: {e}]"), Some(RED_FG)),
-        },
+        }
         SlashCommandAction::NewSession => match session.reset_session() {
             Ok(()) => {
                 if let Ok(mut list) = chat.lock() {

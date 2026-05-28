@@ -897,7 +897,18 @@ impl AgentSession {
     /// `/compact` slash command, where the user is explicitly asking
     /// for compaction regardless of session state.
     pub async fn compact(&mut self) -> Result<String, CodingAgentError> {
-        self.do_compact().await
+        self.do_compact(None).await
+    }
+
+    /// Compaction variant that lets the caller steer the summarizer
+    /// with custom instructions — e.g. `/compact focus on the
+    /// database schema changes`. The instructions are folded into the
+    /// summary prompt prefix so the model retains them under the
+    /// caller's frame.
+    pub async fn compact_with(&mut self, instructions: &str) -> Result<String, CodingAgentError> {
+        let trimmed = instructions.trim();
+        let custom = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        self.do_compact(custom).await
     }
 
     /// Compact-if-needed: no-op unless auto-compaction is enabled AND
@@ -913,14 +924,17 @@ impl AgentSession {
         if !compaction::should_compact(context_tokens, max_context_tokens, &settings) {
             return Ok(());
         }
-        let _ = self.do_compact().await?;
+        let _ = self.do_compact(None).await?;
         Ok(())
     }
 
     /// Run the compaction summarizer + record the result on the session
     /// manager. Returns the summary text. Caller is responsible for any
     /// gating (auto-toggle, token threshold).
-    async fn do_compact(&mut self) -> Result<String, CodingAgentError> {
+    async fn do_compact(
+        &mut self,
+        custom_instructions: Option<String>,
+    ) -> Result<String, CodingAgentError> {
         let settings = self.settings_manager.compaction_settings();
 
         self.is_compacting = true;
@@ -932,7 +946,11 @@ impl AgentSession {
         );
 
         let file_ops = compaction::extract_file_operations(&to_compact);
-        let summary_prompt = compaction::build_compaction_prompt(&to_compact, &file_ops);
+        let summary_prompt = compaction::build_compaction_prompt_with(
+            &to_compact,
+            &file_ops,
+            custom_instructions.as_deref(),
+        );
 
         let summary = match self.generate_compaction_summary(&summary_prompt).await {
             Ok(s) => s,

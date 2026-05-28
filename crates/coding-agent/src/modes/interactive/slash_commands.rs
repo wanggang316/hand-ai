@@ -34,7 +34,10 @@ impl ParsedSlashCommand {
             return None;
         }
         let mut iter = trimmed.splitn(2, char::is_whitespace);
-        let name = iter.next().unwrap_or("").to_string();
+        // Lowercase the command name so `/HELP`, `/Quit`, `/MODEL` all
+        // dispatch identically. Arguments stay case-sensitive — paths,
+        // model patterns, theme names etc. carry meaningful case.
+        let name = iter.next().unwrap_or("").to_ascii_lowercase();
         let args = iter.next().unwrap_or("").trim().to_string();
         if name.is_empty() {
             return None;
@@ -98,8 +101,11 @@ pub enum SlashCommandAction {
     OpenResumePicker,
     /// Clear the chat scrollback (visual only — session history is kept).
     ClearChat,
-    /// Trigger compaction on the active session and inject a summary message.
-    Compact,
+    /// Trigger compaction on the active session and inject a summary
+    /// message. The optional argument is custom steering text the
+    /// caller wants the summarizer to honour (e.g. "focus on the
+    /// database schema changes"); `None` runs the default summary.
+    Compact(Option<String>),
     /// Start a fresh session via `SessionManager::create()`.
     NewSession,
     /// Copy the most recent assistant message to the system clipboard.
@@ -191,7 +197,8 @@ impl fmt::Display for SlashCommandAction {
             },
             SlashCommandAction::OpenResumePicker => f.write_str("[open resume picker]"),
             SlashCommandAction::ClearChat => f.write_str("[clear chat]"),
-            SlashCommandAction::Compact => f.write_str("[compact]"),
+            SlashCommandAction::Compact(None) => f.write_str("[compact]"),
+            SlashCommandAction::Compact(Some(steer)) => write!(f, "[compact: {steer}]"),
             SlashCommandAction::NewSession => f.write_str("[new session]"),
             SlashCommandAction::CopyLastAssistant => f.write_str("[copy last assistant]"),
             SlashCommandAction::CopyN(n) => write!(f, "[copy last {n}]"),
@@ -264,7 +271,13 @@ impl SlashCommandTable {
 
             "clear" => SlashCommandResult::Handled(SlashCommandAction::ClearChat),
 
-            "compact" => SlashCommandResult::Handled(SlashCommandAction::Compact),
+            "compact" => {
+                SlashCommandResult::Handled(SlashCommandAction::Compact(if cmd.args.is_empty() {
+                    None
+                } else {
+                    Some(cmd.args.clone())
+                }))
+            }
 
             "new" => SlashCommandResult::Handled(SlashCommandAction::NewSession),
 
@@ -459,21 +472,47 @@ Commands:
     }
 }
 
-/// Strip a single layer of matched single/double quotes from `arg`
-/// and return the inner string as a [`PathBuf`]. The arg is assumed
-/// to be already-trimmed of leading whitespace by the slash-command
-/// parser.
+/// Strip a single layer of matched single/double quotes from `arg`,
+/// expand a leading `~` (with or without `/`) to the user's home
+/// directory, and return the result as a [`PathBuf`]. The arg is
+/// assumed to be already-trimmed of leading whitespace by the
+/// slash-command parser.
+///
+/// `~` expansion matches shell semantics: bare `~` and `~/foo` map
+/// to `$HOME` / `$HOME/foo`. We deliberately do NOT expand `~user`
+/// for arbitrary users — that requires a passwd lookup and is
+/// rarely useful at this layer. If `dirs::home_dir()` returns
+/// `None`, the tilde is left as-is so callers can still see the
+/// raw input in the resulting error message.
 fn parse_path_argument(arg: &str) -> PathBuf {
     let arg = arg.trim();
-    if arg.len() >= 2 {
+    // Strip a single layer of matched quotes first so `~` inside
+    // `"~/foo"` still expands.
+    let unquoted: &str = if arg.len() >= 2 {
         let bytes = arg.as_bytes();
         let first = bytes[0];
         let last = bytes[arg.len() - 1];
         if (first == b'"' || first == b'\'') && first == last {
-            return PathBuf::from(&arg[1..arg.len() - 1]);
+            &arg[1..arg.len() - 1]
+        } else {
+            arg
         }
+    } else {
+        arg
+    };
+    expand_tilde(unquoted)
+}
+
+fn expand_tilde(s: &str) -> PathBuf {
+    if s == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(s));
     }
-    PathBuf::from(arg)
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(s)
 }
 
 /// Build the [`SlashCommandAction`] for `/export <path>`. Empty argument
@@ -601,6 +640,75 @@ mod tests {
                 txt.contains(cmd),
                 "/help text missing {cmd}; current text:\n{txt}"
             );
+        }
+    }
+
+    /// Regression for #42: slash command names must be
+    /// case-insensitive — `/HELP`, `/Quit`, `/MODEL` should all
+    /// dispatch identically to their lowercase form. Argument case
+    /// must be preserved because paths, model patterns, theme names
+    /// etc. carry meaningful case.
+    #[test]
+    fn parser_lowercases_name_but_preserves_args() {
+        let parsed = ParsedSlashCommand::parse("/HELP").expect("valid");
+        assert_eq!(parsed.name, "help");
+        assert_eq!(parsed.args, "");
+
+        let parsed = ParsedSlashCommand::parse("/Model Claude-Sonnet:HIGH").expect("valid");
+        assert_eq!(parsed.name, "model");
+        assert_eq!(parsed.args, "Claude-Sonnet:HIGH");
+
+        // The dispatcher must accept these as Handled, not Unknown.
+        let parsed = ParsedSlashCommand::parse("/QUIT").unwrap();
+        match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::Quit) => {}
+            other => panic!("expected Quit from /QUIT, got {other:?}"),
+        }
+    }
+
+    /// Regression for #44: `~` and `~/foo` in /export and /import
+    /// arguments must expand to the user's home directory; otherwise
+    /// the OS treats `~` as a literal filename and the operation
+    /// fails with a confusing error.
+    #[test]
+    fn export_path_argument_expands_tilde() {
+        let home = dirs::home_dir().expect("test environment provides $HOME");
+        let parsed = ParsedSlashCommand::parse("/export ~/session.html").unwrap();
+        match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::Export(path, _)) => {
+                assert_eq!(path, home.join("session.html"));
+            }
+            other => panic!("expected Export with expanded path, got {other:?}"),
+        }
+        // Tilde inside quoted path also expands.
+        let parsed = ParsedSlashCommand::parse("/import \"~/in.jsonl\"").unwrap();
+        match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::Import(path)) => {
+                assert_eq!(path, home.join("in.jsonl"));
+            }
+            other => panic!("expected Import with expanded path, got {other:?}"),
+        }
+    }
+
+    /// Regression for #46: `/compact <text>` must carry the custom
+    /// steering text into the dispatched action. `/compact` alone
+    /// must still produce the bare form so the summarizer falls back
+    /// to its default prompt.
+    #[test]
+    fn compact_dispatch_carries_optional_custom_instructions() {
+        let parsed = ParsedSlashCommand::parse("/compact").unwrap();
+        match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::Compact(None)) => {}
+            other => panic!("expected Compact(None), got {other:?}"),
+        }
+
+        let parsed =
+            ParsedSlashCommand::parse("/compact focus on the database schema changes").unwrap();
+        match SlashCommandTable::dispatch(&parsed, &ctx()) {
+            SlashCommandResult::Handled(SlashCommandAction::Compact(Some(text))) => {
+                assert_eq!(text, "focus on the database schema changes");
+            }
+            other => panic!("expected Compact(Some(..)), got {other:?}"),
         }
     }
 
