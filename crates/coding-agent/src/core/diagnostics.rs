@@ -638,15 +638,14 @@ fn check_command(name: &str, args: &[&str]) -> DiagCheck {
 }
 
 fn check_api_key(env_var: &str, provider: &str) -> DiagCheck {
+    // Never disclose any portion of the key — users routinely paste
+    // diagnostics output into issues and chat threads. Report presence
+    // and source only.
     match std::env::var(env_var) {
         Ok(val) if !val.is_empty() => DiagCheck {
             name: format!("{provider} API Key"),
             status: DiagStatus::Ok,
-            value: Some(format!(
-                "{}...{}",
-                &val[..4.min(val.len())],
-                &val[val.len().saturating_sub(4)..],
-            )),
+            value: Some(format!("set (from ${env_var})")),
         },
         _ => DiagCheck {
             name: format!("{provider} API Key"),
@@ -723,6 +722,39 @@ mod tests {
         let check = check_os();
         assert_eq!(check.status, DiagStatus::Ok);
         assert!(check.value.is_some());
+    }
+
+    #[test]
+    fn check_api_key_does_not_disclose_key_material() {
+        // Use a sentinel env var unlikely to collide with anything real.
+        let env_var = "HAND_TEST_DIAG_KEY_SECRET";
+        let secret = "sk-abcd1234EFGH5678wxyz";
+        // SAFETY: confined to this test; we restore on the way out.
+        // Older test binaries treat env mutation as unsafe.
+        unsafe {
+            std::env::set_var(env_var, secret);
+        }
+        let check = check_api_key(env_var, "Sentinel");
+        unsafe {
+            std::env::remove_var(env_var);
+        }
+        let value = check.value.expect("value present when env is set");
+        // No portion of the key may appear in the rendered value.
+        for window_len in 3..=secret.len() {
+            for window in secret
+                .as_bytes()
+                .windows(window_len)
+                .filter_map(|w| std::str::from_utf8(w).ok())
+            {
+                assert!(
+                    !value.contains(window),
+                    "diagnostics leaked key fragment {window:?}: {value:?}"
+                );
+            }
+        }
+        // And we should still announce presence + source for usability.
+        assert!(value.contains("set"));
+        assert!(value.contains(env_var));
     }
 
     /// Build an otherwise-empty `DiagnosticsReport` so unit tests can
