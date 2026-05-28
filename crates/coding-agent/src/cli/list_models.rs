@@ -388,7 +388,10 @@ mod tests {
             mk_model(Provider::Openrouter, "openai/gpt-4o"),
         ];
         let kept = filter_models_by_pattern(models, "openai");
-        assert!(!kept.is_empty(), "openai is a known provider — expected its catalogue");
+        assert!(
+            !kept.is_empty(),
+            "openai is a known provider — expected its catalogue"
+        );
         for m in &kept {
             assert_eq!(
                 m.provider.as_str(),

@@ -1821,8 +1821,8 @@ mod tests {
         // system prompt (so the test below proves something).
         let mut cfg_with = test_config(cwd.to_path_buf());
         cfg_with.no_context_files = false;
-        let session_with =
-            AgentSession::new_with_skill_dirs(cfg_with, vec![], None, None).expect("baseline session");
+        let session_with = AgentSession::new_with_skill_dirs(cfg_with, vec![], None, None)
+            .expect("baseline session");
         let prompt_with = &session_with.context.system_prompt;
         assert!(
             prompt_with.contains(token),

@@ -479,9 +479,7 @@ fn parse_path_argument(arg: &str) -> PathBuf {
 /// error so the driver doesn't have to special-case it.
 fn parse_export(arg: &str) -> SlashCommandAction {
     if arg.is_empty() {
-        return SlashCommandAction::ShowText(
-            "Usage: /export <path.jsonl|.json|.html>".to_string(),
-        );
+        return SlashCommandAction::ShowText("Usage: /export <path.jsonl|.json|.html>".to_string());
     }
     let path = parse_path_argument(arg);
     match ExportFormat::from_path(&path) {
