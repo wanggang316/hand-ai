@@ -976,9 +976,25 @@ impl Tui {
             // the cursor down to the bottom of the visible viewport so the
             // about-to-be-written full re-render lands on a clean slate.
             // Scrollback above the cursor stays intact.
+            //
+            // Same wipe is needed when an overlay is hidden: the previous
+            // composed frame padded out to the full terminal height (so
+            // the overlay could be stamped anywhere), but the new frame
+            // is just the base content — typically far shorter than the
+            // previous frame. full_render writes only new_len rows; rows
+            // beneath that still carry the overlay box (#41). Clearing
+            // from cursor on any force-reset wipes the residual rendering
+            // without needing to special-case it.
+            //
+            // High-water tracking stays on the width-changed path only:
+            // the on-screen footprint really is gone after a reflow, but
+            // a regular force-redraw shouldn't drop the high-water mark
+            // (some tests pin that invariant).
             if width_changed {
                 self.terminal.clear_from_cursor();
                 self.max_lines_rendered = 0;
+            } else if prev > 0 {
+                self.terminal.clear_from_cursor();
             }
             self.renderer.reset();
         }
@@ -1669,6 +1685,42 @@ mod tests {
         assert!(
             post.contains("base"),
             "post-hide frame missing base content: {post:?}"
+        );
+    }
+
+    /// Regression for #41: after hiding an overlay, the previous
+    /// composed frame's rows beneath the new base content must be
+    /// wiped — otherwise the box outline lingers on screen until the
+    /// next unrelated command happens to push enough content to
+    /// overwrite it. The fix is in `maybe_render`'s force-reset path:
+    /// when `prev > 0` the terminal gets a `clear_from_cursor` so
+    /// `full_render`'s short new frame lands on a clean slate.
+    #[test]
+    fn hide_overlay_emits_clear_from_cursor_to_wipe_residue() {
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec!["base"])));
+
+        // Mount + render so prev_line_count > 0 going into the next
+        // force-reset.
+        let handle = tui.show_overlay(
+            Box::new(TestComponent::new(vec!["OVERLAY"])),
+            overlay_opts(false),
+        );
+        tui.maybe_render();
+        output.lock().unwrap().clear();
+
+        // Hide + render. The fix demands a `\x1b[J` clear-from-cursor
+        // somewhere in the emitted bytes so the previously-occupied
+        // overlay rows go away.
+        tui.hide_overlay(handle);
+        tui.maybe_render();
+        let writes: String = output.lock().unwrap().iter().cloned().collect();
+        assert!(
+            writes.contains("\x1b[J"),
+            "post-hide frame did not clear from cursor; \
+             residue would persist on screen. Writes: {writes:?}"
         );
     }
 
