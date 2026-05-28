@@ -790,6 +790,44 @@ fn parse_key_id_components(key_id: &str) -> Option<ParsedKeyId<'_>> {
 }
 
 /// Match raw input data against a `KeyId`. Mirrors TS `matchesKey`.
+/// Round-trip a parsed [`Key`] back to the canonical byte sequence
+/// the [`matches_key`] / `KeybindingsManager::matches` matcher
+/// expects.
+///
+/// The Tui input pipeline wraps ESC-prefixed sequences and single
+/// control bytes in `InputEvent::Key`, so any component that
+/// previously matched on the raw `\x1b` / `\r` / `\x1b[A` string can
+/// keep its existing dispatch by routing `InputEvent::Key` through
+/// this helper. Covers the common "list selector" key surface:
+/// arrows, Enter, Escape, Tab, Ctrl+C, plain printable chars.
+/// Unknown / release events return `None` so callers can fall
+/// through to `HandleResult::Ignored`.
+pub fn key_to_canonical_bytes(key: &Key) -> Option<String> {
+    if key.is_release {
+        return None;
+    }
+    Some(match &key.name {
+        KeyName::Escape => "\x1b".to_string(),
+        KeyName::Enter => "\r".to_string(),
+        KeyName::Tab => "\t".to_string(),
+        KeyName::Up => "\x1b[A".to_string(),
+        KeyName::Down => "\x1b[B".to_string(),
+        KeyName::Right => "\x1b[C".to_string(),
+        KeyName::Left => "\x1b[D".to_string(),
+        KeyName::Home => "\x1b[H".to_string(),
+        KeyName::End => "\x1b[F".to_string(),
+        KeyName::PageUp => "\x1b[5~".to_string(),
+        KeyName::PageDown => "\x1b[6~".to_string(),
+        KeyName::Backspace => "\x7f".to_string(),
+        KeyName::Delete => "\x1b[3~".to_string(),
+        KeyName::Space => " ".to_string(),
+        KeyName::Char('c') if key.modifiers.ctrl => "\x03".to_string(),
+        KeyName::Char('d') if key.modifiers.ctrl => "\x04".to_string(),
+        KeyName::Char(c) if !key.modifiers.ctrl && !key.modifiers.alt => c.to_string(),
+        _ => return None,
+    })
+}
+
 pub fn matches_key(data: &str, key_id: &str) -> bool {
     let Some(parsed) = parse_key_id_components(key_id) else {
         return false;

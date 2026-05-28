@@ -200,8 +200,16 @@ impl Component for SessionSelectorComponent {
     }
 
     fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
+        // Accept both `Raw` and the production `Key` form — the Tui
+        // pipeline wraps Esc / arrows / Enter in `InputEvent::Key`,
+        // so a Raw-only match would silently hang the picker on
+        // dismiss (same class as #56 was for /settings).
         let raw = match event {
-            InputEvent::Raw(s) => s.clone(),
+            InputEvent::Raw(s) | InputEvent::Paste(s) => s.clone(),
+            InputEvent::Key(key) => match hand_tui::key_to_canonical_bytes(key) {
+                Some(s) => s,
+                None => return HandleResult::Ignored,
+            },
             _ => return HandleResult::Ignored,
         };
         let kb = get_keybindings();

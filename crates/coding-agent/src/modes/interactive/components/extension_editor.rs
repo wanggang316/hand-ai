@@ -148,8 +148,19 @@ impl Component for ExtensionEditorComponent {
     }
 
     fn handle_input(&mut self, event: &InputEvent) -> HandleResult {
+        // Recover the raw byte sequence from any of the variants the
+        // Tui pipeline produces. Esc-prefixed sequences arrive as
+        // `InputEvent::Key` in production — previously they fell
+        // straight through to the inner editor and the `SelectCancel`
+        // shortcut at the bottom of this function never fired (same
+        // class as #56).
         let raw = match event {
-            InputEvent::Raw(s) => s.clone(),
+            InputEvent::Raw(s) | InputEvent::Paste(s) => s.clone(),
+            InputEvent::Key(key) => match hand_tui::key_to_canonical_bytes(key) {
+                Some(s) => s,
+                // Unknown Key — let the editor have it (insertion, etc).
+                None => return self.editor.handle_input(event),
+            },
             _ => return self.editor.handle_input(event),
         };
 

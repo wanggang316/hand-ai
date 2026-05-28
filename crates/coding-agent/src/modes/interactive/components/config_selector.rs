@@ -242,9 +242,15 @@ impl ConfigSelectorComponent {
         });
     }
 
-    fn raw_key(event: &InputEvent) -> Option<&str> {
+    /// Recover the raw key bytes from any `InputEvent` variant the Tui
+    /// pipeline might emit — `Raw` / `Paste` carry the string directly;
+    /// `Key` is round-tripped via [`hand_tui::key_to_canonical_bytes`]
+    /// so an Esc / arrow / Enter press dispatches identically. Same
+    /// shape as the #56 fix for `/settings`.
+    fn raw_key(event: &InputEvent) -> Option<String> {
         match event {
-            InputEvent::Raw(s) | InputEvent::Paste(s) => Some(s.as_str()),
+            InputEvent::Raw(s) | InputEvent::Paste(s) => Some(s.clone()),
+            InputEvent::Key(key) => hand_tui::key_to_canonical_bytes(key),
             _ => None,
         }
     }
@@ -318,19 +324,19 @@ impl Component for ConfigSelectorComponent {
         };
         let kb = get_keybindings();
 
-        if kb.matches(data, Keybinding::SelectUp) {
+        if kb.matches(&data, Keybinding::SelectUp) {
             self.move_to_next_item(-1);
             return HandleResult::Handled;
         }
-        if kb.matches(data, Keybinding::SelectDown) {
+        if kb.matches(&data, Keybinding::SelectDown) {
             self.move_to_next_item(1);
             return HandleResult::Handled;
         }
-        if kb.matches(data, Keybinding::SelectPageUp) {
+        if kb.matches(&data, Keybinding::SelectPageUp) {
             self.jump_by_pages(-1);
             return HandleResult::Handled;
         }
-        if kb.matches(data, Keybinding::SelectPageDown) {
+        if kb.matches(&data, Keybinding::SelectPageDown) {
             self.jump_by_pages(1);
             return HandleResult::Handled;
         }
@@ -342,11 +348,11 @@ impl Component for ConfigSelectorComponent {
             let _ = self.events.send(ConfigSelectorEvent::Exit);
             return HandleResult::Handled;
         }
-        if kb.matches(data, Keybinding::SelectCancel) {
+        if kb.matches(&data, Keybinding::SelectCancel) {
             let _ = self.events.send(ConfigSelectorEvent::Cancelled);
             return HandleResult::Handled;
         }
-        if data == " " || kb.matches(data, Keybinding::SelectConfirm) {
+        if data == " " || kb.matches(&data, Keybinding::SelectConfirm) {
             self.toggle_selected();
             return HandleResult::Handled;
         }

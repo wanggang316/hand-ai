@@ -47,8 +47,8 @@ pub use keybindings::{
 };
 pub use keys::{
     Key, KeyEventType, KeyId, KeyModifiers, KeyName, decode_kitty_printable, decode_printable_key,
-    is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key, parse_key_id,
-    set_kitty_protocol_active,
+    is_key_release, is_key_repeat, is_kitty_protocol_active, key_to_canonical_bytes, matches_key,
+    parse_key, parse_key_id, set_kitty_protocol_active,
 };
 pub use kill_ring::KillRing;
 pub use overlay::{

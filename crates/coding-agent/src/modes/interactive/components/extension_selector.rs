@@ -162,9 +162,13 @@ impl ExtensionSelectorComponent {
         }
     }
 
-    fn raw_key(event: &InputEvent) -> Option<&str> {
+    /// Accept any `InputEvent` variant the Tui pipeline can emit.
+    /// Esc-prefixed sequences and single control bytes arrive as
+    /// `InputEvent::Key` in production, not `Raw` — see the #56 fix.
+    fn raw_key(event: &InputEvent) -> Option<String> {
         match event {
-            InputEvent::Raw(s) | InputEvent::Paste(s) => Some(s.as_str()),
+            InputEvent::Raw(s) | InputEvent::Paste(s) => Some(s.clone()),
+            InputEvent::Key(key) => hand_tui::key_to_canonical_bytes(key),
             _ => None,
         }
     }
@@ -210,11 +214,13 @@ impl Component for ExtensionSelectorComponent {
 
         let kb = get_keybindings();
 
-        if self.navigate(&kb, data) {
+        if self.navigate(&kb, &data) {
             return HandleResult::Handled;
         }
 
-        if kb.matches(data, Keybinding::SelectConfirm) || matches_key(data, "enter") || data == "\n"
+        if kb.matches(&data, Keybinding::SelectConfirm)
+            || matches_key(&data, "enter")
+            || data == "\n"
         {
             if let Some(option) = self.selected().map(str::to_string) {
                 let _ = self.events.send(ExtensionSelectorEvent::Select(option));
@@ -222,7 +228,7 @@ impl Component for ExtensionSelectorComponent {
             return HandleResult::Handled;
         }
 
-        if kb.matches(data, Keybinding::SelectCancel) {
+        if kb.matches(&data, Keybinding::SelectCancel) {
             let _ = self.events.send(ExtensionSelectorEvent::Cancel);
             return HandleResult::Handled;
         }
