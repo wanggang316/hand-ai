@@ -643,6 +643,11 @@ pub enum SettingsError {
     /// `save` was called for a scope that has no configured on-disk path.
     #[error("no path configured for {scope:?} settings layer")]
     NoPath { scope: SettingsScope },
+    /// Generic free-text error for in-memory operations that don't fit
+    /// the I/O / YAML buckets — e.g. `apply_setting_by_id` rejecting
+    /// an unknown id or an unparseable value.
+    #[error("{0}")]
+    Other(String),
 }
 
 impl Settings {
@@ -1230,6 +1235,75 @@ impl SettingsManager {
     pub fn set_last_changelog_version(&mut self, scope: SettingsScope, value: Option<String>) {
         self.layer_mut(scope).last_changelog_version = value;
         self.recompute_merged();
+    }
+
+    /// Apply a single setting identified by the same `id` strings the
+    /// `/settings` selector emits in `SettingsSelectorEvent::Changed`,
+    /// against `scope`'s in-memory layer. Used by the driver to
+    /// persist user picks without having to wire 6+ typed setters.
+    ///
+    /// Returns the canonical post-write string form of the new value
+    /// (so the driver can confirm "[setting foo = bar]") or an error
+    /// if the id is unknown or the value can't be parsed for the
+    /// target field. Callers must invoke [`Self::save`] separately to
+    /// commit to disk.
+    pub fn apply_setting_by_id(
+        &mut self,
+        scope: SettingsScope,
+        id: &str,
+        value: &str,
+    ) -> Result<String, SettingsError> {
+        let layer = self.layer_mut(scope);
+        let parse_bool = |v: &str| -> Result<bool, SettingsError> {
+            match v {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(SettingsError::Other(format!(
+                    "expected `true` or `false` for {id}, got {v:?}"
+                ))),
+            }
+        };
+        match id {
+            "theme" => {
+                let parsed = match value {
+                    "dark" => ThemeSetting::Dark,
+                    "light" => ThemeSetting::Light,
+                    "high-contrast" => ThemeSetting::HighContrast,
+                    "system" => ThemeSetting::System,
+                    other => {
+                        return Err(SettingsError::Other(format!("unknown theme {other:?}")));
+                    }
+                };
+                layer.theme = Some(parsed);
+            }
+            "auto_compact" => {
+                let b = parse_bool(value)?;
+                layer.compaction.enabled = Some(b);
+            }
+            "hide_thinking_block" => {
+                let b = parse_bool(value)?;
+                layer.hide_thinking_block = Some(b);
+            }
+            "show_images" => {
+                let b = parse_bool(value)?;
+                layer.terminal.show_images = Some(b);
+            }
+            "clear_on_shrink" => {
+                let b = parse_bool(value)?;
+                layer.terminal.clear_on_shrink = Some(b);
+            }
+            "quiet_startup" => {
+                let b = parse_bool(value)?;
+                layer.quiet_startup = Some(b);
+            }
+            other => {
+                return Err(SettingsError::Other(format!(
+                    "setting {other:?} is not editable via /settings"
+                )));
+            }
+        }
+        self.recompute_merged();
+        Ok(value.to_string())
     }
 
     /// Persist the in-memory state of `scope` to its YAML path.
@@ -1927,6 +2001,53 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(body.as_bytes()).unwrap();
         path
+    }
+
+    /// Regression for #45: `/settings` must persist changes via
+    /// SettingsManager::apply_setting_by_id + save, not just print a
+    /// confirmation. Mutate the in-memory layer, persist, re-read,
+    /// and check the value round-trips.
+    #[test]
+    fn apply_setting_by_id_persists_and_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let global_path = dir.path().join("global.yaml");
+        let mut mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            Some(global_path.clone()),
+            None,
+        );
+        // Baseline: theme is unset on the global layer (defaults are
+        // not in any explicit layer — they're the merge floor).
+        assert!(mgr.global_layer().theme.is_none());
+
+        mgr.apply_setting_by_id(SettingsScope::Global, "theme", "light")
+            .expect("apply theme=light");
+        assert_eq!(mgr.global_layer().theme, Some(ThemeSetting::Light));
+        assert_eq!(mgr.current().theme(), ThemeSetting::Light);
+
+        // Bool toggle.
+        mgr.apply_setting_by_id(SettingsScope::Global, "quiet_startup", "true")
+            .expect("apply quiet_startup=true");
+        assert_eq!(mgr.global_layer().quiet_startup, Some(true));
+
+        // Unknown id surfaces an Other error rather than silently dropping.
+        let err = mgr
+            .apply_setting_by_id(SettingsScope::Global, "not_a_real_setting", "x")
+            .unwrap_err();
+        assert!(matches!(err, SettingsError::Other(_)));
+
+        // Save round-trips through YAML.
+        mgr.save(SettingsScope::Global).expect("save ok");
+        let body = std::fs::read_to_string(&global_path).unwrap();
+        assert!(
+            body.contains("theme: light"),
+            "yaml missing theme: {body:?}"
+        );
+        assert!(
+            body.contains("quiet-startup: true"),
+            "yaml missing quiet-startup: {body:?}"
+        );
     }
 
     #[test]

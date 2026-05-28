@@ -359,11 +359,24 @@ impl InteractiveMode {
         // the same keystroke that triggers it — no separate driver task.
         {
             let slash_registry = crate::core::slash_commands::SlashCommandRegistry::new();
-            let slash_commands: Vec<TuiSlashCommand> = slash_registry
+            // Built-ins first so they always shadow an extension that
+            // tries to override them; extension-contributed commands
+            // then layer underneath. The dispatcher already enforces
+            // built-in precedence (see `find_extension_command`), so
+            // visibility here just keeps the picker honest.
+            let mut slash_commands: Vec<TuiSlashCommand> = slash_registry
                 .commands()
                 .iter()
                 .map(|c| TuiSlashCommand::new(c.name.clone(), c.description.clone()))
                 .collect();
+            let builtin_names: std::collections::HashSet<String> =
+                slash_commands.iter().map(|c| c.name.clone()).collect();
+            for (spec, _ext) in session.collected_slash_commands() {
+                if builtin_names.contains(&spec.name) {
+                    continue;
+                }
+                slash_commands.push(TuiSlashCommand::new(spec.name, spec.description));
+            }
             let mut combined = CombinedAutocompleteProvider::new();
             combined.add_provider(Arc::new(SlashCommandProvider::new(slash_commands)));
             combined.add_provider(Arc::new(PathAutocompleteProvider::new(cwd.clone())));
@@ -789,12 +802,14 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
                         };
                         match SlashCommandTable::dispatch(&parsed, &ctx) {
                             SlashCommandResult::Handled(action) => {
-                                let outcome = apply_slash_action(
+                                let usage_snapshot = agent_usage.lock().ok().map(|u| *u);
+                                let outcome = apply_slash_action_with_usage(
                                     action,
                                     &agent_chat,
                                     &mut session,
                                     &cwd,
                                     Some(&mounter),
+                                    usage_snapshot,
                                 )
                                 .await;
                                 // Slash commands can mutate session state
@@ -951,18 +966,25 @@ async fn run_bash_inline(chat: &ChatList, session: &AgentSession, raw: &str) {
         command.clone(),
         exclude_from_context,
     )));
-    {
-        let mut list = chat.lock().expect("chat list mutex poisoned");
-        list.push(Box::new(SharedRender {
+    // Mount the live cell through push_component so the render loop
+    // is poked. Pre-fix the bash panel stayed buffered until some
+    // unrelated event fired request_render() (same class as #38).
+    push_component(
+        chat,
+        Box::new(SharedRender {
             inner: Arc::clone(&cell),
-        }));
-    }
+        }),
+    );
     match session.run_bash(&command, 0).await {
         Ok(outcome) => {
             if let Ok(mut c) = cell.lock() {
                 c.append_output(&outcome.result.output);
                 c.set_complete(outcome.result.exit_code, outcome.aborted, None);
             }
+            // The cell was mutated in place; nothing pushed to the
+            // chat list, but the user-visible output of the
+            // SharedRender wrapper just changed. Force a repaint.
+            request_render();
         }
         Err(e) => push_error(chat, format!("bash failed: {e}")),
     }
@@ -1635,6 +1657,35 @@ pub(crate) async fn apply_slash_action(
     cwd: &Path,
     mounter: Option<&OverlayMounter>,
 ) -> SlashOutcome {
+    apply_slash_action_inner(action, chat, session, cwd, mounter, None).await
+}
+
+/// Same as [`apply_slash_action`] but threads a snapshot of the
+/// session-wide [`TokenUsageSummary`] through so the `/session`
+/// handler can render the live token + cost totals. The plain
+/// `apply_slash_action` keeps its old signature so the dozens of
+/// test sites that construct an action and run it through the
+/// dispatcher don't have to plumb a usage snapshot they don't care
+/// about.
+pub(crate) async fn apply_slash_action_with_usage(
+    action: SlashCommandAction,
+    chat: &ChatList,
+    session: &mut AgentSession,
+    cwd: &Path,
+    mounter: Option<&OverlayMounter>,
+    usage: Option<TokenUsageSummary>,
+) -> SlashOutcome {
+    apply_slash_action_inner(action, chat, session, cwd, mounter, usage).await
+}
+
+async fn apply_slash_action_inner(
+    action: SlashCommandAction,
+    chat: &ChatList,
+    session: &mut AgentSession,
+    cwd: &Path,
+    mounter: Option<&OverlayMounter>,
+    usage: Option<TokenUsageSummary>,
+) -> SlashOutcome {
     match action {
         SlashCommandAction::Quit => return SlashOutcome::Quit,
         SlashCommandAction::ShowText(s) => push_status(chat, s, None),
@@ -1760,6 +1811,10 @@ pub(crate) async fn apply_slash_action(
             },
             Err(e) => push_status(chat, format!("[/logout failed: {e}]"), Some(RED_FG)),
         },
+        SlashCommandAction::ShowSessionInfo => {
+            let text = render_session_info(session, usage.as_ref());
+            push_status(chat, text, None);
+        }
         SlashCommandAction::ShowDiagnostics => {
             let report = crate::core::diagnostics::run_diagnostics();
             let body = format_diagnostics_report(&report);
@@ -2271,7 +2326,7 @@ fn level_label(level: model::ThinkingLevel) -> &'static str {
 
 async fn mount_settings_selector(
     chat: &ChatList,
-    session: &AgentSession,
+    session: &mut AgentSession,
     mounter: Option<&OverlayMounter>,
 ) {
     let Some(mounter) = mounter else {
@@ -2299,7 +2354,20 @@ async fn mount_settings_selector(
     };
     match rx.recv().await {
         Some(SettingsSelectorEvent::Changed { id, value }) => {
-            push_status(chat, format!("[setting {id} = {value}]"), None);
+            // Persist the change to the global YAML layer so the pick
+            // survives a restart. Pre-fix the dispatcher only printed
+            // the confirmation status and dropped the value on the
+            // floor (#45).
+            let scope = crate::core::settings::SettingsScope::Global;
+            let mgr = session.settings_mut();
+            let body = match mgr.apply_setting_by_id(scope, &id, &value) {
+                Ok(applied) => match mgr.save(scope) {
+                    Ok(()) => format!("[setting {id} = {applied}]"),
+                    Err(e) => format!("[setting {id} = {applied} (save failed: {e})]"),
+                },
+                Err(e) => format!("[/settings: failed to apply {id}: {e}]"),
+            };
+            push_status(chat, body, None);
         }
         Some(SettingsSelectorEvent::Cancelled) | None => {
             push_status(chat, "[/settings closed]".to_string(), None);
@@ -3260,6 +3328,73 @@ fn apply_changelog(chat: &ChatList) {
     };
     let component = CustomMessageComponent::new(CustomMessageData::new("changelog", body));
     push_component(chat, Box::new(component));
+}
+
+/// `/session` — render the active session's headline stats.
+///
+/// Pulls id, label, message count, model, provider, and an
+/// approximate session age from the live [`AgentSession`]. The
+/// `usage` snapshot, when present, contributes the token + cost
+/// segment; tests that exercise the pure dispatch path can omit it
+/// and the renderer skips the token line.
+fn render_session_info(session: &AgentSession, usage: Option<&TokenUsageSummary>) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Session: {}", session.session_id());
+    if let Some(label) = session.label() {
+        let _ = writeln!(out, "Label: {label}");
+    }
+    let _ = writeln!(out, "Messages: {}", session.message_count());
+    let model = session.model();
+    let _ = writeln!(out, "Model: {} ({})", model.id, model.provider.as_str());
+    if let Some(u) = usage
+        && (u.input > 0 || u.output > 0 || u.cache_read > 0 || u.cache_write > 0)
+    {
+        let _ = writeln!(
+            out,
+            "Tokens: {} in / {} out (cache read {} / write {})",
+            u.input, u.output, u.cache_read, u.cache_write,
+        );
+        if u.cost_usd > 0.0 {
+            let _ = writeln!(out, "Cost: ${:.4}", u.cost_usd);
+        }
+    }
+    if let Some(started_ms) = session_started_at_ms(session) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let elapsed_ms = (now_ms - started_ms).max(0) as u64;
+        let _ = writeln!(out, "Duration: {}", format_duration_ms(elapsed_ms));
+    }
+    // Trim the trailing newline so push_status renders flush.
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn session_started_at_ms(session: &AgentSession) -> Option<i64> {
+    // The session header is the first entry; its timestamp is the
+    // session-start timestamp. Iterate the entries so we don't depend
+    // on the in-memory variant having a header (it doesn't).
+    session
+        .session_manager()
+        .entries()
+        .iter()
+        .find_map(|e| e.timestamp())
+}
+
+fn format_duration_ms(ms: u64) -> String {
+    let total_s = ms / 1000;
+    let h = total_s / 3600;
+    let m = (total_s % 3600) / 60;
+    let s = total_s % 60;
+    if h > 0 {
+        format!("{h}h {m}m {s}s")
+    } else if m > 0 {
+        format!("{m}m {s}s")
+    } else {
+        format!("{s}s")
+    }
 }
 
 /// `/reload` — re-read SettingsManager + keybindings from disk so on-disk

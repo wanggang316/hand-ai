@@ -138,6 +138,12 @@ pub enum SlashCommandAction {
     Logout,
     /// Run diagnostics and dump the report into the chat.
     ShowDiagnostics,
+    /// Print the active session's headline stats (id, label, model,
+    /// provider, message count, token totals, duration). The driver
+    /// owns the rendering because it has access to the live
+    /// `AgentSession` and the running `TokenUsageSummary`; the
+    /// dispatcher only produces the action.
+    ShowSessionInfo,
     /// Re-read SettingsManager + keybindings from disk and surface a
     /// confirmation status. Per-subsystem reloaders (extensions,
     /// skills, prompts, themes) attach over time — the driver fires
@@ -199,6 +205,7 @@ impl fmt::Display for SlashCommandAction {
             SlashCommandAction::ClearChat => f.write_str("[clear chat]"),
             SlashCommandAction::Compact(None) => f.write_str("[compact]"),
             SlashCommandAction::Compact(Some(steer)) => write!(f, "[compact: {steer}]"),
+            SlashCommandAction::ShowSessionInfo => f.write_str("[session info]"),
             SlashCommandAction::NewSession => f.write_str("[new session]"),
             SlashCommandAction::CopyLastAssistant => f.write_str("[copy last assistant]"),
             SlashCommandAction::CopyN(n) => write!(f, "[copy last {n}]"),
@@ -240,7 +247,7 @@ pub struct SlashCommandTable;
 
 impl SlashCommandTable {
     /// Dispatch a parsed slash command.
-    pub fn dispatch(cmd: &ParsedSlashCommand, ctx: &SlashCommandContext) -> SlashCommandResult {
+    pub fn dispatch(cmd: &ParsedSlashCommand, _ctx: &SlashCommandContext) -> SlashCommandResult {
         match cmd.name.as_str() {
             "quit" | "exit" | "q" => SlashCommandResult::Handled(SlashCommandAction::Quit),
 
@@ -262,12 +269,11 @@ impl SlashCommandTable {
                 SlashCommandResult::Handled(SlashCommandAction::ShowText(Self::hotkeys_text()))
             }
 
-            // Show the active model + provider. Stop short of the rich
-            // "session" panel — that needs `SessionManager` access (TODO).
-            "session" => SlashCommandResult::Handled(SlashCommandAction::ShowText(format!(
-                "Model: {}\nProvider: {}",
-                ctx.model_id, ctx.provider
-            ))),
+            // The dispatcher emits a typed action; the driver owns
+            // rendering because it has access to the live AgentSession
+            // (for id, label, message count, session-start timestamp)
+            // and the running TokenUsageSummary.
+            "session" => SlashCommandResult::Handled(SlashCommandAction::ShowSessionInfo),
 
             "clear" => SlashCommandResult::Handled(SlashCommandAction::ClearChat),
 
@@ -793,14 +799,11 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_session_shows_model() {
+    fn dispatches_session_emits_show_session_info() {
         let parsed = ParsedSlashCommand::parse("/session").unwrap();
         match SlashCommandTable::dispatch(&parsed, &ctx()) {
-            SlashCommandResult::Handled(SlashCommandAction::ShowText(s)) => {
-                assert!(s.contains("claude-sonnet-4"));
-                assert!(s.contains("anthropic"));
-            }
-            other => panic!("expected ShowText, got {:?}", other),
+            SlashCommandResult::Handled(SlashCommandAction::ShowSessionInfo) => {}
+            other => panic!("expected ShowSessionInfo, got {other:?}"),
         }
     }
 

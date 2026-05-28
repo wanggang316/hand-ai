@@ -881,6 +881,13 @@ impl AgentSession {
         &self.settings_manager
     }
 
+    /// Borrow the session-storage manager for read-only inspection
+    /// (entries, timestamps, etc.). Used by `/session` to surface the
+    /// session-start timestamp without re-reading the JSONL.
+    pub fn session_manager(&self) -> &SessionManager {
+        &self.session_manager
+    }
+
     /// Mutable settings access. Required by the M5.4 startup flow to
     /// record `last_changelog_version` after auto-displaying entries.
     /// Callers that mutate must invoke `save(scope)` themselves to
