@@ -90,6 +90,9 @@ export class RemoteAgent implements Agent {
   private subscribers = new Set<(event: AgentEvent) => void>();
   private nextId = 1;
   private pending = new Set<string>();
+  // Count of optimistically-rendered user messages whose server echo
+  // (message_start, role "user") should be suppressed to avoid a duplicate.
+  private suppressUserEchoes = 0;
   // Browser-executed tools the server declares but does not run itself. Keyed
   // by tool name; invoked when a matching `tool_execution_start` arrives.
   private browserTools = new Map<string, BrowserToolExecutor>();
@@ -169,8 +172,6 @@ export class RemoteAgent implements Agent {
    *   regardless of whether the binary was inlined or uploaded.
    */
   async sendMessage(text: string, attachments?: Attachment[]): Promise<void> {
-    this.state.isStreaming = true;
-
     const images: WireImage[] = [];
     const references: AttachmentReference[] = [];
     const documentTexts: string[] = [];
@@ -206,6 +207,19 @@ export class RemoteAgent implements Agent {
     }
 
     const message = documentTexts.length > 0 ? text + documentTexts.join("") : text;
+
+    // Optimistically render the user's message so a send is never invisible while
+    // it waits in the transport send-queue: a send issued before the socket is
+    // open (or during a reconnect) is buffered there and auto-flushed on connect.
+    // The server echoes this same message via message_start(user); that echo is
+    // suppressed (see handleFrame) to avoid a duplicate, and agent_end reconciles
+    // against the server's authoritative list. Mark the turn streaming only when
+    // it can start now — a queued offline send is not streaming yet (agent_start
+    // flips the flag when the server actually begins the turn).
+    this.state.messages.push({ role: "user", content: message });
+    this.suppressUserEchoes++;
+    this.state.isStreaming = this.conn.connected;
+    this.emit({ type: "message_start", message: { role: "assistant", content: [] } });
 
     this.conn.send({
       type: "prompt",
@@ -361,12 +375,15 @@ export class RemoteAgent implements Agent {
 
       case "message_start":
         // Announces a history addition. The user's own message (string content)
-        // is folded into the stable list here; assistant content streams via
-        // message_update. Seed the streaming container with an empty assistant
-        // message so the pulsing cursor shows before the first token.
+        // is folded into the stable list here — unless sendMessage already
+        // rendered it optimistically, in which case the echo is suppressed to
+        // avoid a duplicate. Assistant content streams via message_update.
         if (ev.message?.role === "user") {
-          const user = this.toUserMessage(ev.message);
-          this.state.messages.push(user);
+          if (this.suppressUserEchoes > 0) {
+            this.suppressUserEchoes--;
+          } else {
+            this.state.messages.push(this.toUserMessage(ev.message));
+          }
         }
         this.emit({
           type: "message_start",
@@ -426,6 +443,9 @@ export class RemoteAgent implements Agent {
       case "agent_end":
         this.state.isStreaming = false;
         this.pending.clear();
+        // Turn boundary: the list is reconciled below, so drop any stale
+        // echo-suppression count to avoid leaking it into a later turn.
+        this.suppressUserEchoes = 0;
         if (ev.messages) {
           this.state.messages = ev.messages.map(normalizeMessage);
         }

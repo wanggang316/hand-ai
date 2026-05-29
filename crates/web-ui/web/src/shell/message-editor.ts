@@ -85,15 +85,6 @@ export class MessageEditor extends LitElement {
   }
 
   /**
-   * Surface a transient, non-blocking notice in the editor's inline slot. Used
-   * by the host view to explain why a send was held back (e.g. the connection
-   * is still coming up) without clearing the typed text.
-   */
-  public notify(message: string): void {
-    this.showError(message);
-  }
-
-  /**
    * Ingest a list of files through `loadAttachment`, enforcing the count and
    * per-file size limits, and append the successes to `attachments`.
    */

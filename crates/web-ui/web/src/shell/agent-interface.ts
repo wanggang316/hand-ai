@@ -223,19 +223,6 @@ export class AgentInterface extends LitElement {
     if ((!input.trim() && (attachments?.length ?? 0) === 0) || session.state.isStreaming) {
       return;
     }
-
-    // Hold back the send while the transport is not connected (still coming up,
-    // or dropped and reconnecting). Keep the typed text and tell the user, so a
-    // too-early send is never silently discarded. The status indicator below the
-    // transcript shows the live state. In-memory agents expose no isConnected and
-    // are treated as always connected, so this never triggers for them.
-    if (session.isConnected && !session.isConnected()) {
-      this._messageEditor.notify(
-        i18n("Connecting to the server — your message was kept. Try again in a moment."),
-      );
-      return;
-    }
-
     if (!session.state.model) throw new Error("No model set on AgentInterface");
 
     // Optional API-key gating. Keys are resolved server-side in this app, so
