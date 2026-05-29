@@ -10,8 +10,12 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "docx-preview": "^0.3.7",
+    "jszip": "^3.10.1",
     "lit": "^3.3.1",
-    "lucide": "^1.17.0"
+    "lucide": "^1.17.0",
+    "pdfjs-dist": "^5.7.284",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.0",

@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M3 complete)
+**Status:** In progress (M0-M3 complete; M4 frontend done, server browser-tool routing pending)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -32,7 +32,9 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 - [x] **M1 — Chat shell**
 - [x] **M2 — Message + tool rendering**
 - [x] **M3 — Sandbox runtime**
-- [ ] **M4 — Artifacts**
+- [~] **M4 — Artifacts** (frontend panel + viewers done and verified; server-side
+  `tool_result` routing + `artifacts` tool declaration pending — see "browser-tool
+  execution" below, shared with M5)
 - [ ] **M5 — Browser tools (JS REPL, extract-document)**
 - [ ] **M6 — Attachments**
 - [ ] **M7 — Storage (IndexedDB)**
@@ -59,6 +61,14 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   `message_start`/`message_end` (role-checked) in the chat-shell milestone;
   (3) the wire `message` field is a loose `WireMessage`, not strictly an
   `AssistantMessage`.
+- **2026-05-29 (M4)**: The native artifacts tool's `execute` signature is
+  `(toolCallId, args, signal)`, not `(args)`; the chat shell wraps it into the
+  `AgentTool.execute(args)` the agent expects. The server browser-tool routing
+  must call it with the toolCallId so the result can be correlated. Also: the
+  HTML-artifact create path and the smoke helper relied on `requestAnimationFrame`
+  to settle, which is throttled/never-fires in a backgrounded or headless tab —
+  the smoke now uses `updateComplete` + a macrotask instead. Real (foregrounded)
+  usage is unaffected; this only matters for headless verification.
 - **2026-05-29 (M3)**: Custom-element registration is only triggered when the
   defining module is actually evaluated. Under `isolatedModules`/esbuild, a
   consumer that imports a sandbox element class **only in a type position**
@@ -98,6 +108,16 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
+- **M4 frontend (2026-05-29)**: Artifacts panel + all viewers landed and verified
+  via direct browser API calls: creating a markdown and an HTML artifact stores
+  both (`artifacts` Map size 2, keyed by filename), the HTML create completes
+  (the <=1500ms console-capture wait is correctly bounded), and opening the HTML
+  artifact mounts an `<html-artifact>` element with a sandbox `<iframe>` in the
+  DOM. Tab bar + Preview/Code toggle render. **Deferred to the browser-tool
+  execution milestone (next):** the server-side `tool_result` `RpcCommand` and
+  the server `artifacts` tool declaration, so the agent can actually drive the
+  browser-resident artifacts tool. The client `artifacts` AgentTool is fully
+  implemented and ready to be wired once the server routes browser tools.
 - **M0 (2026-05-29)**: Verified end-to-end via a deterministic WebSocket probe
   (`get_state`, no LLM) and a live streaming prompt. The WS<->`run_rpc_server`
   bridge reuses the dispatcher unchanged.
@@ -378,25 +398,25 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 67 | FileDownloadRuntimeProvider (returnDownloadableFile; online + offline download) | sandbox-runtime | M3 | DONE |
 | 68 | getRuntime().toString() injection constraint (no closures/imports) preserved | sandbox-runtime | M3 | DONE |
 | 69 | Sandbox iframe attribute `allow-scripts allow-modals` only | sandbox-runtime | M3 | DONE |
-| 70 | ArtifactElement abstract base (light DOM, content get/set, getHeaderButtons) | artifacts | M4 | TODO |
-| 71 | ArtifactsPanel (`<artifacts-panel>`, Map-backed state, imperative DOM insertion, tab bar) | artifacts | M4 | TODO |
-| 72 | getFileType dispatch table (html/svg/markdown/image/pdf/excel/docx/text/generic) | artifacts | M4 | TODO |
-| 73 | Artifact CRUD tool commands: create/update/rewrite/get/delete/logs | artifacts | M4 | TODO |
-| 74 | Artifacts tool: html-create waits ≤1500ms for logs; reloadAllHtmlArtifacts after CRUD | artifacts | M4 | TODO |
-| 75 | reconstructFromMessages (replays artifact + toolResult history, silent + skipWait) | artifacts | M4 | TODO |
-| 76 | HtmlArtifact (sandbox iframe, console capture, preview/code toggle, reload/copy/download) | artifacts | M4 | TODO |
-| 77 | HtmlArtifact standalone download with injected runtime | artifacts | M4 | TODO |
-| 78 | SvgArtifact (Blob-URL preview + code view, copy/download) | artifacts | M4 | TODO |
-| 79 | MarkdownArtifact (markdown-block preview + code view) | artifacts | M4 | TODO |
-| 80 | TextArtifact (hljs highlight for code extensions, else plain pre) | artifacts | M4 | TODO |
-| 81 | ImageArtifact (data-URL render, MIME map, error placeholder, download) | artifacts | M4 | TODO |
-| 82 | PdfArtifact (pdfjs all-pages canvas at scale 1.5, worker config, download) | artifacts | M4 | TODO |
-| 83 | DocxArtifact (docx-preview renderAsync + style overrides, download) | artifacts | M4 | TODO |
-| 84 | ExcelArtifact (xlsx multi-sheet tabs + styled tables, download) | artifacts | M4 | TODO |
-| 85 | GenericArtifact (placeholder + download with extension MIME map) | artifacts | M4 | TODO |
-| 86 | artifact-console (collapsible, error count, autoscroll, copy) | artifacts | M4 | TODO |
-| 87 | ArtifactPill inline clickable badge (openArtifact navigation) | artifacts | M4 | TODO |
-| 88 | ArtifactsToolRenderer (create/rewrite code-block, update Diff, get, logs, delete; registered with panel ref) | artifacts | M4 | TODO |
+| 70 | ArtifactElement abstract base (light DOM, content get/set, getHeaderButtons) | artifacts | M4 | DONE |
+| 71 | ArtifactsPanel (`<artifacts-panel>`, Map-backed state, imperative DOM insertion, tab bar) | artifacts | M4 | DONE |
+| 72 | getFileType dispatch table (html/svg/markdown/image/pdf/excel/docx/text/generic) | artifacts | M4 | DONE |
+| 73 | Artifact CRUD tool commands: create/update/rewrite/get/delete/logs | artifacts | M4 | DONE |
+| 74 | Artifacts tool: html-create waits ≤1500ms for logs; reloadAllHtmlArtifacts after CRUD | artifacts | M4 | DONE |
+| 75 | reconstructFromMessages (replays artifact + toolResult history, silent + skipWait) | artifacts | M4 | DONE |
+| 76 | HtmlArtifact (sandbox iframe, console capture, preview/code toggle, reload/copy/download) | artifacts | M4 | DONE |
+| 77 | HtmlArtifact standalone download with injected runtime | artifacts | M4 | DONE |
+| 78 | SvgArtifact (Blob-URL preview + code view, copy/download) | artifacts | M4 | DONE |
+| 79 | MarkdownArtifact (markdown-block preview + code view) | artifacts | M4 | DONE |
+| 80 | TextArtifact (hljs highlight for code extensions, else plain pre) | artifacts | M4 | DONE |
+| 81 | ImageArtifact (data-URL render, MIME map, error placeholder, download) | artifacts | M4 | DONE |
+| 82 | PdfArtifact (pdfjs all-pages canvas at scale 1.5, worker config, download) | artifacts | M4 | DONE |
+| 83 | DocxArtifact (docx-preview renderAsync + style overrides, download) | artifacts | M4 | DONE |
+| 84 | ExcelArtifact (xlsx multi-sheet tabs + styled tables, download) | artifacts | M4 | DONE |
+| 85 | GenericArtifact (placeholder + download with extension MIME map) | artifacts | M4 | DONE |
+| 86 | artifact-console (collapsible, error count, autoscroll, copy) | artifacts | M4 | DONE |
+| 87 | ArtifactPill inline clickable badge (openArtifact navigation) | artifacts | M4 | DONE |
+| 88 | ArtifactsToolRenderer (create/rewrite code-block, update Diff, get, logs, delete; registered with panel ref) | artifacts | M4 | DONE |
 | 89 | Server-side `tool_result` RpcCommand variant for browser-tool replies | artifacts/browser-tools | M4 | TODO |
 | 90 | Server-side `artifacts` tool declaration (schema + dynamic description) for system prompt | artifacts | M4 | TODO |
 | 91 | createJavaScriptReplTool / javascriptReplTool (dynamic description, sandbox execute, base64 files) | browser-tools | M5 | TODO |

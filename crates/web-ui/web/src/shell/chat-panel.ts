@@ -1,18 +1,23 @@
 // Top-level chat shell layout orchestrator. Hosts the conversational
-// <agent-interface> and an artifacts panel slot. Above the 800px breakpoint the
-// two sit side-by-side; below it the artifacts panel becomes a full-screen
+// <agent-interface> and the real <artifacts-panel>. Above the 800px breakpoint
+// the two sit side-by-side; below it the artifacts panel becomes a full-screen
 // overlay and a floating "Artifacts N" pill appears whenever artifacts exist and
 // the panel is collapsed.
 //
-// In M1 the artifacts panel is a STUB (an empty bordered placeholder; the real
-// panel lands in the artifacts milestone). The artifact count is held at 0 here,
-// but the pill / overlay / breakpoint / show-hide logic is fully implemented so
-// it works as soon as artifacts exist.
+// The ChatPanel constructor registers the ArtifactsToolRenderer with the live
+// panel ref so artifacts-tool calls render with a navigable pill, and adds the
+// panel's client `artifacts` AgentTool to the agent's tool set (server-side
+// routing of the tool call is a separate server milestone). The pill count is
+// driven from the panel's artifact count via setArtifactCount/onArtifactsChange.
 
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { ArtifactsPanel } from "../artifacts/artifacts-panel";
+import { ArtifactsToolRenderer } from "../artifacts/artifacts-tool-renderer";
+import "../artifacts/index";
 import type { Agent } from "../core/agent";
-import type { AgentTool } from "../core/tool";
+import type { AgentTool, ToolResult } from "../core/tool";
+import { registerToolRenderer } from "../tools/renderer-registry";
 import { Badge } from "../ui/badge";
 import { i18n } from "../utils/i18n";
 import "./agent-interface";
@@ -39,8 +44,20 @@ export class ChatPanel extends LitElement {
   @state() private showArtifactsPanel = false;
   @state() private windowWidth = 0;
 
-  // Forwarded for the artifacts panel once it lands (sandbox CSP delivery).
+  // The live artifacts panel; created in setAgent.
+  private artifactsPanel: ArtifactsPanel;
   private sandboxUrlProvider?: () => string;
+  // True while reconstructFromMessages is replaying history; suppresses the
+  // auto-open / count-bump that a real user-driven create would trigger.
+  private reconstructing = false;
+
+  constructor() {
+    super();
+    // Construct the panel and register its tool renderer up front so the
+    // renderer (with the live panel ref) is available before the first render.
+    this.artifactsPanel = new ArtifactsPanel();
+    registerToolRenderer("artifacts", new ArtifactsToolRenderer(this.artifactsPanel));
+  }
 
   private resizeHandler = () => {
     this.windowWidth = window.innerWidth;
@@ -86,24 +103,90 @@ export class ChatPanel extends LitElement {
     agentInterface.onModelSelect = config?.onModelSelect;
     this.agentInterface = agentInterface;
 
-    // The artifacts tool factory lands with the artifacts milestone. M1 forwards
-    // any consumer-provided tools onto the agent state so the contract is real.
+    // Wire the artifacts panel to the agent + sandbox CSP provider + callbacks.
+    this.artifactsPanel.agent = agent;
+    if (this.sandboxUrlProvider) this.artifactsPanel.sandboxUrlProvider = this.sandboxUrlProvider;
+    this.artifactsPanel.onArtifactsChange = () => this.handleArtifactsChange();
+    this.artifactsPanel.onOpen = () => {
+      this.showArtifactsPanel = true;
+      this.requestUpdate();
+    };
+    this.artifactsPanel.onClose = () => {
+      this.showArtifactsPanel = false;
+      this.requestUpdate();
+    };
+
+    // Register the client artifacts tool on the agent's tool set. The panel's
+    // tool uses the richer (toolCallId, args, signal) contract; adapt it to the
+    // local AgentTool.execute(args) shape used by the agent state.
+    const panelTool = this.artifactsPanel.tool;
+    const artifactsTool: AgentTool = {
+      name: panelTool.name,
+      get description() {
+        return panelTool.description;
+      },
+      parameters: panelTool.parameters,
+      execute: async (args: unknown): Promise<ToolResult> => {
+        const result = await panelTool.execute(
+          "",
+          args as Parameters<typeof panelTool.execute>[1],
+        );
+        const text = result.content
+          .filter((c) => c.type === "text")
+          .map((c) => c.text ?? "")
+          .join("\n");
+        return { content: text, isError: false };
+      },
+    };
+
     const additionalTools = config?.toolsFactory?.(agent, agentInterface) ?? [];
-    if (additionalTools.length > 0) {
-      agent.state.tools = [...agent.state.tools, ...additionalTools];
-    }
+    agent.state.tools = [...agent.state.tools, artifactsTool, ...additionalTools];
+
+    // Replay any artifact history already present (e.g. restored session)
+    // without auto-opening the panel — preserve the null-during-reconstruct
+    // ordering by guarding the change handler while reconstructing.
+    await this.reconstructArtifacts();
 
     this.requestUpdate();
   }
 
-  /** The sandbox CSP URL provider, consumed by the artifacts panel once it lands. */
+  /** Replay artifact history from the current message list (no auto-open). */
+  public async reconstructArtifacts(): Promise<void> {
+    if (!this.agent) return;
+    this.reconstructing = true;
+    try {
+      await this.artifactsPanel.reconstructFromMessages(this.agent.state.messages);
+    } finally {
+      this.reconstructing = false;
+    }
+    // Sync the count after reconstruction without forcing the panel open.
+    const count = this.artifactsPanel.artifacts.size;
+    this.hasArtifacts = count > 0;
+    this.artifactCount = count;
+    this.requestUpdate();
+  }
+
+  /** Called by the panel whenever its artifact set changes. */
+  private handleArtifactsChange(): void {
+    const count = this.artifactsPanel.artifacts.size;
+    if (this.reconstructing) {
+      // During reconstruction, update count only; never auto-open.
+      this.hasArtifacts = count > 0;
+      this.artifactCount = count;
+      this.requestUpdate();
+      return;
+    }
+    this.setArtifactCount(count);
+  }
+
+  /** The sandbox CSP URL provider, consumed by the artifacts panel. */
   public getSandboxUrlProvider(): (() => string) | undefined {
     return this.sandboxUrlProvider;
   }
 
   /**
-   * Set the artifact count (called by the artifacts panel once it lands). M1
-   * holds this at 0; exposing it now lets the pill/overlay logic be exercised.
+   * Set the artifact count. A net-new artifact auto-opens the panel; the pill /
+   * overlay logic keys off hasArtifacts + showArtifactsPanel.
    */
   public setArtifactCount(count: number): void {
     const created = count > this.artifactCount;
@@ -115,32 +198,6 @@ export class ChatPanel extends LitElement {
     this.requestUpdate();
   }
 
-  /** Stub artifacts panel: an empty bordered placeholder until the real one lands. */
-  private renderArtifactsPanel() {
-    const isMobile = this.windowWidth < BREAKPOINT;
-    return html`
-      <div class="h-full w-full border-l border-border bg-background flex flex-col">
-        <div class="flex items-center justify-between px-3 h-10 border-b border-border">
-          <span class="text-sm font-medium">${i18n("Artifacts")}</span>
-          ${isMobile
-            ? html`<button
-                class="text-muted-foreground hover:text-foreground text-sm"
-                @click=${() => {
-                  this.showArtifactsPanel = false;
-                  this.requestUpdate();
-                }}
-              >
-                ${i18n("Close")}
-              </button>`
-            : ""}
-        </div>
-        <div class="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-          ${i18n("No artifacts yet")}
-        </div>
-      </div>
-    `;
-  }
-
   override render() {
     if (!this.agent || !this.agentInterface) {
       return html`<div class="flex items-center justify-center h-full">
@@ -150,6 +207,10 @@ export class ChatPanel extends LitElement {
 
     const isMobile = this.windowWidth < BREAKPOINT;
     const showPanel = this.showArtifactsPanel && this.hasArtifacts;
+
+    // Keep the panel's collapsed/overlay flags in sync with the layout.
+    this.artifactsPanel.collapsed = !showPanel;
+    this.artifactsPanel.overlay = isMobile && showPanel;
 
     return html`
       <div class="relative w-full h-full overflow-hidden flex">
@@ -189,7 +250,7 @@ export class ChatPanel extends LitElement {
               ? "width: 50%;"
               : "display: none;"}
         >
-          ${showPanel ? this.renderArtifactsPanel() : ""}
+          ${this.artifactsPanel}
         </div>
       </div>
     `;
