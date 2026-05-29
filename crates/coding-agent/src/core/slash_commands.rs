@@ -132,9 +132,24 @@ impl SlashCommandRegistry {
             ("help", vec!["h"], "Show available commands", false),
             ("quit", vec!["exit", "q"], "Quit the agent", false),
             ("clear", vec![], "Clear the chat scrollback", false),
-            ("model", vec![], "Switch model", true),
-            ("models", vec![], "List available models", true),
-            ("session", vec![], "Show session info", false),
+            (
+                "model",
+                vec![],
+                "Select or switch model (pattern resolves inline)",
+                true,
+            ),
+            (
+                "models",
+                vec![],
+                "Select or switch model (alias for /model)",
+                true,
+            ),
+            (
+                "session",
+                vec![],
+                "Show session info (id, model, tokens, duration)",
+                false,
+            ),
             ("settings", vec![], "Show current settings", false),
             (
                 "thinking",
@@ -142,7 +157,12 @@ impl SlashCommandRegistry {
                 "Set thinking level (minimal/low/medium/high/xhigh)",
                 true,
             ),
-            ("compact", vec![], "Manually compact context", true),
+            (
+                "compact",
+                vec![],
+                "Compact context (optional `[text]` custom focus)",
+                true,
+            ),
             ("new", vec![], "Start a new session", false),
             ("resume", vec![], "Browse and select session", true),
             ("name", vec![], "Set session display name", true),
@@ -167,7 +187,7 @@ impl SlashCommandRegistry {
                 "Show keyboard shortcuts",
                 false,
             ),
-            ("changelog", vec![], "Display version info", false),
+            ("changelog", vec![], "Show CHANGELOG.md", false),
             ("skills", vec![], "List discovered skills", false),
             ("extensions", vec![], "List loaded Tier 1 extensions", false),
             ("theme", vec![], "Select or set a theme", true),
@@ -394,6 +414,46 @@ mod tests {
     fn registry_commands_not_empty() {
         let registry = SlashCommandRegistry::new();
         assert!(registry.commands().len() >= 15);
+    }
+
+    /// Autocomplete dropdowns surface the registry description directly,
+    /// so a misleading entry (e.g. "/models — List available models" when
+    /// `/models` actually opens a selector) trains users to expect the
+    /// wrong behaviour. Pin the descriptions that previously drifted.
+    #[test]
+    fn registry_descriptions_match_actual_behaviour() {
+        let registry = SlashCommandRegistry::new();
+        let models = registry.find("models").expect("/models registered");
+        assert!(
+            !models.description.to_ascii_lowercase().contains("list"),
+            "/models description still implies listing: {}",
+            models.description
+        );
+        let changelog = registry
+            .find("changelog")
+            .expect("/changelog registered");
+        assert!(
+            !changelog
+                .description
+                .to_ascii_lowercase()
+                .contains("version info"),
+            "/changelog description still says version info: {}",
+            changelog.description
+        );
+        let compact = registry.find("compact").expect("/compact registered");
+        assert!(
+            compact.description.to_ascii_lowercase().contains("text")
+                || compact.description.contains("[text]"),
+            "/compact description does not mention the optional arg: {}",
+            compact.description
+        );
+        let model = registry.find("model").expect("/model registered");
+        let model_desc = model.description.to_ascii_lowercase();
+        assert!(
+            model_desc.contains("select") || model_desc.contains("switch"),
+            "/model description missing select/switch verb: {}",
+            model.description
+        );
     }
 
     #[test]
