@@ -4,6 +4,7 @@ members = [
     "crates/agent",
     "crates/tui",
     "crates/coding-agent",
+    "crates/web-ui",
     "examples",
     "crates/coding-agent/examples/extensions/permission-gate",
     "crates/coding-agent/examples/extensions/dirty-repo-guard",
