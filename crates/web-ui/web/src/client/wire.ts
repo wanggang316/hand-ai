@@ -4,6 +4,7 @@
 // the subset M0 needs is fully typed here; later milestones extend it.
 
 import type { AgentMessage, ContentBlock, StopReason, Usage } from "../core/messages";
+import type { Model } from "../core/model";
 
 /**
  * Loose message shape as it appears inside agent-event frames. Message
@@ -37,6 +38,14 @@ export interface SetModelCommand {
   provider: string;
   modelId: string;
 }
+export interface CycleModelCommand {
+  type: "cycle_model";
+  id?: string;
+}
+export interface GetAvailableModelsCommand {
+  type: "get_available_models";
+  id?: string;
+}
 export interface SetThinkingLevelCommand {
   type: "set_thinking_level";
   id?: string;
@@ -66,6 +75,8 @@ export type ClientCommand =
   | PromptCommand
   | AbortCommand
   | SetModelCommand
+  | CycleModelCommand
+  | GetAvailableModelsCommand
   | SetThinkingLevelCommand
   | GetStateCommand
   | ToolResultCommand;
@@ -79,6 +90,15 @@ export interface ResponseFrame {
   success: boolean;
   data?: unknown;
   error?: string | null;
+}
+
+/**
+ * `get_available_models` response data. The server serializes each native
+ * `Model` directly; its camelCase field set is structurally compatible with
+ * the local `Model` interface (`src/core/model.ts`).
+ */
+export interface AvailableModelsData {
+  models: Model[];
 }
 
 /** Agent-loop event payload (`kind: "agent"`), carrying a flattened event. */

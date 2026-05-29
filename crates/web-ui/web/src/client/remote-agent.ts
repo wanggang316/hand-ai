@@ -23,7 +23,7 @@ import type {
   UserMessage,
 } from "../core/messages";
 import type { Model, ThinkingLevel } from "../core/model";
-import { isAgentEvent, type ServerFrame, type WireMessage } from "./wire";
+import { type AvailableModelsData, isAgentEvent, type ServerFrame, type WireMessage } from "./wire";
 import type { WsConnection } from "./ws-connection";
 
 /** Result shape a browser-executed tool returns (matches the artifacts tool). */
@@ -119,6 +119,18 @@ export class RemoteAgent implements Agent {
       provider: model.provider,
       modelId: model.id,
     });
+  }
+
+  /**
+   * Fetch the server's full model catalog via the correlated request/response
+   * path. The server serializes each native `Model` directly, so the returned
+   * objects are structurally the local `Model` type.
+   */
+  async getAvailableModels(): Promise<Model[]> {
+    const data = await this.conn.request<AvailableModelsData>({
+      type: "get_available_models",
+    });
+    return data?.models ?? [];
   }
 
   setThinkingLevel(level: ThinkingLevel): void {

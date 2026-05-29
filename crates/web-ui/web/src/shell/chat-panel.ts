@@ -14,7 +14,8 @@
 
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import type { BrowserToolResult } from "../client/remote-agent";
+import type { BrowserToolResult, RemoteAgent } from "../client/remote-agent";
+import { ModelSelector } from "../providers/model-selector";
 import { ArtifactsPanel } from "../artifacts/artifacts-panel";
 import { ArtifactsToolRenderer } from "../artifacts/artifacts-tool-renderer";
 import "../artifacts/index";
@@ -126,7 +127,11 @@ export class ChatPanel extends LitElement {
     agentInterface.onApiKeyRequired = config?.onApiKeyRequired;
     agentInterface.onBeforeSend = config?.onBeforeSend;
     agentInterface.onCostClick = config?.onCostClick;
-    agentInterface.onModelSelect = config?.onModelSelect;
+    // The model button opens the model selector: the catalog is loaded from the
+    // server via getAvailableModels and switching applies server-side through
+    // setModel. A caller-supplied onModelSelect takes precedence.
+    agentInterface.onModelSelect =
+      config?.onModelSelect ?? (() => this.openModelSelector(agent));
     this.agentInterface = agentInterface;
 
     // Wire the artifacts panel to the agent + sandbox CSP provider + callbacks.
@@ -181,6 +186,21 @@ export class ChatPanel extends LitElement {
     await this.reconstructArtifacts();
 
     this.requestUpdate();
+  }
+
+  /**
+   * Open the model selector for the active agent. The catalog comes from the
+   * server (`getAvailableModels`) when the agent exposes it (RemoteAgent);
+   * selecting a model applies it server-side via `setModel`.
+   */
+  private openModelSelector(agent: Agent): void {
+    const remote =
+      typeof (agent as Partial<RemoteAgent>).getAvailableModels === "function"
+        ? (agent as RemoteAgent)
+        : undefined;
+    ModelSelector.open(agent.state.model ?? null, (model) => agent.setModel(model), {
+      agent: remote,
+    });
   }
 
   /** Replay artifact history from the current message list (no auto-open). */

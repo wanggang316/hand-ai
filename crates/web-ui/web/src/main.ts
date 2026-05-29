@@ -167,7 +167,8 @@ void panel.setAgent(agent, {
   onApiKeyRequired: async () => true,
   onBeforeSend: () => {},
   onCostClick: () => {},
-  onModelSelect: () => {},
+  // onModelSelect intentionally omitted: the chat panel's default opens the
+  // model selector. (A no-op here would suppress it.)
   // The server declares the `artifacts` tool; the panel executes it in the
   // browser. Bind the executor registration to the concrete RemoteAgent here,
   // where both the agent and the panel are reachable.

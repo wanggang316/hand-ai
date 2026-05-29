@@ -306,7 +306,10 @@ export class MessageEditor extends LitElement {
                   className: "h-8 text-xs truncate",
                   onClick: () => {
                     this.textareaRef.value?.focus();
-                    requestAnimationFrame(() => this.onModelSelect?.());
+                    // Defer past the current click so the dialog's outside-click
+                    // close does not catch this same click. setTimeout (not rAF)
+                    // so it still fires in a backgrounded/headless tab.
+                    setTimeout(() => this.onModelSelect?.(), 0);
                   },
                   children: html`<span class="ml-1">${this.currentModel.id}</span>`,
                 })

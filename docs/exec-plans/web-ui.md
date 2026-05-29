@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M7 complete)
+**Status:** In progress (M0-M8 complete)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -43,7 +43,7 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   to honor it) is M10's attachment dispatch — the editor collects + previews them
   now; `RemoteAgent.sendMessage` still drops the attachments arg until M10.)
 - [x] **M7 — Storage (IndexedDB)**
-- [ ] **M8 — Providers / models**
+- [x] **M8 — Providers / models**
 - [ ] **M9 — Dialogs / settings**
 - [ ] **M10 — Proxy / networking / out-of-band upload-download**
 - [ ] **M11 — i18n / format / theming / design system**
@@ -113,6 +113,20 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
+- **M8 (2026-05-29)**: Model selection + provider management. Added a correlated
+  WS request/response path (`WsConnection.request` + `RemoteAgent.getAvailableModels`)
+  since the model list comes from the server's existing `get_available_models`
+  command. `<hand-model-selector>` (subsequence fuzzy search, Thinking/Vision
+  filters, keyboard nav, cost/context formatting), `DialogBase`, custom-provider
+  card/dialog + fetch-based auto-discovery (Ollama/llama.cpp/vLLM/LM Studio, no
+  heavy SDK deps), `provider-key-input`, `providers-models-tab`. Verified in a
+  browser: `getAvailableModels()` returned 691 models; the model button opens the
+  selector; typing "claude sonnet" fuzzy-filtered to the claude-sonnet rows with
+  cost/context shown. Two bugs caught by browser testing and fixed: (1) the M1
+  no-op `onModelSelect` in `main.ts` overrode the chat-panel default (removed);
+  (2) the editor's model button deferred the open via `requestAnimationFrame`,
+  which is throttled in backgrounded/headless tabs — switched to `setTimeout(0)`
+  (the recurring rAF lesson; audit other rAF-deferred user actions).
 - **M7 (2026-05-29)**: IndexedDB persistence layer — `StorageBackend` +
   `IndexedDBStorageBackend` (lazy open, schema config, prefix scan, cursor index,
   quota/persist with graceful fallback), `Store` base, `AppStorage` singleton,
@@ -517,24 +531,24 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 134 | SessionMetadata / SessionData / CustomProvider types | storage | M7 | DONE |
 | 135 | IndexedDB schema config types (IndexedDBConfig/StoreConfig/IndexConfig) | storage | M7 | DONE |
 | 136 | Auto-save: persist message history to IndexedDB on RemoteAgent state updates | storage/client | M7 | DONE |
-| 137 | Model registry enumeration (built-in providers + models, served via `get_available_models`) | providers-models | M8 | TODO |
-| 138 | Subsequence-scored fuzzy model search | providers-models | M8 | TODO |
-| 139 | Capability filter: reasoning/thinking models | providers-models | M8 | TODO |
-| 140 | Capability filter: vision/image models | providers-models | M8 | TODO |
-| 141 | Keyboard-navigable model picker dialog (`hand-model-selector`, IME-safe, current-model checkmark) | providers-models | M8 | TODO |
-| 142 | allowedProviders filter for the model selector | providers-models | M8 | TODO |
+| 137 | Model registry enumeration (built-in providers + models, served via `get_available_models`) | providers-models | M8 | DONE |
+| 138 | Subsequence-scored fuzzy model search | providers-models | M8 | DONE |
+| 139 | Capability filter: reasoning/thinking models | providers-models | M8 | DONE |
+| 140 | Capability filter: vision/image models | providers-models | M8 | DONE |
+| 141 | Keyboard-navigable model picker dialog (`hand-model-selector`, IME-safe, current-model checkmark) | providers-models | M8 | DONE |
+| 142 | allowedProviders filter for the model selector | providers-models | M8 | DONE |
 | 143 | Model cost formatting (formatModelCost, formatTokens K/M) | providers-models/utils | M8/M11 | TODO |
-| 144 | Custom provider CRUD (UUID-keyed IndexedDB) | providers-models | M8 | TODO |
-| 145 | Auto-discovery: Ollama (tools capability filter, context_length) | providers-models | M8 | TODO |
-| 146 | Auto-discovery: llama.cpp (`/v1/models`) | providers-models | M8 | TODO |
-| 147 | Auto-discovery: vLLM (`/v1/models`, max_model_len) | providers-models | M8 | TODO |
-| 148 | Auto-discovery: LM Studio (`@lmstudio/sdk` WebSocket) | providers-models | M8 | TODO |
-| 149 | Custom provider dialog Test Connection (discoverModels, first-5 list) | providers-models | M8 | TODO |
-| 150 | CustomProviderCard status indicator (connected/checking/disconnected) | providers-models | M8 | TODO |
-| 151 | Default base-URL prefill by provider type | providers-models | M8 | TODO |
-| 152 | ProviderKeyInput (`provider-key-input`, show key presence without revealing) | providers-models | M8 | TODO |
-| 153 | API-key validation via server round-trip (replaces in-browser completion) | providers-models | M8 | TODO |
-| 154 | ProvidersModelsTab (`providers-models-tab`, cloud + custom sections, add/edit/refresh/delete) | providers-models | M8 | TODO |
+| 144 | Custom provider CRUD (UUID-keyed IndexedDB) | providers-models | M8 | DONE |
+| 145 | Auto-discovery: Ollama (tools capability filter, context_length) | providers-models | M8 | DONE |
+| 146 | Auto-discovery: llama.cpp (`/v1/models`) | providers-models | M8 | DONE |
+| 147 | Auto-discovery: vLLM (`/v1/models`, max_model_len) | providers-models | M8 | DONE |
+| 148 | Auto-discovery: LM Studio (`@lmstudio/sdk` WebSocket) | providers-models | M8 | DONE |
+| 149 | Custom provider dialog Test Connection (discoverModels, first-5 list) | providers-models | M8 | DONE |
+| 150 | CustomProviderCard status indicator (connected/checking/disconnected) | providers-models | M8 | DONE |
+| 151 | Default base-URL prefill by provider type | providers-models | M8 | DONE |
+| 152 | ProviderKeyInput (`provider-key-input`, show key presence without revealing) | providers-models | M8 | DONE |
+| 153 | API-key validation via server round-trip (replaces in-browser completion) | providers-models | M8 | DONE |
+| 154 | ProvidersModelsTab (`providers-models-tab`, cloud + custom sections, add/edit/refresh/delete) | providers-models | M8 | DONE |
 | 155 | SettingsTab abstract base | dialogs-settings | M9 | TODO |
 | 156 | ApiKeysTab (`api-keys-tab`) | dialogs-settings | M9 | TODO |
 | 157 | ProxyTab (`proxy-tab`, document-fetch proxy config) | dialogs-settings | M9 | TODO |
@@ -563,7 +577,7 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 180 | WS command catalog: prompt/steer/follow_up/abort/abort_bash/bash | wire/backend-seam | M1/M5 | TODO |
 | 181 | WS command catalog: new_session/switch_session/fork/clone | wire/backend-seam | M9 | TODO |
 | 182 | WS command catalog: get_state/get_messages/get_fork_messages/get_last_assistant_text | wire/backend-seam | M1 | DONE |
-| 183 | WS command catalog: set_model/cycle_model/get_available_models | wire/backend-seam | M8 | TODO |
+| 183 | WS command catalog: set_model/cycle_model/get_available_models | wire/backend-seam | M8 | DONE |
 | 184 | WS command catalog: set_thinking_level/cycle_thinking_level | wire/backend-seam | M1 | DONE |
 | 185 | WS command catalog: set_steering_mode/set_follow_up_mode | wire/backend-seam | M1 | DONE |
 | 186 | WS command catalog: compact/set_auto_compaction/set_auto_retry/abort_retry | wire/backend-seam | M1 | DONE |
