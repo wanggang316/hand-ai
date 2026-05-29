@@ -293,19 +293,49 @@ impl AgentSession {
                 .join(".hand")
                 .join("sessions")
                 .join(format!("{}.jsonl", session_id));
+            // Prefix-match: when the exact `<dir>/<id>.jsonl` does
+            // not exist, scan the dir for `*.jsonl` files whose
+            // basename starts with the user's value. Restores the
+            // `--resume <prefix>` behaviour that regressed (#78)
+            // after the new long id format (#76) made the full id
+            // tedious to type. Ambiguous matches return None so the
+            // caller surfaces the "not found" error rather than
+            // silently picking one.
+            let prefix_match = |dir: &Path| -> Option<PathBuf> {
+                let entries = std::fs::read_dir(dir).ok()?;
+                let mut candidates: Vec<PathBuf> = entries
+                    .flatten()
+                    .filter_map(|e| {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if name.starts_with(session_id.as_str()) && name.ends_with(".jsonl") {
+                            Some(e.path())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if candidates.len() == 1 {
+                    candidates.pop()
+                } else {
+                    None
+                }
+            };
+            let legacy_dir = config.cwd.join(".hand").join("sessions");
             let resolved = if let Some(p) = direct {
                 p
             } else if primary.exists() {
                 primary
             } else if legacy.exists() && legacy != primary {
                 legacy
+            } else if let Some(p) = prefix_match(&session_dir) {
+                p
+            } else if let Some(p) = prefix_match(&legacy_dir) {
+                p
             } else {
-                // Neither path exists — try open on primary so the
-                // existing not-found error path fires, but supplement
-                // with both attempted locations in the message so
-                // users see what was actually checked.
+                // Nothing matched. Surface both attempted locations
+                // plus a hint that id-prefix lookup was also tried.
                 return Err(CodingAgentError::Session(format!(
-                    "Session \"{session_id}\" not found. Looked in:\n  - {primary}\n  - {legacy}",
+                    "Session \"{session_id}\" not found. Looked in:\n  - {primary}\n  - {legacy}\n  (also tried matching as an id prefix)",
                     primary = primary.display(),
                     legacy = legacy.display(),
                 )));
@@ -2093,6 +2123,45 @@ mod tests {
             "primary path missing: {msg}"
         );
         assert!(msg.contains(".hand/sessions"), "legacy path missing: {msg}");
+    }
+
+    /// Regression for #78: `--resume <prefix>` must resolve a session
+    /// by id-prefix when the exact `<dir>/<value>.jsonl` does not
+    /// exist. After #76 lengthened the id format, the resume site
+    /// only built a literal path and `.open()`d it, so anything
+    /// short of the full 32-char id missed the file. Seed a fresh
+    /// session under a custom `--session-dir`, then resume by a
+    /// short prefix and assert it resolves to the same id.
+    #[test]
+    fn resume_resolves_id_by_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let session_dir_tmp = TempDir::new().unwrap();
+        let session_dir = session_dir_tmp.path().to_path_buf();
+        std::fs::create_dir_all(&session_dir).unwrap();
+        // Mint a real session under the override dir so its id has
+        // the full collision-free shape from #76.
+        let sm = SessionManager::create_in(cwd, &session_dir).expect("create_in");
+        let full_id = sm.id().to_string();
+        drop(sm);
+        // A safe non-trivial prefix: drop the random suffix (the last
+        // hex group separated by `_`). The prefix is unique within
+        // the empty session_dir so the scan returns exactly one
+        // candidate.
+        let prefix = full_id.rsplit_once('_').unwrap().0.to_string();
+        assert!(prefix.len() < full_id.len(), "prefix must actually be shorter");
+
+        let mut config = test_config(cwd.to_path_buf());
+        config.session_dir = Some(session_dir.clone());
+        config.resume_session = Some(prefix.clone());
+
+        let session = AgentSession::new_with_skill_dirs(config, vec![], None, None)
+            .unwrap_or_else(|e| panic!("resume by prefix `{prefix}` failed: {e}"));
+        assert_eq!(
+            session.session_id(),
+            full_id,
+            "prefix resume must land on the same session id"
+        );
     }
 
     /// `AgentSession::new_with_skill_dirs` discovers a project skill and
