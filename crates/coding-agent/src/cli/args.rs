@@ -60,8 +60,11 @@ pub struct Args {
     #[arg(short, long, alias = "session", num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
 
-    /// Continue the most recent session
-    #[arg(short, long = "continue")]
+    /// Continue the most recent session. Mutually exclusive with
+    /// `--resume <id>` -- specifying both was previously a silent
+    /// noop: the bogus id got dropped and `--continue` won, hiding
+    /// typos. clap surfaces a clear conflict-with error instead (#80).
+    #[arg(short, long = "continue", conflicts_with = "resume")]
     pub continue_session: bool,
 
     /// Fork from a session file path or ID prefix
@@ -757,6 +760,51 @@ mod tests {
         assert!(long.continue_session);
         let short = Args::try_parse_from(["hand", "-c"]).unwrap();
         assert!(short.continue_session);
+    }
+
+    /// Regression for #80: `--continue` and `--resume <id>` are
+    /// mutually exclusive. Before this enforcement, supplying both
+    /// silently dropped the resume id and fell back to --continue's
+    /// most-recent semantics, hiding typos and silently swapping
+    /// the session the user actually wanted. clap surfaces a clean
+    /// conflict-with error instead.
+    #[test]
+    fn continue_and_resume_are_mutually_exclusive() {
+        let result = Args::try_parse_from([
+            "hand",
+            "--continue",
+            "--resume",
+            "s_anything",
+        ]);
+        let err = match result {
+            Ok(_) => panic!("conflicting flags must error at parse time"),
+            Err(e) => e,
+        };
+        let kind = err.kind();
+        assert!(
+            matches!(kind, clap::error::ErrorKind::ArgumentConflict),
+            "expected ArgumentConflict, got {kind:?}: {err}"
+        );
+        let msg = err.to_string();
+        // Mention both flags so users can self-diagnose without
+        // re-running with --help.
+        assert!(msg.contains("--continue"), "error must name --continue: {msg}");
+        assert!(msg.contains("--resume"), "error must name --resume: {msg}");
+    }
+
+    /// `-c -r <id>` (the short-form pair) must also conflict, not
+    /// just the long forms.
+    #[test]
+    fn continue_short_and_resume_short_are_mutually_exclusive() {
+        let result = Args::try_parse_from(["hand", "-c", "-r", "s_anything"]);
+        let err = match result {
+            Ok(_) => panic!("conflicting short flags must error"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        ));
     }
 
     #[test]
