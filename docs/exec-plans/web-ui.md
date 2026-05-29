@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M4 complete)
+**Status:** In progress (M0-M5 complete; M6 loadAttachment ingestion core done)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -36,8 +36,10 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   mechanism — server declares browser tools, suspends on a per-connection hub
   keyed by `tool_call_id`, `ws.rs` intercepts `tool_result` frames to resolve
   them; `run_rpc_server`/agent crates unchanged)
-- [ ] **M5 — Browser tools (JS REPL, extract-document)**
-- [ ] **M6 — Attachments**
+- [x] **M5 — Browser tools (JS REPL, extract-document)**
+- [~] **M6 — Attachments** (loadAttachment ingestion core + per-format processors
+  done, matrix rows 101-109; remaining: `<attachment-tile>`, `<attachment-overlay>`,
+  editor drag/drop/paste/picker wiring)
 - [ ] **M7 — Storage (IndexedDB)**
 - [ ] **M8 — Providers / models**
 - [ ] **M9 — Dialogs / settings**
@@ -109,6 +111,17 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
+- **M5 (2026-05-29)**: `javascript_repl` and `extract_document` browser tools
+  landed on the M4 hub (server declares them; client executors run in the M3
+  sandbox / via fetch+`loadAttachment`). Also implemented M6's `loadAttachment`
+  ingestion core (PDF/DOCX/PPTX/XLSX/image/text processors, chunked base64).
+  Verified in a browser: prompting the agent to use `javascript_repl` produced
+  roles `[user, assistant, toolResult, assistant]`, ran the code in the sandbox
+  (computed 70), and completed the turn — confirming the browser-tool hub
+  generalizes to a second tool. `extract_document` is gate-verified and uses the
+  identical hub path (only the executor body differs: fetch + 50MB cap + neutral
+  CORS fallback + `loadAttachment`). Remaining M6: attachment tile/overlay
+  elements + editor drag/drop/paste wiring.
 - **Browser-tool execution (2026-05-29)**: The cross-cutting mechanism that lets
   the server-side agent loop invoke browser-resident tools is implemented and
   verified end-to-end. Design (clean, id-correlated): a per-connection
@@ -437,16 +450,16 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 88 | ArtifactsToolRenderer (create/rewrite code-block, update Diff, get, logs, delete; registered with panel ref) | artifacts | M4 | DONE |
 | 89 | Browser-tool replies via `tool_result` frame (hub + ws.rs interception; no RpcCommand change needed) | artifacts/browser-tools | M4 | DONE |
 | 90 | Server-side `artifacts` tool declaration (schema + description) for system prompt | artifacts | M4 | DONE |
-| 91 | createJavaScriptReplTool / javascriptReplTool (dynamic description, sandbox execute, base64 files) | browser-tools | M5 | TODO |
-| 92 | executeJavaScript utility (hidden iframe, console+returnValue+files, 120s timeout, abort) | browser-tools | M5 | TODO |
-| 93 | javascriptReplRenderer (collapsible code + console + attachment chips; auto-register) | browser-tools | M5 | TODO |
-| 94 | createExtractDocumentTool / extractDocumentTool (fetch 50MB limit, CORS fallback, loadAttachment) | browser-tools | M5 | TODO |
-| 95 | extractDocumentRenderer (collapsible URL + extracted text / error console; auto-register) | browser-tools | M5 | TODO |
-| 96 | extract-document neutral CORS-fallback message (no reference brand) | browser-tools | M5 | TODO |
-| 97 | isCorsError predicate (extract-document fallback only) | browser-tools/utils | M5 | TODO |
-| 98 | Tool auto-registration via side-effect imports (`tools/index.ts`) | browser-tools | M5 | TODO |
-| 99 | RemoteAgent routes browser-tool calls to local execute and replies with `tool_result` | browser-tools/client | M5 | TODO |
-| 100 | Server-side `javascript_repl` / `extract_document` tool declarations for system prompt | browser-tools | M5 | TODO |
+| 91 | createJavaScriptReplTool / javascriptReplTool (dynamic description, sandbox execute, base64 files) | browser-tools | M5 | DONE |
+| 92 | executeJavaScript utility (hidden iframe, console+returnValue+files, 120s timeout, abort) | browser-tools | M5 | DONE |
+| 93 | javascriptReplRenderer (collapsible code + console + attachment chips; auto-register) | browser-tools | M5 | DONE |
+| 94 | createExtractDocumentTool / extractDocumentTool (fetch 50MB limit, CORS fallback, loadAttachment) | browser-tools | M5 | DONE |
+| 95 | extractDocumentRenderer (collapsible URL + extracted text / error console; auto-register) | browser-tools | M5 | DONE |
+| 96 | extract-document neutral CORS-fallback message (no reference brand) | browser-tools | M5 | DONE |
+| 97 | isCorsError predicate (extract-document fallback only) | browser-tools/utils | M5 | DONE |
+| 98 | Tool auto-registration via side-effect imports (`tools/index.ts`) | browser-tools | M5 | DONE |
+| 99 | RemoteAgent routes browser-tool calls to local execute and replies with `tool_result` | browser-tools/client | M5 | DONE |
+| 100 | Server-side `javascript_repl` / `extract_document` tool declarations for system prompt | browser-tools | M5 | DONE |
 | 101 | Attachment data model (id, type, fileName, mimeType, size, content base64, extractedText?, preview?) | attachments | M6 | TODO |
 | 102 | loadAttachment universal ingestion (URL/File/Blob/ArrayBuffer) | attachments | M6 | TODO |
 | 103 | PDF ingestion (page-tagged XML text + 160×160 thumbnail) | attachments | M6 | TODO |
@@ -525,7 +538,7 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 176 | app.css design tokens (CSS custom properties) | theming | M11 | TODO |
 | 177 | @keyframes shimmer + .animate-shimmer (thinking block) | theming | M11 | TODO |
 | 178 | Thin-scrollbar rules + user-message gradient (brand-neutral palette) | theming | M11 | TODO |
-| 179 | Tool description prompt constants reproduced verbatim, brand-neutral (prompts.ts) | utils/prompts | M5 | TODO |
+| 179 | Tool description prompt constants reproduced verbatim, brand-neutral (prompts.ts) | utils/prompts | M5 | DONE |
 | 180 | WS command catalog: prompt/steer/follow_up/abort/abort_bash/bash | wire/backend-seam | M1/M5 | TODO |
 | 181 | WS command catalog: new_session/switch_session/fork/clone | wire/backend-seam | M9 | TODO |
 | 182 | WS command catalog: get_state/get_messages/get_fork_messages/get_last_assistant_text | wire/backend-seam | M1 | DONE |

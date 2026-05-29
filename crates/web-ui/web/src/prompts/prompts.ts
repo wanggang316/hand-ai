@@ -140,3 +140,89 @@ const csvData = readTextAttachment(csvFile.id);
 const rows = csvData.split('\\n').map(row => row.split(','));
 \`\`\`
 `;
+
+/**
+ * Description of the file-download runtime helper the REPL exposes
+ * (`returnDownloadableFile`). Mirrors the `FileDownloadRuntimeProvider`
+ * description so the model knows how to hand files back to the user.
+ */
+export const FILE_DOWNLOAD_RUNTIME_DESCRIPTION = `
+### Returned Files
+
+Hand a generated file back to the user.
+
+#### Functions
+- returnDownloadableFile(fileName, content, mimeType?) - Return a file from the
+  REPL run. \`content\` may be a string, Uint8Array, or Blob. Returned files are
+  reported back to you and offered to the user; they are not accessible in a
+  later REPL call.
+`;
+
+/**
+ * JavaScript REPL tool description. The dynamic runtime-provider descriptions
+ * (attachments, returned files, etc.) are appended so the model knows which
+ * globals are available in the sandbox for the current run.
+ */
+export const JAVASCRIPT_REPL_TOOL_DESCRIPTION = (runtimeProviderDescriptions: string[]) => `# JavaScript REPL
+
+## Purpose
+Execute JavaScript code in a sandboxed browser environment with full Web APIs.
+
+## When to Use
+- Quick calculations or data transformations
+- Testing JavaScript code snippets in isolation
+- Processing data with libraries (XLSX, CSV, etc.)
+- Creating files from data
+
+## Environment
+- ES2023+ JavaScript (async/await, optional chaining, nullish coalescing, etc.)
+- All browser APIs: DOM, Canvas, WebGL, Fetch, Web Workers, WebSockets, Crypto, etc.
+- Import any npm package: await import('https://esm.run/package-name')
+
+## Common Libraries
+- XLSX: const XLSX = await import('https://esm.run/xlsx');
+- CSV: const Papa = (await import('https://esm.run/papaparse')).default;
+- Chart.js: const Chart = (await import('https://esm.run/chart.js/auto')).default;
+- Three.js: const THREE = await import('https://esm.run/three');
+
+## Persistence between tool calls
+- Objects stored on global scope do not persist between calls.
+
+## Input
+- You have access to the user's attachments via listAttachments(), readTextAttachment(id), and readBinaryAttachment(id)
+
+## Output
+- All console.log() calls are captured for you to inspect. The user does not see these logs.
+- Use returnDownloadableFile(fileName, content, mimeType?) for file results (images, JSON, CSV, etc.).
+
+## Example
+const data = [10, 20, 15, 25];
+const sum = data.reduce((a, b) => a + b, 0);
+const avg = sum / data.length;
+console.log('Sum:', sum, 'Average:', avg);
+
+## Important Notes
+- Graphics: Use fixed dimensions (800x600), NOT window.innerWidth/Height
+- Chart.js: Set options: { responsive: false, animation: false }
+- Three.js: renderer.setSize(800, 600) with matching aspect ratio
+
+## Helper Functions (Automatically Available)
+
+These functions are injected into the execution environment and available globally:
+
+${runtimeProviderDescriptions.join("\n\n")}
+`;
+
+/** Extract-document tool description. Brand-neutral. */
+export const EXTRACT_DOCUMENT_DESCRIPTION = `# Extract Document
+
+Extract plain text from documents on the web (PDF, DOCX, XLSX, PPTX).
+
+## When to Use
+User wants you to read a document at a URL.
+
+## Input
+- { url: "https://example.com/document.pdf" } - URL to PDF, DOCX, XLSX, or PPTX
+
+## Returns
+Structured plain text with page/sheet/slide delimiters.`;

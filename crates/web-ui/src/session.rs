@@ -15,7 +15,10 @@
 //! frames.
 
 use crate::app::AppState;
-use crate::browser_tools::{BrowserToolHub, artifacts_browser_tool};
+use crate::browser_tools::{
+    BrowserToolHub, artifacts_browser_tool, extract_document_browser_tool,
+    javascript_repl_browser_tool,
+};
 use hand_coding_agent::{AgentSession, model_resolver, tools};
 
 /// Build a fresh in-memory agent session for a new connection, paired with the
@@ -26,6 +29,8 @@ pub fn build_session(state: &AppState) -> (AgentSession, BrowserToolHub) {
     let hub = BrowserToolHub::new();
     let mut agent_tools = tools::create_default_tools(&state.cwd);
     agent_tools.push(artifacts_browser_tool(hub.clone()));
+    agent_tools.push(javascript_repl_browser_tool(hub.clone()));
+    agent_tools.push(extract_document_browser_tool(hub.clone()));
 
     let session =
         AgentSession::in_memory_with_client(resolved.model, agent_tools, model::Client::new());

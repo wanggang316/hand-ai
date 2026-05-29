@@ -171,6 +171,108 @@ pub fn artifacts_browser_tool(hub: BrowserToolHub) -> AgentTool {
     )
 }
 
+// ---------------------------------------------------------------------------
+// JavaScript REPL browser tool: server-side declaration.
+// ---------------------------------------------------------------------------
+
+/// Brand-neutral name of the JavaScript REPL tool. Must match the client tool
+/// name (`javascript_repl`) registered as the browser executor.
+pub const JAVASCRIPT_REPL_TOOL_NAME: &str = "javascript_repl";
+
+/// Description shown to the LLM for the JavaScript REPL tool. The client tool's
+/// description is dynamic (it appends the available sandbox runtime helpers); the
+/// server declares a static, brand-neutral summary sufficient for the model to
+/// call the tool correctly. Kept in sync with the client tool description.
+pub const JAVASCRIPT_REPL_TOOL_DESCRIPTION: &str = "\
+Execute JavaScript code in a sandboxed browser environment with full Web APIs.
+
+Use this for quick calculations, data transformations, testing snippets in \
+isolation, or processing data with libraries (e.g. XLSX, CSV).
+
+Environment:
+- ES2023+ JavaScript (async/await, optional chaining, etc.).
+- All browser APIs: DOM, Canvas, WebGL, Fetch, Web Workers, Crypto, etc.
+- Import any npm package: `await import('https://esm.run/package-name')`.
+
+Input/output:
+- Read the user's attachments via `listAttachments()`, `readTextAttachment(id)`, \
+and `readBinaryAttachment(id)` when attachments are present.
+- All `console.log()` output is captured and returned to you (the user does not \
+see these logs).
+- Return generated files via `returnDownloadableFile(fileName, content, mimeType?)`.
+
+Notes:
+- Globals do not persist between calls.
+- For graphics, use fixed dimensions (e.g. 800x600), not `window.innerWidth/Height`.";
+
+/// JSON Schema for the JavaScript REPL tool parameters. Mirrors the client tool's
+/// schema (`crates/web-ui/web/src/tools/javascript-repl.ts`).
+pub fn javascript_repl_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "code": { "type": "string", "description": "JavaScript code to execute" }
+        },
+        "required": ["code"]
+    })
+}
+
+/// Build the JavaScript REPL browser tool bound to `hub`.
+pub fn javascript_repl_browser_tool(hub: BrowserToolHub) -> AgentTool {
+    browser_tool(
+        JAVASCRIPT_REPL_TOOL_NAME,
+        JAVASCRIPT_REPL_TOOL_DESCRIPTION,
+        javascript_repl_parameters(),
+        hub,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Extract-document browser tool: server-side declaration.
+// ---------------------------------------------------------------------------
+
+/// Brand-neutral name of the extract-document tool. Must match the client tool
+/// name (`extract_document`) registered as the browser executor.
+pub const EXTRACT_DOCUMENT_TOOL_NAME: &str = "extract_document";
+
+/// Description shown to the LLM for the extract-document tool. Kept in sync with
+/// the client tool description (`crates/web-ui/web/src/prompts/prompts.ts`).
+pub const EXTRACT_DOCUMENT_TOOL_DESCRIPTION: &str = "\
+Extract plain text from documents on the web (PDF, DOCX, XLSX, PPTX).
+
+Use this when the user wants you to read a document at a URL.
+
+Input:
+- { url: \"https://example.com/document.pdf\" } - URL to a PDF, DOCX, XLSX, or \
+PPTX document.
+
+Returns structured plain text with page / sheet / slide delimiters.";
+
+/// JSON Schema for the extract-document tool parameters. Mirrors the client
+/// tool's schema (`crates/web-ui/web/src/tools/extract-document.ts`).
+pub fn extract_document_parameters() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "URL of the document to extract text from (PDF, DOCX, XLSX, or PPTX)"
+            }
+        },
+        "required": ["url"]
+    })
+}
+
+/// Build the extract-document browser tool bound to `hub`.
+pub fn extract_document_browser_tool(hub: BrowserToolHub) -> AgentTool {
+    browser_tool(
+        EXTRACT_DOCUMENT_TOOL_NAME,
+        EXTRACT_DOCUMENT_TOOL_DESCRIPTION,
+        extract_document_parameters(),
+        hub,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

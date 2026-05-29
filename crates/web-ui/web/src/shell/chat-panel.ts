@@ -19,7 +19,21 @@ import { ArtifactsPanel } from "../artifacts/artifacts-panel";
 import { ArtifactsToolRenderer } from "../artifacts/artifacts-tool-renderer";
 import "../artifacts/index";
 import type { Agent } from "../core/agent";
+import type { Attachment } from "../core/messages";
 import type { AgentTool } from "../core/tool";
+import {
+  AttachmentsRuntimeProvider,
+  FileDownloadRuntimeProvider,
+  type SandboxRuntimeProvider,
+} from "../sandbox";
+import {
+  createExtractDocumentTool,
+  makeExtractDocumentExecutor,
+} from "../tools/extract-document";
+import {
+  createJavaScriptReplTool,
+  makeJavaScriptReplExecutor,
+} from "../tools/javascript-repl";
 import { registerToolRenderer } from "../tools/renderer-registry";
 import { Badge } from "../ui/badge";
 import { i18n } from "../utils/i18n";
@@ -144,6 +158,18 @@ export class ChatPanel extends LitElement {
       },
     );
 
+    // The SERVER also declares `javascript_repl` and `extract_document`; the
+    // browser EXECUTES them. The REPL runs in a transient sandbox iframe with
+    // attachment + file-download runtime providers built per-run from the live
+    // conversation; extract_document fetches + parses a URL via loadAttachment.
+    const replTool = createJavaScriptReplTool();
+    replTool.runtimeProvidersFactory = () => this.buildReplRuntimeProviders(agent);
+    if (this.sandboxUrlProvider) replTool.sandboxUrlProvider = this.sandboxUrlProvider;
+    config?.registerBrowserTool?.(replTool.name, makeJavaScriptReplExecutor(replTool));
+
+    const extractTool = createExtractDocumentTool();
+    config?.registerBrowserTool?.(extractTool.name, makeExtractDocumentExecutor(extractTool));
+
     const additionalTools = config?.toolsFactory?.(agent, agentInterface) ?? [];
     if (additionalTools.length > 0) {
       agent.state.tools = [...agent.state.tools, ...additionalTools];
@@ -189,6 +215,26 @@ export class ChatPanel extends LitElement {
   /** The sandbox CSP URL provider, consumed by the artifacts panel. */
   public getSandboxUrlProvider(): (() => string) | undefined {
     return this.sandboxUrlProvider;
+  }
+
+  /**
+   * Build the runtime providers offered to a JavaScript REPL run: the user's
+   * attachments (read-only, from any `user-with-attachments` messages) plus the
+   * file-download helper so returned files round-trip back to the host.
+   */
+  private buildReplRuntimeProviders(agent: Agent): SandboxRuntimeProvider[] {
+    const providers: SandboxRuntimeProvider[] = [];
+    const attachments: Attachment[] = [];
+    for (const message of agent.state.messages) {
+      if (message.role === "user-with-attachments" && message.attachments) {
+        attachments.push(...message.attachments);
+      }
+    }
+    if (attachments.length > 0) {
+      providers.push(new AttachmentsRuntimeProvider(attachments));
+    }
+    providers.push(new FileDownloadRuntimeProvider());
+    return providers;
   }
 
   /**
