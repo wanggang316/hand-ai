@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M6 complete)
+**Status:** In progress (M0-M7 complete)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -42,7 +42,7 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   attachments TO the agent (image content in the `prompt` frame + a server change
   to honor it) is M10's attachment dispatch — the editor collects + previews them
   now; `RemoteAgent.sendMessage` still drops the attachments arg until M10.)
-- [ ] **M7 — Storage (IndexedDB)**
+- [x] **M7 — Storage (IndexedDB)**
 - [ ] **M8 — Providers / models**
 - [ ] **M9 — Dialogs / settings**
 - [ ] **M10 — Proxy / networking / out-of-band upload-download**
@@ -113,6 +113,17 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
+- **M7 (2026-05-29)**: IndexedDB persistence layer — `StorageBackend` +
+  `IndexedDBStorageBackend` (lazy open, schema config, prefix scan, cursor index,
+  quota/persist with graceful fallback), `Store` base, `AppStorage` singleton,
+  and the four stores (Settings, ProviderKeys, Sessions dual-store with atomic
+  save/delete and single-transaction `updateTitle`, CustomProviders). Bootstrap
+  wires them (db `hand-ai`) + a resilient auto-save subscription on
+  `agent_end`/`message_end`. Verified in a browser: a save → get + getAllMetadata
+  → updateTitle → delete round-trip returns
+  `{saved, restoredOk, metadataCount:1, titleUpdated, deletedOk}` all true,
+  confirming the atomic dual-store writes. (Two transient API 500s delayed this
+  milestone by one loop iteration; no code impact.)
 - **M6 (2026-05-29)**: Attachment UI complete — `<attachment-tile>` (thumbnail/
   badge/delete), `<attachment-overlay>` (PDF all-pages / DOCX / Excel / PPTX /
   image / text + extracted-text toggle + download), and editor ingestion
@@ -494,18 +505,18 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 122 | MessageEditor drag-and-drop file upload with overlay | attachments/chat-shell | M6 | DONE |
 | 123 | MessageEditor clipboard paste image capture | attachments/chat-shell | M6 | DONE |
 | 124 | MessageEditor file picker + attachment tile row with delete (max 10, 20MB, accepted types) | attachments/chat-shell | M6 | DONE |
-| 125 | StorageBackend / StorageTransaction interfaces | storage | M7 | TODO |
-| 126 | IndexedDBStorageBackend (lazy open, schema config, prefix scan, cursor index, quota, persist) | storage | M7 | TODO |
-| 127 | Store abstract base + setBackend/getBackend | storage | M7 | TODO |
-| 128 | AppStorage facade + getAppStorage/setAppStorage singleton | storage | M7 | TODO |
-| 129 | SettingsStore | storage | M7 | TODO |
-| 130 | ProviderKeysStore (per-provider key, has/list, never exposes value) | storage | M7 | TODO |
-| 131 | SessionsStore dual-store (sessions + sessions-metadata, atomic save/delete) | storage | M7 | TODO |
-| 132 | SessionsStore getAllMetadata desc, getLatestSessionId, updateTitle (single transaction) | storage | M7 | TODO |
-| 133 | CustomProvidersStore (UUID-keyed, getAll, has) | storage | M7 | TODO |
-| 134 | SessionMetadata / SessionData / CustomProvider types | storage | M7 | TODO |
-| 135 | IndexedDB schema config types (IndexedDBConfig/StoreConfig/IndexConfig) | storage | M7 | TODO |
-| 136 | Auto-save: persist message history to IndexedDB on RemoteAgent state updates | storage/client | M7 | TODO |
+| 125 | StorageBackend / StorageTransaction interfaces | storage | M7 | DONE |
+| 126 | IndexedDBStorageBackend (lazy open, schema config, prefix scan, cursor index, quota, persist) | storage | M7 | DONE |
+| 127 | Store abstract base + setBackend/getBackend | storage | M7 | DONE |
+| 128 | AppStorage facade + getAppStorage/setAppStorage singleton | storage | M7 | DONE |
+| 129 | SettingsStore | storage | M7 | DONE |
+| 130 | ProviderKeysStore (per-provider key, has/list, never exposes value) | storage | M7 | DONE |
+| 131 | SessionsStore dual-store (sessions + sessions-metadata, atomic save/delete) | storage | M7 | DONE |
+| 132 | SessionsStore getAllMetadata desc, getLatestSessionId, updateTitle (single transaction) | storage | M7 | DONE |
+| 133 | CustomProvidersStore (UUID-keyed, getAll, has) | storage | M7 | DONE |
+| 134 | SessionMetadata / SessionData / CustomProvider types | storage | M7 | DONE |
+| 135 | IndexedDB schema config types (IndexedDBConfig/StoreConfig/IndexConfig) | storage | M7 | DONE |
+| 136 | Auto-save: persist message history to IndexedDB on RemoteAgent state updates | storage/client | M7 | DONE |
 | 137 | Model registry enumeration (built-in providers + models, served via `get_available_models`) | providers-models | M8 | TODO |
 | 138 | Subsequence-scored fuzzy model search | providers-models | M8 | TODO |
 | 139 | Capability filter: reasoning/thinking models | providers-models | M8 | TODO |
