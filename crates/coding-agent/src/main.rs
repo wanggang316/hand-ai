@@ -237,7 +237,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else if let Some(ref fork_source) = cli.fork {
         // Fork from existing session
-        let fork_path = resolve_session_path(&cwd, fork_source);
+        let fork_path = resolve_session_path_in(
+            base_config.session_dir.as_deref(),
+            &cwd,
+            fork_source,
+        );
         match hand_coding_agent::SessionManager::fork_from(&fork_path, &cwd) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
@@ -800,8 +804,21 @@ fn print_help() {
     println!("  @<filepath>          Include file contents in message");
 }
 
-fn resolve_session_path(cwd: &std::path::Path, source: &str) -> PathBuf {
-    hand_coding_agent::SessionManager::resolve_session_source(None, cwd, source)
+/// Resolve a `--fork <source>` argument to an on-disk path. Probes
+/// `--session-dir <X>` (when set) before the home-based default so
+/// `--fork <id> --session-dir <X>` matches the plumbing
+/// `--continue` / `--resume` already have (#77).
+fn resolve_session_path_in(
+    session_dir: Option<&std::path::Path>,
+    cwd: &std::path::Path,
+    source: &str,
+) -> PathBuf {
+    hand_coding_agent::SessionManager::resolve_session_source_in(
+        session_dir,
+        None,
+        cwd,
+        source,
+    )
 }
 
 fn execute_shell(cmd: &str) {

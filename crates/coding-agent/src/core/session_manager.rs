@@ -1056,13 +1056,32 @@ impl SessionManager {
     /// [`Self::default_session_dir_with_base`] for embedders that route
     /// state through their own data directory.
     pub fn resolve_session_source(base: Option<&Path>, cwd: &Path, source: &str) -> PathBuf {
+        Self::resolve_session_source_in(None, base, cwd, source)
+    }
+
+    /// Same as [`Self::resolve_session_source`] but probes an explicit
+    /// `--session-dir` override before the home-based / legacy
+    /// fallbacks. Mirrors the plumbing `--continue` / `--resume` already
+    /// have so `--fork <id> --session-dir <X>` resolves ids stored in
+    /// `<X>` instead of erroring with "No session found" (#77).
+    pub fn resolve_session_source_in(
+        session_dir: Option<&Path>,
+        base: Option<&Path>,
+        cwd: &Path,
+        source: &str,
+    ) -> PathBuf {
         let raw = PathBuf::from(source);
         if raw.is_file() {
             return raw;
         }
         let home_dir = Self::default_session_dir_with_base(base, cwd);
         let legacy_dir = cwd.join(".hand").join("sessions");
-        for dir in [&home_dir, &legacy_dir] {
+        let override_dir = session_dir.map(|d| d.to_path_buf());
+        let probe: Vec<&PathBuf> = override_dir
+            .iter()
+            .chain([&home_dir, &legacy_dir])
+            .collect();
+        for dir in probe {
             let exact = dir.join(format!("{source}.jsonl"));
             if exact.is_file() {
                 return exact;
@@ -1332,6 +1351,56 @@ mod tests {
         // caller's error message carries the user's raw text.
         let bogus = SessionManager::resolve_session_source(None, cwd_path, "s_not_a_thing");
         assert_eq!(bogus, PathBuf::from("s_not_a_thing"));
+    }
+
+    /// Regression for #77: `--fork <id> --session-dir <X>` must
+    /// resolve ids stored in `<X>` (same plumbing #58 added for
+    /// `--continue`). Seed a session under an explicit dir that is
+    /// NOT the home-based default, and assert
+    /// `resolve_session_source_in` finds it by both exact id and
+    /// prefix, while the home-based-only resolver does not.
+    #[test]
+    fn resolve_session_source_in_honours_explicit_session_dir() {
+        let home = TempDir::new().unwrap();
+        let _g = scoped_hand_home(home.path());
+        let cwd = TempDir::new().unwrap();
+        let cwd_path = cwd.path();
+
+        // Use a session_dir that is NOT the home-based default so a
+        // false positive (resolving from home) cannot pass.
+        let override_dir = TempDir::new().unwrap();
+        let override_dir = override_dir.path();
+        let full_id = "s_19e72011771_0_8c29f66da9ec33e3";
+        let session_file = override_dir.join(format!("{full_id}.jsonl"));
+        std::fs::write(&session_file, "").unwrap();
+
+        // Without the override, the home-based default doesn't see it.
+        let resolved =
+            SessionManager::resolve_session_source(None, cwd_path, full_id);
+        assert_ne!(
+            resolved, session_file,
+            "without --session-dir the resolver must not magically find override-dir files"
+        );
+
+        // With the override, both exact and prefix match.
+        let resolved = SessionManager::resolve_session_source_in(
+            Some(override_dir),
+            None,
+            cwd_path,
+            full_id,
+        );
+        assert_eq!(resolved, session_file, "exact id must resolve under --session-dir");
+
+        let resolved = SessionManager::resolve_session_source_in(
+            Some(override_dir),
+            None,
+            cwd_path,
+            "s_19e72011771",
+        );
+        assert_eq!(
+            resolved, session_file,
+            "id prefix must resolve under --session-dir"
+        );
     }
 
     #[test]
