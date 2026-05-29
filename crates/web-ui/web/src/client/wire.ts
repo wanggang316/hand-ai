@@ -46,13 +46,29 @@ export interface GetStateCommand {
   type: "get_state";
   id?: string;
 }
+/**
+ * Reply to a server-declared, browser-executed tool call (e.g. `artifacts`).
+ * The server suspends the tool's execution until this frame arrives, keyed by
+ * `toolCallId`. `content` carries the result blocks; the server concatenates
+ * text parts into the tool result returned to the agent loop.
+ */
+export interface ToolResultCommand {
+  type: "tool_result";
+  id?: string;
+  toolCallId: string;
+  toolName?: string;
+  content: { type: "text" | "image"; text?: string }[];
+  isError: boolean;
+  details?: unknown;
+}
 
 export type ClientCommand =
   | PromptCommand
   | AbortCommand
   | SetModelCommand
   | SetThinkingLevelCommand
-  | GetStateCommand;
+  | GetStateCommand
+  | ToolResultCommand;
 
 // ---- server -> client -------------------------------------------------------
 

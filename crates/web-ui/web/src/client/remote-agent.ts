@@ -19,11 +19,25 @@ import type {
   AssistantMessage,
   ContentBlock,
   Attachment,
+  ToolResultContent,
   UserMessage,
 } from "../core/messages";
 import type { Model, ThinkingLevel } from "../core/model";
 import { isAgentEvent, type ServerFrame, type WireMessage } from "./wire";
 import type { WsConnection } from "./ws-connection";
+
+/** Result shape a browser-executed tool returns (matches the artifacts tool). */
+export interface BrowserToolResult {
+  content: ToolResultContent[];
+  isError?: boolean;
+  details?: unknown;
+}
+
+/** A browser-side executor for a server-declared tool. */
+export type BrowserToolExecutor = (
+  toolCallId: string,
+  args: unknown,
+) => Promise<BrowserToolResult>;
 
 // The server serializes assistant tool-call blocks with the discriminator
 // "toolcall"; the rest of the UI uses the canonical "toolCall". Normalize the
@@ -47,6 +61,9 @@ export class RemoteAgent implements Agent {
   private subscribers = new Set<(event: AgentEvent) => void>();
   private nextId = 1;
   private pending = new Set<string>();
+  // Browser-executed tools the server declares but does not run itself. Keyed
+  // by tool name; invoked when a matching `tool_execution_start` arrives.
+  private browserTools = new Map<string, BrowserToolExecutor>();
 
   constructor(
     private readonly conn: WsConnection,
@@ -66,6 +83,15 @@ export class RemoteAgent implements Agent {
   subscribe(cb: (event: AgentEvent) => void): () => void {
     this.subscribers.add(cb);
     return () => this.subscribers.delete(cb);
+  }
+
+  /**
+   * Register a browser-side executor for a server-declared tool. When the
+   * server emits `tool_execution_start` for `name`, the executor runs locally
+   * and its result is sent back as a `tool_result` frame keyed by toolCallId.
+   */
+  registerBrowserTool(name: string, execute: BrowserToolExecutor): void {
+    this.browserTools.set(name, execute);
   }
 
   private emit(event: AgentEvent): void {
@@ -169,6 +195,12 @@ export class RemoteAgent implements Agent {
 
       case "tool_execution_start":
         if (ev.toolCallId) this.pending.add(ev.toolCallId);
+        // If this tool executes in the browser, run it locally and reply. The
+        // server's tool closure is suspended until the matching tool_result
+        // frame arrives, so this resolves the agent loop's pending tool call.
+        if (ev.toolName && ev.toolCallId && this.browserTools.has(ev.toolName)) {
+          void this.runBrowserTool(ev.toolCallId, ev.toolName, ev.args);
+        }
         break;
 
       case "tool_execution_update":
@@ -211,5 +243,45 @@ export class RemoteAgent implements Agent {
       default:
         break;
     }
+  }
+
+  /**
+   * Execute a browser-side tool and send the result back to the server. The
+   * server keys the reply by `toolCallId` to resume the suspended tool call.
+   * Failures (thrown executor, missing registration) are reported as an error
+   * tool result so the agent loop never hangs.
+   */
+  private async runBrowserTool(
+    toolCallId: string,
+    toolName: string,
+    args: unknown,
+  ): Promise<void> {
+    const execute = this.browserTools.get(toolName);
+    let content: ToolResultContent[];
+    let isError: boolean;
+    let details: unknown;
+    if (!execute) {
+      content = [{ type: "text", text: `No browser executor registered for tool ${toolName}` }];
+      isError = true;
+    } else {
+      try {
+        const result = await execute(toolCallId, args);
+        content = result.content;
+        isError = result.isError ?? false;
+        details = result.details;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        content = [{ type: "text", text: `Browser tool ${toolName} failed: ${message}` }];
+        isError = true;
+      }
+    }
+    this.conn.send({
+      type: "tool_result",
+      toolCallId,
+      toolName,
+      content,
+      isError,
+      details,
+    });
   }
 }

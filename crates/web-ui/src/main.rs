@@ -4,6 +4,7 @@
 //! the existing agent RPC dispatcher (see [`ws`]). Binds loopback only.
 
 mod app;
+mod browser_tools;
 mod session;
 mod ws;
 

@@ -5,18 +5,21 @@
 // the panel is collapsed.
 //
 // The ChatPanel constructor registers the ArtifactsToolRenderer with the live
-// panel ref so artifacts-tool calls render with a navigable pill, and adds the
-// panel's client `artifacts` AgentTool to the agent's tool set (server-side
-// routing of the tool call is a separate server milestone). The pill count is
-// driven from the panel's artifact count via setArtifactCount/onArtifactsChange.
+// panel ref so artifacts-tool calls render with a navigable pill. The server
+// DECLARES the `artifacts` tool and the browser EXECUTES it: the panel's client
+// `artifacts` tool is registered as the browser executor (via the config's
+// registerBrowserTool hook) rather than added to the agent's server-side tool
+// set. The pill count is driven from the panel's artifact count via
+// setArtifactCount/onArtifactsChange.
 
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import type { BrowserToolResult } from "../client/remote-agent";
 import { ArtifactsPanel } from "../artifacts/artifacts-panel";
 import { ArtifactsToolRenderer } from "../artifacts/artifacts-tool-renderer";
 import "../artifacts/index";
 import type { Agent } from "../core/agent";
-import type { AgentTool, ToolResult } from "../core/tool";
+import type { AgentTool } from "../core/tool";
 import { registerToolRenderer } from "../tools/renderer-registry";
 import { Badge } from "../ui/badge";
 import { i18n } from "../utils/i18n";
@@ -33,6 +36,15 @@ export interface ChatPanelConfig {
   onModelSelect?: () => void;
   sandboxUrlProvider?: () => string;
   toolsFactory?: (agent: Agent, agentInterface: AgentInterface) => AgentTool[];
+  /**
+   * Register a browser-executed tool. The server declares such tools and
+   * suspends their execution until the browser replies; the panel uses this to
+   * register the `artifacts` tool executor against the concrete RemoteAgent.
+   */
+  registerBrowserTool?: (
+    name: string,
+    execute: (toolCallId: string, args: unknown) => Promise<BrowserToolResult>,
+  ) => void;
 }
 
 @customElement("hand-chat-panel")
@@ -116,31 +128,26 @@ export class ChatPanel extends LitElement {
       this.requestUpdate();
     };
 
-    // Register the client artifacts tool on the agent's tool set. The panel's
-    // tool uses the richer (toolCallId, args, signal) contract; adapt it to the
-    // local AgentTool.execute(args) shape used by the agent state.
+    // The SERVER declares the `artifacts` tool; the browser only EXECUTES it.
+    // Register the panel's client tool as the browser executor so a server
+    // `tool_execution_start` for "artifacts" runs locally and replies. The
+    // panel's native tool signature is execute(toolCallId, args, signal).
     const panelTool = this.artifactsPanel.tool;
-    const artifactsTool: AgentTool = {
-      name: panelTool.name,
-      get description() {
-        return panelTool.description;
-      },
-      parameters: panelTool.parameters,
-      execute: async (args: unknown): Promise<ToolResult> => {
+    config?.registerBrowserTool?.(
+      panelTool.name,
+      async (toolCallId: string, args: unknown): Promise<BrowserToolResult> => {
         const result = await panelTool.execute(
-          "",
+          toolCallId,
           args as Parameters<typeof panelTool.execute>[1],
         );
-        const text = result.content
-          .filter((c) => c.type === "text")
-          .map((c) => c.text ?? "")
-          .join("\n");
-        return { content: text, isError: false };
+        return { content: result.content, isError: false };
       },
-    };
+    );
 
     const additionalTools = config?.toolsFactory?.(agent, agentInterface) ?? [];
-    agent.state.tools = [...agent.state.tools, artifactsTool, ...additionalTools];
+    if (additionalTools.length > 0) {
+      agent.state.tools = [...agent.state.tools, ...additionalTools];
+    }
 
     // Replay any artifact history already present (e.g. restored session)
     // without auto-opening the panel — preserve the null-during-reconstruct

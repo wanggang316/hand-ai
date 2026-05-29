@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M3 complete; M4 frontend done, server browser-tool routing pending)
+**Status:** In progress (M0-M4 complete)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -32,9 +32,10 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 - [x] **M1 — Chat shell**
 - [x] **M2 — Message + tool rendering**
 - [x] **M3 — Sandbox runtime**
-- [~] **M4 — Artifacts** (frontend panel + viewers done and verified; server-side
-  `tool_result` routing + `artifacts` tool declaration pending — see "browser-tool
-  execution" below, shared with M5)
+- [x] **M4 — Artifacts** (frontend panel + viewers AND the browser-tool execution
+  mechanism — server declares browser tools, suspends on a per-connection hub
+  keyed by `tool_call_id`, `ws.rs` intercepts `tool_result` frames to resolve
+  them; `run_rpc_server`/agent crates unchanged)
 - [ ] **M5 — Browser tools (JS REPL, extract-document)**
 - [ ] **M6 — Attachments**
 - [ ] **M7 — Storage (IndexedDB)**
@@ -108,6 +109,23 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
+- **Browser-tool execution (2026-05-29)**: The cross-cutting mechanism that lets
+  the server-side agent loop invoke browser-resident tools is implemented and
+  verified end-to-end. Design (clean, id-correlated): a per-connection
+  `BrowserToolHub` (`tool_call_id` -> `oneshot::Sender<ToolResult>`); browser
+  tools are real `AgentTool`s whose `execute` closure registers on the hub and
+  awaits; `ws.rs` intercepts inbound `tool_result` frames and resolves the hub;
+  the inbound interceptor and the dispatcher run as separate tasks so the
+  suspended tool resolves with no deadlock. `run_rpc_server` and the agent/model
+  crates are UNCHANGED (no `RpcCommand` variant added). Verified in a browser: a
+  prompt asking the agent to use the `artifacts` tool produced
+  roles `[user, assistant, toolResult, assistant]`, created `hello.md` in the
+  panel, rendered the create card, and the turn completed with "Done!". The same
+  hub serves M5's `javascript_repl` / `extract_document`. Known limitation: a
+  browser-reported `isError:true` rides in `details` (the agent loop derives
+  `is_error` from the closure's Ok/Err and browser tools return Ok); the error
+  text is still in the content the model sees. Switch the browser tool to
+  `AgentTool::new` returning `Err` if true `is_error` propagation is needed.
 - **M4 frontend (2026-05-29)**: Artifacts panel + all viewers landed and verified
   via direct browser API calls: creating a markdown and an HTML artifact stores
   both (`artifacts` Map size 2, keyed by filename), the HTML create completes
@@ -417,8 +435,8 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 86 | artifact-console (collapsible, error count, autoscroll, copy) | artifacts | M4 | DONE |
 | 87 | ArtifactPill inline clickable badge (openArtifact navigation) | artifacts | M4 | DONE |
 | 88 | ArtifactsToolRenderer (create/rewrite code-block, update Diff, get, logs, delete; registered with panel ref) | artifacts | M4 | DONE |
-| 89 | Server-side `tool_result` RpcCommand variant for browser-tool replies | artifacts/browser-tools | M4 | TODO |
-| 90 | Server-side `artifacts` tool declaration (schema + dynamic description) for system prompt | artifacts | M4 | TODO |
+| 89 | Browser-tool replies via `tool_result` frame (hub + ws.rs interception; no RpcCommand change needed) | artifacts/browser-tools | M4 | DONE |
+| 90 | Server-side `artifacts` tool declaration (schema + description) for system prompt | artifacts | M4 | DONE |
 | 91 | createJavaScriptReplTool / javascriptReplTool (dynamic description, sandbox execute, base64 files) | browser-tools | M5 | TODO |
 | 92 | executeJavaScript utility (hidden iframe, console+returnValue+files, 120s timeout, abort) | browser-tools | M5 | TODO |
 | 93 | javascriptReplRenderer (collapsible code + console + attachment chips; auto-register) | browser-tools | M5 | TODO |
