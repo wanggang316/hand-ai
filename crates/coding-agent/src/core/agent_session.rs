@@ -2149,7 +2149,10 @@ mod tests {
         // the empty session_dir so the scan returns exactly one
         // candidate.
         let prefix = full_id.rsplit_once('_').unwrap().0.to_string();
-        assert!(prefix.len() < full_id.len(), "prefix must actually be shorter");
+        assert!(
+            prefix.len() < full_id.len(),
+            "prefix must actually be shorter"
+        );
 
         let mut config = test_config(cwd.to_path_buf());
         config.session_dir = Some(session_dir.clone());

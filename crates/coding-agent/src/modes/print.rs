@@ -77,16 +77,9 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else if let Some(ref fork_source) = args.fork {
-        let fork_path = resolve_session_path_in(
-            base_config.session_dir.as_deref(),
-            &cwd,
-            fork_source,
-        );
-        match SessionManager::fork_from_in(
-            &fork_path,
-            &cwd,
-            base_config.session_dir.as_deref(),
-        ) {
+        let fork_path =
+            resolve_session_path_in(base_config.session_dir.as_deref(), &cwd, fork_source);
+        match SessionManager::fork_from_in(&fork_path, &cwd, base_config.session_dir.as_deref()) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
                     resume_session: Some(sm.id().to_string()),
@@ -960,10 +953,9 @@ mod tests {
             .as_array()
             .expect(".json export must be a JSON array");
         assert!(
-            entries.iter().any(|e| e
-                .get("type")
-                .and_then(|v| v.as_str())
-                == Some("session")),
+            entries
+                .iter()
+                .any(|e| e.get("type").and_then(|v| v.as_str()) == Some("session")),
             "JSON array must contain the session header: {text}"
         );
     }
@@ -978,9 +970,8 @@ mod tests {
         let session = make_session_with_file(&tmp);
         for fname in ["dump.md", "dump.txt", "dump"] {
             let out = tmp.path().join(fname);
-            let err = handle_export(&session, &out).expect_err(
-                "unknown / missing extension must error",
-            );
+            let err =
+                handle_export(&session, &out).expect_err("unknown / missing extension must error");
             let msg = err.to_string();
             assert!(
                 msg.contains("unsupported extension"),

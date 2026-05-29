@@ -23,8 +23,8 @@ pub mod theme;
 
 pub use driver::{InteractiveError, InteractiveMode};
 pub use slash_commands::{
-    ExportFormat, ParsedSlashCommand, SlashCommandAction, SlashCommandContext,
-    SlashCommandResult, SlashCommandTable,
+    ExportFormat, ParsedSlashCommand, SlashCommandAction, SlashCommandContext, SlashCommandResult,
+    SlashCommandTable,
 };
 
 use std::path::{Path, PathBuf};
@@ -93,16 +93,9 @@ fn build_session(
             }
         }
     } else if let Some(ref fork_source) = args.fork {
-        let fork_path = resolve_session_path_in(
-            base_config.session_dir.as_deref(),
-            cwd,
-            fork_source,
-        );
-        match SessionManager::fork_from_in(
-            &fork_path,
-            cwd,
-            base_config.session_dir.as_deref(),
-        ) {
+        let fork_path =
+            resolve_session_path_in(base_config.session_dir.as_deref(), cwd, fork_source);
+        match SessionManager::fork_from_in(&fork_path, cwd, base_config.session_dir.as_deref()) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
                     resume_session: Some(sm.id().to_string()),
@@ -126,10 +119,6 @@ fn build_session(
 /// `--session-dir <X>` (when set) before the home-based default so
 /// `--fork <id> --session-dir <X>` matches the plumbing
 /// `--continue` / `--resume` already have (#77).
-fn resolve_session_path_in(
-    session_dir: Option<&Path>,
-    cwd: &Path,
-    source: &str,
-) -> PathBuf {
+fn resolve_session_path_in(session_dir: Option<&Path>, cwd: &Path, source: &str) -> PathBuf {
     SessionManager::resolve_session_source_in(session_dir, None, cwd, source)
 }

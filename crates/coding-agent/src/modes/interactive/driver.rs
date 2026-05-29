@@ -4008,7 +4008,10 @@ mod tests {
         );
         let confirm = list[0].render(80).join("\n");
         let warn = list[1].render(80).join("\n");
-        assert!(confirm.contains("high"), "confirmation missing level: {confirm}");
+        assert!(
+            confirm.contains("high"),
+            "confirmation missing level: {confirm}"
+        );
         assert!(
             warn.contains("does not advertise extended thinking"),
             "warning missing reasoning-unsupported hint: {warn}"

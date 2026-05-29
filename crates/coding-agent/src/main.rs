@@ -245,11 +245,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else if let Some(ref fork_source) = cli.fork {
         // Fork from existing session
-        let fork_path = resolve_session_path_in(
-            base_config.session_dir.as_deref(),
-            &cwd,
-            fork_source,
-        );
+        let fork_path =
+            resolve_session_path_in(base_config.session_dir.as_deref(), &cwd, fork_source);
         match hand_coding_agent::SessionManager::fork_from_in(
             &fork_path,
             &cwd,
@@ -748,11 +745,8 @@ fn handle_export(
             .map_err(|e| format!("JSONL export not available for active session: {}", e))?;
         }
         ExportFormat::Json => {
-            export::export_to_json(
-                &hand_coding_agent::SessionManager::in_memory(),
-                path,
-            )
-            .map_err(|e| format!("JSON export not available for active session: {}", e))?;
+            export::export_to_json(&hand_coding_agent::SessionManager::in_memory(), path)
+                .map_err(|e| format!("JSON export not available for active session: {}", e))?;
         }
         ExportFormat::Html => {
             export::export_to_html(
@@ -844,12 +838,7 @@ fn resolve_session_path_in(
     cwd: &std::path::Path,
     source: &str,
 ) -> PathBuf {
-    hand_coding_agent::SessionManager::resolve_session_source_in(
-        session_dir,
-        None,
-        cwd,
-        source,
-    )
+    hand_coding_agent::SessionManager::resolve_session_source_in(session_dir, None, cwd, source)
 }
 
 fn execute_shell(cmd: &str) {

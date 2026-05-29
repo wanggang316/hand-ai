@@ -429,9 +429,7 @@ mod tests {
             "/models description still implies listing: {}",
             models.description
         );
-        let changelog = registry
-            .find("changelog")
-            .expect("/changelog registered");
+        let changelog = registry.find("changelog").expect("/changelog registered");
         assert!(
             !changelog
                 .description

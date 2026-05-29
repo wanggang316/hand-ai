@@ -520,7 +520,10 @@ mod tests {
             err.kind()
         );
         let msg = err.to_string();
-        assert!(msg.contains("--no-tools"), "error must name --no-tools: {msg}");
+        assert!(
+            msg.contains("--no-tools"),
+            "error must name --no-tools: {msg}"
+        );
         assert!(msg.contains("--tools"), "error must name --tools: {msg}");
     }
 
@@ -693,7 +696,10 @@ mod tests {
         assert_eq!(args.resume.as_deref(), Some(expected_resume.as_str()));
         assert_eq!(args.fork.as_deref(), Some(expected_fork.as_str()));
         assert_eq!(args.export.as_deref(), Some(expected_export.as_path()));
-        assert_eq!(args.session_dir.as_deref(), Some(expected_sessions.as_path()));
+        assert_eq!(
+            args.session_dir.as_deref(),
+            Some(expected_sessions.as_path())
+        );
         assert_eq!(args.cwd.as_deref(), Some(expected_cwd.as_path()));
         assert_eq!(args.system_prompt.as_deref(), Some(expected_sys.as_str()));
         assert_eq!(args.append_system_prompt, vec![expected_append]);
@@ -748,7 +754,10 @@ mod tests {
         let help = cmd.render_long_help().to_string();
         let lower = help.to_ascii_lowercase();
         // Quick locator — the long flag is present in help.
-        assert!(lower.contains("--system-prompt"), "help missing flag: {help}");
+        assert!(
+            lower.contains("--system-prompt"),
+            "help missing flag: {help}"
+        );
         // The sentence/words that document auto-loading on
         // `--system-prompt` specifically — the existing line on
         // `--append-system-prompt` doesn't satisfy users opening
@@ -824,12 +833,7 @@ mod tests {
     /// conflict-with error instead.
     #[test]
     fn continue_and_resume_are_mutually_exclusive() {
-        let result = Args::try_parse_from([
-            "hand",
-            "--continue",
-            "--resume",
-            "s_anything",
-        ]);
+        let result = Args::try_parse_from(["hand", "--continue", "--resume", "s_anything"]);
         let err = match result {
             Ok(_) => panic!("conflicting flags must error at parse time"),
             Err(e) => e,
@@ -842,7 +846,10 @@ mod tests {
         let msg = err.to_string();
         // Mention both flags so users can self-diagnose without
         // re-running with --help.
-        assert!(msg.contains("--continue"), "error must name --continue: {msg}");
+        assert!(
+            msg.contains("--continue"),
+            "error must name --continue: {msg}"
+        );
         assert!(msg.contains("--resume"), "error must name --resume: {msg}");
     }
 
@@ -879,8 +886,14 @@ mod tests {
             err.kind()
         );
         let msg = err.to_string();
-        assert!(msg.contains("--no-session"), "error must name --no-session: {msg}");
-        assert!(msg.contains("--continue"), "error must name --continue: {msg}");
+        assert!(
+            msg.contains("--no-session"),
+            "error must name --no-session: {msg}"
+        );
+        assert!(
+            msg.contains("--continue"),
+            "error must name --continue: {msg}"
+        );
     }
 
     /// `--no-session -c` short-form pair must also error.
@@ -904,10 +917,9 @@ mod tests {
     /// silently break the documented intent in args.rs.
     #[test]
     fn no_session_with_resume_does_not_conflict() {
-        let args =
-            Args::try_parse_from(["hand", "--no-session", "--resume", "s_some_id"]).expect(
-                "--no-session --resume is intentionally allowed; load history into in-memory session",
-            );
+        let args = Args::try_parse_from(["hand", "--no-session", "--resume", "s_some_id"]).expect(
+            "--no-session --resume is intentionally allowed; load history into in-memory session",
+        );
         assert!(args.no_session);
         assert_eq!(args.resume.as_deref(), Some("s_some_id"));
     }
@@ -1119,8 +1131,7 @@ mod tests {
     /// future loosening can't silently bring back the swallow.
     #[test]
     fn no_extensions_and_extension_are_mutually_exclusive() {
-        let result =
-            Args::try_parse_from(["hand", "--no-extensions", "-e", "a", "-e", "b"]);
+        let result = Args::try_parse_from(["hand", "--no-extensions", "-e", "a", "-e", "b"]);
         let err = match result {
             Ok(_) => panic!("conflicting flags must error"),
             Err(e) => e,

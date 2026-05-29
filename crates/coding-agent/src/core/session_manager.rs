@@ -1193,9 +1193,7 @@ fn generate_session_id() -> String {
 /// unlikely -- this loop catches the impossible-but-possible case
 /// (and any test that monkey-patches the clock/RNG) before the
 /// caller would silently overwrite an existing session.
-fn mint_unique_session_path(
-    session_dir: &Path,
-) -> Result<(String, PathBuf), CodingAgentError> {
+fn mint_unique_session_path(session_dir: &Path) -> Result<(String, PathBuf), CodingAgentError> {
     // Eight tries is two-cubed-plus-two more than the per-process
     // counter can produce in a single millisecond bucket; if all eight
     // collide something is structurally wrong (mocked rng/clock, full
@@ -1392,21 +1390,19 @@ mod tests {
         std::fs::write(&session_file, "").unwrap();
 
         // Without the override, the home-based default doesn't see it.
-        let resolved =
-            SessionManager::resolve_session_source(None, cwd_path, full_id);
+        let resolved = SessionManager::resolve_session_source(None, cwd_path, full_id);
         assert_ne!(
             resolved, session_file,
             "without --session-dir the resolver must not magically find override-dir files"
         );
 
         // With the override, both exact and prefix match.
-        let resolved = SessionManager::resolve_session_source_in(
-            Some(override_dir),
-            None,
-            cwd_path,
-            full_id,
+        let resolved =
+            SessionManager::resolve_session_source_in(Some(override_dir), None, cwd_path, full_id);
+        assert_eq!(
+            resolved, session_file,
+            "exact id must resolve under --session-dir"
         );
-        assert_eq!(resolved, session_file, "exact id must resolve under --session-dir");
 
         let resolved = SessionManager::resolve_session_source_in(
             Some(override_dir),
@@ -1737,12 +1733,8 @@ mod tests {
         // Forks must land under override_dir, NOT the home-based default.
         let override_dir_tmp = TempDir::new().unwrap();
         let override_dir = override_dir_tmp.path().to_path_buf();
-        let forked = SessionManager::fork_from_in(
-            &source_path,
-            cwd.path(),
-            Some(&override_dir),
-        )
-        .expect("fork_from_in");
+        let forked = SessionManager::fork_from_in(&source_path, cwd.path(), Some(&override_dir))
+            .expect("fork_from_in");
         let forked_path = forked.path().to_path_buf();
 
         assert!(
@@ -1751,7 +1743,10 @@ mod tests {
         );
         assert_eq!(forked.session_dir(), override_dir);
         // Sanity: actually on disk under the override.
-        assert!(forked_path.exists(), "fork file not flushed: {forked_path:?}");
+        assert!(
+            forked_path.exists(),
+            "fork file not flushed: {forked_path:?}"
+        );
     }
 
     /// `fork_from` (no session_dir override) preserves the historic
