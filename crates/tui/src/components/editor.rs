@@ -1548,10 +1548,20 @@ impl EditorComponent {
                     }
                     return HandleResult::Handled;
                 }
-                KeyName::Tab | KeyName::Enter => {
+                KeyName::Tab => {
                     self.accept_autocomplete();
                     return HandleResult::Handled;
                 }
+                // Enter intentionally does NOT accept the popup —
+                // it always submits whatever's currently in the
+                // editor buffer. The previous behaviour (Enter both
+                // accepts AND blocks the submit) forced the user to
+                // hit Enter twice for a slash command that already
+                // matched the popup exactly (#61). Editing UX
+                // matches VS Code / Cursor: Tab is the "accept"
+                // gesture; Enter is the "submit" gesture. The
+                // popup auto-dismisses on the buffer change the
+                // submit triggers downstream.
                 KeyName::Escape => {
                     self.cancel_autocomplete();
                     return HandleResult::Handled;
@@ -2620,6 +2630,54 @@ mod tests {
         };
         editor.handle_input(&InputEvent::Key(down));
         assert_eq!(editor.autocomplete_state().unwrap().selected, 1);
+    }
+
+    /// Issue #61: Enter must NOT be intercepted by the autocomplete
+    /// popup. The previous wiring made Tab and Enter both accept the
+    /// item, so a user who typed `/diagnostics` (exact match) had to
+    /// hit Enter twice — once to "accept" the no-op completion, then
+    /// again to submit. The component now leaves Enter to its normal
+    /// path (which the host driver translates into submit). Tab still
+    /// accepts.
+    #[test]
+    fn enter_with_popup_active_is_not_intercepted() {
+        use crate::keys::{Key, KeyEventType, KeyModifiers};
+
+        let mut editor = EditorComponent::new();
+        editor.set_focused(true);
+        editor.set_autocomplete_provider(Arc::new(SyncProvider {
+            items: vec![AutocompleteItem {
+                label: "help".into(),
+                detail: None,
+                insert_text: "/help".into(),
+                kind: AutocompleteItemKind::SlashCommand,
+            }],
+        }));
+        editor.handle_input(&InputEvent::Raw("/".into()));
+        editor.handle_input(&InputEvent::Raw("h".into()));
+        // Popup is up.
+        assert!(editor.autocomplete_state().is_some());
+
+        let enter = Key {
+            name: KeyName::Enter,
+            modifiers: KeyModifiers::default(),
+            is_release: false,
+            event_type: KeyEventType::Press,
+            base_layout_key: None,
+        };
+        let result = editor.handle_input(&InputEvent::Key(enter));
+        // Enter is handled by the editor's normal path (inserts a
+        // newline by default in this editor; the host driver
+        // remaps it to submit). The key point is the popup intercept
+        // did NOT swallow it — so editor.text() should reflect Enter
+        // having taken its usual effect, and accept_autocomplete was
+        // NOT called (text contains `/h`, not `/help`).
+        assert_eq!(result, HandleResult::Handled);
+        assert!(
+            !editor.text().contains("/help"),
+            "Enter must not have triggered accept_autocomplete; got text {:?}",
+            editor.text()
+        );
     }
 
     // -- IME -------------------------------------------------------------

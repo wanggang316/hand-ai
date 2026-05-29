@@ -71,3 +71,18 @@ fn print_with_missing_at_file_exits_nonzero() {
         "expected @file error on stderr, got: {stderr:?}"
     );
 }
+
+/// Issue #62: `--print '/help'` (or any bare slash command) must not
+/// be shipped to the LLM as plain text — the model hallucinates
+/// plausible-looking command output. Print mode now refuses with a
+/// non-zero exit and an explanatory stderr that mentions the
+/// command the user typed.
+#[test]
+fn print_with_bare_slash_command_exits_nonzero() {
+    let (code, stderr) = run(&["--print", "--no-tools", "/help"]);
+    assert_ne!(code, 0, "expected non-zero exit; stderr was: {stderr:?}");
+    assert!(
+        stderr.contains("/help") && stderr.contains("slash command"),
+        "expected slash-command refusal on stderr, got: {stderr:?}"
+    );
+}

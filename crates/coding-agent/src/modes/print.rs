@@ -195,6 +195,27 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         positional_msg.as_deref(),
     ) && !initial.trim().is_empty()
     {
+        // Slash commands have no dispatcher in print mode — the
+        // session would otherwise ship `/help` to the LLM as a user
+        // message and the model would hallucinate plausible-looking
+        // command output (#62). Refuse with a clear error so the
+        // user knows they need interactive mode (or a real CLI
+        // surface for what they're trying to do). Bare-text prompts
+        // that happen to begin with `/path/to/file` also start with
+        // `/`, so narrow the check to short tokens that look like a
+        // single slash-command.
+        if looks_like_slash_command(initial.trim()) {
+            return Err(format!(
+                "Error: slash commands like {first_token} are not dispatched in --print mode \
+                 (the session would ship it to the LLM as text and the model would fabricate \
+                 plausible output). Run `hand` interactively, or use the corresponding CLI flag.",
+                first_token = initial
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(initial.trim())
+            )
+            .into());
+        }
         let expanded = expand_at_mentions(&initial, &cwd)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         let with_files = match file_args_block.as_deref() {
@@ -515,6 +536,35 @@ fn at_path_exists(path_str: &str, cwd: &std::path::Path) -> bool {
 /// `<file name="<absolute_path>"><file content></file>` ahead of the
 /// remaining prompt text. Non-existent paths produce an error string
 /// scripts can pattern-match on; empty files are silently skipped.
+/// True when `text` looks like a single bare slash-command
+/// invocation — i.e. starts with `/`, the first whitespace-delimited
+/// token is short and contains no path separators, and is followed
+/// either by nothing or by command-style arguments. Used to reject
+/// `--print '/help'` style invocations that would otherwise ship to
+/// the LLM as plain text and trigger hallucinated output (#62).
+///
+/// Deliberately conservative: a longer slashed input like
+/// `/path/to/file explain this` looks like a real prompt (the user
+/// is naming a file) and is allowed through; `/help`, `/diagnostics`,
+/// `/help me` are caught.
+fn looks_like_slash_command(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix('/') else {
+        return false;
+    };
+    let first_token = rest.split_whitespace().next().unwrap_or("");
+    if first_token.is_empty() {
+        return false;
+    }
+    // Slash commands are short, ASCII-letter names; reject anything
+    // that looks like a path (contains another `/`, `.`, or `..`).
+    !first_token.contains('/')
+        && !first_token.contains('.')
+        && first_token.len() <= 32
+        && first_token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Text only — image attachments need the ImageContent path and
 /// resizing logic that the single-string `--prompt` surface doesn't
 /// yet expose.
@@ -746,6 +796,46 @@ fn resolve_session_path(cwd: &std::path::Path, source: &str) -> std::path::PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #62: `--print '/help'` must NOT ship `/help` to the LLM
+    /// as a plain user message — the model hallucinates plausible-
+    /// but-fake help output. The detector flags single bare slash
+    /// commands while leaving path-like text (`/usr/bin/foo`,
+    /// `/tmp/notes.md explain this`) alone.
+    #[test]
+    fn looks_like_slash_command_distinguishes_commands_from_paths() {
+        // Slash commands (must be flagged).
+        for cmd in [
+            "/help",
+            "/diagnostics",
+            "/quit",
+            "/help me",
+            "/scoped-models",
+            "/copy 3",
+        ] {
+            assert!(
+                super::looks_like_slash_command(cmd),
+                "should flag {cmd:?} as a slash command"
+            );
+        }
+        // Paths and natural prose (must NOT be flagged).
+        for not_cmd in [
+            "/usr/bin/env explain this",
+            "/tmp/notes.md summarize",
+            "/path/to/file.txt",
+            "explain @README.md",
+            "",
+            "/",
+            "/with.dot",
+            // Looks like a slash but the next char is a path separator
+            "/abc/def",
+        ] {
+            assert!(
+                !super::looks_like_slash_command(not_cmd),
+                "should NOT flag {not_cmd:?}"
+            );
+        }
+    }
 
     /// Build a minimal on-disk AgentSession for the export tests.
     /// Lives in the test module so its dependency on the `cfg(test)`

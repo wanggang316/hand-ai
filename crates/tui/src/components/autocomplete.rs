@@ -529,7 +529,41 @@ impl PathAutocompleteProvider {
                 };
                 let treat_as_dir = is_dir_direct || target_is_dir;
 
-                if query_lower.is_empty() || display.to_lowercase().contains(&query_lower) {
+                // Filter scope depends on whether the query carries a
+                // path component:
+                //   - `@src/` (contains `/`) → match the full relative
+                //     path as a substring; lets users scope to a
+                //     subdirectory.
+                //   - `@RE`   (no `/`) → basename prefix match. This
+                //     matches `cd <tab>` / `ls <tab>` muscle memory
+                //     and stops `.gitignore` (basename ends in "re"),
+                //     `.claude/worktrees/` (intermediate component
+                //     contains "re"), and similar false positives
+                //     from polluting the popup (#60).
+                let basename_lower = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_lowercase())
+                    .unwrap_or_default();
+                // Smarter filter — query shape determines the match:
+                //   `src/`       → full-path substring (subdirectory scope)
+                //   `.rs`        → basename ends_with (extension completion)
+                //   `RE`         → basename starts_with (the common case)
+                // Pre-fix, the filter was `display.to_lowercase()
+                // .contains(query)`, which matched intermediate path
+                // components — typing `@RE` brought in
+                // `.claude/worktrees/` because "worktrees" contains
+                // "re", which the user didn't expect (#60).
+                let matches = if query_lower.is_empty() {
+                    true
+                } else if query_lower.contains('/') {
+                    display.to_lowercase().contains(&query_lower)
+                } else if query_lower.starts_with('.') {
+                    basename_lower.ends_with(&query_lower)
+                } else {
+                    basename_lower.starts_with(&query_lower)
+                };
+                if matches {
                     let label = if treat_as_dir {
                         format!("{display}/")
                     } else {
@@ -1255,6 +1289,42 @@ mod tests {
             !labels.iter().any(|l| l.ends_with("deep.rs")),
             "depth-4 file is beyond the default 3-level budget, got: {labels:?}"
         );
+    }
+
+    /// Issue #60: typing `@RE` must not pull in entries whose only
+    /// "match" was in an intermediate path component. Pre-fix, the
+    /// filter ran `display.contains(query)` on the full relative
+    /// path, so `.claude/worktrees/` matched `re` because "worktrees"
+    /// happens to contain it. Now the basename-only branch keeps
+    /// extension completions working (`@.rs` → `main.rs`) without
+    /// hauling in intermediate-component matches.
+    #[test]
+    fn path_provider_basename_filter_excludes_intermediate_path_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("README.md"), "").unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "").unwrap();
+        std::fs::create_dir_all(tmp.path().join(".claude/worktrees")).unwrap();
+        std::fs::write(tmp.path().join(".claude/worktrees/cache.txt"), "").unwrap();
+
+        let provider = PathAutocompleteProvider::new(tmp.path().to_path_buf());
+        let items = provider
+            .query_sync(&ctx("RE", AutocompleteTrigger::At))
+            .expect("at returns Some");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"README.md"),
+            "README.md should match @RE, got: {labels:?}"
+        );
+        for unwanted in [
+            ".gitignore",
+            ".claude/worktrees/",
+            ".claude/worktrees/cache.txt",
+        ] {
+            assert!(
+                !labels.contains(&unwanted),
+                "@RE should not match {unwanted:?}, got: {labels:?}"
+            );
+        }
     }
 
     /// UC-ac-012 — querying with a relative directory prefix (`src/`)
