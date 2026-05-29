@@ -26,7 +26,7 @@ pub mod utils;
 // `hand_coding_agent::AgentSession` style imports.
 pub use core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 pub use core::error::CodingAgentError;
-pub use core::export::{export_to_html, export_to_jsonl};
+pub use core::export::{export_to_html, export_to_json, export_to_jsonl};
 pub use core::model_resolver::{self, ResolvedModel};
 pub use core::session_manager::SessionManager;
 pub use core::settings::SettingsManager;

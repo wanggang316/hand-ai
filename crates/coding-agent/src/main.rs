@@ -8,6 +8,7 @@ use hand_coding_agent::core::export;
 use hand_coding_agent::core::model_resolver;
 use hand_coding_agent::core::timings;
 use hand_coding_agent::modes;
+use hand_coding_agent::modes::interactive::ExportFormat;
 use hand_coding_agent::modes::session_setup::SessionSetup;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -723,18 +724,37 @@ fn handle_export(
     session: &AgentSession,
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("html");
-
-    match ext {
-        "jsonl" => {
+    // Route through ExportFormat::from_path so unknown extensions
+    // (.md, .txt, no ext, ...) fail fast with the same diagnostic
+    // /export shows in the TUI, instead of silently writing HTML
+    // into the user's arbitrarily-named file (#84).
+    let Some(format) = ExportFormat::from_path(path) else {
+        return Err(format!(
+            "--export: unsupported extension on {}. Expected .jsonl, .json, or .html.",
+            path.display()
+        )
+        .into());
+    };
+    match format {
+        ExportFormat::Jsonl => {
             export::export_to_jsonl(
-                // Need session manager access — use messages for now
+                // Interactive-mode export still hands the writer a
+                // fresh in-memory SessionManager and bails when it
+                // has no path. Pre-existing limitation; the #84 fix
+                // only tightens the extension-validation step.
                 &hand_coding_agent::SessionManager::in_memory(),
                 path,
             )
             .map_err(|e| format!("JSONL export not available for active session: {}", e))?;
         }
-        _ => {
+        ExportFormat::Json => {
+            export::export_to_json(
+                &hand_coding_agent::SessionManager::in_memory(),
+                path,
+            )
+            .map_err(|e| format!("JSON export not available for active session: {}", e))?;
+        }
+        ExportFormat::Html => {
             export::export_to_html(
                 session.messages(),
                 session.session_id(),

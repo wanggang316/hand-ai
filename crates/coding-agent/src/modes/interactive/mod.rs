@@ -23,8 +23,8 @@ pub mod theme;
 
 pub use driver::{InteractiveError, InteractiveMode};
 pub use slash_commands::{
-    ParsedSlashCommand, SlashCommandAction, SlashCommandContext, SlashCommandResult,
-    SlashCommandTable,
+    ExportFormat, ParsedSlashCommand, SlashCommandAction, SlashCommandContext,
+    SlashCommandResult, SlashCommandTable,
 };
 
 use std::path::{Path, PathBuf};

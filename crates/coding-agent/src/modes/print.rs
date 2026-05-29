@@ -9,6 +9,7 @@ use crate::SessionManager;
 use crate::cli::Args;
 use crate::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 use crate::core::export;
+use crate::modes::interactive::slash_commands::ExportFormat;
 use crate::modes::session_setup::SessionSetup;
 use std::io::{self, Write};
 
@@ -459,34 +460,43 @@ fn handle_export(
     session: &AgentSession,
     path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // `.json` aliases to the JSONL exporter — a JSONL stream parses as
-    // a sequence of JSON values, which is what most consumers want and
-    // avoids shipping a second exporter for an effectively identical
-    // payload.
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("html");
-
-    match ext {
-        "jsonl" | "json" => {
+    // Route through the same ExportFormat::from_path the slash
+    // command uses (#84). Unknown extensions (.md, .txt, no ext, …)
+    // previously fell through to HTML silently, so `hand --export
+    // session.md` produced an HTML document inside `session.md`
+    // with no diagnostics. Mirror the /export dispatcher: reject
+    // unsupported extensions with the same message.
+    let Some(format) = ExportFormat::from_path(path) else {
+        return Err(format!(
+            "--export: unsupported extension on {}. Expected .jsonl, .json, or .html.",
+            path.display()
+        )
+        .into());
+    };
+    match format {
+        ExportFormat::Jsonl | ExportFormat::Json => {
             // Copy the live session file verbatim. An earlier
             // implementation handed `export_to_jsonl` a fresh
-            // `SessionManager::in_memory()` with no path, which always
+            // in-memory SessionManager with no path, which always
             // failed with "Cannot export an in-memory session" — the
-            // jsonl export path of `--print --export out.jsonl` was
-            // completely broken. The interactive `/export` dispatcher
-            // is the model: read the session file path from the live
-            // AgentSession, re-open a SessionManager rooted at that
-            // path, then copy.
+            // jsonl export path was completely broken. Read the
+            // session file path from the live AgentSession, re-open
+            // a SessionManager rooted there, then dispatch on format.
             let Some(file_path) = session.session_file() else {
                 return Err(
-                    "Cannot export an in-memory session as JSONL (use --print without --no-session)"
+                    "Cannot export an in-memory session as JSON/JSONL (use --print without --no-session)"
                         .into(),
                 );
             };
             let manager = SessionManager::open(file_path)
                 .map_err(|e| format!("Failed to open session for export: {e}"))?;
-            export::export_to_jsonl(&manager, path)?;
+            match format {
+                ExportFormat::Jsonl => export::export_to_jsonl(&manager, path)?,
+                ExportFormat::Json => export::export_to_json(&manager, path)?,
+                ExportFormat::Html => unreachable!(),
+            }
         }
-        _ => {
+        ExportFormat::Html => {
             export::export_to_html(
                 session.messages(),
                 session.session_id(),
@@ -932,17 +942,59 @@ mod tests {
         );
     }
 
-    /// `.json` extension aliases to the JSONL exporter — a JSONL stream
-    /// parses as a sequence of JSON values, which is what most
-    /// consumers want.
+    /// `.json` extension now produces a valid JSON document (a
+    /// pretty-printed array of session entries) -- post-#67 the
+    /// interactive `/export` dispatcher already does this, and the
+    /// CLI path now agrees so `JSON.parse(out.json)` works
+    /// regardless of which surface wrote the file.
     #[tokio::test]
-    async fn handle_export_json_extension_aliases_to_jsonl() {
+    async fn handle_export_json_extension_writes_valid_json_array() {
         let tmp = tempfile::tempdir().unwrap();
         let session = make_session_with_file(&tmp);
         let out = tmp.path().join("dumped.json");
         handle_export(&session, &out).expect("export ok");
         let text = std::fs::read_to_string(&out).unwrap();
-        assert!(text.contains("\"type\":\"session\""));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("output must be a single valid JSON value");
+        let entries = parsed
+            .as_array()
+            .expect(".json export must be a JSON array");
+        assert!(
+            entries.iter().any(|e| e
+                .get("type")
+                .and_then(|v| v.as_str())
+                == Some("session")),
+            "JSON array must contain the session header: {text}"
+        );
+    }
+
+    /// Regression for #84: --export rejects unknown extensions with
+    /// the same diagnostic the TUI /export already shows. Without
+    /// this guard, `hand --export session.md` silently produced an
+    /// HTML document inside session.md.
+    #[tokio::test]
+    async fn handle_export_unknown_extension_errors_with_clear_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session_with_file(&tmp);
+        for fname in ["dump.md", "dump.txt", "dump"] {
+            let out = tmp.path().join(fname);
+            let err = handle_export(&session, &out).expect_err(
+                "unknown / missing extension must error",
+            );
+            let msg = err.to_string();
+            assert!(
+                msg.contains("unsupported extension"),
+                "missing unsupported-extension hint on {fname}: {msg}"
+            );
+            assert!(
+                msg.contains(".jsonl") && msg.contains(".json") && msg.contains(".html"),
+                "error must list supported extensions on {fname}: {msg}"
+            );
+            assert!(
+                !out.exists(),
+                "no partial file should be written for unknown ext {fname}: {out:?}"
+            );
+        }
     }
 
     /// Pin the byte shape: piped stdin and `--prompt` concatenate into
