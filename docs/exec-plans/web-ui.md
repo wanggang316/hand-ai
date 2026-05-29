@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M2 complete)
+**Status:** In progress (M0-M3 complete)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -31,7 +31,7 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   - [x] M0.T4 Minimal axum router: serve assets + `/ws`; one prompt streams one assistant reply end-to-end
 - [x] **M1 — Chat shell**
 - [x] **M2 — Message + tool rendering**
-- [ ] **M3 — Sandbox runtime**
+- [x] **M3 — Sandbox runtime**
 - [ ] **M4 — Artifacts**
 - [ ] **M5 — Browser tools (JS REPL, extract-document)**
 - [ ] **M6 — Attachments**
@@ -59,6 +59,15 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   `message_start`/`message_end` (role-checked) in the chat-shell milestone;
   (3) the wire `message` field is a loose `WireMessage`, not strictly an
   `AssistantMessage`.
+- **2026-05-29 (M3)**: Custom-element registration is only triggered when the
+  defining module is actually evaluated. Under `isolatedModules`/esbuild, a
+  consumer that imports a sandbox element class **only in a type position**
+  (e.g. `createElement(...) as SandboxIframe`) has its import elided, so
+  `<sandbox-iframe>` never registers and `el.execute` is missing. Rule for the
+  sandbox (and any custom element): consumers must import a runtime value from
+  the module or add a side-effect import. M4/M5 import sandbox provider values,
+  so they register it; pure-type consumers (like the smoke helper) need an
+  explicit `import "./sandboxed-iframe"`.
 - **2026-05-29 (M2)**: The server serializes assistant **tool-call content
   blocks with the discriminator `"toolcall"`** (all lowercase), not the
   canonical `"toolCall"` the renderers expect. A browser test (agent invoking
@@ -355,20 +364,20 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 53 | defaultConvertToLlm (filters artifact, expands user-with-attachments) | chat-shell/core | M1 | DONE |
 | 54 | convertAttachments (images→ImageContent, docs→TextContent header) | chat-shell/core | M1 | DONE |
 | 55 | isUserMessageWithAttachments / isArtifactMessage guards | chat-shell/core | M1 | DONE |
-| 56 | SandboxedIframe `execute()` (transient hidden iframe, 120s timeout, AbortSignal) | sandbox-runtime | M3 | TODO |
-| 57 | SandboxedIframe `loadContent()` (persistent visible iframe for HTML artifacts) | sandbox-runtime | M3 | TODO |
-| 58 | SandboxedIframe `prepareHtmlDocument()` (public; standalone download assembly) | sandbox-runtime | M3 | TODO |
-| 59 | Sandbox `srcdoc` + optional `sandboxUrlProvider` (extension CSP) delivery modes | sandbox-runtime | M3 | TODO |
-| 60 | Navigation interceptor (link/form → open-external-url postMessage) | sandbox-runtime | M3 | TODO |
-| 61 | HTML validation gate (DOMParser parsererror → error page) | sandbox-runtime | M3 | TODO |
-| 62 | RUNTIME_MESSAGE_ROUTER singleton dispatcher (register/set/add/remove/unregister) | sandbox-runtime | M3 | TODO |
-| 63 | RuntimeMessageBridge `generateBridgeCode()` (sendRuntimeMessage, onCompleted, completionCallbacks) | sandbox-runtime | M3 | TODO |
-| 64 | ConsoleRuntimeProvider (console override, complete() lifecycle, error handlers) | sandbox-runtime | M3 | TODO |
+| 56 | SandboxedIframe `execute()` (transient hidden iframe, 120s timeout, AbortSignal) | sandbox-runtime | M3 | DONE |
+| 57 | SandboxedIframe `loadContent()` (persistent visible iframe for HTML artifacts) | sandbox-runtime | M3 | DONE |
+| 58 | SandboxedIframe `prepareHtmlDocument()` (public; standalone download assembly) | sandbox-runtime | M3 | DONE |
+| 59 | Sandbox `srcdoc` + optional `sandboxUrlProvider` (extension CSP) delivery modes | sandbox-runtime | M3 | DONE |
+| 60 | Navigation interceptor (link/form → open-external-url postMessage) | sandbox-runtime | M3 | DONE |
+| 61 | HTML validation gate (DOMParser parsererror → error page) | sandbox-runtime | M3 | DONE |
+| 62 | RUNTIME_MESSAGE_ROUTER singleton dispatcher (register/set/add/remove/unregister) | sandbox-runtime | M3 | DONE |
+| 63 | RuntimeMessageBridge `generateBridgeCode()` (sendRuntimeMessage, onCompleted, completionCallbacks) | sandbox-runtime | M3 | DONE |
+| 64 | ConsoleRuntimeProvider (console override, complete() lifecycle, error handlers) | sandbox-runtime | M3 | DONE |
 | 65 | ArtifactsRuntimeProvider (list/get/createOrUpdate/delete globals; online + offline; readWrite) | sandbox-runtime/artifacts | M3/M4 | TODO |
 | 66 | AttachmentsRuntimeProvider (list/readText/readBinary attachment globals) | sandbox-runtime/attachments | M3/M6 | TODO |
-| 67 | FileDownloadRuntimeProvider (returnDownloadableFile; online + offline download) | sandbox-runtime | M3 | TODO |
-| 68 | getRuntime().toString() injection constraint (no closures/imports) preserved | sandbox-runtime | M3 | TODO |
-| 69 | Sandbox iframe attribute `allow-scripts allow-modals` only | sandbox-runtime | M3 | TODO |
+| 67 | FileDownloadRuntimeProvider (returnDownloadableFile; online + offline download) | sandbox-runtime | M3 | DONE |
+| 68 | getRuntime().toString() injection constraint (no closures/imports) preserved | sandbox-runtime | M3 | DONE |
+| 69 | Sandbox iframe attribute `allow-scripts allow-modals` only | sandbox-runtime | M3 | DONE |
 | 70 | ArtifactElement abstract base (light DOM, content get/set, getHeaderButtons) | artifacts | M4 | TODO |
 | 71 | ArtifactsPanel (`<artifacts-panel>`, Map-backed state, imperative DOM insertion, tab bar) | artifacts | M4 | TODO |
 | 72 | getFileType dispatch table (html/svg/markdown/image/pdf/excel/docx/text/generic) | artifacts | M4 | TODO |
