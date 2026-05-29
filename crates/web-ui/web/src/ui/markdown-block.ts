@@ -1,11 +1,12 @@
-// Minimal text block element. M1 needs to render user/assistant message text
-// correctly; the full markdown renderer (with syntax highlighting and rich
-// formatting) lands in a later milestone. This intentionally renders plain text
-// with preserved whitespace and word wrapping so the message shape is correct;
-// swapping in a real markdown parser later only changes this file.
+// Markdown renderer element. Parses its `content` to safe HTML via the local,
+// dependency-free `renderMarkdown` (escape-first, so source HTML cannot survive)
+// and renders it into the light DOM so Tailwind utility classes apply. Used by
+// assistant/user/thinking message bodies and the Markdown artifact preview.
 
 import { html, LitElement } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
+import { renderMarkdown } from "./markdown";
 
 @customElement("markdown-block")
 export class MarkdownBlock extends LitElement {
@@ -23,6 +24,8 @@ export class MarkdownBlock extends LitElement {
   }
 
   override render() {
-    return html`<div class="whitespace-pre-wrap break-words leading-relaxed">${this.content}</div>`;
+    return html`<div class="markdown-body break-words">
+      ${unsafeHTML(renderMarkdown(this.content))}
+    </div>`;
   }
 }
