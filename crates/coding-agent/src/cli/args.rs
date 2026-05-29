@@ -105,8 +105,15 @@ pub struct Args {
     #[arg(long)]
     pub no_builtin_tools: bool,
 
-    /// Run in ephemeral mode (don't save session)
-    #[arg(long)]
+    /// Run in ephemeral mode (don't save session). Mutually
+    /// exclusive with `--continue` -- combining the two used to
+    /// silently drop --continue and run a fresh ephemeral session,
+    /// surprising users who had --continue baked into a shell alias
+    /// (#82, sibling of #80). clap surfaces a clean conflict error
+    /// instead. --resume/--fork are intentionally NOT in the conflict
+    /// list: those load a past session's history but writes (when
+    /// --no-session) stay in memory, which is a reasonable mode.
+    #[arg(long, conflicts_with = "continue_session")]
     pub no_session: bool,
 
     /// Disable auto-loading of project context files (HAND.md,
@@ -805,6 +812,57 @@ mod tests {
             err.kind(),
             clap::error::ErrorKind::ArgumentConflict
         ));
+    }
+
+    /// Regression for #82: `--no-session` and `--continue` are
+    /// mutually exclusive. Pre-fix, the combination silently dropped
+    /// --continue and ran a fresh ephemeral session, surprising
+    /// users with --continue baked into a shell alias. clap surfaces
+    /// a clean conflict error.
+    #[test]
+    fn no_session_and_continue_are_mutually_exclusive() {
+        let result = Args::try_parse_from(["hand", "--no-session", "--continue"]);
+        let err = match result {
+            Ok(_) => panic!("conflicting flags must error at parse time"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err.kind(), clap::error::ErrorKind::ArgumentConflict),
+            "expected ArgumentConflict, got {:?}: {err}",
+            err.kind()
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("--no-session"), "error must name --no-session: {msg}");
+        assert!(msg.contains("--continue"), "error must name --continue: {msg}");
+    }
+
+    /// `--no-session -c` short-form pair must also error.
+    #[test]
+    fn no_session_and_continue_short_are_mutually_exclusive() {
+        let result = Args::try_parse_from(["hand", "--no-session", "-c"]);
+        let err = match result {
+            Ok(_) => panic!("conflicting short --continue must error"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        ));
+    }
+
+    /// Adjacent surface check: `--no-session --resume <id>` is
+    /// intentionally NOT a conflict -- loading a past session's
+    /// history into ephemeral memory is a coherent mode. Pin this
+    /// non-conflict so a future "tighten everything" patch can't
+    /// silently break the documented intent in args.rs.
+    #[test]
+    fn no_session_with_resume_does_not_conflict() {
+        let args =
+            Args::try_parse_from(["hand", "--no-session", "--resume", "s_some_id"]).expect(
+                "--no-session --resume is intentionally allowed; load history into in-memory session",
+            );
+        assert!(args.no_session);
+        assert_eq!(args.resume.as_deref(), Some("s_some_id"));
     }
 
     #[test]
