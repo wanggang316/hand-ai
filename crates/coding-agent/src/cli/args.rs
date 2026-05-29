@@ -260,6 +260,81 @@ impl Args {
             .filter_map(|s| s.strip_prefix('@').map(|p| p.to_string()))
             .collect()
     }
+
+    /// Expand a leading `~` / `~/` to the user's home directory in
+    /// every CLI field that takes a path. Run AFTER clap parsing,
+    /// BEFORE downstream consumers see the values, so `--resume
+    /// ~/sess.jsonl`, `--export ~/out.html`, `--session-dir
+    /// ~/sessions`, `--cwd ~/proj`, `--skill ~/skills/foo`, etc. all
+    /// work the same way the shell would expand them (#79). Fields
+    /// that may carry literal text (--system-prompt,
+    /// --append-system-prompt) only get expanded when the value
+    /// actually starts with `~` or `~/`, so literal prose that does
+    /// not start with a tilde is untouched.
+    pub fn expand_tilde_paths(&mut self) {
+        if let Some(ref s) = self.resume {
+            self.resume = Some(expand_tilde(s));
+        }
+        if let Some(ref s) = self.fork {
+            self.fork = Some(expand_tilde(s));
+        }
+        if let Some(ref p) = self.cwd {
+            self.cwd = Some(expand_tilde_pathbuf(p));
+        }
+        if let Some(ref p) = self.session_dir {
+            self.session_dir = Some(expand_tilde_pathbuf(p));
+        }
+        if let Some(ref p) = self.export {
+            self.export = Some(expand_tilde_pathbuf(p));
+        }
+        if let Some(ref s) = self.system_prompt {
+            self.system_prompt = Some(expand_tilde(s));
+        }
+        for s in self.append_system_prompt.iter_mut() {
+            *s = expand_tilde(s);
+        }
+        for s in self.extensions.iter_mut() {
+            *s = expand_tilde(s);
+        }
+        for s in self.skills.iter_mut() {
+            *s = expand_tilde(s);
+        }
+        for s in self.themes.iter_mut() {
+            *s = expand_tilde(s);
+        }
+        for s in self.prompt_templates.iter_mut() {
+            *s = expand_tilde(s);
+        }
+    }
+}
+
+/// Replace a leading `~` / `~/` with the user's home directory.
+/// Returns the input verbatim when it does not start with a tilde
+/// or when `dirs::home_dir()` fails. Internal helper for
+/// [`Args::expand_tilde_paths`]; the bigger
+/// [`crate::tools::path_utils::expand_path`] helper also strips a
+/// leading `@` sigil which is the wrong semantics for CLI flags.
+fn expand_tilde(s: &str) -> String {
+    if s == "~" {
+        return dirs::home_dir()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|| s.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
+    }
+    s.to_string()
+}
+
+fn expand_tilde_pathbuf(p: &std::path::Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if s == "~" || s.starts_with("~/") {
+        PathBuf::from(expand_tilde(&s))
+    } else {
+        p.to_path_buf()
+    }
 }
 
 /// Rewrite multi-character short flags (`-nc`, `-nt`, `-nbt`, …) into
@@ -503,6 +578,100 @@ mod tests {
     fn parses_api_key_flag() {
         let args = Args::try_parse_from(["hand", "--api-key", "sk-test"]).unwrap();
         assert_eq!(args.api_key.as_deref(), Some("sk-test"));
+    }
+
+    /// Regression for #79: a leading `~` in CLI path flags must
+    /// expand to the user's home dir. Sibling fix to #44 (which
+    /// covered the slash-command surface but not the CLI flags).
+    /// Verify across a representative subset of fields: Option<String>
+    /// (resume / fork), Option<PathBuf> (export / session-dir / cwd),
+    /// and Vec<String> (skills / extensions).
+    #[test]
+    fn expand_tilde_paths_replaces_leading_tilde_across_flags() {
+        // dirs::home_dir() must be available on the test host; the
+        // assertion below depends on it returning Some.
+        let home = match dirs::home_dir() {
+            Some(h) => h,
+            None => return,
+        };
+        let home_str = home.to_string_lossy().into_owned();
+
+        let mut args = Args::try_parse_from([
+            "hand",
+            "--resume",
+            "~/sess.jsonl",
+            "--fork",
+            "~/forks/abc.jsonl",
+            "--export",
+            "~/out.html",
+            "--session-dir",
+            "~/sessions",
+            "--cwd",
+            "~/proj",
+            "--system-prompt",
+            "~/prompts/sys.txt",
+            "--append-system-prompt",
+            "~/prompts/extra.txt",
+            "--skill",
+            "~/skills/a",
+            "--skill",
+            "~/skills/b",
+            "--extension",
+            "~/ext/p.so",
+        ])
+        .unwrap();
+
+        // Pre: clap preserves the literal `~`.
+        assert!(args.resume.as_deref().unwrap().starts_with('~'));
+
+        args.expand_tilde_paths();
+
+        let expected_resume = format!("{home_str}/sess.jsonl");
+        let expected_fork = format!("{home_str}/forks/abc.jsonl");
+        let expected_export = home.join("out.html");
+        let expected_sessions = home.join("sessions");
+        let expected_cwd = home.join("proj");
+        let expected_sys = format!("{home_str}/prompts/sys.txt");
+        let expected_append = format!("{home_str}/prompts/extra.txt");
+        assert_eq!(args.resume.as_deref(), Some(expected_resume.as_str()));
+        assert_eq!(args.fork.as_deref(), Some(expected_fork.as_str()));
+        assert_eq!(args.export.as_deref(), Some(expected_export.as_path()));
+        assert_eq!(args.session_dir.as_deref(), Some(expected_sessions.as_path()));
+        assert_eq!(args.cwd.as_deref(), Some(expected_cwd.as_path()));
+        assert_eq!(args.system_prompt.as_deref(), Some(expected_sys.as_str()));
+        assert_eq!(args.append_system_prompt, vec![expected_append]);
+        assert_eq!(
+            args.skills,
+            vec![
+                format!("{home_str}/skills/a"),
+                format!("{home_str}/skills/b"),
+            ]
+        );
+        assert_eq!(args.extensions, vec![format!("{home_str}/ext/p.so")]);
+    }
+
+    /// Boundary: paths that do NOT start with `~` are returned
+    /// verbatim. A literal `--system-prompt "be concise"` must not
+    /// get rewritten by the expander even though strings are the
+    /// same field type.
+    #[test]
+    fn expand_tilde_paths_leaves_non_tilde_values_untouched() {
+        let mut args = Args::try_parse_from([
+            "hand",
+            "--system-prompt",
+            "be concise",
+            "--resume",
+            "s_abc123",
+            "--skill",
+            "/abs/path",
+            "--skill",
+            "relative/path",
+        ])
+        .unwrap();
+        args.expand_tilde_paths();
+        assert_eq!(args.system_prompt.as_deref(), Some("be concise"));
+        assert_eq!(args.resume.as_deref(), Some("s_abc123"));
+        assert_eq!(args.skills, vec!["/abs/path", "relative/path"]);
     }
 
     #[test]

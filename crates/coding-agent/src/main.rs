@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `Error: <one-line>` message instead of a multi-line usage dump
     // on stderr. Help and version still use clap's built-in handler
     // (exit 0, full output).
-    let cli = Args::try_parse_from(argv).unwrap_or_else(|e| {
+    let mut cli = Args::try_parse_from(argv).unwrap_or_else(|e| {
         match e.kind() {
             clap::error::ErrorKind::DisplayHelp
             | clap::error::ErrorKind::DisplayVersion
@@ -47,6 +47,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     timings::time("parse_args");
+
+    // Expand a leading `~` / `~/` in every CLI flag that takes a
+    // path so `hand --resume ~/x.jsonl`, `--export ~/out.html`,
+    // `--session-dir ~/sessions`, etc. work the same way the shell
+    // would expand them. Sibling fix to #44 for the slash-command
+    // surface (#79).
+    cli.expand_tilde_paths();
 
     // Honest warnings for documented-but-unplumbed flags (#64). The
     // runtime doesn't yet wire `--theme`, `--extension`, or
