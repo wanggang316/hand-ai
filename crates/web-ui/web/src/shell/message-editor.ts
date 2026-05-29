@@ -58,10 +58,30 @@ export class MessageEditor extends LitElement {
 
   @state() processingFiles = false;
   @state() private isDragging = false;
+  @state() private errorMessage = "";
   private fileInputRef = createRef<HTMLInputElement>();
+  private errorTimer?: ReturnType<typeof setTimeout>;
 
   protected override createRenderRoot(): HTMLElement | DocumentFragment {
     return this;
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.errorTimer) clearTimeout(this.errorTimer);
+  }
+
+  /**
+   * Show a non-blocking, auto-dismissing validation error inline in the editor
+   * (replaces the former `window.alert` sites — alerts block the UI thread and
+   * are untestable). The latest message wins; it clears after a few seconds.
+   */
+  private showError(message: string): void {
+    this.errorMessage = message;
+    if (this.errorTimer) clearTimeout(this.errorTimer);
+    this.errorTimer = setTimeout(() => {
+      this.errorMessage = "";
+    }, 5000);
   }
 
   /**
@@ -72,7 +92,7 @@ export class MessageEditor extends LitElement {
     if (files.length === 0) return;
 
     if (files.length + this.attachments.length > this.maxFiles) {
-      alert(i18n("Maximum {n} files allowed").replace("{n}", String(this.maxFiles)));
+      this.showError(i18n("Maximum {n} files allowed", { n: this.maxFiles }));
       return;
     }
 
@@ -83,21 +103,13 @@ export class MessageEditor extends LitElement {
     for (const file of files) {
       try {
         if (file.size > this.maxFileSize) {
-          alert(
-            i18n("{name} exceeds the maximum size of {mb}MB")
-              .replace("{name}", file.name)
-              .replace("{mb}", String(maxMb)),
-          );
+          this.showError(i18n("{name} exceeds the maximum size of {mb}MB", { name: file.name, mb: maxMb }));
           continue;
         }
         newAttachments.push(await loadAttachment(file));
       } catch (error) {
         console.error(`Error processing ${file.name}:`, error);
-        alert(
-          i18n("Failed to process {name}: {error}")
-            .replace("{name}", file.name)
-            .replace("{error}", String(error)),
-        );
+        this.showError(i18n("Failed to process {name}: {error}", { name: file.name, error: String(error) }));
       }
     }
 
@@ -220,6 +232,23 @@ export class MessageEditor extends LitElement {
               class="absolute inset-0 bg-primary/10 rounded-xl pointer-events-none z-10 flex items-center justify-center"
             >
               <div class="text-primary font-medium">${i18n("Drop files here")}</div>
+            </div>`
+          : ""}
+        ${this.errorMessage
+          ? html`<div
+              class="mx-4 mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 flex items-start justify-between gap-2"
+              role="alert"
+            >
+              <span class="text-xs text-destructive">${this.errorMessage}</span>
+              <button
+                class="text-destructive/70 hover:text-destructive text-xs leading-none"
+                title=${i18n("Close")}
+                @click=${() => {
+                  this.errorMessage = "";
+                }}
+              >
+                ✕
+              </button>
             </div>`
           : ""}
         ${this.attachments.length > 0

@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M10 complete; extension-UI protocol deferred to M12)
+**Status:** In progress (M0-M11 complete; extension-UI protocol + parity sweep in M12)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -48,7 +48,7 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   app header done; the extension-UI request/response protocol, rows 188-189, is
   deferred to M12 — niche, needs server extensions that emit UI requests)
 - [x] **M10 — Proxy / networking / out-of-band upload-download**
-- [ ] **M11 — i18n / format / theming / design system**
+- [x] **M11 — i18n / format / theming / design system**
 - [ ] **M12 — Polish, single-binary packaging, parity verification**
 
 ## Surprises & Discoveries
@@ -115,6 +115,17 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
+- **M11 (2026-05-29)**: Presentation layer. `i18n()` now does real lookup with
+  `{param}` substitution + a `subscribe`/`language-change` event; the `de` table
+  covers all 174 distinct call-site keys (en is identity), placeholders preserved.
+  `format.ts` confirmed complete. `app.css` finalized: light+dark tokens via
+  `data-theme`, shimmer keyframes, thin-scrollbar, user-message gradient (all
+  vendored, brand-neutral). Added `ui/` primitives (input `fc`, switch, label,
+  theme-toggle). **Closed the no-alert gate**: the 3 editor `alert()` validation
+  sites are now an inline, auto-dismissing error banner — a repo-wide grep finds
+  no real `alert`/`confirm`/`window.prompt` calls. Verified: tsc + vite build
+  clean; brand grep clean; `runI18nSmoke()` → 175 de entries with correct
+  sample translations.
 - **M10 (2026-05-29)**: Networking seam. Server: `POST /upload` (content-addressed
   SHA-256 blob store, 50MB cap), `GET /download/:id` + `POST /download/register`
   (serves only files under the session cwd — path-traversal rejected),
@@ -601,14 +612,14 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 168 | Export flow: export_html response → GET /download/:id → browser download | proxy-networking | M10 | DONE |
 | 169 | Document-fetch proxy applied client-side for extract_document only | proxy-networking | M10 | DONE |
 | 170 | WsConnection lifecycle (connect, reconnect, framing) | proxy-networking/client | M0/M10 | TODO |
-| 171 | i18n translation system (~200 keys, en + de, exact placeholders, brand-neutral) | utils/i18n | M11 | TODO |
-| 172 | i18n() / setLanguage() / translations exports | utils/i18n | M11 | TODO |
-| 173 | formatUsage / formatCost / formatTokenCount | utils/format | M11 | TODO |
-| 174 | ui/ design-system primitives (Button, CopyButton, DownloadButton, Select, Switch, Badge, Label) | ui | M11 | TODO |
+| 171 | i18n translation system (~200 keys, en + de, exact placeholders, brand-neutral) | utils/i18n | M11 | DONE |
+| 172 | i18n() / setLanguage() / translations exports | utils/i18n | M11 | DONE |
+| 173 | formatUsage / formatCost / formatTokenCount | utils/format | M11 | DONE |
+| 174 | ui/ design-system primitives (Button, CopyButton, DownloadButton, Select, Switch, Badge, Label) | ui | M11 | DONE |
 | 175 | markdown-block / code-block / diff / preview-code-toggle / theme-toggle / mode-toggle elements | ui | M2/M4/M6/M11 | TODO |
-| 176 | app.css design tokens (CSS custom properties) | theming | M11 | TODO |
-| 177 | @keyframes shimmer + .animate-shimmer (thinking block) | theming | M11 | TODO |
-| 178 | Thin-scrollbar rules + user-message gradient (brand-neutral palette) | theming | M11 | TODO |
+| 176 | app.css design tokens (CSS custom properties) | theming | M11 | DONE |
+| 177 | @keyframes shimmer + .animate-shimmer (thinking block) | theming | M11 | DONE |
+| 178 | Thin-scrollbar rules + user-message gradient (brand-neutral palette) | theming | M11 | DONE |
 | 179 | Tool description prompt constants reproduced verbatim, brand-neutral (prompts.ts) | utils/prompts | M5 | DONE |
 | 180 | WS command catalog: prompt/steer/follow_up/abort/abort_bash/bash | wire/backend-seam | M1/M5 | TODO |
 | 181 | WS command catalog: new_session/switch_session/fork/clone | wire/backend-seam | M9 | DONE |

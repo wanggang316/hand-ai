@@ -1,5 +1,5 @@
 // DialogBase — a minimal modal base for the de-branded dialog system. Brand-
-// neutral reimplementation of the reference mini-lit `Dialog`/`DialogBase`.
+// neutral reimplementation of a generic `Dialog`/`DialogBase` modal primitive.
 //
 // Subclasses override `renderContent()` (and optionally `modalWidth` /
 // `modalHeight`) and call `open()`. The base appends itself to `document.body`
