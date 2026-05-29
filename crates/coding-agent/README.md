@@ -266,8 +266,10 @@ cat README.md | cargo run --bin hand -- --print --prompt "Summarize this"
 | `--provider <name>` | Provider (anthropic, openai, google, etc.) |
 | `--model <pattern>` | Model pattern or ID (supports `provider/id` and `:<thinking>`) |
 | `--api-key <key>` | API key (overrides env vars) |
+| `--base-url <url>` | Custom base URL for the provider (self-hosted proxies / non-catalogue endpoints) |
 | `--thinking <level>` | `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `--list-models [search]` | List available models |
+| `--models <a,b,c>` | Comma-separated subset of model patterns to enable for the session |
 
 ### Session Options
 
@@ -291,8 +293,38 @@ so the JSONL files travel with the repo. The id-based `--resume` /
 |--------|-------------|
 | `--tools <list>` | Enable specific tools (comma-separated) |
 | `--no-tools` | Disable all tools |
+| `--no-builtin-tools` | Disable hand's built-ins; keep extension-provided tools |
 
 Available tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`
+
+### Diagnostics & Scripting
+
+| Option | Description |
+|--------|-------------|
+| `--diagnostics` | Print a diagnostics report (auth, model, paths, network) and exit |
+| `--export <path>` | Export the (resumed) session to `path`; format inferred from the extension (`.jsonl` / `.json` / `.html`) |
+| `--mode <text\|json\|rpc>` | Output mode for `--print` — `text` (default), JSONL event stream, or RPC alias |
+| `--rpc` | Headless RPC mode (JSONL on stdin/stdout); mutually exclusive with `--print` |
+| `--offline` | Suppress auto-download / version-check / network probes (equivalent to `HAND_OFFLINE=1`) |
+
+### Discovery Overrides
+
+`--skill`, `--theme`, `--extension`, `--prompt-template` are repeatable —
+each entry contributes an additional path on top of the auto-discovered
+set. The matching `--no-*` flag disables that subsystem's discovery
+entirely (including the explicit `--*` paths for extensions).
+
+| Option | Description |
+|--------|-------------|
+| `--skill <path>` | Add an extra skill path (repeatable) |
+| `--no-skills` | Disable skill discovery (project + user + builtin) |
+| `--theme <path>` | Add an extra theme path (repeatable) |
+| `--no-themes` | Disable theme discovery |
+| `-e`, `--extension <path>` | Load an extra extension by path (repeatable) |
+| `--no-extensions` | Disable all extension loading (explicit + auto-discovered) |
+| `--prompt-template <path>` | Add an extra prompt-template path (repeatable) |
+| `--no-prompt-templates` | Disable prompt-template discovery |
+| `--no-context-files` | Skip auto-loading of `HAND.md` / `.hand/context.md` |
 
 ### Other Options
 
@@ -301,8 +333,8 @@ Available tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`
 | `-p`, `--print` | Non-interactive print mode (final answer to stdout) |
 | `--prompt <text>` | Initial prompt (long-form only; `-p` is `--print`) |
 | `-d`, `--cwd <dir>` | Working directory |
-| `--system-prompt <text>` | Override system prompt |
-| `--append-system-prompt <text>` | Append to system prompt |
+| `--system-prompt <text>` | Override system prompt (auto-loaded from disk when the value resolves to an existing file) |
+| `--append-system-prompt <text>` | Append text or file contents to the system prompt (repeatable; each value auto-loads from disk when it resolves to a file) |
 | `--verbose` | Verbose logging (long-form only; `-v` is `--version`) |
 | `-v`, `-V`, `--version` | Print the binary version and exit |
 

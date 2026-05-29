@@ -552,6 +552,36 @@ mod tests {
         assert_eq!(args.append_system_prompt, vec!["first", "second"]);
     }
 
+    /// Every `--<long-flag>` advertised by `--help` must appear in the
+    /// `crates/coding-agent/README.md` CLI Reference section so the
+    /// documentation can't drift out from under the runtime surface.
+    /// Known exclusions: `--help` (universal, not in clap doc-comments)
+    /// and `--session` (documented as an alias of `--resume` in the
+    /// same row, but its bare token may not appear).
+    #[test]
+    fn readme_documents_every_clap_long_flag() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        let readme_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
+        let readme = std::fs::read_to_string(&readme_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", readme_path.display()));
+        let mut missing = Vec::new();
+        for arg in cmd.get_arguments() {
+            let Some(long) = arg.get_long() else { continue };
+            if matches!(long, "help" | "session") {
+                continue;
+            }
+            let needle = format!("--{long}");
+            if !readme.contains(&needle) {
+                missing.push(needle);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "README CLI Reference is missing these clap flags: {missing:?}"
+        );
+    }
+
     #[test]
     fn parses_continue_short_and_long() {
         let long = Args::try_parse_from(["hand", "--continue"]).unwrap();
