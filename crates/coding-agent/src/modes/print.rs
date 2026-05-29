@@ -734,8 +734,15 @@ fn load_file_args(paths: &[String], cwd: &std::path::Path) -> Result<Option<Stri
         if !resolved.exists() {
             return Err(format!("File not found: {raw}"));
         }
-        let body =
-            std::fs::read_to_string(&resolved).map_err(|e| format!("Failed to read {raw}: {e}"))?;
+        let body = match std::fs::read_to_string(&resolved) {
+            Ok(body) => body,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(format!(
+                    "Cannot attach {raw}: binary files (e.g. images) are not yet supported by --print @<path> — text attachments only for now"
+                ));
+            }
+            Err(e) => return Err(format!("Failed to read {raw}: {e}")),
+        };
         parts.push(format!("<file path=\"{raw}\">\n{body}\n</file>"));
     }
     Ok(Some(parts.join("\n")))
@@ -1250,5 +1257,56 @@ mod tests {
         let out = expand_at_mentions(&prompt, &std::env::temp_dir()).unwrap();
         // Empty file produces no <file> block; rest of prompt remains.
         assert_eq!(out, "hi");
+    }
+
+    /// `@<path>` positionals in `hand --print` flow through
+    /// `Args::file_args()` -> `load_file_args`, not `expand_at_mentions`.
+    /// A binary file (e.g. a PNG) previously bubbled the raw
+    /// "stream did not contain valid UTF-8" message, leaving users to
+    /// chase a phantom corruption bug. Match the
+    /// `expand_at_mentions` binary-detection arm so the error names
+    /// the actual root cause: image attachments are not yet wired up
+    /// in --print.
+    #[test]
+    fn load_file_args_binary_file_returns_clear_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "hand-bin-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("img.png");
+        std::fs::write(&path, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).unwrap();
+        let raw = path.to_string_lossy().to_string();
+        let err = load_file_args(std::slice::from_ref(&raw), &std::env::temp_dir()).unwrap_err();
+        assert!(
+            err.contains("binary files"),
+            "expected binary-files hint, got: {err}"
+        );
+        assert!(
+            err.contains(&raw),
+            "error should name the offending path, got: {err}"
+        );
+        assert!(
+            !err.contains("stream did not contain valid UTF-8"),
+            "error still leaks the raw IO message: {err}"
+        );
+    }
+
+    /// Regression boundary: a UTF-8 file still loads through
+    /// `load_file_args` exactly as before -- the binary-detection arm
+    /// must NOT catch valid text.
+    #[test]
+    fn load_file_args_text_file_still_inlines() {
+        let path = write_tmp("hello world\n");
+        let raw = path.to_string_lossy().to_string();
+        let out = load_file_args(&[raw], &std::env::temp_dir())
+            .unwrap()
+            .unwrap();
+        assert!(out.contains("hello world"), "{out}");
+        assert!(out.contains("<file path="), "{out}");
     }
 }
