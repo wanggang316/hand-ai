@@ -19,6 +19,40 @@ pub fn export_to_jsonl(session: &SessionManager, output: &Path) -> Result<(), Co
     Ok(())
 }
 
+/// Export a session as a single valid JSON document — a top-level
+/// array of session entries. Mirrors `export_to_jsonl` but wraps
+/// the same entries in `[...]` so `JSON.parse(...)` succeeds
+/// directly (issue #67). Pretty-prints for human readability.
+pub fn export_to_json(session: &SessionManager, output: &Path) -> Result<(), CodingAgentError> {
+    let source = session.path();
+    if source.as_os_str().is_empty() {
+        return Err(CodingAgentError::Session(
+            "Cannot export an in-memory session to JSON".into(),
+        ));
+    }
+    let body = std::fs::read_to_string(source)
+        .map_err(|e| CodingAgentError::Session(format!("Failed to read session file: {e}")))?;
+    let mut entries: Vec<serde_json::Value> = Vec::new();
+    for (idx, line) in body.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+            CodingAgentError::Session(format!(
+                "Failed to parse session entry on line {}: {e}",
+                idx + 1
+            ))
+        })?;
+        entries.push(value);
+    }
+    let pretty = serde_json::to_string_pretty(&entries)
+        .map_err(|e| CodingAgentError::Session(format!("Failed to encode JSON: {e}")))?;
+    std::fs::write(output, pretty)
+        .map_err(|e| CodingAgentError::Session(format!("Failed to write JSON: {e}")))?;
+    Ok(())
+}
+
 /// Export messages to a simple HTML file.
 pub fn export_to_html(
     messages: &[Message],
@@ -523,6 +557,48 @@ fn main() {}
         let output = dir.path().join("exported.jsonl");
         export_to_jsonl(&session, &output).unwrap();
         assert!(output.exists());
+    }
+
+    /// Issue #67: `/export out.json` must produce a valid JSON
+    /// document — a top-level array of session entries — not a JSONL
+    /// stream. Pre-fix, `JSON.parse` on the output threw on the
+    /// second line. Pin a parse-as-JSON round trip plus the empty-
+    /// session edge case.
+    #[test]
+    fn test_export_json_produces_valid_json_array() {
+        let dir = TempDir::new().unwrap();
+        let mut session = SessionManager::create(dir.path()).unwrap();
+        session
+            .append_message(Message::User(UserMessage::new_text("first")))
+            .unwrap();
+        session
+            .append_message(Message::User(UserMessage::new_text("second")))
+            .unwrap();
+
+        let out = dir.path().join("session.json");
+        export_to_json(&session, &out).unwrap();
+        let body = std::fs::read_to_string(&out).unwrap();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("export must be valid JSON");
+        let arr = parsed.as_array().expect("export must be a top-level array");
+        // 1 session header + 2 messages.
+        assert!(
+            arr.len() >= 3,
+            "expected at least 3 entries, got {}",
+            arr.len()
+        );
+        // First entry is the session header.
+        assert_eq!(arr[0].get("type").and_then(|v| v.as_str()), Some("session"));
+    }
+
+    #[test]
+    fn test_export_json_in_memory_fails() {
+        let session = SessionManager::in_memory();
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("session.json");
+        let result = export_to_json(&session, &output);
+        assert!(result.is_err());
     }
 
     #[test]

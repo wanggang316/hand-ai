@@ -2911,7 +2911,7 @@ fn last_n_assistant_texts(session: &AgentSession, n: usize) -> Vec<String> {
 /// `/export <path>` — dispatch to the right `core::export` entrypoint based
 /// on the parsed [`ExportFormat`].
 fn apply_export(chat: &ChatList, session: &AgentSession, path: &Path, fmt: ExportFormat) {
-    use crate::core::export::{export_to_html, export_to_jsonl};
+    use crate::core::export::{export_to_html, export_to_json, export_to_jsonl};
     // Refuse to silently overwrite an existing file. upstream-side issue #8:
     // users testing exports against a path they already used lose the
     // previous transcript without warning. Tell them to delete first
@@ -2929,10 +2929,12 @@ fn apply_export(chat: &ChatList, session: &AgentSession, path: &Path, fmt: Expor
     }
     match fmt {
         ExportFormat::Jsonl | ExportFormat::Json => {
-            // For `.json` we still copy the JSONL stream verbatim — a
-            // JSONL stream parses as a sequence of JSON values, which is
-            // what most consumers expect, so we don't ship a separate
-            // JSON exporter.
+            // `.jsonl` copies the raw JSONL session file verbatim;
+            // `.json` wraps the same entries in a top-level array so
+            // the output is a single valid JSON document instead of
+            // a JSONL stream (#67). Both branches open the same on-
+            // disk session — the in-memory error message stays
+            // shared.
             let manager = match session.session_file() {
                 Some(p) => match crate::core::session_manager::SessionManager::open(p) {
                     Ok(m) => m,
@@ -2944,13 +2946,18 @@ fn apply_export(chat: &ChatList, session: &AgentSession, path: &Path, fmt: Expor
                 None => {
                     push_status(
                         chat,
-                        "[/export: cannot export an in-memory session as JSONL]".to_string(),
+                        "[/export: cannot export an in-memory session as JSON/JSONL]".to_string(),
                         Some(RED_FG),
                     );
                     return;
                 }
             };
-            match export_to_jsonl(&manager, path) {
+            let result = if matches!(fmt, ExportFormat::Jsonl) {
+                export_to_jsonl(&manager, path)
+            } else {
+                export_to_json(&manager, path)
+            };
+            match result {
                 Ok(()) => push_status(chat, format!("[exported to {}]", path.display()), None),
                 Err(e) => push_status(chat, format!("[/export failed: {e}]"), Some(RED_FG)),
             }

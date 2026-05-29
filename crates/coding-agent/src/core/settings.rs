@@ -1296,6 +1296,50 @@ impl SettingsManager {
                 let b = parse_bool(value)?;
                 layer.quiet_startup = Some(b);
             }
+            // Effective-default display entries (build_settings_entries
+            // surfaces these as String values so users can see what's
+            // in effect after the global + project merge — see issue
+            // #16 / UAT-013). Real keystroke editing of strings via
+            // SettingsListComponent isn't wired yet, so a `Changed`
+            // event here normally fires with the same value the user
+            // saw. Pre-fix, an unknown-id branch rejected them with
+            // `"...is not editable via /settings"` (#66). Accept the
+            // ids here so the no-op trip is silent; when keystroke
+            // editing lands these can be tightened into proper
+            // validators.
+            "default_provider" => {
+                let trimmed = value.trim();
+                layer.default_provider = if trimmed.is_empty() || trimmed.starts_with('(') {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+            "default_model" => {
+                let trimmed = value.trim();
+                layer.default_model = if trimmed.is_empty() || trimmed.starts_with('(') {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+            }
+            "default_thinking_level" => {
+                let parsed = match value {
+                    "off" => Some(ThinkingLevelSetting::Off),
+                    "minimal" => Some(ThinkingLevelSetting::Minimal),
+                    "low" => Some(ThinkingLevelSetting::Low),
+                    "medium" => Some(ThinkingLevelSetting::Medium),
+                    "high" => Some(ThinkingLevelSetting::High),
+                    "xhigh" => Some(ThinkingLevelSetting::Xhigh),
+                    // The display value `(unset)` and any unrecognised
+                    // text both map back to None — the merged-view
+                    // entry uses `(unset)` as the placeholder, so a
+                    // no-op trip through here must not coin a bogus
+                    // setting.
+                    _ => None,
+                };
+                layer.default_thinking_level = parsed;
+            }
             other => {
                 return Err(SettingsError::Other(format!(
                     "setting {other:?} is not editable via /settings"
@@ -2048,6 +2092,67 @@ mod tests {
             body.contains("quiet-startup: true"),
             "yaml missing quiet-startup: {body:?}"
         );
+    }
+
+    /// Issue #66: `default_provider` / `default_model` /
+    /// `default_thinking_level` show up as String entries in
+    /// `/settings`. Until keystroke editing for String values lands,
+    /// the dispatcher emits a Changed event with the same string the
+    /// user saw — `apply_setting_by_id` must accept those ids, not
+    /// reject them with "is not editable via /settings".
+    #[test]
+    fn apply_setting_by_id_accepts_default_provider_model_thinking_level() {
+        let mut mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            None,
+            None,
+        );
+
+        // Accept a real provider value.
+        let applied = mgr
+            .apply_setting_by_id(SettingsScope::Global, "default_provider", "openrouter")
+            .expect("default_provider must be accepted");
+        assert_eq!(applied, "openrouter");
+        assert_eq!(
+            mgr.global_layer().default_provider.as_deref(),
+            Some("openrouter")
+        );
+
+        // Placeholder strings like `(none — …)` get mapped back to None.
+        mgr.apply_setting_by_id(
+            SettingsScope::Global,
+            "default_provider",
+            "(none — falls back to auto-pick)",
+        )
+        .expect("placeholder must round-trip silently");
+        assert!(mgr.global_layer().default_provider.is_none());
+
+        // default_model behaves the same.
+        mgr.apply_setting_by_id(SettingsScope::Global, "default_model", "claude-opus-4-7")
+            .unwrap();
+        assert_eq!(
+            mgr.global_layer().default_model.as_deref(),
+            Some("claude-opus-4-7")
+        );
+
+        // default_thinking_level parses the documented enum strings.
+        for (s, expected) in [
+            ("off", ThinkingLevelSetting::Off),
+            ("minimal", ThinkingLevelSetting::Minimal),
+            ("low", ThinkingLevelSetting::Low),
+            ("medium", ThinkingLevelSetting::Medium),
+            ("high", ThinkingLevelSetting::High),
+            ("xhigh", ThinkingLevelSetting::Xhigh),
+        ] {
+            mgr.apply_setting_by_id(SettingsScope::Global, "default_thinking_level", s)
+                .unwrap();
+            assert_eq!(mgr.global_layer().default_thinking_level, Some(expected));
+        }
+        // And the `(unset)` placeholder maps back to None.
+        mgr.apply_setting_by_id(SettingsScope::Global, "default_thinking_level", "(unset)")
+            .unwrap();
+        assert!(mgr.global_layer().default_thinking_level.is_none());
     }
 
     #[test]
