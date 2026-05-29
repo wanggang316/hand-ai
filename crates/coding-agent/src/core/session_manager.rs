@@ -888,6 +888,20 @@ impl SessionManager {
     /// `Compaction::first_kept_entry_id` and `Label::target_id` remain
     /// valid after the fork.
     pub fn fork_from(source_path: &Path, cwd: &Path) -> Result<Self, CodingAgentError> {
+        Self::fork_from_in(source_path, cwd, None)
+    }
+
+    /// Same as [`Self::fork_from`] but writes the new fork under an
+    /// explicit `--session-dir` override when provided. Without this,
+    /// `hand --fork <id> --session-dir <X>` would write the new fork
+    /// to the home-based default and the subsequent resume lookup
+    /// (which honours --session-dir via #58) would fail to find it
+    /// (#77 part 2).
+    pub fn fork_from_in(
+        source_path: &Path,
+        cwd: &Path,
+        session_dir: Option<&Path>,
+    ) -> Result<Self, CodingAgentError> {
         let source_entries = load_entries_from_file(source_path)?;
         if source_entries.is_empty() {
             return Err(CodingAgentError::Session(format!(
@@ -906,7 +920,10 @@ impl SessionManager {
             }
         };
 
-        let session_dir = Self::default_session_dir(cwd);
+        let session_dir = match session_dir {
+            Some(dir) => dir.to_path_buf(),
+            None => Self::default_session_dir(cwd),
+        };
         std::fs::create_dir_all(&session_dir)?;
 
         // Same collision safety as `create_in` (#76): refuse to mint a
@@ -1699,6 +1716,65 @@ mod tests {
             forked.header().parent_session
         );
         assert_eq!(reloaded.message_count(), 1);
+    }
+
+    /// Regression for #77 part 2: `fork_from_in` with an explicit
+    /// session_dir must write the new fork file UNDER that dir, not
+    /// the home-based default. Without this, `hand --fork <id>
+    /// --session-dir <X>` lands the fork in ~/.hand/... and the
+    /// subsequent --session-dir-aware resume lookup fails with
+    /// "Session <new-id> not found".
+    #[test]
+    fn fork_from_in_with_session_dir_writes_under_override() {
+        let cwd = TempDir::new().unwrap();
+        let _g = scoped_hand_home(cwd.path());
+        let mut source = SessionManager::create(cwd.path()).unwrap();
+        source
+            .append_message(Message::User(UserMessage::new_text("seed")))
+            .unwrap();
+        let source_path = source.path().to_path_buf();
+
+        // Forks must land under override_dir, NOT the home-based default.
+        let override_dir_tmp = TempDir::new().unwrap();
+        let override_dir = override_dir_tmp.path().to_path_buf();
+        let forked = SessionManager::fork_from_in(
+            &source_path,
+            cwd.path(),
+            Some(&override_dir),
+        )
+        .expect("fork_from_in");
+        let forked_path = forked.path().to_path_buf();
+
+        assert!(
+            forked_path.starts_with(&override_dir),
+            "fork file must live under --session-dir override: got {forked_path:?}, expected under {override_dir:?}"
+        );
+        assert_eq!(forked.session_dir(), override_dir);
+        // Sanity: actually on disk under the override.
+        assert!(forked_path.exists(), "fork file not flushed: {forked_path:?}");
+    }
+
+    /// `fork_from` (no session_dir override) preserves the historic
+    /// behaviour of writing under the home-based default. Pin the
+    /// no-regression path explicitly.
+    #[test]
+    fn fork_from_without_session_dir_writes_under_home_default() {
+        let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
+        let mut source = SessionManager::create(dir.path()).unwrap();
+        source
+            .append_message(Message::User(UserMessage::new_text("seed")))
+            .unwrap();
+        let source_path = source.path().to_path_buf();
+
+        let target_dir = TempDir::new().unwrap();
+        let forked = SessionManager::fork_from(&source_path, target_dir.path()).unwrap();
+        let expected_dir = SessionManager::default_session_dir(target_dir.path());
+        assert!(
+            forked.path().starts_with(&expected_dir),
+            "fork must land under home-based default: got {:?}, expected under {expected_dir:?}",
+            forked.path()
+        );
     }
 
     #[test]

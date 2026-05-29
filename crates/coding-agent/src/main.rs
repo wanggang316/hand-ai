@@ -249,7 +249,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &cwd,
             fork_source,
         );
-        match hand_coding_agent::SessionManager::fork_from(&fork_path, &cwd) {
+        match hand_coding_agent::SessionManager::fork_from_in(
+            &fork_path,
+            &cwd,
+            base_config.session_dir.as_deref(),
+        ) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
                     resume_session: Some(sm.id().to_string()),

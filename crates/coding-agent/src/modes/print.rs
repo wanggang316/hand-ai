@@ -81,7 +81,11 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             &cwd,
             fork_source,
         );
-        match SessionManager::fork_from(&fork_path, &cwd) {
+        match SessionManager::fork_from_in(
+            &fork_path,
+            &cwd,
+            base_config.session_dir.as_deref(),
+        ) {
             Ok(sm) => {
                 let config = AgentSessionConfig {
                     resume_session: Some(sm.id().to_string()),
