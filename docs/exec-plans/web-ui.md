@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0 complete)
+**Status:** In progress (M0-M1 complete)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -29,7 +29,7 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   - [x] M0.T2 Create the Vite + Tailwind v4 + TypeScript frontend project that builds and type-checks
   - [x] M0.T3 Define shared WS wire types (`src/client/wire.ts`) and `src/core/` skeleton
   - [x] M0.T4 Minimal axum router: serve assets + `/ws`; one prompt streams one assistant reply end-to-end
-- [ ] **M1 — Chat shell**
+- [x] **M1 — Chat shell**
 - [ ] **M2 — Message + tool rendering**
 - [ ] **M3 — Sandbox runtime**
 - [ ] **M4 — Artifacts**
@@ -79,7 +79,18 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
-(To be filled at milestone completion)
+- **M0 (2026-05-29)**: Verified end-to-end via a deterministic WebSocket probe
+  (`get_state`, no LLM) and a live streaming prompt. The WS<->`run_rpc_server`
+  bridge reuses the dispatcher unchanged.
+- **M1 (2026-05-29)**: Verified in a real browser against the single-binary
+  served bundle: a live prompt renders the user bubble, a collapsible thinking
+  block, and the streamed assistant reply in the stable list; the streaming
+  container hands off cleanly (cleared + hidden on completion); the cost stats
+  bar renders aggregate usage (`formatUsage`). No app-level console errors (the
+  only console error originates from the browser extension's own polyfill, not
+  the app). lucide resolved to a 1.x package in this environment's registry
+  rather than the public 0.x; the `icon()` helper's `IconNode` shape matched and
+  build/typecheck/runtime are green.
 
 ## Context and Orientation
 
@@ -287,32 +298,32 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 6 | In-process `AgentSession` via `AgentSessionConfig` (no subprocess) | scaffold | M0 | DONE |
 | 7 | Hello-world: one `prompt` streams one assistant reply end-to-end | scaffold | M0 | DONE |
 | 8 | `RemoteAgent` implements local `Agent` interface | scaffold/chat-shell | M0/M1 | TODO |
-| 9 | `RemoteAgent` maps the seven UI-facing `AgentEvent` variants from server frames | chat-shell | M1 | TODO |
-| 10 | `RemoteAgent` mirrors `AgentState` (messages, model, thinkingLevel, tools, pendingToolCalls, isStreaming) | chat-shell | M1 | TODO |
-| 11 | `RemoteAgent` initial `session_state` hydration on connect and after `agent_end` | chat-shell | M1 | TODO |
-| 12 | ChatPanel layout orchestrator (`<hand-chat-panel>`, 800px breakpoint, mobile overlay) | chat-shell | M1 | TODO |
-| 13 | Floating "Artifacts N" pill when artifacts exist and panel collapsed | chat-shell | M1 | TODO |
-| 14 | ChatPanel `setAgent(agent, config)` with config hooks (onApiKeyRequired, onBeforeSend, onCostClick, onModelSelect, sandboxUrlProvider, toolsFactory) | chat-shell | M1 | TODO |
+| 9 | `RemoteAgent` maps the seven UI-facing `AgentEvent` variants from server frames | chat-shell | M1 | DONE |
+| 10 | `RemoteAgent` mirrors `AgentState` (messages, model, thinkingLevel, tools, pendingToolCalls, isStreaming) | chat-shell | M1 | DONE |
+| 11 | `RemoteAgent` initial `session_state` hydration on connect and after `agent_end` | chat-shell | M1 | DONE |
+| 12 | ChatPanel layout orchestrator (`<hand-chat-panel>`, 800px breakpoint, mobile overlay) | chat-shell | M1 | DONE |
+| 13 | Floating "Artifacts N" pill when artifacts exist and panel collapsed | chat-shell | M1 | DONE |
+| 14 | ChatPanel `setAgent(agent, config)` with config hooks (onApiKeyRequired, onBeforeSend, onCostClick, onModelSelect, sandboxUrlProvider, toolsFactory) | chat-shell | M1 | DONE |
 | 15 | ChatPanel artifact reconstruction null-`onArtifactsChange` ordering on load | chat-shell/artifacts | M1/M4 | TODO |
-| 16 | AgentInterface conversational shell (`<agent-interface>`) | chat-shell | M1 | TODO |
-| 17 | Auto-scroll: ResizeObserver + scroll listener, disable on scroll-up, re-enable near bottom | chat-shell | M1 | TODO |
-| 18 | Auto-scroll clientHeight-shrink guard (stats bar appearance must not false-disable) | chat-shell | M1 | TODO |
-| 19 | AgentInterface queries `.overflow-y-auto` / `.max-w-3xl` to attach observers | chat-shell | M1 | TODO |
-| 20 | Per-turn cost stats bar with optional onCostClick | chat-shell | M1 | TODO |
-| 21 | Abort button + Escape-to-abort while streaming | chat-shell | M1 | TODO |
+| 16 | AgentInterface conversational shell (`<agent-interface>`) | chat-shell | M1 | DONE |
+| 17 | Auto-scroll: ResizeObserver + scroll listener, disable on scroll-up, re-enable near bottom | chat-shell | M1 | DONE |
+| 18 | Auto-scroll clientHeight-shrink guard (stats bar appearance must not false-disable) | chat-shell | M1 | DONE |
+| 19 | AgentInterface queries `.overflow-y-auto` / `.max-w-3xl` to attach observers | chat-shell | M1 | DONE |
+| 20 | Per-turn cost stats bar with optional onCostClick | chat-shell | M1 | DONE |
+| 21 | Abort button + Escape-to-abort while streaming | chat-shell | M1 | DONE |
 | 22 | API-key gating + onApiKeyRequired hook | chat-shell/dialogs | M1/M9 | TODO |
-| 23 | onBeforeSend hook | chat-shell | M1 | TODO |
-| 24 | MessageList stable renderer with keyed `repeat()` | chat-shell | M1 | TODO |
-| 25 | MessageList skips `artifact` role; pairs toolResult by toolCallId | chat-shell | M1 | TODO |
-| 26 | MessageList hides pending tool calls (`hidePendingToolCalls=isStreaming`) | chat-shell | M1 | TODO |
-| 27 | StreamingMessageContainer live renderer with rAF batching | chat-shell | M1 | TODO |
-| 28 | StreamingMessageContainer deep-clone dirty-check (`structuredClone`) | chat-shell | M1 | TODO |
-| 29 | StreamingMessageContainer pulsing cursor before first token; hides after message_end | chat-shell | M1 | TODO |
-| 30 | MessageEditor auto-growing textarea (field-sizing, max-height 200px) | chat-shell | M1 | TODO |
-| 31 | MessageEditor Enter-to-send / Shift+Enter newline / IME composition guard | chat-shell | M1 | TODO |
-| 32 | MessageEditor left toolbar: paperclip + thinking-level Select (only when model.reasoning) | chat-shell | M1 | TODO |
-| 33 | MessageEditor right toolbar: model-id button + send/stop toggle | chat-shell | M1 | TODO |
-| 34 | AgentInterface props/methods (setInput, setAutoScroll, sendMessage, enable* flags) | chat-shell | M1 | TODO |
+| 23 | onBeforeSend hook | chat-shell | M1 | DONE |
+| 24 | MessageList stable renderer with keyed `repeat()` | chat-shell | M1 | DONE |
+| 25 | MessageList skips `artifact` role; pairs toolResult by toolCallId | chat-shell | M1 | DONE |
+| 26 | MessageList hides pending tool calls (`hidePendingToolCalls=isStreaming`) | chat-shell | M1 | DONE |
+| 27 | StreamingMessageContainer live renderer with rAF batching | chat-shell | M1 | DONE |
+| 28 | StreamingMessageContainer deep-clone dirty-check (`structuredClone`) | chat-shell | M1 | DONE |
+| 29 | StreamingMessageContainer pulsing cursor before first token; hides after message_end | chat-shell | M1 | DONE |
+| 30 | MessageEditor auto-growing textarea (field-sizing, max-height 200px) | chat-shell | M1 | DONE |
+| 31 | MessageEditor Enter-to-send / Shift+Enter newline / IME composition guard | chat-shell | M1 | DONE |
+| 32 | MessageEditor left toolbar: paperclip + thinking-level Select (only when model.reasoning) | chat-shell | M1 | DONE |
+| 33 | MessageEditor right toolbar: model-id button + send/stop toggle | chat-shell | M1 | DONE |
+| 34 | AgentInterface props/methods (setInput, setAutoScroll, sendMessage, enable* flags) | chat-shell | M1 | DONE |
 | 35 | UserMessage renderer (`user-message`, markdown + attachment chips) | message-tool-rendering | M2 | TODO |
 | 36 | AssistantMessage renderer (`assistant-message`, ordered text/thinking/toolCall, usage, error/aborted) | message-tool-rendering | M2 | TODO |
 | 37 | ToolMessage renderer (`tool-message`, aborted-stub synthesis, isCustom card wrap) | message-tool-rendering | M2 | TODO |
@@ -330,10 +341,10 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 49 | CalculateRenderer (four progressive text states + error layout) | message-tool-rendering | M2 | TODO |
 | 50 | DefaultRenderer (state derivation, JSON pretty-print, Input/Output code-blocks) | message-tool-rendering | M2 | TODO |
 | 51 | GetCurrentTimeRenderer (seven param/result/timezone paths) | message-tool-rendering | M2 | TODO |
-| 52 | Message type extension system (CustomAgentMessages declaration merge) | chat-shell/core | M1 | TODO |
-| 53 | defaultConvertToLlm (filters artifact, expands user-with-attachments) | chat-shell/core | M1 | TODO |
-| 54 | convertAttachments (images→ImageContent, docs→TextContent header) | chat-shell/core | M1 | TODO |
-| 55 | isUserMessageWithAttachments / isArtifactMessage guards | chat-shell/core | M1 | TODO |
+| 52 | Message type extension system (CustomAgentMessages declaration merge) | chat-shell/core | M1 | DONE |
+| 53 | defaultConvertToLlm (filters artifact, expands user-with-attachments) | chat-shell/core | M1 | DONE |
+| 54 | convertAttachments (images→ImageContent, docs→TextContent header) | chat-shell/core | M1 | DONE |
+| 55 | isUserMessageWithAttachments / isArtifactMessage guards | chat-shell/core | M1 | DONE |
 | 56 | SandboxedIframe `execute()` (transient hidden iframe, 120s timeout, AbortSignal) | sandbox-runtime | M3 | TODO |
 | 57 | SandboxedIframe `loadContent()` (persistent visible iframe for HTML artifacts) | sandbox-runtime | M3 | TODO |
 | 58 | SandboxedIframe `prepareHtmlDocument()` (public; standalone download assembly) | sandbox-runtime | M3 | TODO |
@@ -460,15 +471,15 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 179 | Tool description prompt constants reproduced verbatim, brand-neutral (prompts.ts) | utils/prompts | M5 | TODO |
 | 180 | WS command catalog: prompt/steer/follow_up/abort/abort_bash/bash | wire/backend-seam | M1/M5 | TODO |
 | 181 | WS command catalog: new_session/switch_session/fork/clone | wire/backend-seam | M9 | TODO |
-| 182 | WS command catalog: get_state/get_messages/get_fork_messages/get_last_assistant_text | wire/backend-seam | M1 | TODO |
+| 182 | WS command catalog: get_state/get_messages/get_fork_messages/get_last_assistant_text | wire/backend-seam | M1 | DONE |
 | 183 | WS command catalog: set_model/cycle_model/get_available_models | wire/backend-seam | M8 | TODO |
-| 184 | WS command catalog: set_thinking_level/cycle_thinking_level | wire/backend-seam | M1 | TODO |
-| 185 | WS command catalog: set_steering_mode/set_follow_up_mode | wire/backend-seam | M1 | TODO |
-| 186 | WS command catalog: compact/set_auto_compaction/set_auto_retry/abort_retry | wire/backend-seam | M1 | TODO |
+| 184 | WS command catalog: set_thinking_level/cycle_thinking_level | wire/backend-seam | M1 | DONE |
+| 185 | WS command catalog: set_steering_mode/set_follow_up_mode | wire/backend-seam | M1 | DONE |
+| 186 | WS command catalog: compact/set_auto_compaction/set_auto_retry/abort_retry | wire/backend-seam | M1 | DONE |
 | 187 | WS command catalog: get_session_stats/export_html/set_session_name/get_commands | wire/backend-seam | M9/M10 | TODO |
 | 188 | Extension UI protocol: extension_ui_request server→client (select/confirm/input/editor/notify/setStatus/setWidget/setTitle/set_editor_text) | wire/backend-seam | M9 | TODO |
 | 189 | Extension UI protocol: extension_ui_response client→server | wire/backend-seam | M9 | TODO |
-| 190 | Event catalog: agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end | wire/backend-seam | M1 | TODO |
+| 190 | Event catalog: agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end | wire/backend-seam | M1 | DONE |
 | 191 | Event catalog: tool_execution_start/update/end | wire/backend-seam | M2 | TODO |
 | 192 | Event catalog: compaction_start/end, error, session_info_changed | wire/backend-seam | M1/M9 | TODO |
 | 193 | Reuse run_rpc_server dispatch (Prompt/Bash interruptible select! races) unchanged | backend-seam | M0/M1 | TODO |
@@ -479,7 +490,7 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 198 | Two-terminal dev workflow (cargo --dev + Vite HMR via proxy) | build | M10/M12 | TODO |
 | 199 | Brand-neutrality: zero forbidden substrings across frontend + server source | de-branding | M11/M12 | TODO |
 | 200 | Custom message extension pattern (CustomAgentMessages declaration-merge + custom renderer + customConvertToLlm) | utils-wiring/core | M2 | TODO |
-| 201 | agent.steer() exposed on RemoteAgent for custom-message injection | client | M1 | TODO |
+| 201 | agent.steer() exposed on RemoteAgent for custom-message injection | client | M1 | DONE |
 | 202 | Documented carry-forward constraints (get_state latency, Compact.customInstructions dropped, absolute session paths) | backend-seam | M12 | TODO |
 
 ## Verification and Acceptance

@@ -1,30 +1,88 @@
 @import "tailwindcss";
 
 /*
- * Design tokens. The full token set, shimmer keyframes, scrollbar rules, and
- * message gradient land in the theming milestone; this is the M0 minimum.
+ * Design tokens. M1 needs the color tokens the chat shell utility classes map to
+ * (background/foreground/card/muted/border/primary/destructive) plus the shimmer
+ * keyframe used by the thinking block. The full token set, theme switching, and
+ * scrollbar rules are finalized in the theming milestone.
+ *
+ * Tailwind v4 resolves `bg-card`, `text-muted-foreground`, `border-border`, etc.
+ * from the `--color-*` custom properties declared in the @theme block below.
  */
-:root {
-  --background: #ffffff;
-  --foreground: #0a0a0a;
-  --muted: #6b7280;
-  --border: #e5e7eb;
+@theme {
+  --color-background: #ffffff;
+  --color-foreground: #0a0a0a;
+  --color-card: #ffffff;
+  --color-card-foreground: #0a0a0a;
+  --color-muted: #f4f4f5;
+  --color-muted-foreground: #6b7280;
+  --color-border: #e5e7eb;
+  --color-primary: #2563eb;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f4f4f5;
+  --color-secondary-foreground: #0a0a0a;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
 }
 
-@media (prefers-color-scheme: dark) {
+@layer base {
   :root {
-    --background: #0a0a0a;
-    --foreground: #fafafa;
-    --muted: #9ca3af;
-    --border: #27272a;
+    --background: #ffffff;
+    --foreground: #0a0a0a;
+    --muted: #6b7280;
+    --border: #e5e7eb;
   }
+}
+
+/* Shimmer animation for the thinking block header while streaming. */
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.animate-shimmer {
+  animation: shimmer 2s linear infinite;
+}
+
+/* User-message bubble background (brand-neutral). */
+.user-message-container {
+  background: color-mix(in oklab, var(--color-primary) 12%, transparent);
 }
 
 html,
 body {
   margin: 0;
   height: 100%;
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--color-background);
+  color: var(--color-foreground);
   font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+#app {
+  display: block;
+  height: 100vh;
+  min-height: 0;
+}
+
+/*
+ * Dark mode overrides the generated `--color-*` custom properties at runtime so
+ * the Tailwind color utilities follow the OS theme. Full theme switching lands
+ * in the theming milestone.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background: #0a0a0a;
+    --color-foreground: #fafafa;
+    --color-card: #0a0a0a;
+    --color-card-foreground: #fafafa;
+    --color-muted: #18181b;
+    --color-muted-foreground: #9ca3af;
+    --color-border: #27272a;
+    --color-secondary: #18181b;
+    --color-secondary-foreground: #fafafa;
+  }
 }
