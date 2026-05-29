@@ -209,10 +209,7 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 "Error: slash commands like {first_token} are not dispatched in --print mode \
                  (the session would ship it to the LLM as text and the model would fabricate \
                  plausible output). Run `hand` interactively, or use the corresponding CLI flag.",
-                first_token = initial
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or(initial.trim())
+                first_token = initial.split_whitespace().next().unwrap_or(initial.trim())
             )
             .into());
         }
@@ -873,6 +870,7 @@ mod tests {
             no_context_files: true,
             session_dir: Some(tmp.path().join(".hand").join("sessions")),
             no_skills: true,
+            extra_skill_dirs: Vec::new(),
             base_dir: None,
         };
         let mut session = AgentSession::new(cfg, vec![]).expect("session new");

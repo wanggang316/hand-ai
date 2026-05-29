@@ -43,6 +43,9 @@ pub struct SessionSetup {
     /// `--no-skills`: skip skill discovery for a reproducible system
     /// prompt.
     pub no_skills: bool,
+    /// `--skill <path>` (repeatable): explicit skill paths to load
+    /// alongside the auto-discovered project/user/builtin scopes.
+    pub extra_skill_dirs: Vec<PathBuf>,
 }
 
 impl SessionSetup {
@@ -332,6 +335,7 @@ impl SessionSetup {
             no_context_files: args.no_context_files,
             session_dir,
             no_skills: args.no_skills,
+            extra_skill_dirs: args.skills.iter().map(PathBuf::from).collect(),
         })
     }
 
@@ -353,6 +357,7 @@ impl SessionSetup {
             no_context_files: self.no_context_files,
             session_dir: self.session_dir.clone(),
             no_skills: self.no_skills,
+            extra_skill_dirs: self.extra_skill_dirs.clone(),
             base_dir: None,
         }
     }

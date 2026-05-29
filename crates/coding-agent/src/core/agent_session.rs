@@ -114,6 +114,12 @@ pub struct AgentSessionConfig {
     /// When `true`, skip skill discovery entirely. Backs the
     /// `--no-skills` CLI flag.
     pub no_skills: bool,
+    /// Extra skill directories explicitly supplied by the user. Each
+    /// entry is a path that either holds a `SKILL.md` directly
+    /// (treated as a single Project-scope skill) or is a directory
+    /// containing per-skill subdirectories. Backs the `--skill <path>`
+    /// CLI flag (repeatable). Ignored when `no_skills` is `true`.
+    pub extra_skill_dirs: Vec<PathBuf>,
     /// Override for the agent data root (replacement for `~/.hand/agent`).
     ///
     /// When `Some(base)`, sessions land under `base/sessions/<flattened-cwd>/`.
@@ -335,7 +341,20 @@ impl AgentSession {
         let (skills_discovered, skill_errors): (Vec<Skill>, Vec<SkillError>) = if config.no_skills {
             (Vec::new(), Vec::new())
         } else {
-            skills::discover_skills(&config.cwd, user_dir, builtin_dir)
+            let (mut skills, mut errors) =
+                skills::discover_skills(&config.cwd, user_dir, builtin_dir);
+            // CLI-supplied --skill <path> entries. Each path can be
+            // either a single-skill dir (contains SKILL.md) or a
+            // parent dir of per-skill subdirectories. Load both
+            // shapes by adding the parent-of-dir as a root when the
+            // path's SKILL.md exists, otherwise treat the path as
+            // the parent.
+            for explicit in &config.extra_skill_dirs {
+                let (extra, errs) = skills::discover_explicit_skill_path(explicit);
+                skills.extend(extra);
+                errors.extend(errs);
+            }
+            (skills, errors)
         };
 
         // Build system prompt
@@ -425,6 +444,7 @@ impl AgentSession {
                 no_context_files: true,
                 session_dir: None,
                 no_skills: true,
+                extra_skill_dirs: Vec::new(),
                 base_dir: None,
             },
             session_manager: SessionManager::in_memory(),
@@ -1856,6 +1876,7 @@ mod tests {
             no_context_files: false,
             session_dir: None,
             no_skills: false,
+            extra_skill_dirs: Vec::new(),
             base_dir: None,
         }
     }

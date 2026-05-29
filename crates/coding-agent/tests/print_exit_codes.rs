@@ -86,3 +86,27 @@ fn print_with_bare_slash_command_exits_nonzero() {
         "expected slash-command refusal on stderr, got: {stderr:?}"
     );
 }
+
+/// Issue #64: `--theme`, `--extension`, `--prompt-template` are
+/// parsed but the runtime doesn't yet wire them. Emit an honest
+/// stderr warning per flag so the user isn't silently misled.
+/// Detection happens at startup before any I/O, so the test can
+/// run against the diagnostics path (which exits early) and still
+/// see the warning.
+#[test]
+fn unplumbed_theme_flag_emits_warning() {
+    let (_code, stderr) = run(&["--theme", "/tmp/zzz-theme.yaml", "--diagnostics"]);
+    assert!(
+        stderr.contains("warning") && stderr.contains("--theme"),
+        "expected --theme warning on stderr, got: {stderr:?}"
+    );
+}
+
+#[test]
+fn unplumbed_extension_flag_emits_warning() {
+    let (_code, stderr) = run(&["--extension", "/tmp/zzz-ext", "--diagnostics"]);
+    assert!(
+        stderr.contains("warning") && stderr.contains("--extension"),
+        "expected --extension warning on stderr, got: {stderr:?}"
+    );
+}

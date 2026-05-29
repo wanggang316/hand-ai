@@ -132,6 +132,60 @@ pub fn discover_skills(
     discover_skills_with_roots(roots)
 }
 
+/// Load skills from an explicit path supplied via `--skill <path>`.
+///
+/// Accepts two layouts so the CLI matches user expectations:
+///
+///   - **Single skill dir**: the path itself contains a `SKILL.md` at
+///     its root (e.g. `--skill /tmp/myskill`). We then treat the
+///     parent as the discovery root with `PerDirectory` layout so the
+///     skill name resolves to the basename.
+///   - **Skills-of-skills dir**: the path is a parent of multiple
+///     per-skill subdirectories (e.g. `--skill ~/my-skills/`). Treat
+///     the path itself as the discovery root.
+///
+/// Skills always land under `SourceScope::Project` because CLI-passed
+/// paths are per-invocation overrides rather than global defaults.
+/// Returns the loaded skills plus any per-file errors so the diagnostics
+/// panel surfaces them like any other source.
+pub fn discover_explicit_skill_path(path: &Path) -> (Vec<Skill>, Vec<SkillError>) {
+    let skill_md = path.join("SKILL.md");
+    if skill_md.is_file() {
+        // Single-skill layout — scan the parent so PerDirectory
+        // resolves the name to `path.file_name()`. Filter the
+        // results to keep ONLY the one skill the user pointed at,
+        // so unrelated siblings under the parent don't sneak in.
+        let Some(parent) = path.parent() else {
+            return (Vec::new(), Vec::new());
+        };
+        let Some(target_name) = path.file_name().and_then(|s| s.to_str()) else {
+            return (Vec::new(), Vec::new());
+        };
+        let (all, errs) =
+            discover_skills_with_roots(vec![(parent.to_path_buf(), SourceScope::Project)]);
+        let kept = all.into_iter().filter(|s| s.name == target_name).collect();
+        (kept, errs)
+    } else if path.is_dir() {
+        discover_skills_with_roots(vec![(path.to_path_buf(), SourceScope::Project)])
+    } else {
+        // Not a directory at all — surface as a loader error so
+        // diagnostics shows the user what was wrong.
+        (
+            Vec::new(),
+            vec![SkillError::Loader {
+                path: path.to_path_buf(),
+                source: ResourceLoaderError::Io {
+                    path: path.to_path_buf(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "--skill path is not a directory",
+                    ),
+                },
+            }],
+        )
+    }
+}
+
 /// Run the underlying loader against an explicit set of roots and validate
 /// each entry. Internal entry point shared with tests that need direct
 /// control over the root list.
@@ -272,6 +326,53 @@ mod tests {
 
     fn discover_in(cwd: &Path) -> (Vec<Skill>, Vec<SkillError>) {
         discover_skills(cwd, None, None)
+    }
+
+    fn write_min_skill(dir: &Path, name: &str) {
+        let body =
+            format!("---\nname: {name}\ndescription: Test skill {name}\n---\n\n# {name}\nBody.\n");
+        fs::write(dir.join("SKILL.md"), body).unwrap();
+    }
+
+    /// Issue #63: `--skill <path>` accepts both shapes — a single
+    /// skill directory (path contains SKILL.md) and a parent directory
+    /// of multiple per-skill subdirs. The explicit-path discovery
+    /// loads them under SourceScope::Project.
+    #[test]
+    fn explicit_skill_path_loads_single_skill_dir() {
+        let tmp = TempDir::new().unwrap();
+        let skill_dir = tmp.path().join("myskill");
+        fs::create_dir_all(&skill_dir).unwrap();
+        write_min_skill(&skill_dir, "myskill");
+        let (skills, errors) = discover_explicit_skill_path(&skill_dir);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(skills.len(), 1, "expected one skill, got {skills:?}");
+        assert_eq!(skills[0].name, "myskill");
+    }
+
+    #[test]
+    fn explicit_skill_path_loads_parent_dir_of_skills() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("a")).unwrap();
+        fs::create_dir_all(tmp.path().join("b")).unwrap();
+        write_min_skill(&tmp.path().join("a"), "a");
+        write_min_skill(&tmp.path().join("b"), "b");
+        let (skills, errors) = discover_explicit_skill_path(tmp.path());
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let mut names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+        names.sort();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    /// A `--skill /nonexistent/path` surfaces as a loader error so the
+    /// diagnostics panel shows the user the bad path instead of
+    /// silently skipping it.
+    #[test]
+    fn explicit_skill_path_missing_dir_surfaces_error() {
+        let (skills, errors) =
+            discover_explicit_skill_path(Path::new("/nonexistent/zzz-skill-test"));
+        assert!(skills.is_empty());
+        assert_eq!(errors.len(), 1);
     }
 
     // 1. valid-skill: happy path.

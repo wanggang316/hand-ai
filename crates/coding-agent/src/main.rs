@@ -48,6 +48,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     timings::time("parse_args");
 
+    // Honest warnings for documented-but-unplumbed flags (#64). The
+    // runtime doesn't yet wire `--theme`, `--extension`, or
+    // `--prompt-template` into the corresponding discovery paths, and
+    // silently ignoring them surprised users into thinking the load
+    // worked. Surface a one-line warning per flag on stderr so the
+    // mismatch is visible. `--skill` is fully plumbed (#63) so it's
+    // not in the warning set.
+    if !cli.themes.is_empty() {
+        eprintln!(
+            "warning: --theme is parsed but not yet plumbed into theme discovery; \
+             the supplied path(s) have no effect. \
+             Add themes via ~/.hand/themes/ or a project .hand/themes/ directory."
+        );
+    }
+    if !cli.extensions.is_empty() {
+        eprintln!(
+            "warning: --extension is parsed but not yet plumbed; \
+             the supplied path(s) have no effect. \
+             Configure extensions via ~/.hand/agent/settings.yaml under `extensions:`."
+        );
+    }
+    if !cli.prompt_templates.is_empty() {
+        eprintln!(
+            "warning: --prompt-template is parsed but not yet plumbed; \
+             the supplied path(s) have no effect."
+        );
+    }
+
     // `--offline` flips on the same env-var guard the tools-manager
     // already honors. Setting the env var here means every downstream
     // caller (binary fetcher, version checker) sees offline mode
