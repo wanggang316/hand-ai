@@ -72,7 +72,9 @@ pub struct Args {
     #[arg(short = 'd', long)]
     pub cwd: Option<PathBuf>,
 
-    /// Custom system prompt (overrides default)
+    /// Custom system prompt (overrides default). Auto-loaded from
+    /// disk when the value resolves to an existing file path; otherwise
+    /// treated as literal text.
     #[arg(long)]
     pub system_prompt: Option<String>,
 
@@ -507,6 +509,30 @@ mod tests {
     fn parses_system_prompt_flag() {
         let args = Args::try_parse_from(["hand", "--system-prompt", "Be concise"]).unwrap();
         assert_eq!(args.system_prompt.as_deref(), Some("Be concise"));
+    }
+
+    /// `--system-prompt` auto-loads file contents when the value
+    /// resolves to an existing path (same as `--append-system-prompt`).
+    /// The doc-comment / `--help` output must mention this so users can
+    /// discover the behaviour without reading the source.
+    #[test]
+    fn system_prompt_help_text_mentions_auto_load() {
+        use clap::CommandFactory;
+        let mut cmd = Args::command();
+        let help = cmd.render_long_help().to_string();
+        let lower = help.to_ascii_lowercase();
+        // Quick locator — the long flag is present in help.
+        assert!(lower.contains("--system-prompt"), "help missing flag: {help}");
+        // The sentence/words that document auto-loading on
+        // `--system-prompt` specifically — the existing line on
+        // `--append-system-prompt` doesn't satisfy users opening
+        // `--help` for the override flag.
+        let lower_no_ws: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            lower_no_ws.contains("auto-loaded from disk")
+                && lower_no_ws.contains("existing file path"),
+            "--system-prompt help text does not document auto-loading: {help}"
+        );
     }
 
     /// `--append-system-prompt` is repeatable. Each invocation pushes

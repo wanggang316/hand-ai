@@ -3400,6 +3400,11 @@ fn render_session_info(session: &AgentSession, usage: Option<&TokenUsageSummary>
     let _ = writeln!(out, "Messages: {}", session.message_count());
     let model = session.model();
     let _ = writeln!(out, "Model: {} ({})", model.id, model.provider.as_str());
+    let thinking_label = match session.stream_options().reasoning {
+        Some(level) => level_label(level),
+        None => "off",
+    };
+    let _ = writeln!(out, "Thinking: {thinking_label}");
     if let Some(u) = usage
         && (u.input > 0 || u.output > 0 || u.cache_read > 0 || u.cache_write > 0)
     {
@@ -3541,6 +3546,31 @@ mod tests {
         assert_eq!(view.cwd, "/tmp");
         assert_eq!(view.model_id, "test-model");
         assert_eq!(view.model_provider, "anthropic");
+    }
+
+    /// `/session` must surface the current thinking level so users
+    /// can confirm `/thinking <level>` actually took effect. The
+    /// label tracks `stream_options().reasoning` — `off` when None,
+    /// otherwise the documented level name.
+    #[test]
+    fn render_session_info_includes_thinking_level() {
+        let mut session = make_session();
+        // Default is None → renders as "off".
+        let txt = render_session_info(&session, None);
+        assert!(
+            txt.contains("Thinking: off"),
+            "missing thinking line: {txt}"
+        );
+
+        // Plant a level and re-render.
+        let mut opts = session.stream_options().clone();
+        opts.reasoning = Some(model::ThinkingLevel::High);
+        session.set_stream_options(opts);
+        let txt = render_session_info(&session, None);
+        assert!(
+            txt.contains("Thinking: high"),
+            "thinking line missing or wrong label: {txt}"
+        );
     }
 
     #[test]
