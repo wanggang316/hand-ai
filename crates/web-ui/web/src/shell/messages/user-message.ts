@@ -1,10 +1,10 @@
 // User-message renderer. Renders the user's text via markdown-block and, for the
-// user-with-attachments role, a row of attachment chips. The rich attachment
-// tile element lands with the attachments milestone; until then a minimal chip
-// (filename) keeps the shape correct without referencing a not-yet-defined tag.
+// user-with-attachments role, a row of read-only `<attachment-tile>`s (click to
+// open the overlay; no delete affordance).
 
-import { html, LitElement, type TemplateResult } from "lit";
+import { html, LitElement } from "lit";
 import { customElement, property } from "lit/decorators.js";
+import "../../attachments/attachment-tile";
 import type {
   TextContent,
   UserMessage as UserMessageType,
@@ -45,10 +45,7 @@ export class UserMessage extends LitElement {
           ${attachments && attachments.length > 0
             ? html`<div class="mt-3 flex flex-wrap gap-2">
                 ${attachments.map(
-                  (a): TemplateResult => html`<span
-                    class="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-2 py-1 text-xs text-muted-foreground"
-                    >${a.fileName}</span
-                  >`,
+                  (a) => html`<attachment-tile .attachment=${a}></attachment-tile>`,
                 )}
               </div>`
             : ""}

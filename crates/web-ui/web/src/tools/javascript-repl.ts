@@ -27,6 +27,9 @@ import {
 // <sandbox-iframe> (a type-only import would be elided under isolatedModules
 // and the element would never register).
 import "../sandbox/sandboxed-iframe";
+// Side-effect import registers <attachment-tile> (a type-only import would be
+// elided under isolatedModules and the element would never register).
+import "../attachments/attachment-tile";
 import { i18n } from "../utils/i18n";
 import {
   registerToolRenderer,
@@ -254,15 +257,9 @@ function resultText(result: ToolResultMessage): string {
   );
 }
 
-/** File chip (attachment-tile lands with M6; a plain chip stands in for now). */
+/** A returned downloadable file, shown as a read-only attachment tile. */
 function fileChip(att: Attachment) {
-  return html`<span
-    class="inline-flex items-center gap-1 rounded border border-border bg-muted px-2 py-1 text-xs font-mono"
-    title=${att.mimeType}
-  >
-    <span>${att.fileName}</span>
-    <span class="text-muted-foreground tabular-nums">${(att.size / 1024).toFixed(1)}KB</span>
-  </span>`;
+  return html`<attachment-tile .attachment=${att}></attachment-tile>`;
 }
 
 export const javascriptReplRenderer: ToolRenderer<JavaScriptReplParams, JavaScriptReplResult> = {

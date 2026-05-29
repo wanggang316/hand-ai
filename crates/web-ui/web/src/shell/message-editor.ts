@@ -1,14 +1,21 @@
 // Bottom-anchored input widget. Auto-growing textarea (max-height 200px), with
 // Enter-to-send / Shift+Enter-for-newline and an IME composition guard so a
-// composing CJK input never sends. Left toolbar: a paperclip button (attachment
-// wiring lands in the attachments milestone — rendered here, no-op for now) and
-// a thinking-level selector shown only when the active model supports reasoning.
-// Right toolbar: a model-id button and a send/stop toggle reflecting streaming.
+// composing CJK input never sends. Left toolbar: a paperclip button (opens a
+// file picker; spins a loader while files are ingesting) and a thinking-level
+// selector shown only when the active model supports reasoning. Right toolbar: a
+// model-id button and a send/stop toggle reflecting streaming.
+//
+// Attachments (M6): files arrive via the paperclip picker, drag-and-drop (with a
+// drop overlay), or clipboard paste of images. Each file is ingested through
+// `loadAttachment` and shown as an `<attachment-tile>` in a row above the
+// textarea, with delete. Limits: max 10 attachments, 20MB each, accepted types.
 
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { createRef, ref } from "lit/directives/ref.js";
-import { Paperclip, Send, Square } from "lucide";
+import { Loader2, Paperclip, Send, Square } from "lucide";
+import { loadAttachment } from "../attachments/attachment-utils";
+import "../attachments/attachment-tile";
 import type { Attachment } from "../core/messages";
 import type { Model, ThinkingLevel } from "../core/model";
 import { Button } from "../ui/button";
@@ -44,11 +51,64 @@ export class MessageEditor extends LitElement {
   @property({ attribute: false }) onThinkingChange?: (level: ThinkingLevel) => void;
   @property({ attribute: false }) onFilesChange?: (files: Attachment[]) => void;
   @property({ type: Array }) attachments: Attachment[] = [];
+  @property({ type: Number }) maxFiles = 10;
+  @property({ type: Number }) maxFileSize = 20 * 1024 * 1024; // 20MB
+  @property() acceptedTypes =
+    "image/*,application/pdf,.docx,.pptx,.xlsx,.xls,.txt,.md,.json,.xml,.html,.css,.js,.ts,.jsx,.tsx,.yml,.yaml";
 
   @state() processingFiles = false;
+  @state() private isDragging = false;
+  private fileInputRef = createRef<HTMLInputElement>();
 
   protected override createRenderRoot(): HTMLElement | DocumentFragment {
     return this;
+  }
+
+  /**
+   * Ingest a list of files through `loadAttachment`, enforcing the count and
+   * per-file size limits, and append the successes to `attachments`.
+   */
+  private async ingestFiles(files: File[]): Promise<void> {
+    if (files.length === 0) return;
+
+    if (files.length + this.attachments.length > this.maxFiles) {
+      alert(i18n("Maximum {n} files allowed").replace("{n}", String(this.maxFiles)));
+      return;
+    }
+
+    this.processingFiles = true;
+    const maxMb = Math.round(this.maxFileSize / 1024 / 1024);
+    const newAttachments: Attachment[] = [];
+
+    for (const file of files) {
+      try {
+        if (file.size > this.maxFileSize) {
+          alert(
+            i18n("{name} exceeds the maximum size of {mb}MB")
+              .replace("{name}", file.name)
+              .replace("{mb}", String(maxMb)),
+          );
+          continue;
+        }
+        newAttachments.push(await loadAttachment(file));
+      } catch (error) {
+        console.error(`Error processing ${file.name}:`, error);
+        alert(
+          i18n("Failed to process {name}: {error}")
+            .replace("{name}", file.name)
+            .replace("{error}", String(error)),
+        );
+      }
+    }
+
+    this.attachments = [...this.attachments, ...newAttachments];
+    this.onFilesChange?.(this.attachments);
+    this.processingFiles = false;
+  }
+
+  private removeFile(fileId: string) {
+    this.attachments = this.attachments.filter((f) => f.id !== fileId);
+    this.onFilesChange?.(this.attachments);
   }
 
   private handleTextareaInput = (e: Event) => {
@@ -81,7 +141,62 @@ export class MessageEditor extends LitElement {
   };
 
   private handleAttachmentClick = () => {
-    // Attachment ingestion is wired in the attachments milestone; no-op for now.
+    this.fileInputRef.value?.click();
+  };
+
+  private handleFilesSelected = async (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    await this.ingestFiles(files);
+    input.value = ""; // Reset so picking the same file again re-fires change.
+  };
+
+  private handlePaste = async (e: ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const imageFiles: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+
+    if (imageFiles.length > 0) {
+      e.preventDefault(); // Don't also paste the image as text/markup.
+      await this.ingestFiles(imageFiles);
+    }
+  };
+
+  private handleDragOver = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!this.isDragging) this.isDragging = true;
+  };
+
+  private handleDragLeave = (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only clear when the pointer actually left the component bounds (drag
+    // events fire on child elements too).
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    if (
+      e.clientX <= rect.left ||
+      e.clientX >= rect.right ||
+      e.clientY <= rect.top ||
+      e.clientY >= rect.bottom
+    ) {
+      this.isDragging = false;
+    }
+  };
+
+  private handleDrop = async (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    this.isDragging = false;
+    await this.ingestFiles(Array.from(e.dataTransfer?.files ?? []));
   };
 
   override firstUpdated() {
@@ -92,7 +207,33 @@ export class MessageEditor extends LitElement {
     const supportsThinking = this.currentModel?.reasoning === true;
 
     return html`
-      <div class="bg-card rounded-xl border border-border shadow-sm relative">
+      <div
+        class="bg-card rounded-xl shadow-sm relative ${this.isDragging
+          ? "border-2 border-primary bg-primary/5"
+          : "border border-border"}"
+        @dragover=${this.handleDragOver}
+        @dragleave=${this.handleDragLeave}
+        @drop=${this.handleDrop}
+      >
+        ${this.isDragging
+          ? html`<div
+              class="absolute inset-0 bg-primary/10 rounded-xl pointer-events-none z-10 flex items-center justify-center"
+            >
+              <div class="text-primary font-medium">${i18n("Drop files here")}</div>
+            </div>`
+          : ""}
+        ${this.attachments.length > 0
+          ? html`<div class="px-4 pt-3 pb-2 flex flex-wrap gap-2">
+              ${this.attachments.map(
+                (attachment) => html`<attachment-tile
+                  .attachment=${attachment}
+                  .showDelete=${true}
+                  .onDelete=${() => this.removeFile(attachment.id)}
+                ></attachment-tile>`,
+              )}
+            </div>`
+          : ""}
+
         <textarea
           class="w-full bg-transparent p-4 text-foreground placeholder-muted-foreground outline-none resize-none overflow-y-auto"
           placeholder=${i18n("Type a message...")}
@@ -101,22 +242,36 @@ export class MessageEditor extends LitElement {
           .value=${this.value}
           @input=${this.handleTextareaInput}
           @keydown=${this.handleKeyDown}
+          @paste=${this.handlePaste}
           ${ref(this.textareaRef)}
         ></textarea>
+
+        <input
+          type="file"
+          ${ref(this.fileInputRef)}
+          @change=${this.handleFilesSelected}
+          accept=${this.acceptedTypes}
+          multiple
+          style="display: none;"
+        />
 
         <!-- Button row -->
         <div class="px-2 pb-2 flex items-center justify-between">
           <!-- Left: attachment + thinking selector -->
           <div class="flex gap-2 items-center">
             ${this.showAttachmentButton
-              ? Button({
-                  variant: "ghost",
-                  size: "icon",
-                  className: "h-8 w-8",
-                  onClick: this.handleAttachmentClick,
-                  title: i18n("Attach files"),
-                  children: icon(Paperclip, "sm"),
-                })
+              ? this.processingFiles
+                ? html`<div class="h-8 w-8 flex items-center justify-center">
+                    ${icon(Loader2, "sm", "animate-spin text-muted-foreground")}
+                  </div>`
+                : Button({
+                    variant: "ghost",
+                    size: "icon",
+                    className: "h-8 w-8",
+                    onClick: this.handleAttachmentClick,
+                    title: i18n("Attach files"),
+                    children: icon(Paperclip, "sm"),
+                  })
               : ""}
             ${supportsThinking && this.showThinkingSelector
               ? Select({

@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M5 complete; M6 loadAttachment ingestion core done)
+**Status:** In progress (M0-M6 complete)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -37,9 +37,11 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   keyed by `tool_call_id`, `ws.rs` intercepts `tool_result` frames to resolve
   them; `run_rpc_server`/agent crates unchanged)
 - [x] **M5 — Browser tools (JS REPL, extract-document)**
-- [~] **M6 — Attachments** (loadAttachment ingestion core + per-format processors
-  done, matrix rows 101-109; remaining: `<attachment-tile>`, `<attachment-overlay>`,
-  editor drag/drop/paste/picker wiring)
+- [x] **M6 — Attachments** (loadAttachment ingestion core + `<attachment-tile>` +
+  `<attachment-overlay>` + editor drag/drop/paste/picker). NB: delivery of
+  attachments TO the agent (image content in the `prompt` frame + a server change
+  to honor it) is M10's attachment dispatch — the editor collects + previews them
+  now; `RemoteAgent.sendMessage` still drops the attachments arg until M10.)
 - [ ] **M7 — Storage (IndexedDB)**
 - [ ] **M8 — Providers / models**
 - [ ] **M9 — Dialogs / settings**
@@ -111,6 +113,14 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
+- **M6 (2026-05-29)**: Attachment UI complete — `<attachment-tile>` (thumbnail/
+  badge/delete), `<attachment-overlay>` (PDF all-pages / DOCX / Excel / PPTX /
+  image / text + extracted-text toggle + download), and editor ingestion
+  (paperclip picker + drag/drop + clipboard paste, max 10 / 20MB / type
+  allowlist). Verified in a browser: `loadAttachment` of a text File renders an
+  `<attachment-tile>`. Polish carried forward (M11/M12): the editor's validation
+  errors use `alert()` (ported from the reference) — replace with an inline,
+  non-blocking error. Delivery of attachments to the agent is M10.
 - **M5 (2026-05-29)**: `javascript_repl` and `extract_document` browser tools
   landed on the M4 hub (server declares them; client executors run in the M3
   sandbox / via fetch+`loadAttachment`). Also implemented M6's `loadAttachment`
@@ -460,30 +470,30 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 98 | Tool auto-registration via side-effect imports (`tools/index.ts`) | browser-tools | M5 | DONE |
 | 99 | RemoteAgent routes browser-tool calls to local execute and replies with `tool_result` | browser-tools/client | M5 | DONE |
 | 100 | Server-side `javascript_repl` / `extract_document` tool declarations for system prompt | browser-tools | M5 | DONE |
-| 101 | Attachment data model (id, type, fileName, mimeType, size, content base64, extractedText?, preview?) | attachments | M6 | TODO |
-| 102 | loadAttachment universal ingestion (URL/File/Blob/ArrayBuffer) | attachments | M6 | TODO |
-| 103 | PDF ingestion (page-tagged XML text + 160×160 thumbnail) | attachments | M6 | TODO |
-| 104 | DOCX ingestion (docx-preview AST walk, tables) | attachments | M6 | TODO |
-| 105 | PPTX ingestion (jszip + `<a:t>` regex, slide + notes) | attachments | M6 | TODO |
-| 106 | Excel/XLS ingestion (xlsx sheet→CSV per sheet) | attachments | M6 | TODO |
-| 107 | Image ingestion (base64 + preview identity) | attachments | M6 | TODO |
-| 108 | Plain-text ingestion (TextDecoder, extension allowlist) | attachments | M6 | TODO |
-| 109 | Chunked base64 encoding (0x8000) for large files | attachments | M6 | TODO |
-| 110 | AttachmentTile (`attachment-tile`, thumbnail/icon, PDF badge, delete, opens overlay) | attachments | M6 | TODO |
-| 111 | AttachmentOverlay (`attachment-overlay`, full-screen, header, backdrop/Escape close) | attachments | M6 | TODO |
-| 112 | AttachmentOverlay PDF viewer (all pages canvas scale 1.5, task cleanup) | attachments | M6 | TODO |
-| 113 | AttachmentOverlay DOCX viewer (renderAsync + style overrides) | attachments | M6 | TODO |
-| 114 | AttachmentOverlay Excel viewer (multi-sheet tabs, styled tables) | attachments | M6 | TODO |
-| 115 | AttachmentOverlay PPTX viewer (extracted-text pre) | attachments | M6 | TODO |
-| 116 | AttachmentOverlay image viewer | attachments | M6 | TODO |
-| 117 | AttachmentOverlay plain-text viewer | attachments | M6 | TODO |
-| 118 | AttachmentOverlay extracted-text toggle (PDF/DOCX/Excel) | attachments | M6 | TODO |
-| 119 | AttachmentOverlay file download (base64→Blob→anchor) | attachments | M6 | TODO |
-| 120 | AttachmentOverlay error display state | attachments | M6 | TODO |
-| 121 | pdfjs-dist worker configured as Vite static asset | attachments/build | M6 | TODO |
-| 122 | MessageEditor drag-and-drop file upload with overlay | attachments/chat-shell | M6 | TODO |
-| 123 | MessageEditor clipboard paste image capture | attachments/chat-shell | M6 | TODO |
-| 124 | MessageEditor file picker + attachment tile row with delete (max 10, 20MB, accepted types) | attachments/chat-shell | M6 | TODO |
+| 101 | Attachment data model (id, type, fileName, mimeType, size, content base64, extractedText?, preview?) | attachments | M6 | DONE |
+| 102 | loadAttachment universal ingestion (URL/File/Blob/ArrayBuffer) | attachments | M6 | DONE |
+| 103 | PDF ingestion (page-tagged XML text + 160×160 thumbnail) | attachments | M6 | DONE |
+| 104 | DOCX ingestion (docx-preview AST walk, tables) | attachments | M6 | DONE |
+| 105 | PPTX ingestion (jszip + `<a:t>` regex, slide + notes) | attachments | M6 | DONE |
+| 106 | Excel/XLS ingestion (xlsx sheet→CSV per sheet) | attachments | M6 | DONE |
+| 107 | Image ingestion (base64 + preview identity) | attachments | M6 | DONE |
+| 108 | Plain-text ingestion (TextDecoder, extension allowlist) | attachments | M6 | DONE |
+| 109 | Chunked base64 encoding (0x8000) for large files | attachments | M6 | DONE |
+| 110 | AttachmentTile (`attachment-tile`, thumbnail/icon, PDF badge, delete, opens overlay) | attachments | M6 | DONE |
+| 111 | AttachmentOverlay (`attachment-overlay`, full-screen, header, backdrop/Escape close) | attachments | M6 | DONE |
+| 112 | AttachmentOverlay PDF viewer (all pages canvas scale 1.5, task cleanup) | attachments | M6 | DONE |
+| 113 | AttachmentOverlay DOCX viewer (renderAsync + style overrides) | attachments | M6 | DONE |
+| 114 | AttachmentOverlay Excel viewer (multi-sheet tabs, styled tables) | attachments | M6 | DONE |
+| 115 | AttachmentOverlay PPTX viewer (extracted-text pre) | attachments | M6 | DONE |
+| 116 | AttachmentOverlay image viewer | attachments | M6 | DONE |
+| 117 | AttachmentOverlay plain-text viewer | attachments | M6 | DONE |
+| 118 | AttachmentOverlay extracted-text toggle (PDF/DOCX/Excel) | attachments | M6 | DONE |
+| 119 | AttachmentOverlay file download (base64→Blob→anchor) | attachments | M6 | DONE |
+| 120 | AttachmentOverlay error display state | attachments | M6 | DONE |
+| 121 | pdfjs-dist worker configured as Vite static asset | attachments/build | M6 | DONE |
+| 122 | MessageEditor drag-and-drop file upload with overlay | attachments/chat-shell | M6 | DONE |
+| 123 | MessageEditor clipboard paste image capture | attachments/chat-shell | M6 | DONE |
+| 124 | MessageEditor file picker + attachment tile row with delete (max 10, 20MB, accepted types) | attachments/chat-shell | M6 | DONE |
 | 125 | StorageBackend / StorageTransaction interfaces | storage | M7 | TODO |
 | 126 | IndexedDBStorageBackend (lazy open, schema config, prefix scan, cursor index, quota, persist) | storage | M7 | TODO |
 | 127 | Store abstract base + setBackend/getBackend | storage | M7 | TODO |

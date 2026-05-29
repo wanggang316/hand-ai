@@ -99,8 +99,10 @@ export class RemoteAgent implements Agent {
   }
 
   async sendMessage(text: string, _attachments?: Attachment[]): Promise<void> {
-    // Attachment dispatch (inline base64 vs. upload reference) lands with the
-    // networking milestone; M1 sends text prompts.
+    // TODO(M10): attachment dispatch. M6 ingests attachments and shows them in
+    // the composer / overlay, but does not deliver them to the agent. M10 must
+    // put image content into the `prompt` frame (and have the server honor it);
+    // until then `_attachments` is intentionally ignored.
     this.state.isStreaming = true;
     this.conn.send({ type: "prompt", id: String(this.nextId++), message: text });
   }
