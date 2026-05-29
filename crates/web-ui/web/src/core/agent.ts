@@ -34,4 +34,13 @@ export interface Agent {
   setThinkingLevel(level: ThinkingLevel): void;
   getApiKey?(provider: string): Promise<string | undefined>;
   steer?(message: AgentMessage): void;
+  /**
+   * Transport-backed agents (e.g. the WebSocket-backed RemoteAgent) report
+   * whether the connection is currently usable. Views use this to avoid
+   * dispatching a send into a not-yet-open / dropped socket. Absent on in-memory
+   * agents, where the view treats the agent as always connected.
+   */
+  isConnected?(): boolean;
+  /** Subscribe to connection up/down transitions; returns an unsubscribe fn. */
+  onConnectionChange?(cb: (connected: boolean) => void): () => void;
 }

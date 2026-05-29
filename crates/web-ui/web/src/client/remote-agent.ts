@@ -131,6 +131,16 @@ export class RemoteAgent implements Agent {
     return () => this.subscribers.delete(cb);
   }
 
+  /** Whether the underlying socket is currently open (ready to send). */
+  isConnected(): boolean {
+    return this.conn.connected;
+  }
+
+  /** Subscribe to socket open/close transitions; returns an unsubscribe fn. */
+  onConnectionChange(cb: (connected: boolean) => void): () => void {
+    return this.conn.onStatusChange(cb);
+  }
+
   /**
    * Register a browser-side executor for a server-declared tool. When the
    * server emits `tool_execution_start` for `name`, the executor runs locally

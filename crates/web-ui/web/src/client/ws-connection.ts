@@ -22,6 +22,7 @@ const MAX_RECONNECT_DELAY_MS = 15_000;
 export class WsConnection {
   private ws!: WebSocket;
   private handlers = new Set<FrameHandler>();
+  private statusHandlers = new Set<(connected: boolean) => void>();
   private sendQueue: string[] = [];
   private isOpen = false;
 
@@ -50,6 +51,7 @@ export class WsConnection {
       this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS; // reset backoff
       for (const msg of this.sendQueue) this.ws.send(msg);
       this.sendQueue = [];
+      this.emitStatus(true);
     });
     this.ws.addEventListener("message", (event) => {
       let frame: ServerFrame;
@@ -64,6 +66,7 @@ export class WsConnection {
       for (const handler of this.handlers) handler(frame);
     });
     this.ws.addEventListener("close", () => {
+      const wasOpen = this.isOpen;
       this.isOpen = false;
       const err = new Error("WebSocket closed before response");
       for (const pending of this.pendingRequests.values()) {
@@ -71,11 +74,31 @@ export class WsConnection {
         pending.reject(err);
       }
       this.pendingRequests.clear();
+      if (wasOpen) this.emitStatus(false);
       if (!this.closedByUser) {
         setTimeout(() => this.connect(), this.reconnectDelayMs);
         this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
       }
     });
+  }
+
+  /** Whether the socket is currently open and ready to send. */
+  get connected(): boolean {
+    return this.isOpen;
+  }
+
+  /**
+   * Subscribe to open/close transitions. The callback fires with `true` on each
+   * `open` (including reconnects) and `false` when an open socket closes.
+   * Returns an unsubscribe function. Handlers persist across reconnects.
+   */
+  onStatusChange(handler: (connected: boolean) => void): () => void {
+    this.statusHandlers.add(handler);
+    return () => this.statusHandlers.delete(handler);
+  }
+
+  private emitStatus(connected: boolean): void {
+    for (const handler of this.statusHandlers) handler(connected);
   }
 
   onFrame(handler: FrameHandler): () => void {

@@ -42,6 +42,14 @@ export class AgentInterface extends LitElement {
   private _scrollContainer?: HTMLElement;
   private _resizeObserver?: ResizeObserver;
   private _unsubscribeSession?: () => void;
+  private _unsubscribeConnection?: () => void;
+
+  // Live transport status (transport-backed agents only). Defaults to connected
+  // so in-memory agents — which expose no isConnected — never gate or annotate.
+  // `_wasConnected` distinguishes the first connect ("Connecting…") from a drop
+  // after a successful connect ("Reconnecting…").
+  private _connected = true;
+  private _wasConnected = false;
 
   /** Set the editor's text (and optional attachments). */
   public setInput(text: string, attachments?: Attachment[]): void {
@@ -116,6 +124,10 @@ export class AgentInterface extends LitElement {
       this._unsubscribeSession();
       this._unsubscribeSession = undefined;
     }
+    if (this._unsubscribeConnection) {
+      this._unsubscribeConnection();
+      this._unsubscribeConnection = undefined;
+    }
   }
 
   private setupSessionSubscription(): void {
@@ -123,7 +135,26 @@ export class AgentInterface extends LitElement {
       this._unsubscribeSession();
       this._unsubscribeSession = undefined;
     }
+    if (this._unsubscribeConnection) {
+      this._unsubscribeConnection();
+      this._unsubscribeConnection = undefined;
+    }
     if (!this.session) return;
+
+    // Track transport connection status so the editor can reflect "Connecting…/
+    // Reconnecting…" and hold back sends instead of dropping them silently. Only
+    // transport-backed agents expose isConnected; others stay always-connected.
+    if (this.session.isConnected) {
+      this._connected = this.session.isConnected();
+      if (this._connected) this._wasConnected = true;
+    }
+    if (this.session.onConnectionChange) {
+      this._unsubscribeConnection = this.session.onConnectionChange((connected) => {
+        this._connected = connected;
+        if (connected) this._wasConnected = true;
+        this.requestUpdate();
+      });
+    }
 
     this._unsubscribeSession = this.session.subscribe((ev: AgentEvent) => {
       switch (ev.type) {
@@ -192,6 +223,19 @@ export class AgentInterface extends LitElement {
     if ((!input.trim() && (attachments?.length ?? 0) === 0) || session.state.isStreaming) {
       return;
     }
+
+    // Hold back the send while the transport is not connected (still coming up,
+    // or dropped and reconnecting). Keep the typed text and tell the user, so a
+    // too-early send is never silently discarded. The status indicator below the
+    // transcript shows the live state. In-memory agents expose no isConnected and
+    // are treated as always connected, so this never triggers for them.
+    if (session.isConnected && !session.isConnected()) {
+      this._messageEditor.notify(
+        i18n("Connecting to the server — your message was kept. Try again in a moment."),
+      );
+      return;
+    }
+
     if (!session.state.model) throw new Error("No model set on AgentInterface");
 
     // Optional API-key gating. Keys are resolved server-side in this app, so
@@ -316,6 +360,17 @@ export class AgentInterface extends LitElement {
         <!-- Input -->
         <div class="shrink-0">
           <div class="max-w-3xl mx-auto px-2">
+            ${session.isConnected && !this._connected
+              ? html`<div
+                  class="flex items-center gap-1.5 px-1 pb-1 text-xs text-amber-600 dark:text-amber-400"
+                  role="status"
+                >
+                  <span
+                    class="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"
+                  ></span>
+                  <span>${this._wasConnected ? i18n("Reconnecting…") : i18n("Connecting…")}</span>
+                </div>`
+              : ""}
             <message-editor
               .isStreaming=${state.isStreaming}
               .currentModel=${state.model}

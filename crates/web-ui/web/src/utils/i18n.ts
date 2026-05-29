@@ -148,6 +148,10 @@ export const translations: Translations = {
     "Checking...": "Überprüfe...",
     "Testing...": "Teste...",
     Disconnected: "Getrennt",
+    "Connecting…": "Verbinde…",
+    "Reconnecting…": "Verbinde erneut…",
+    "Connecting to the server — your message was kept. Try again in a moment.":
+      "Verbindung wird aufgebaut — Ihre Nachricht wurde behalten. Versuchen Sie es gleich erneut.",
     // Proxy (document-fetch)
     Proxy: "Proxy",
     "Proxy URL": "Proxy-URL",
