@@ -7,6 +7,9 @@ import "./app.css";
 import { RemoteAgent } from "./client/remote-agent";
 import { WsConnection } from "./client/ws-connection";
 import type { Model } from "./core/model";
+// Side-effect imports: register the built-in message and tool renderers.
+import "./shell/messages/index";
+import "./tools/index";
 import "./shell/chat-panel";
 import type { ChatPanel } from "./shell/chat-panel";
 

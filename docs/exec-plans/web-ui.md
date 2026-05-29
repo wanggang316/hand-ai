@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M1 complete)
+**Status:** In progress (M0-M2 complete)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -30,7 +30,7 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   - [x] M0.T3 Define shared WS wire types (`src/client/wire.ts`) and `src/core/` skeleton
   - [x] M0.T4 Minimal axum router: serve assets + `/ws`; one prompt streams one assistant reply end-to-end
 - [x] **M1 — Chat shell**
-- [ ] **M2 — Message + tool rendering**
+- [x] **M2 — Message + tool rendering**
 - [ ] **M3 — Sandbox runtime**
 - [ ] **M4 — Artifacts**
 - [ ] **M5 — Browser tools (JS REPL, extract-document)**
@@ -59,6 +59,16 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   `message_start`/`message_end` (role-checked) in the chat-shell milestone;
   (3) the wire `message` field is a loose `WireMessage`, not strictly an
   `AssistantMessage`.
+- **2026-05-29 (M2)**: The server serializes assistant **tool-call content
+  blocks with the discriminator `"toolcall"`** (all lowercase), not the
+  canonical `"toolCall"` the renderers expect. A browser test (agent invoking
+  the bash tool) caught the resulting missing tool-call card. Fixed by
+  normalizing wire content blocks (`toolcall` -> `toolCall`) at the RemoteAgent
+  boundary so core types and renderers stay canonical; applied on
+  `message_update`, `turn_end`, and the `agent_end` reconciled list. The
+  `toolResult` message shape (`role`, `toolCallId`, `toolName`, `content`,
+  `isError`) already matched. Watch for further lowercase-variant discriminators
+  on other content block kinds (image/thinking matched as-is).
 - **2026-05-29 (M0)**: The reference architecture doc named a public
   `rpc::EventEnvelope`; in the workspace the event envelope and `WireSessionEvent`
   are private to `rpc::server`. This is a non-issue for the chosen design: the
@@ -324,23 +334,23 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 32 | MessageEditor left toolbar: paperclip + thinking-level Select (only when model.reasoning) | chat-shell | M1 | DONE |
 | 33 | MessageEditor right toolbar: model-id button + send/stop toggle | chat-shell | M1 | DONE |
 | 34 | AgentInterface props/methods (setInput, setAutoScroll, sendMessage, enable* flags) | chat-shell | M1 | DONE |
-| 35 | UserMessage renderer (`user-message`, markdown + attachment chips) | message-tool-rendering | M2 | TODO |
-| 36 | AssistantMessage renderer (`assistant-message`, ordered text/thinking/toolCall, usage, error/aborted) | message-tool-rendering | M2 | TODO |
-| 37 | ToolMessage renderer (`tool-message`, aborted-stub synthesis, isCustom card wrap) | message-tool-rendering | M2 | TODO |
-| 38 | ToolMessageDebugView (`tool-message-debug`, raw args+result code-blocks) | message-tool-rendering | M2 | TODO |
-| 39 | AbortedMessage renderer (`aborted-message`) | message-tool-rendering | M2 | TODO |
-| 40 | ThinkingBlock collapsible reasoning with shimmer header while streaming | message-tool-rendering | M2 | TODO |
-| 41 | ExpandableSection reusable accordion (light-DOM child capture) | message-tool-rendering | M2 | TODO |
-| 42 | ConsoleBlock scrolling output pane with copy + error variant | message-tool-rendering | M2 | TODO |
+| 35 | UserMessage renderer (`user-message`, markdown + attachment chips) | message-tool-rendering | M2 | DONE |
+| 36 | AssistantMessage renderer (`assistant-message`, ordered text/thinking/toolCall, usage, error/aborted) | message-tool-rendering | M2 | DONE |
+| 37 | ToolMessage renderer (`tool-message`, aborted-stub synthesis, isCustom card wrap) | message-tool-rendering | M2 | DONE |
+| 38 | ToolMessageDebugView (`tool-message-debug`, raw args+result code-blocks) | message-tool-rendering | M2 | DONE |
+| 39 | AbortedMessage renderer (`aborted-message`) | message-tool-rendering | M2 | DONE |
+| 40 | ThinkingBlock collapsible reasoning with shimmer header while streaming | message-tool-rendering | M2 | DONE |
+| 41 | ExpandableSection reusable accordion (light-DOM child capture) | message-tool-rendering | M2 | DONE |
+| 42 | ConsoleBlock scrolling output pane with copy + error variant | message-tool-rendering | M2 | DONE |
 | 43 | Input functional component (`fc()` Input) | message-tool-rendering/ui | M2/M11 | TODO |
-| 44 | Message renderer registry (register/get/renderMessage, MessageRole) | message-tool-rendering | M2 | TODO |
-| 45 | Tool renderer registry (renderTool, register/getToolRenderer, toolRenderers map) | message-tool-rendering | M2 | TODO |
-| 46 | renderHeader / renderCollapsibleHeader helpers (max-h + chevron ref toggle) | message-tool-rendering | M2 | TODO |
-| 47 | setShowJsonMode global force-default-renderer toggle | message-tool-rendering | M2 | TODO |
-| 48 | BashRenderer (three states, `> command` + output console-block) | message-tool-rendering | M2 | TODO |
-| 49 | CalculateRenderer (four progressive text states + error layout) | message-tool-rendering | M2 | TODO |
-| 50 | DefaultRenderer (state derivation, JSON pretty-print, Input/Output code-blocks) | message-tool-rendering | M2 | TODO |
-| 51 | GetCurrentTimeRenderer (seven param/result/timezone paths) | message-tool-rendering | M2 | TODO |
+| 44 | Message renderer registry (register/get/renderMessage, MessageRole) | message-tool-rendering | M2 | DONE |
+| 45 | Tool renderer registry (renderTool, register/getToolRenderer, toolRenderers map) | message-tool-rendering | M2 | DONE |
+| 46 | renderHeader / renderCollapsibleHeader helpers (max-h + chevron ref toggle) | message-tool-rendering | M2 | DONE |
+| 47 | setShowJsonMode global force-default-renderer toggle | message-tool-rendering | M2 | DONE |
+| 48 | BashRenderer (three states, `> command` + output console-block) | message-tool-rendering | M2 | DONE |
+| 49 | CalculateRenderer (four progressive text states + error layout) | message-tool-rendering | M2 | DONE |
+| 50 | DefaultRenderer (state derivation, JSON pretty-print, Input/Output code-blocks) | message-tool-rendering | M2 | DONE |
+| 51 | GetCurrentTimeRenderer (seven param/result/timezone paths) | message-tool-rendering | M2 | DONE |
 | 52 | Message type extension system (CustomAgentMessages declaration merge) | chat-shell/core | M1 | DONE |
 | 53 | defaultConvertToLlm (filters artifact, expands user-with-attachments) | chat-shell/core | M1 | DONE |
 | 54 | convertAttachments (images→ImageContent, docs→TextContent header) | chat-shell/core | M1 | DONE |
@@ -480,7 +490,7 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 188 | Extension UI protocol: extension_ui_request server→client (select/confirm/input/editor/notify/setStatus/setWidget/setTitle/set_editor_text) | wire/backend-seam | M9 | TODO |
 | 189 | Extension UI protocol: extension_ui_response client→server | wire/backend-seam | M9 | TODO |
 | 190 | Event catalog: agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end | wire/backend-seam | M1 | DONE |
-| 191 | Event catalog: tool_execution_start/update/end | wire/backend-seam | M2 | TODO |
+| 191 | Event catalog: tool_execution_start/update/end | wire/backend-seam | M2 | DONE |
 | 192 | Event catalog: compaction_start/end, error, session_info_changed | wire/backend-seam | M1/M9 | TODO |
 | 193 | Reuse run_rpc_server dispatch (Prompt/Bash interruptible select! races) unchanged | backend-seam | M0/M1 | TODO |
 | 194 | session.subscribe → per-connection outbound WS channel | backend-seam | M0 | DONE |
@@ -489,7 +499,7 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 197 | Build ordering wrapper (Vite build → cargo build --release) | build | M12 | TODO |
 | 198 | Two-terminal dev workflow (cargo --dev + Vite HMR via proxy) | build | M10/M12 | TODO |
 | 199 | Brand-neutrality: zero forbidden substrings across frontend + server source | de-branding | M11/M12 | TODO |
-| 200 | Custom message extension pattern (CustomAgentMessages declaration-merge + custom renderer + customConvertToLlm) | utils-wiring/core | M2 | TODO |
+| 200 | Custom message extension pattern (CustomAgentMessages declaration-merge + custom renderer + customConvertToLlm) | utils-wiring/core | M2 | DONE |
 | 201 | agent.steer() exposed on RemoteAgent for custom-message injection | client | M1 | DONE |
 | 202 | Documented carry-forward constraints (get_state latency, Compact.customInstructions dropped, absolute session paths) | backend-seam | M12 | TODO |
 

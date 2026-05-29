@@ -91,8 +91,10 @@ export class StreamingMessageContainer extends LitElement {
       <div class="flex flex-col gap-3 mb-3">
         ${renderAssistantMessage(msg, {
           isStreaming: this.isStreaming,
+          tools: this.tools,
           pendingToolCalls: this.pendingToolCalls,
           toolResultsById: this.toolResultsById,
+          onCostClick: this.onCostClick,
           hidePendingToolCalls: false,
         })}
         ${this.isStreaming

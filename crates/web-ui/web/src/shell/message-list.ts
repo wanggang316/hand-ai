@@ -42,8 +42,10 @@ export class MessageList extends LitElement {
     for (const msg of this.messages) {
       const template = renderHistoryMessage(msg, {
         isStreaming: false,
+        tools: this.tools,
         pendingToolCalls: this.pendingToolCalls,
         toolResultsById: resultByCallId,
+        onCostClick: this.onCostClick,
         // While streaming, hide pending tool calls here; the streaming
         // container owns the in-flight rendering.
         hidePendingToolCalls: this.isStreaming,

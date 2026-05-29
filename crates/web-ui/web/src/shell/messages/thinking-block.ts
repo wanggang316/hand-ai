@@ -1,13 +1,13 @@
-// Collapsible reasoning block. Minimal M1 version: a toggle header (with a
-// shimmer class while streaming) over a markdown body. The rich version (full
-// shimmer keyframes, markdown thinking styles) is finalized in the theming
-// milestone; the shape and props are stable so it can be enhanced in place.
+// Collapsible reasoning block. Collapsed by default; a chevron toggles the
+// markdown body. While streaming, the header text uses the shimmer gradient
+// (`animate-shimmer`) so it pulses until the thinking completes. Light DOM so
+// the Tailwind utility classes resolve.
 
 import { html, LitElement } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { ChevronRight } from "lucide";
-import { icon } from "./icons";
-import "./markdown-block";
+import { icon } from "../../ui/icons";
+import "../../ui/markdown-block";
 
 @customElement("thinking-block")
 export class ThinkingBlock extends LitElement {
@@ -24,7 +24,7 @@ export class ThinkingBlock extends LitElement {
     this.style.display = "block";
   }
 
-  private toggleExpanded() {
+  private toggleExpanded(): void {
     this.isExpanded = !this.isExpanded;
   }
 

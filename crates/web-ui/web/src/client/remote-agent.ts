@@ -17,12 +17,30 @@ import type { Agent, AgentEvent, AgentState } from "../core/agent";
 import type {
   AgentMessage,
   AssistantMessage,
+  ContentBlock,
   Attachment,
   UserMessage,
 } from "../core/messages";
 import type { Model, ThinkingLevel } from "../core/model";
 import { isAgentEvent, type ServerFrame, type WireMessage } from "./wire";
 import type { WsConnection } from "./ws-connection";
+
+// The server serializes assistant tool-call blocks with the discriminator
+// "toolcall"; the rest of the UI uses the canonical "toolCall". Normalize the
+// wire quirk at this boundary so renderers and core types stay canonical.
+function normalizeBlock(block: ContentBlock): ContentBlock {
+  if ((block as { type: string }).type === "toolcall") {
+    return { ...block, type: "toolCall" } as unknown as ContentBlock;
+  }
+  return block;
+}
+
+function normalizeMessage(msg: AgentMessage): AgentMessage {
+  if (msg.role === "assistant" && Array.isArray(msg.content)) {
+    return { ...msg, content: msg.content.map(normalizeBlock) };
+  }
+  return msg;
+}
 
 export class RemoteAgent implements Agent {
   readonly state: AgentState;
@@ -102,7 +120,7 @@ export class RemoteAgent implements Agent {
   private toAssistantMessage(wire: WireMessage): AssistantMessage {
     return {
       role: "assistant",
-      content: Array.isArray(wire.content) ? wire.content : [],
+      content: Array.isArray(wire.content) ? wire.content.map(normalizeBlock) : [],
       usage: wire.usage,
       stopReason: wire.stopReason,
       model: wire.model,
@@ -185,7 +203,7 @@ export class RemoteAgent implements Agent {
         this.state.isStreaming = false;
         this.pending.clear();
         if (ev.messages) {
-          this.state.messages = ev.messages;
+          this.state.messages = ev.messages.map(normalizeMessage);
         }
         this.emit({ type: "agent_end", stopReason: "stop" });
         break;
