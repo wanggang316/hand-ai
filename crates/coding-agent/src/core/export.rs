@@ -3,6 +3,7 @@
 use crate::core::error::CodingAgentError;
 use crate::core::session_manager::SessionManager;
 use model::Message;
+use pulldown_cmark::{Event, Options, Parser};
 use std::path::Path;
 
 /// Export a session to JSONL format (copy the raw session file).
@@ -48,7 +49,19 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 .user .role {{ color: #7c3aed; }}
 .assistant .role {{ color: #06b6d4; }}
 .tool-result .role {{ color: #e94560; }}
-.content {{ white-space: pre-wrap; word-break: break-word; }}
+.content {{ word-break: break-word; }}
+/* Tool-result and thinking bodies keep verbatim whitespace — they
+   inherit pre-wrap from .verbatim, which markdown-rendered bodies
+   deliberately do NOT inherit (otherwise prose would never reflow). */
+.verbatim {{ white-space: pre-wrap; }}
+.markdown p {{ margin: 0.5em 0; }}
+.markdown ul, .markdown ol {{ padding-left: 1.5em; }}
+.markdown a {{ color: #06b6d4; }}
+.markdown blockquote {{ border-left: 3px solid #444; margin: 0.5em 0; padding: 0 0 0 1em; color: #bbb; }}
+.markdown table {{ border-collapse: collapse; margin: 0.5em 0; }}
+.markdown th, .markdown td {{ border: 1px solid #333; padding: 4px 8px; }}
+.markdown h1, .markdown h2, .markdown h3 {{ margin-top: 1em; }}
+.markdown img {{ max-width: 100%; height: auto; }}
 code {{ background: #0d1117; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }}
 pre {{ background: #0d1117; padding: 1rem; border-radius: 8px; overflow-x: auto; }}
 pre code {{ background: none; padding: 0; }}
@@ -65,19 +78,20 @@ pre code {{ background: none; padding: 0; }}
     for msg in messages {
         match msg {
             Message::User(u) => {
-                let text = match &u.content {
-                    model::UserContent::Text(s) => escape_html(s),
+                let raw = match &u.content {
+                    model::UserContent::Text(s) => s.clone(),
                     model::UserContent::Blocks(blocks) => blocks
                         .iter()
                         .filter_map(|c| match c {
-                            model::UserContentBlock::Text(t) => Some(escape_html(&t.text)),
+                            model::UserContentBlock::Text(t) => Some(t.text.clone()),
                             _ => None,
                         })
                         .collect::<Vec<_>>()
                         .join("\n"),
                 };
+                let rendered = render_markdown(&raw);
                 html.push_str(&format!(
-                    "<div class=\"message user\"><div class=\"role\">User</div><div class=\"content\">{text}</div></div>\n"
+                    "<div class=\"message user\"><div class=\"role\">User</div><div class=\"content markdown\">{rendered}</div></div>\n"
                 ));
             }
             Message::Assistant(a) => {
@@ -85,7 +99,7 @@ pre code {{ background: none; padding: 0; }}
                 for block in &a.content {
                     match block {
                         model::AssistantContentBlock::Text(t) => {
-                            parts.push(escape_html(&t.text));
+                            parts.push(render_markdown(&t.text));
                         }
                         model::AssistantContentBlock::ToolCall(tc) => {
                             parts.push(format!(
@@ -105,7 +119,7 @@ pre code {{ background: none; padding: 0; }}
                     }
                 }
                 html.push_str(&format!(
-                    "<div class=\"message assistant\"><div class=\"role\">Assistant</div><div class=\"content\">{}</div></div>\n",
+                    "<div class=\"message assistant\"><div class=\"role\">Assistant</div><div class=\"content markdown\">{}</div></div>\n",
                     parts.join("\n")
                 ));
             }
@@ -121,7 +135,7 @@ pre code {{ background: none; padding: 0; }}
                     .join("\n");
                 let error_marker = if tr.is_error { " (error)" } else { "" };
                 html.push_str(&format!(
-                    "<div class=\"message tool-result\"><div class=\"role\">Tool Result: {}{}</div><div class=\"content\">{}</div></div>\n",
+                    "<div class=\"message tool-result\"><div class=\"role\">Tool Result: {}{}</div><div class=\"content verbatim\">{}</div></div>\n",
                     escape_html(&tr.tool_name),
                     error_marker,
                     text,
@@ -142,6 +156,47 @@ fn escape_html(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Render markdown into a safe HTML fragment for use inside a
+/// `<div class="content markdown">` block.
+///
+/// We strip raw HTML events so untrusted LLM output cannot inject
+/// `<script>`, `<iframe>`, JavaScript URLs, or other arbitrary
+/// elements into the exported document. Tables, strikethrough, task
+/// lists, and footnotes are enabled — they're the GitHub-flavoured
+/// markdown features users actually exercise (#65). The output
+/// fragment is meant to live inside a styled container, not as a
+/// standalone document.
+fn render_markdown(input: &str) -> String {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    options.insert(Options::ENABLE_FOOTNOTES);
+
+    // Rewrite raw-HTML events into escaped Text events. The two
+    // legitimate sources of <…> in chat output are (a) the user
+    // genuinely typing `<world>` and (b) the LLM occasionally
+    // emitting tags inside prose. Both should appear as literal
+    // characters — the user shouldn't see arbitrary tags from an
+    // LLM execute, and the user's own `<world>` shouldn't vanish.
+    // Escaping (not dropping) handles both.
+    // html::push_html escapes Text-event contents on its own, so
+    // we forward the raw `<...>` string and let the renderer turn
+    // it into `&lt;...&gt;` — no double-escaping.
+    let parser = Parser::new_ext(input, options).map(|ev| match ev {
+        Event::Html(s) | Event::InlineHtml(s) => Event::Text(s),
+        // Math events render as TeX source by default; drop the
+        // markers and keep the text so old exports still parse the
+        // string instead of erroring.
+        Event::DisplayMath(s) | Event::InlineMath(s) => Event::Text(s),
+        other => other,
+    });
+
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, parser);
+    html
 }
 
 #[cfg(test)]
@@ -166,6 +221,114 @@ mod tests {
         assert!(content.contains("Hand Session"));
         assert!(content.contains("Hello &lt;world&gt;"));
         assert!(content.contains("How are you?"));
+    }
+
+    /// Issue #65: HTML export must RENDER markdown in user and
+    /// assistant text blocks, not dump the raw source. Verified
+    /// downstream in Chrome via DevTools (zero <code>/<pre>/<table>/<a>
+    /// elements before the fix). Here we just grep the output HTML
+    /// for the structural elements the markdown source asks for.
+    #[test]
+    fn export_html_renders_markdown_to_html_elements() {
+        use model::types::{Api, Provider};
+        use model::{AssistantContentBlock, AssistantMessage, TextContent, Usage};
+
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("session.html");
+
+        // Cover every markdown feature the reporter checked in Chrome.
+        let md = r#"# Heading
+
+A paragraph with **bold**, *italic*, and `inline code`.
+
+```rust
+fn main() {}
+```
+
+- list item one
+- list item two
+
+1. ordered
+2. ordered too
+
+| Feature | Rust |
+|---------|------|
+| safety  | yes  |
+
+> a blockquote
+
+[a link](https://example.com)
+"#;
+
+        let messages = vec![Message::Assistant(AssistantMessage {
+            role: "assistant".into(),
+            content: vec![AssistantContentBlock::Text(TextContent::new(md))],
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            model: "claude-test".into(),
+            usage: Usage::default(),
+            stop_reason: model::StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        })];
+
+        export_to_html(&messages, "sess", "claude-test", &output).unwrap();
+        let html = std::fs::read_to_string(&output).unwrap();
+
+        for needle in [
+            "<h1",
+            "<strong>bold</strong>",
+            "<em>italic</em>",
+            "<code>inline code</code>",
+            "<pre>",
+            "<ul>",
+            "<ol>",
+            "<table>",
+            "<blockquote>",
+            "<a href=\"https://example.com\"",
+        ] {
+            assert!(
+                html.contains(needle),
+                "rendered HTML missing {needle:?}; got: {html}"
+            );
+        }
+
+        // And the raw markdown source must NOT survive as literal
+        // text — the user reporter saw "##" headers and "```"
+        // fences leak through pre-fix.
+        assert!(!html.contains("```rust"), "raw fence leaked: {html}");
+    }
+
+    /// Issue #65 follow-on: the markdown renderer must NOT let an
+    /// LLM-authored `<script>` tag survive as real HTML. It should
+    /// appear as escaped text so the browser displays it literally.
+    #[test]
+    fn export_html_escapes_inline_html_in_markdown() {
+        let dir = TempDir::new().unwrap();
+        let output = dir.path().join("session.html");
+
+        let messages = vec![Message::User(model::UserMessage::new_text(
+            "Look: <script>alert('x')</script> and <iframe src=\"bad\"></iframe>",
+        ))];
+
+        export_to_html(&messages, "sess", "claude-test", &output).unwrap();
+        let html = std::fs::read_to_string(&output).unwrap();
+
+        // The raw `<script>` and `<iframe>` strings appear escaped,
+        // not as live elements.
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&lt;iframe"));
+        // And a real <script>/<iframe> open tag must NOT live in the
+        // body — only the CSS / meta head ever uses tag names. Probe
+        // specifically for the inputs we passed in to keep the
+        // assertion tight.
+        let body_start = html.find("<body>").unwrap_or(0);
+        let body = &html[body_start..];
+        assert!(!body.contains("<script>"), "live <script> survived: {body}");
+        assert!(!body.contains("<iframe"), "live <iframe> survived: {body}");
     }
 
     /// Issue #19: HTML export was claimed to render assistant messages

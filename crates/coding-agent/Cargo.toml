@@ -45,6 +45,7 @@ tar = "0.4"
 zip = { version = "5", default-features = false, features = ["deflate"] }
 rand = "0.8"
 unicode-normalization = "0.1"
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["process", "signal"] }
