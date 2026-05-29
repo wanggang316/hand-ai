@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** Draft
+**Status:** In progress (M0 complete)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -24,11 +24,11 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Progress
 
-- [ ] **M0 — Scaffold and hello-world end-to-end**
-  - [ ] M0.T1 Add `crates/web-ui` to workspace members; create `hand-web-ui` binary crate that builds
-  - [ ] M0.T2 Create the Vite + Tailwind v4 + TypeScript frontend project that builds and type-checks
-  - [ ] M0.T3 Define shared WS wire types (`src/client/wire.ts`) and `src/core/` skeleton
-  - [ ] M0.T4 Minimal axum router: serve assets + `/ws`; one prompt streams one assistant reply end-to-end
+- [x] **M0 — Scaffold and hello-world end-to-end**
+  - [x] M0.T1 Add `crates/web-ui` to workspace members; create `hand-web-ui` binary crate that builds
+  - [x] M0.T2 Create the Vite + Tailwind v4 + TypeScript frontend project that builds and type-checks
+  - [x] M0.T3 Define shared WS wire types (`src/client/wire.ts`) and `src/core/` skeleton
+  - [x] M0.T4 Minimal axum router: serve assets + `/ws`; one prompt streams one assistant reply end-to-end
 - [ ] **M1 — Chat shell**
 - [ ] **M2 — Message + tool rendering**
 - [ ] **M3 — Sandbox runtime**
@@ -44,7 +44,27 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Surprises & Discoveries
 
-(None yet)
+- **2026-05-29 (M0)**: The native agent event stream does not match the assumed
+  "message_start/update/end all carry the assistant message" model. Verified
+  against a live turn: `message_start` / `message_end` announce *any* message
+  added to history — including the user's own message, whose `content` is a
+  plain string — while the streaming assistant content arrives via
+  `message_update` (content is a block array of thinking/text/toolCall), the
+  finalized assistant message for the turn is carried by `turn_end.message`,
+  and the full reconciled list is in `agent_end.messages`. Consequences applied
+  in M0 and to carry into M1: (1) any text extraction must handle
+  `content: string | ContentBlock[]`; (2) `RemoteAgent` drives the streaming
+  reply from `message_update` (role === "assistant") and finalizes from
+  `turn_end`, and folds user/assistant history additions from
+  `message_start`/`message_end` (role-checked) in the chat-shell milestone;
+  (3) the wire `message` field is a loose `WireMessage`, not strictly an
+  `AssistantMessage`.
+- **2026-05-29 (M0)**: The reference architecture doc named a public
+  `rpc::EventEnvelope`; in the workspace the event envelope and `WireSessionEvent`
+  are private to `rpc::server`. This is a non-issue for the chosen design: the
+  server reuses `run_rpc_server` wholesale by bridging the WebSocket onto its
+  `AsyncBufRead`/`AsyncWrite` parameters (one text frame == one JSONL line), so
+  no envelope type needs to be re-exported.
 
 ## Decision Log
 
@@ -259,13 +279,13 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 
 | # | Capability | Subsystem | Milestone | Status |
 |---|---|---|---|---|
-| 1 | Workspace member `crates/web-ui` added; `hand-web-ui` binary builds | scaffold | M0 | TODO |
-| 2 | Vite + Tailwind v4 + tsc frontend project builds and type-checks | scaffold | M0 | TODO |
-| 3 | Shared WS wire types (envelope + client→/server→ catalogs) in TS | scaffold | M0 | TODO |
-| 4 | axum router: serve assets + `/ws` upgrade; per-connection `AgentSession` task | scaffold | M0 | TODO |
-| 5 | WS text-frame ↔ `RpcCommand`/`RpcResponse`/`EventEnvelope` bridge | scaffold | M0 | TODO |
-| 6 | In-process `AgentSession` via `AgentSessionConfig` (no subprocess) | scaffold | M0 | TODO |
-| 7 | Hello-world: one `prompt` streams one assistant reply end-to-end | scaffold | M0 | TODO |
+| 1 | Workspace member `crates/web-ui` added; `hand-web-ui` binary builds | scaffold | M0 | DONE |
+| 2 | Vite + Tailwind v4 + tsc frontend project builds and type-checks | scaffold | M0 | DONE |
+| 3 | Shared WS wire types (envelope + client→/server→ catalogs) in TS | scaffold | M0 | DONE |
+| 4 | axum router: serve assets + `/ws` upgrade; per-connection `AgentSession` task | scaffold | M0 | DONE |
+| 5 | WS text-frame ↔ `RpcCommand`/`RpcResponse`/`EventEnvelope` bridge | scaffold | M0 | DONE |
+| 6 | In-process `AgentSession` via `AgentSessionConfig` (no subprocess) | scaffold | M0 | DONE |
+| 7 | Hello-world: one `prompt` streams one assistant reply end-to-end | scaffold | M0 | DONE |
 | 8 | `RemoteAgent` implements local `Agent` interface | scaffold/chat-shell | M0/M1 | TODO |
 | 9 | `RemoteAgent` maps the seven UI-facing `AgentEvent` variants from server frames | chat-shell | M1 | TODO |
 | 10 | `RemoteAgent` mirrors `AgentState` (messages, model, thinkingLevel, tools, pendingToolCalls, isStreaming) | chat-shell | M1 | TODO |
@@ -452,7 +472,7 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 191 | Event catalog: tool_execution_start/update/end | wire/backend-seam | M2 | TODO |
 | 192 | Event catalog: compaction_start/end, error, session_info_changed | wire/backend-seam | M1/M9 | TODO |
 | 193 | Reuse run_rpc_server dispatch (Prompt/Bash interruptible select! races) unchanged | backend-seam | M0/M1 | TODO |
-| 194 | session.subscribe → per-connection outbound WS channel | backend-seam | M0 | TODO |
+| 194 | session.subscribe → per-connection outbound WS channel | backend-seam | M0 | DONE |
 | 195 | API keys resolved server-side from env (never sent to browser) | backend-seam | M0/M8 | TODO |
 | 196 | rust-embed single-binary asset serving (release) | build | M12 | TODO |
 | 197 | Build ordering wrapper (Vite build → cargo build --release) | build | M12 | TODO |

@@ -70,14 +70,16 @@ ws.onclose = () => out.textContent += "\n[closed]\n";
 ws.onmessage = (e) => {
   try {
     const f = JSON.parse(e.data);
-    if (f.type === "event" && f.event && f.event.kind === "agent" && f.event.message) {
-      const blocks = f.event.message.content || [];
-      const text = blocks.filter(b => b.type === "text").map(b => b.text).join("");
-      out.textContent = "[connected]\n" + text;
-    } else {
-      out.textContent += "\n" + e.data;
+    if (f.type === "event" && f.event && f.event.kind === "agent") {
+      const m = f.event.message;
+      // Streaming assistant content is a block array; user-message echoes
+      // (message_start/message_end) carry a plain string and are skipped.
+      if (m && Array.isArray(m.content)) {
+        const text = m.content.filter(b => b.type === "text").map(b => b.text).join("");
+        if (text) out.textContent = "[connected]\n" + text;
+      }
     }
-  } catch { out.textContent += "\n" + e.data; }
+  } catch { /* ignore non-JSON frames */ }
 };
 document.getElementById("f").addEventListener("submit", (ev) => {
   ev.preventDefault();
