@@ -909,16 +909,19 @@ impl SessionManager {
         let session_dir = Self::default_session_dir(cwd);
         std::fs::create_dir_all(&session_dir)?;
 
-        let id = generate_session_id();
+        // Same collision safety as `create_in` (#76): refuse to mint a
+        // path that already exists. Two concurrent fork operations
+        // landing in the same millisecond bucket must not share a file.
+        let (id, path) = mint_unique_session_path(&session_dir)?;
         let header = SessionHeader {
             version: CURRENT_SESSION_VERSION,
-            id: id.clone(),
+            id,
             timestamp: Utc::now().timestamp_millis(),
             cwd: cwd.to_string_lossy().to_string(),
             parent_session: Some(source_header.id.clone()),
         };
 
-        // Preserve every non-header entry from the source verbatim —
+        // Preserve every non-header entry from the source verbatim --
         // ids included, so downstream cross-references stay valid.
         let mut entries = Vec::with_capacity(source_entries.len());
         entries.push(SessionEntry::Session(header.clone()));
@@ -928,8 +931,6 @@ impl SessionManager {
             }
             entries.push(entry);
         }
-
-        let path = session_dir.join(format!("{}.jsonl", id));
 
         let mgr = Self {
             path: path.clone(),
@@ -1141,7 +1142,40 @@ fn generate_session_id() -> String {
         .unwrap_or_default()
         .as_millis();
     let c = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("s_{:x}_{:x}", ts, c)
+    // Process- and clock-collision safety: append 64 random bits so two
+    // processes that mint an id in the same millisecond (the per-process
+    // COUNTER never sees the other) cannot land on the same filename.
+    // Without this, concurrent `--print` invocations against a shared
+    // --session-dir clobber each other's JSONL files (#76).
+    let rand_suffix: u64 = rand::random();
+    format!("s_{ts:x}_{c:x}_{rand_suffix:016x}")
+}
+
+/// Mint a session id whose `<session_dir>/<id>.jsonl` does not yet
+/// exist. Even with the 64-bit random suffix in
+/// [`generate_session_id`] a freak collision is astronomically
+/// unlikely -- this loop catches the impossible-but-possible case
+/// (and any test that monkey-patches the clock/RNG) before the
+/// caller would silently overwrite an existing session.
+fn mint_unique_session_path(
+    session_dir: &Path,
+) -> Result<(String, PathBuf), CodingAgentError> {
+    // Eight tries is two-cubed-plus-two more than the per-process
+    // counter can produce in a single millisecond bucket; if all eight
+    // collide something is structurally wrong (mocked rng/clock, full
+    // disk that materialises stale files, ...) and bubbling an error
+    // is far better than corrupting either session.
+    for _ in 0..8 {
+        let id = generate_session_id();
+        let path = session_dir.join(format!("{id}.jsonl"));
+        if !path.exists() {
+            return Ok((id, path));
+        }
+    }
+    Err(CodingAgentError::Session(format!(
+        "Could not mint a unique session id under {} after 8 attempts",
+        session_dir.display()
+    )))
 }
 
 fn generate_entry_id() -> String {
@@ -1879,6 +1913,85 @@ mod tests {
             sm.path()
         );
         assert_eq!(sm.session_dir(), custom_dir);
+    }
+
+    /// Regression for #76: many concurrent `create_in` calls against the
+    /// same `--session-dir` must each land on its own JSONL file. The
+    /// pre-fix id format `s_<ms>_<counter>` collided whenever N
+    /// processes minted ids in the same millisecond -- they all
+    /// produced `s_<ts>_0` and then clobbered each other's session
+    /// state. The new shape `s_<ms>_<counter>_<rand64>` plus a
+    /// belt-and-braces collision check at `mint_unique_session_path`
+    /// keeps every concurrent session isolated.
+    ///
+    /// Eight in-process threads stand in for eight cross-process
+    /// invocations -- they share the same atomic counter (so the
+    /// per-thread counter slots are even more crowded than two
+    /// genuinely independent processes would be) and they all hit
+    /// the same dir. If unique ids were not guaranteed across the
+    /// shared counter+ms bucket the test would fail by producing
+    /// fewer than 8 distinct files.
+    #[test]
+    fn create_in_is_collision_free_under_concurrent_invocations() {
+        let cwd = TempDir::new().unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let session_dir = session_dir.path().to_path_buf();
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let cwd_path = cwd.path().to_path_buf();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let cwd_path = cwd_path.clone();
+            let session_dir = session_dir.clone();
+            handles.push(std::thread::spawn(move || {
+                SessionManager::create_in(&cwd_path, &session_dir)
+                    .expect("concurrent create_in")
+                    .path()
+                    .to_path_buf()
+            }));
+        }
+        let mut paths: Vec<std::path::PathBuf> =
+            handles.into_iter().map(|h| h.join().unwrap()).collect();
+        paths.sort();
+        let unique = {
+            let mut p = paths.clone();
+            p.dedup();
+            p
+        };
+        assert_eq!(
+            paths.len(),
+            unique.len(),
+            "concurrent create_in produced duplicate session files: {paths:?}"
+        );
+        for path in &paths {
+            assert!(path.exists(), "session file not on disk: {path:?}");
+        }
+    }
+
+    /// Regression for #76 part 2: the helper itself must never hand
+    /// back an existing path. Pre-create a file at the candidate
+    /// location's exact name and assert `mint_unique_session_path`
+    /// re-rolls onto a different id rather than returning the
+    /// already-occupied one.
+    #[test]
+    fn mint_unique_session_path_rerolls_when_candidate_exists() {
+        let session_dir = TempDir::new().unwrap();
+        // First call: get a fresh (id, path).
+        let (occupied_id, occupied_path) =
+            mint_unique_session_path(session_dir.path()).expect("first mint");
+        std::fs::write(&occupied_path, b"prior session content").unwrap();
+        // Second call: must NOT hand back the same path.
+        let (next_id, next_path) =
+            mint_unique_session_path(session_dir.path()).expect("second mint");
+        assert_ne!(occupied_id, next_id, "ids must differ across mints");
+        assert_ne!(
+            occupied_path, next_path,
+            "second mint reused an occupied path: {next_path:?}"
+        );
+        assert!(
+            !next_path.exists(),
+            "second mint handed back an existing path"
+        );
     }
 
     /// UC-sm-003 — a SessionManager handed to the runtime stays the
