@@ -675,27 +675,49 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 
 The plan is complete when the release binary built by M12 serves the embedded frontend with no external file dependencies, a user can perform every action listed in §Purpose, and a brand-neutrality grep over `crates/web-ui/web/src/` and `crates/web-ui/src/` for the forbidden substrings returns zero matches. **All three hold as of 2026-05-29.**
 
-### Accepted Refinements
+### Verification — final closeout (2026-05-29)
 
-A small number of matrix rows are marked DONE at the capability/protocol level but
-have basic (rather than fully-polished) behavior. These are intentional, documented
-per the rule above, and do not block any user action in §Purpose:
+After the M12 sweep, a follow-up pass closed and live-verified the items that had
+been left as refinements:
 
-- **WebSocket auto-reconnect (row 170)**: `WsConnection` connects and frames
-  correctly; it does not auto-reconnect after a drop (a page refresh re-establishes
-  the session). The reference UI is purely client-side and has no WS, so there is no
-  reference behavior to match here.
-- **Large uploaded images (row 167)**: small images deliver inline in the `prompt`
-  frame and reach the agent; files routed through `POST /upload` are referenced by
-  id, but the server does not yet resolve image *references* back to image content
-  for the model. Document attachments deliver via extracted text regardless.
-- **Extension UI (rows 188-189)**: fully wired client-side (modals + toasts +
-  `extension_ui_response`); exercised only when a loaded server extension calls the
-  host UI, since the dispatcher emits these frames on demand, not during normal
-  turns.
-- **Image → vision delivery**: the client→wire→`build_user_message`→agent-loop path
-  is complete and unit-tested; a visual end-to-end demo requires a vision-capable
-  model (the default smoke model is text-only).
+- **Full assembled-app browser smoke** ✓ — the M9–M12 UI renders with no
+  app-level console errors (only the browser extension's own polyfill warning);
+  header (5 actions), chat, editor, artifacts panel all mount; a text prompt
+  streams (`[user, assistant]`).
+- **Image delivery** ✓ — the client now inlines *all* images in the `prompt`
+  frame (bounded by the editor's 20MB cap) rather than uploading large ones by
+  reference, so they reach the agent. Verified against a vision model
+  (`gemini-2.5-flash`): a generated red PNG → the model answered "Red".
+- **`extract_document` live** ✓ — the agent fetched a real CORS-permissive URL,
+  the browser parsed it, and 779 chars of extracted text round-tripped back into
+  the turn.
+- **Extension UI** ✓ — the registered `extension-ui-dialog` renders and resolves
+  (confirm → `true`); the full server-emitted path activates when a loaded
+  extension calls the host UI.
+- **WebSocket auto-reconnect** ✓ — `WsConnection` now reconnects on an
+  unexpected close with capped exponential backoff (a reconnect yields a fresh
+  per-connection server session; browser state persists).
+- **Workspace gates** ✓ — `cargo clippy --workspace --all-targets -- -D warnings`
+  and `cargo fmt --check` pass.
+
+### Accepted Architectural Limitations
+
+The following are intentional consequences of the server-bridge architecture (the
+reference UI ran the agent client-side and so did not face them). They do not block
+any action in §Purpose:
+
+- **Server-side session replay (row, ~136/loadSession)**: loading a persisted
+  session restores the browser-side transcript + model + thinking level for
+  display, but does NOT replay that history into the server's per-connection
+  `AgentSession` context — so a prompt sent right after loading an old session
+  does not carry that history server-side. Closing this would require a new
+  server mechanism to seed `AgentSession` context (e.g. a transcript-replay or a
+  server-side `switch_session` over a persisted store); it is out of scope for a
+  faithful port and recorded here as a known tradeoff.
+- **Active-model label on connect (cosmetic)**: the editor shows a placeholder
+  model label until the user opens the model selector; the frontend does not yet
+  hydrate the server's active model via `get_state` on connect. Switching models
+  works; only the initial label may differ from the server default.
 
 ## Idempotence and Recovery
 

@@ -15,8 +15,12 @@ interface PendingRequest {
 /** Default request timeout: reject if no matching response arrives in time. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
+/** Initial reconnect backoff; doubles up to {@link MAX_RECONNECT_DELAY_MS}. */
+const INITIAL_RECONNECT_DELAY_MS = 1000;
+const MAX_RECONNECT_DELAY_MS = 15_000;
+
 export class WsConnection {
-  private ws: WebSocket;
+  private ws!: WebSocket;
   private handlers = new Set<FrameHandler>();
   private sendQueue: string[] = [];
   private isOpen = false;
@@ -27,10 +31,23 @@ export class WsConnection {
   private pendingRequests = new Map<string, PendingRequest>();
   private nextRequestId = 1;
 
-  constructor(url: string) {
-    this.ws = new WebSocket(url);
+  // Auto-reconnect state. On an unexpected close the socket is re-opened with a
+  // capped exponential backoff; `close()` sets `closedByUser` to stop that.
+  // Frame subscribers (`onFrame`) persist across reconnects since they live on
+  // this instance, not the socket. A reconnect yields a fresh server-side
+  // session (per-connection model); browser-side state is unaffected.
+  private closedByUser = false;
+  private reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+
+  constructor(private readonly url: string) {
+    this.connect();
+  }
+
+  private connect(): void {
+    this.ws = new WebSocket(this.url);
     this.ws.addEventListener("open", () => {
       this.isOpen = true;
+      this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS; // reset backoff
       for (const msg of this.sendQueue) this.ws.send(msg);
       this.sendQueue = [];
     });
@@ -54,6 +71,10 @@ export class WsConnection {
         pending.reject(err);
       }
       this.pendingRequests.clear();
+      if (!this.closedByUser) {
+        setTimeout(() => this.connect(), this.reconnectDelayMs);
+        this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
+      }
     });
   }
 
@@ -111,6 +132,7 @@ export class WsConnection {
   }
 
   close(): void {
+    this.closedByUser = true;
     this.ws.close();
   }
 }

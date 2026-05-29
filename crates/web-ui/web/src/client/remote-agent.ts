@@ -36,18 +36,6 @@ import {
 } from "./wire";
 import type { WsConnection } from "./ws-connection";
 
-/**
- * Images at or below this base64-decoded size are inlined in the `prompt`
- * frame's `images` array; larger files are uploaded out-of-band and referenced.
- */
-const INLINE_IMAGE_LIMIT_BYTES = 256 * 1024;
-
-/** Approximate decoded byte length of a base64 string without decoding it. */
-function base64ByteLength(base64: string): number {
-  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
-  return Math.floor((base64.length * 3) / 4) - padding;
-}
-
 /** Result shape a browser-executed tool returns (matches the artifacts tool). */
 export interface BrowserToolResult {
   content: ToolResultContent[];
@@ -123,10 +111,11 @@ export class RemoteAgent implements Agent {
   /**
    * Send a prompt with optional attachments using a hybrid dispatch:
    *
-   * - **Small images** (decoded size <= {@link INLINE_IMAGE_LIMIT_BYTES}) are
-   *   inlined as base64 in the `prompt` frame's `images` array (server
-   *   `ImageContent` shape: `{ data, mime_type }`).
-   * - **Larger files** are uploaded out-of-band via `POST /upload` and carried
+   * - **Images** are inlined as base64 in the `prompt` frame's `images` array
+   *   (server `ImageContent` shape: `{ data, mime_type }`) so the model receives
+   *   them — the server honors prompt images. Bounded by the editor's 20MB
+   *   per-attachment cap, which a WebSocket text frame handles fine.
+   * - **Non-image files** are uploaded out-of-band via `POST /upload` and carried
    *   as lightweight `{ id, ... }` references in the frame's `attachments`
    *   array, keeping the WebSocket frame small.
    * - **Documents** with extracted text have that text appended to the message
@@ -146,14 +135,15 @@ export class RemoteAgent implements Agent {
         documentTexts.push(`\n\n[Document: ${attachment.fileName}]\n${attachment.extractedText}`);
       }
 
-      const byteSize = attachment.size || base64ByteLength(attachment.content);
-
-      if (attachment.type === "image" && byteSize <= INLINE_IMAGE_LIMIT_BYTES) {
+      // Inline every image so it reaches the model via the prompt frame's
+      // images (the server honors them). Sizes are bounded by the editor's
+      // 20MB attachment cap.
+      if (attachment.type === "image") {
         images.push({ data: attachment.content, mime_type: attachment.mimeType });
         continue;
       }
 
-      // Larger files (and large images) upload out-of-band and are referenced.
+      // Non-image files upload out-of-band and are referenced.
       try {
         const { id, size } = await uploadAttachment(attachment);
         references.push({
@@ -163,12 +153,9 @@ export class RemoteAgent implements Agent {
           size,
         });
       } catch (err) {
-        // Upload failed: fall back to inlining images so the message still has
-        // the visual content; documents already carry their text above.
-        if (attachment.type === "image") {
-          images.push({ data: attachment.content, mime_type: attachment.mimeType });
-        }
-        console.error("Attachment upload failed; falling back to inline/text", err);
+        // Upload failed: documents already carry their text above; nothing more
+        // to deliver for a non-image binary, so just log.
+        console.error("Attachment upload failed", err);
       }
     }
 

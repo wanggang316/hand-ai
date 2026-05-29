@@ -13,41 +13,36 @@ JS REPL、IndexedDB、附件解析）。
 
 ## 当前状态
 
-M0（脚手架与端到端打通）已完成：
-
-- `hand-web-ui` 二进制 crate 已加入 workspace，`cargo check` / `cargo clippy` 通过；
-- 前端工程（Vite + Tailwind v4 + TypeScript）`tsc --noEmit` 与 `vite build` 通过；
-- `/ws` 将 WebSocket 桥接到既有的 JSONL RPC 派发器（`run_rpc_server`），命令派发、
-  事件转发、中断 race 全部原样复用；
-- 一条 `prompt` 可端到端流式返回助手回复。
-
-后续里程碑（聊天外壳、消息/工具渲染、artifacts、沙箱、附件、存储、provider 管理、
-对话框、代理/上传下载、i18n/主题、打包）见上述 ExecPlan。
+全部里程碑（M0–M12）已完成：聊天外壳、消息/工具渲染、沙箱运行时、artifacts
+（9 种 viewer + 浏览器工具执行）、浏览器工具（JS REPL、extract_document）、附件
+（解析 + tile + overlay）、IndexedDB 存储、provider/模型选择、对话框/设置/顶栏、
+上传下载与附件投递、i18n/主题，以及单二进制打包。详见上述 ExecPlan 的能力对齐矩阵。
 
 ## 运行
+
+### 单二进制（自包含 release）
+
+```bash
+scripts/build-web-ui.sh        # 构建前端 (Vite) 并 cargo build --release，内嵌前端资源
+./target/release/hand-web-ui   # 打开打印出的 http://127.0.0.1:<port>
+```
+
+release 二进制通过 `rust-embed` 内嵌 `web/dist`，无需任何外部文件，可在任意目录运行。
 
 ### 开发（前端热更新 + 真实后端）
 
 ```bash
-# 终端 1：启动 Rust server（默认 127.0.0.1:4137）
-cargo run -p hand-web-ui
+# 终端 1：Rust server。--web-dir 指向磁盘上的前端目录即进入“从磁盘提供资源”模式
+cargo run -p hand-web-ui -- --web-dir crates/web-ui/web/dist
 
-# 终端 2：启动 Vite 开发服务器（代理 /ws 到 Rust server）
+# 终端 2：Vite 开发服务器（代理 /ws、/upload、/download 到 Rust server）
 npm --prefix crates/web-ui/web install
 npm --prefix crates/web-ui/web run dev
 ```
 
 provider API key 从 server 进程环境读取（绝不下发到浏览器）。可用 `--model` /
-`--provider` 覆盖默认模型。
-
-### 单进程冒烟
-
-```bash
-npm --prefix crates/web-ui/web run build   # 产出 web/dist
-cargo run -p hand-web-ui                    # 直接打开打印出的 http://127.0.0.1:<port>
-```
-
-未构建前端时，`/` 会回退到一个内置连通性探测页，直接演示流式 seam。
+`--provider` 覆盖默认模型。不带 `--web-dir` 运行时使用内嵌资源；内嵌资源缺失时
+`/` 回退到内置连通性探测页。
 
 ## License
 
