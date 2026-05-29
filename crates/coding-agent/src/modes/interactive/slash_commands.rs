@@ -377,11 +377,11 @@ impl SlashCommandTable {
 Commands:
   /quit, /exit, /q     Exit the session
   /help, /h            Show this help
-  /model, /models      Open model selector / inline-resolve a pattern
-  /session             Show active model
+  /model, /models      Select or switch model (pattern resolves inline)
+  /session             Show session info (id, model, messages, tokens, duration)
   /hotkeys             Show keyboard shortcuts
   /clear               Clear chat scrollback (history kept)
-  /compact             Compact context now
+  /compact [text]      Compact context (optional custom focus instructions)
   /new                 Start a fresh session
   /resume              Resume the most recent session
   /copy [n]            Copy last assistant message (or last n) to clipboard
@@ -397,10 +397,15 @@ Commands:
   /thinking [level]    Open thinking selector / set inline level
   /settings            Open settings selector
   /scoped-models       Toggle which models the /model quick-cycle reaches
+  /tree [path]         Open filesystem-tree picker (at cwd or given path)
   /reload              Reload settings and keybindings from disk
   /login               Open login dialog
   /logout              Clear stored auth credentials
-  /diagnostics         Show diagnostics report"
+  /diagnostics         Show diagnostics report
+
+Inline:
+  !command             Run a bash command inline
+  !!command            Same as ! but the output is hidden from agent context"
     }
 
     /// Build the `/hotkeys` text by enumerating the live
@@ -637,6 +642,7 @@ mod tests {
             "/thinking",
             "/settings",
             "/scoped-models",
+            "/tree",
             "/reload",
             "/login",
             "/logout",
@@ -647,6 +653,35 @@ mod tests {
                 "/help text missing {cmd}; current text:\n{txt}"
             );
         }
+        // Issues #69 + #70: descriptions must match current behaviour.
+        // The stale "Show active model" / "Compact context now" /
+        // "inline-resolve a pattern" texts must be gone, /session must
+        // describe what it actually shows, and bash inline (`!command`,
+        // `!!command`) must be documented so users discover it.
+        assert!(
+            !txt.contains("Show active model"),
+            "/help still uses the stale /session description"
+        );
+        assert!(
+            !txt.contains("Compact context now"),
+            "/help still uses the stale /compact description"
+        );
+        assert!(
+            !txt.contains("inline-resolve a pattern"),
+            "/help still uses the jargon-y /model description"
+        );
+        assert!(
+            txt.contains("Show session info"),
+            "/help missing updated /session description"
+        );
+        assert!(
+            txt.contains("!command"),
+            "/help missing bash-inline (!command) line"
+        );
+        assert!(
+            txt.contains("!!command"),
+            "/help missing bash-inline-hidden (!!command) line"
+        );
     }
 
     /// Regression for #42: slash command names must be

@@ -2244,11 +2244,7 @@ async fn mount_thinking_selector(
         match parsed {
             Ok(level) => {
                 apply_thinking_level(session, level);
-                let label = match level {
-                    Some(l) => level_label(l).to_string(),
-                    None => "off".to_string(),
-                };
-                push_status(chat, format!("[thinking: {label}]"), None);
+                report_thinking_change(chat, session, level);
             }
             Err(()) => {
                 push_status(
@@ -2292,11 +2288,7 @@ async fn mount_thinking_selector(
     match rx.recv().await {
         Some(ThinkingOutcome::Selected(level)) => {
             apply_thinking_level(session, level);
-            let label = match level {
-                Some(l) => level_label(l).to_string(),
-                None => "off".to_string(),
-            };
-            push_status(chat, format!("[thinking: {label}]"), None);
+            report_thinking_change(chat, session, level);
         }
         Some(ThinkingOutcome::Cancelled) | None => {
             push_status(chat, "[/thinking cancelled]".to_string(), None);
@@ -2311,6 +2303,33 @@ fn apply_thinking_level(session: &mut AgentSession, level: Option<model::Thinkin
     let mut opts = session.stream_options().clone();
     opts.reasoning = level;
     session.set_stream_options(opts);
+}
+
+/// Emit the `[thinking: <level>]` confirmation, and a yellow follow-up
+/// warning when the active model does not advertise reasoning support so
+/// users learn the level will be silently dropped (or rejected) instead
+/// of mistakenly believing they enabled extended thinking.
+fn report_thinking_change(
+    chat: &ChatList,
+    session: &AgentSession,
+    level: Option<model::ThinkingLevel>,
+) {
+    let label = match level {
+        Some(l) => level_label(l).to_string(),
+        None => "off".to_string(),
+    };
+    push_status(chat, format!("[thinking: {label}]"), None);
+    if level.is_some() && !session.model().reasoning {
+        let model_id = &session.model().id;
+        push_status(
+            chat,
+            format!(
+                "[warning: {model_id} does not advertise extended thinking — \
+                 this setting may be ignored or rejected by the provider]"
+            ),
+            Some(YELLOW_FG),
+        );
+    }
 }
 
 fn level_label(level: model::ThinkingLevel) -> &'static str {
@@ -3931,6 +3950,87 @@ mod tests {
         assert_eq!(session.stream_options().reasoning, None);
         let joined = chat.lock().unwrap()[0].render(80).join("\n");
         assert!(joined.contains("off"), "{joined:?}");
+    }
+
+    /// `/thinking high` on a model that does not advertise reasoning
+    /// support should still apply (so users can opt in once the model
+    /// upgrades) but must also surface a yellow warning so the user
+    /// knows the level may be silently dropped or rejected by the
+    /// provider.
+    #[tokio::test]
+    async fn thinking_inline_level_warns_when_model_lacks_reasoning() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        assert!(!session.model().reasoning);
+        let action = dispatch(
+            "/thinking high",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        let list = chat.lock().unwrap();
+        assert!(
+            list.len() >= 2,
+            "expected confirmation + warning, got {} entries",
+            list.len()
+        );
+        let confirm = list[0].render(80).join("\n");
+        let warn = list[1].render(80).join("\n");
+        assert!(confirm.contains("high"), "confirmation missing level: {confirm}");
+        assert!(
+            warn.contains("does not advertise extended thinking"),
+            "warning missing reasoning-unsupported hint: {warn}"
+        );
+        assert!(
+            warn.contains(&session.model().id),
+            "warning missing model id: {warn}"
+        );
+    }
+
+    /// On a reasoning-capable model the warning must NOT fire — the
+    /// confirmation is the only status pushed.
+    #[tokio::test]
+    async fn thinking_inline_level_skips_warning_when_model_supports_reasoning() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut model = dummy_model();
+        model.reasoning = true;
+        let mut session = AgentSession::in_memory_with_client(model, vec![], Client::new());
+        let action = dispatch(
+            "/thinking high",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        let list = chat.lock().unwrap();
+        assert_eq!(list.len(), 1);
+        let joined = list[0].render(80).join("\n");
+        assert!(joined.contains("high"), "{joined:?}");
+        assert!(
+            !joined.contains("does not advertise"),
+            "unexpected warning on reasoning-capable model: {joined}"
+        );
+    }
+
+    /// `/thinking off` on a non-reasoning model should NOT warn —
+    /// clearing the level is always valid.
+    #[tokio::test]
+    async fn thinking_off_does_not_warn_on_non_reasoning_model() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let mut session = make_session();
+        let action = dispatch(
+            "/thinking off",
+            &SlashCommandContext {
+                model_id: "x".into(),
+                provider: "y".into(),
+            },
+        );
+        apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
+        let list = chat.lock().unwrap();
+        assert_eq!(list.len(), 1);
     }
 
     /// Unknown `/thinking <foo>` shouldn't mutate state — surface a
