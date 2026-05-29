@@ -54,6 +54,8 @@ const model: Model = {
 };
 
 const agent = new RemoteAgent(conn, model);
+// Reflect the server's actual active model in the UI (overrides the placeholder).
+void agent.hydrate();
 
 // ---- IndexedDB persistence (db name "hand-ai") ------------------------------
 // Construct the four stores + a versioned IndexedDB backend, wire the backend

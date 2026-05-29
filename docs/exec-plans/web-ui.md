@@ -699,25 +699,20 @@ been left as refinements:
   per-connection server session; browser state persists).
 - **Workspace gates** ✓ — `cargo clippy --workspace --all-targets -- -D warnings`
   and `cargo fmt --check` pass.
+- **Server-side session replay** ✓ — added a `set_messages` RPC command +
+  `AgentSession::set_messages` (core crate); `loadSession` now de-normalizes the
+  `toolCall` discriminator and replays the persisted transcript into the server's
+  per-connection `AgentSession`. Verified end-to-end: after `new_session`
+  (cleared context) + `loadSession`, a follow-up prompt correctly recalled the
+  seeded facts ("lucky number 47, favorite color teal"). `cargo test -p
+  hand-coding-agent` (1542) stays green.
+- **Active-model hydration on connect** ✓ — `RemoteAgent.hydrate()` fetches
+  `get_state` on connect and sets the active model, so the editor reflects the
+  server's real model. Verified: a server started on `gemini-2.5-flash` shows
+  `gemini-2.5-flash` in the editor (not the bootstrap placeholder).
 
-### Accepted Architectural Limitations
-
-The following are intentional consequences of the server-bridge architecture (the
-reference UI ran the agent client-side and so did not face them). They do not block
-any action in §Purpose:
-
-- **Server-side session replay (row, ~136/loadSession)**: loading a persisted
-  session restores the browser-side transcript + model + thinking level for
-  display, but does NOT replay that history into the server's per-connection
-  `AgentSession` context — so a prompt sent right after loading an old session
-  does not carry that history server-side. Closing this would require a new
-  server mechanism to seed `AgentSession` context (e.g. a transcript-replay or a
-  server-side `switch_session` over a persisted store); it is out of scope for a
-  faithful port and recorded here as a known tradeoff.
-- **Active-model label on connect (cosmetic)**: the editor shows a placeholder
-  model label until the user opens the model selector; the frontend does not yet
-  hydrate the server's active model via `get_state` on connect. Switching models
-  works; only the initial label may differ from the server default.
+There are no remaining accepted limitations: every item flagged during the parity
+review has been implemented and live-verified.
 
 ## Idempotence and Recovery
 

@@ -66,6 +66,25 @@ function normalizeMessage(msg: AgentMessage): AgentMessage {
   return msg;
 }
 
+/**
+ * Inverse of {@link normalizeBlock}: restore the server's `"toolcall"`
+ * discriminator before sending a stored transcript back (so `model::Message`
+ * deserializes the assistant tool-call blocks server-side).
+ */
+function denormalizeBlock(block: ContentBlock): ContentBlock {
+  if ((block as { type: string }).type === "toolCall") {
+    return { ...block, type: "toolcall" } as unknown as ContentBlock;
+  }
+  return block;
+}
+
+function denormalizeMessage(msg: AgentMessage): AgentMessage {
+  if (msg.role === "assistant" && Array.isArray(msg.content)) {
+    return { ...msg, content: msg.content.map(denormalizeBlock) };
+  }
+  return msg;
+}
+
 export class RemoteAgent implements Agent {
   readonly state: AgentState;
   private subscribers = new Set<(event: AgentEvent) => void>();
@@ -88,6 +107,23 @@ export class RemoteAgent implements Agent {
       isStreaming: false,
     };
     this.conn.onFrame((frame) => this.handleFrame(frame));
+  }
+
+  /**
+   * Hydrate the active model from the server's session state on connect, so the
+   * editor reflects the real server model rather than the bootstrap placeholder
+   * (e.g. when the server was started with a non-default `--model`). Best-effort.
+   */
+  async hydrate(): Promise<void> {
+    try {
+      const state = await this.conn.request<{ model?: Model }>({ type: "get_state" });
+      if (state?.model) {
+        this.state.model = state.model;
+        this.emit({ type: "agent_end", stopReason: "stop" });
+      }
+    } catch {
+      // Best-effort; keep the placeholder label if get_state is unavailable.
+    }
   }
 
   subscribe(cb: (event: AgentEvent) => void): () => void {
@@ -223,11 +259,11 @@ export class RemoteAgent implements Agent {
    * persisted session loaded from IndexedDB, then notify subscribers so the
    * chat shell re-renders the restored history.
    *
-   * NB: this restores only the *browser-side* view of the conversation. The
-   * server still owns its own live AgentSession; replaying the loaded history
-   * into the server-side context (so the next prompt has the full history) is a
-   * later concern (see M10/M12 — server-side session restore). For now the
-   * displayed messages, model, and thinking level are reset and re-rendered.
+   * Restores both the browser-side view AND the server-side session context:
+   * the model is applied via `set_model` and the transcript is replayed into the
+   * server's per-connection `AgentSession` via `set_messages`, so a follow-up
+   * prompt carries the full history. Only model-native roles round-trip; the
+   * `toolCall` discriminator is de-normalized to the server's `toolcall`.
    */
   loadSession(data: { messages: AgentMessage[]; model: Model; thinkingLevel: ThinkingLevel }): void {
     this.state.messages = data.messages.map(normalizeMessage);
@@ -241,6 +277,17 @@ export class RemoteAgent implements Agent {
       id: String(this.nextId++),
       provider: data.model.provider,
       modelId: data.model.id,
+    });
+    // Seed the server-side session context with the restored transcript so the
+    // next prompt has history. Only model-native roles deserialize server-side
+    // (UI-only roles are skipped there); de-normalize toolCall -> toolcall.
+    const serverMessages = data.messages
+      .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "toolResult")
+      .map(denormalizeMessage);
+    this.conn.send({
+      type: "set_messages",
+      id: String(this.nextId++),
+      messages: serverMessages,
     });
     // agent_end is the event the chat shell uses to reconcile its view from
     // state.messages and re-enable input; reuse it to repaint the restored list.

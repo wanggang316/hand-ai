@@ -636,6 +636,18 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             )
         }
 
+        RpcCommand::SetMessages { id, messages } => {
+            // Restore a persisted transcript into this session's context.
+            // Entries that don't deserialize into a `Message` (e.g. UI-only
+            // roles the browser layered on) are skipped rather than failing.
+            let restored: Vec<Message> = messages
+                .into_iter()
+                .filter_map(|v| serde_json::from_value::<Message>(v).ok())
+                .collect();
+            session.set_messages(restored);
+            RpcResponse::new(id, RpcResponseBody::SetMessages(RpcResultEmpty::ok()))
+        }
+
         RpcCommand::Abort { id } => {
             // Cancel the in-flight turn (if any). Idempotent: returning
             // `success: true` for both "cancelled a running turn" and

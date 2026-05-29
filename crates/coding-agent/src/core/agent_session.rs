@@ -937,6 +937,14 @@ impl AgentSession {
         &self.context.messages
     }
 
+    /// Replace the in-memory context messages. Used to restore a previously
+    /// persisted transcript into this (per-connection) session so a follow-up
+    /// turn carries that history. Does not touch the session manager's stored
+    /// file; callers seeding an ephemeral session own persistence separately.
+    pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.context.messages = messages;
+    }
+
     /// Get the settings manager.
     pub fn settings(&self) -> &SettingsManager {
         &self.settings_manager

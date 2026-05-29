@@ -303,6 +303,17 @@ pub enum RpcCommand {
         id: Option<String>,
     },
 
+    /// Replace the session's in-memory message history. Used by the web UI to
+    /// restore a browser-persisted session's transcript into the server-side
+    /// per-connection session so a follow-up prompt carries that context.
+    /// `messages` are opaque JSON deserialized into `model::Message`
+    /// (entries that fail to deserialize are skipped).
+    SetMessages {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        messages: Vec<serde_json::Value>,
+    },
+
     // ---- Commands ----
     GetCommands {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -578,6 +589,8 @@ pub enum RpcResponseBody {
     SetSessionName(RpcResultEmpty),
 
     GetMessages(RpcResultWithData<MessagesData>),
+
+    SetMessages(RpcResultEmpty),
 
     GetCommands(RpcResultWithData<CommandsData>),
 

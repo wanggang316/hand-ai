@@ -94,6 +94,16 @@ export interface SetSessionNameCommand {
   id?: string;
   name: string;
 }
+/**
+ * Seed the server-side session's context with a restored transcript (used when
+ * loading a browser-persisted session). Only model-native roles
+ * (user/assistant/toolResult) are honored; the server skips others.
+ */
+export interface SetMessagesCommand {
+  type: "set_messages";
+  id?: string;
+  messages: AgentMessage[];
+}
 export interface GetSessionStatsCommand {
   type: "get_session_stats";
   id?: string;
@@ -148,6 +158,7 @@ export type ClientCommand =
   | NewSessionCommand
   | SwitchSessionCommand
   | SetSessionNameCommand
+  | SetMessagesCommand
   | GetSessionStatsCommand
   | ExportHtmlCommand
   | ToolResultCommand
