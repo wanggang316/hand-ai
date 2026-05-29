@@ -55,6 +55,24 @@ export interface GetStateCommand {
   type: "get_state";
   id?: string;
 }
+export interface NewSessionCommand {
+  type: "new_session";
+  id?: string;
+}
+export interface SwitchSessionCommand {
+  type: "switch_session";
+  id?: string;
+  sessionPath: string;
+}
+export interface SetSessionNameCommand {
+  type: "set_session_name";
+  id?: string;
+  name: string;
+}
+export interface GetSessionStatsCommand {
+  type: "get_session_stats";
+  id?: string;
+}
 /**
  * Reply to a server-declared, browser-executed tool call (e.g. `artifacts`).
  * The server suspends the tool's execution until this frame arrives, keyed by
@@ -79,6 +97,10 @@ export type ClientCommand =
   | GetAvailableModelsCommand
   | SetThinkingLevelCommand
   | GetStateCommand
+  | NewSessionCommand
+  | SwitchSessionCommand
+  | SetSessionNameCommand
+  | GetSessionStatsCommand
   | ToolResultCommand;
 
 // ---- server -> client -------------------------------------------------------

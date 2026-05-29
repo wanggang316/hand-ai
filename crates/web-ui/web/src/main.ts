@@ -19,11 +19,21 @@ import { IndexedDBStorageBackend } from "./storage/indexeddb-backend";
 import { ProviderKeysStore } from "./storage/provider-keys-store";
 import { SessionsStore } from "./storage/sessions-store";
 import { SettingsStore } from "./storage/settings-store";
+import { i18n } from "./utils/i18n";
 // Side-effect imports: register the built-in message and tool renderers.
 import "./shell/messages/index";
 import "./tools/index";
 import "./shell/chat-panel";
 import type { ChatPanel } from "./shell/chat-panel";
+import "./shell/app-header";
+import type { AppHeader, Theme } from "./shell/app-header";
+import { ApiKeyPromptDialog } from "./dialogs/api-key-prompt-dialog";
+import { ApiKeysTab } from "./dialogs/api-keys-tab";
+import { ProxyTab } from "./dialogs/proxy-tab";
+import { SessionListDialog } from "./dialogs/session-list-dialog";
+import { SettingsDialog } from "./dialogs/settings-dialog";
+import "./providers/providers-models-tab";
+import type { ProvidersModelsTab } from "./providers/providers-models-tab";
 
 const wsUrl =
   (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
@@ -89,11 +99,16 @@ setAppStorage(
 // the chat. (Loading a persisted session and choosing the id from existing
 // metadata is wired by the sessions dialog in a later milestone; until then a
 // fresh id is minted per page load.)
-const sessionId =
-  typeof crypto !== "undefined" && "randomUUID" in crypto
+function freshSessionId(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : `session-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-const sessionCreatedAt = new Date().toISOString();
+}
+
+// The active session id / created-at are mutable so the header's "new session"
+// and "load session" actions can rebind which IndexedDB record auto-save writes.
+let sessionId = freshSessionId();
+let sessionCreatedAt = new Date().toISOString();
 
 function buildPreview(messages: AgentMessage[]): string {
   const parts: string[] = [];
@@ -157,14 +172,121 @@ agent.subscribe((event) => {
 
 const app = document.getElementById("app");
 if (!app) throw new Error("missing #app mount point");
+app.style.display = "flex";
+app.style.flexDirection = "column";
+
+// ---- App header (sessions / new / inline title / theme / settings) ----------
+const header = document.createElement("app-header") as AppHeader;
+header.theme = "dark";
+header.title = i18n("New Session");
+document.documentElement.setAttribute("data-theme", "dark");
+
+// Restore the persisted theme asynchronously (avoid top-level await; the build
+// target predates it). Basic toggle; full theming is M11.
+void settingsStore
+  .get<Theme>("theme")
+  .then((saved) => {
+    if (saved === "light" || saved === "dark") {
+      header.theme = saved;
+      document.documentElement.setAttribute("data-theme", saved);
+    }
+  })
+  .catch(() => {});
 
 const panel = document.createElement("hand-chat-panel") as ChatPanel;
+// The panel must flex to fill the space below the fixed-height header.
+panel.style.flex = "1";
+panel.style.minHeight = "0";
+
+app.appendChild(header);
 app.appendChild(panel);
 
+// Keep the header title in sync with the persisted session title.
+async function refreshHeaderTitle(): Promise<void> {
+  try {
+    const meta = await sessionsStore.getMetadata(sessionId);
+    if (meta?.title) header.title = meta.title;
+  } catch {
+    // ignore; the header keeps its current label
+  }
+}
+
+header.onOpenSessions = () => {
+  SessionListDialog.open(
+    (id) => void loadSession(id),
+    (deletedId) => {
+      // If the active session was deleted, start a fresh one.
+      if (deletedId === sessionId) startNewSession();
+    },
+  );
+};
+
+header.onNewSession = () => startNewSession();
+
+header.onOpenSettings = () => {
+  // Tab order matches the architecture: Providers & Models, Proxy, API Keys.
+  const providersTab = document.createElement("providers-models-tab") as ProvidersModelsTab;
+  providersTab.agent = agent;
+  const proxyTab = new ProxyTab();
+  const apiKeysTab = new ApiKeysTab();
+  apiKeysTab.agent = agent;
+  SettingsDialog.open([providersTab, proxyTab, apiKeysTab]);
+};
+
+header.onRenameTitle = (title) => {
+  // Persist locally (updateTitle is a no-op until the session has been saved)
+  // and inform the server so its session name matches.
+  void sessionsStore.updateTitle(sessionId, title).catch((err) => {
+    console.warn("rename persist failed", err);
+  });
+  agent.setSessionName(title);
+};
+
+header.onThemeChange = (theme) => {
+  void settingsStore.set("theme", theme).catch(() => {});
+};
+
+/** Reset to a brand-new session: clear the agent and rebind the auto-save id. */
+function startNewSession(): void {
+  agent.newSession();
+  sessionId = freshSessionId();
+  sessionCreatedAt = new Date().toISOString();
+  header.title = i18n("New Session");
+}
+
+/**
+ * Load a persisted session into the displayed conversation. Restores the
+ * browser-side view (messages / model / thinking level) via RemoteAgent and
+ * rebinds auto-save to that session's id so subsequent turns overwrite it.
+ *
+ * NB: this restores only the client-side view. Replaying the loaded transcript
+ * into the server-side AgentSession context (so the next prompt carries the full
+ * history) is a later concern — see M10/M12 server-side session restore.
+ */
+async function loadSession(id: string): Promise<void> {
+  try {
+    const data = await sessionsStore.get(id);
+    if (!data) return;
+    agent.loadSession({
+      messages: data.messages,
+      model: data.model,
+      thinkingLevel: data.thinkingLevel,
+    });
+    sessionId = data.id;
+    sessionCreatedAt = data.createdAt;
+    header.title = data.title || i18n("New Session");
+  } catch (err) {
+    console.warn("session load failed", err);
+  }
+}
+
 void panel.setAgent(agent, {
-  // Provider keys are resolved server-side; the prompt dialog lands with the
-  // dialogs milestone. Returning true lets sends proceed in the meantime.
-  onApiKeyRequired: async () => true,
+  // API-key gating: prompt for the provider's key when the server reports one is
+  // required. Resolves true once a key is stored (or already present).
+  onApiKeyRequired: async (provider: string) => {
+    if (await providerKeysStore.has(provider).catch(() => false)) return true;
+    return ApiKeyPromptDialog.prompt(provider);
+  },
   onBeforeSend: () => {},
   onCostClick: () => {},
   // onModelSelect intentionally omitted: the chat panel's default opens the
@@ -173,4 +295,9 @@ void panel.setAgent(agent, {
   // browser. Bind the executor registration to the concrete RemoteAgent here,
   // where both the agent and the panel are reachable.
   registerBrowserTool: (name, execute) => agent.registerBrowserTool(name, execute),
+});
+
+// After a turn is persisted, reflect the (possibly auto-generated) title.
+agent.subscribe((event) => {
+  if (event.type === "agent_end") void refreshHeaderTitle();
 });

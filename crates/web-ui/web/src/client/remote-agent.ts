@@ -140,6 +140,49 @@ export class RemoteAgent implements Agent {
     }
   }
 
+  /**
+   * Replace the displayed transcript (and model / thinking level) with a
+   * persisted session loaded from IndexedDB, then notify subscribers so the
+   * chat shell re-renders the restored history.
+   *
+   * NB: this restores only the *browser-side* view of the conversation. The
+   * server still owns its own live AgentSession; replaying the loaded history
+   * into the server-side context (so the next prompt has the full history) is a
+   * later concern (see M10/M12 — server-side session restore). For now the
+   * displayed messages, model, and thinking level are reset and re-rendered.
+   */
+  loadSession(data: { messages: AgentMessage[]; model: Model; thinkingLevel: ThinkingLevel }): void {
+    this.state.messages = data.messages.map(normalizeMessage);
+    this.state.model = data.model;
+    this.state.thinkingLevel = data.thinkingLevel;
+    this.state.isStreaming = false;
+    this.pending.clear();
+    // Apply the restored model server-side so the next turn uses it.
+    this.conn.send({
+      type: "set_model",
+      id: String(this.nextId++),
+      provider: data.model.provider,
+      modelId: data.model.id,
+    });
+    // agent_end is the event the chat shell uses to reconcile its view from
+    // state.messages and re-enable input; reuse it to repaint the restored list.
+    this.emit({ type: "agent_end", stopReason: "stop" });
+  }
+
+  /** Reset the conversation: clear local state and ask the server for a fresh session. */
+  newSession(): void {
+    this.state.messages = [];
+    this.state.isStreaming = false;
+    this.pending.clear();
+    this.conn.send({ type: "new_session", id: String(this.nextId++) });
+    this.emit({ type: "agent_end", stopReason: "stop" });
+  }
+
+  /** Rename the active session server-side (the browser persists titles separately). */
+  setSessionName(name: string): void {
+    this.conn.send({ type: "set_session_name", id: String(this.nextId++), name });
+  }
+
   steer(message: AgentMessage): void {
     // Mid-turn steering; folds a custom message into the conversation. The wire
     // command lands with the backend-seam command catalog; until then the

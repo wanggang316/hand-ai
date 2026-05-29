@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M8 complete)
+**Status:** In progress (M0-M9 complete; extension-UI protocol deferred to M12)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -44,7 +44,9 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
   now; `RemoteAgent.sendMessage` still drops the attachments arg until M10.)
 - [x] **M7 — Storage (IndexedDB)**
 - [x] **M8 — Providers / models**
-- [ ] **M9 — Dialogs / settings**
+- [x] **M9 — Dialogs / settings** (settings/session/api-key/persistent dialogs +
+  app header done; the extension-UI request/response protocol, rows 188-189, is
+  deferred to M12 — niche, needs server extensions that emit UI requests)
 - [ ] **M10 — Proxy / networking / out-of-band upload-download**
 - [ ] **M11 — i18n / format / theming / design system**
 - [ ] **M12 — Polish, single-binary packaging, parity verification**
@@ -113,6 +115,21 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
+- **M9 (2026-05-29)**: Dialog system + app header. `DialogBase`-based
+  `<settings-dialog>` (sidebar/mobile-strip nav, all tabs mounted, display:none
+  toggle) hosting Providers&Models + Proxy + ApiKeys tabs; `<session-list-dialog>`
+  (metadata cards, relative dates, usage, in-UI two-step delete confirm — no
+  window.confirm); `<api-key-prompt-dialog>` (storage-poll resolve);
+  `<persistent-storage-dialog>` (navigator.storage.persist + graceful fallback);
+  and `<app-header>` (sessions / new / inline-editable title / theme toggle /
+  settings). Verified in a browser: `runDialogsSmoke()` →
+  `{settingsOpened:true, settingsTabCount:2, sessionDialogOpened:true}`; the
+  header renders 5 buttons with a working theme attribute. Deferred: (a) the
+  extension-UI request/response protocol (rows 188-189, niche) to M12; (b)
+  full server-side session restore — `loadSession` restores the browser view +
+  pushes set_model/new_session but does not replay the transcript into the
+  server `AgentSession` (M10/M12); (c) the M6 editor `alert()` validation sites
+  to M11/M12 polish (the no-alert gate closes there).
 - **M8 (2026-05-29)**: Model selection + provider management. Added a correlated
   WS request/response path (`WsConnection.request` + `RemoteAgent.getAvailableModels`)
   since the model list comes from the server's existing `get_available_models`
@@ -549,15 +566,15 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 152 | ProviderKeyInput (`provider-key-input`, show key presence without revealing) | providers-models | M8 | DONE |
 | 153 | API-key validation via server round-trip (replaces in-browser completion) | providers-models | M8 | DONE |
 | 154 | ProvidersModelsTab (`providers-models-tab`, cloud + custom sections, add/edit/refresh/delete) | providers-models | M8 | DONE |
-| 155 | SettingsTab abstract base | dialogs-settings | M9 | TODO |
-| 156 | ApiKeysTab (`api-keys-tab`) | dialogs-settings | M9 | TODO |
-| 157 | ProxyTab (`proxy-tab`, document-fetch proxy config) | dialogs-settings | M9 | TODO |
-| 158 | SettingsDialog (`settings-dialog`, sidebar/mobile-strip nav, display:none tab toggle) | dialogs-settings | M9 | TODO |
-| 159 | SessionListDialog (`session-list-dialog`, metadata cards, relative dates, usage, in-UI delete confirm) | dialogs-settings | M9 | TODO |
-| 160 | ApiKeyPromptDialog (`api-key-prompt-dialog`, storage-poll resolve, interval cleanup) | dialogs-settings | M9 | TODO |
-| 161 | PersistentStorageDialog (`persistent-storage-dialog`, navigator.storage.persist, graceful fallback) | dialogs-settings | M9 | TODO |
+| 155 | SettingsTab abstract base | dialogs-settings | M9 | DONE |
+| 156 | ApiKeysTab (`api-keys-tab`) | dialogs-settings | M9 | DONE |
+| 157 | ProxyTab (`proxy-tab`, document-fetch proxy config) | dialogs-settings | M9 | DONE |
+| 158 | SettingsDialog (`settings-dialog`, sidebar/mobile-strip nav, display:none tab toggle) | dialogs-settings | M9 | DONE |
+| 159 | SessionListDialog (`session-list-dialog`, metadata cards, relative dates, usage, in-UI delete confirm) | dialogs-settings | M9 | DONE |
+| 160 | ApiKeyPromptDialog (`api-key-prompt-dialog`, storage-poll resolve, interval cleanup) | dialogs-settings | M9 | DONE |
+| 161 | PersistentStorageDialog (`persistent-storage-dialog`, navigator.storage.persist, graceful fallback) | dialogs-settings | M9 | DONE |
 | 162 | DialogBase modal base (open/close, backdrop, modalWidth/Height) | dialogs-settings/ui | M8/M9 | TODO |
-| 163 | App header: sessions / new-session / inline-editable title / theme toggle / settings | dialogs-settings/bootstrap | M9 | TODO |
+| 163 | App header: sessions / new-session / inline-editable title / theme toggle / settings | dialogs-settings/bootstrap | M9 | DONE |
 | 164 | POST /upload endpoint (attachment bytes → content reference) | proxy-networking | M10 | TODO |
 | 165 | GET /download/:id endpoint (serve ExportHtml output bytes) | proxy-networking | M10 | TODO |
 | 166 | Vite dev proxy for /ws, /upload, /download | proxy-networking/build | M10 | TODO |
@@ -575,15 +592,15 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 178 | Thin-scrollbar rules + user-message gradient (brand-neutral palette) | theming | M11 | TODO |
 | 179 | Tool description prompt constants reproduced verbatim, brand-neutral (prompts.ts) | utils/prompts | M5 | DONE |
 | 180 | WS command catalog: prompt/steer/follow_up/abort/abort_bash/bash | wire/backend-seam | M1/M5 | TODO |
-| 181 | WS command catalog: new_session/switch_session/fork/clone | wire/backend-seam | M9 | TODO |
+| 181 | WS command catalog: new_session/switch_session/fork/clone | wire/backend-seam | M9 | DONE |
 | 182 | WS command catalog: get_state/get_messages/get_fork_messages/get_last_assistant_text | wire/backend-seam | M1 | DONE |
 | 183 | WS command catalog: set_model/cycle_model/get_available_models | wire/backend-seam | M8 | DONE |
 | 184 | WS command catalog: set_thinking_level/cycle_thinking_level | wire/backend-seam | M1 | DONE |
 | 185 | WS command catalog: set_steering_mode/set_follow_up_mode | wire/backend-seam | M1 | DONE |
 | 186 | WS command catalog: compact/set_auto_compaction/set_auto_retry/abort_retry | wire/backend-seam | M1 | DONE |
 | 187 | WS command catalog: get_session_stats/export_html/set_session_name/get_commands | wire/backend-seam | M9/M10 | TODO |
-| 188 | Extension UI protocol: extension_ui_request server→client (select/confirm/input/editor/notify/setStatus/setWidget/setTitle/set_editor_text) | wire/backend-seam | M9 | TODO |
-| 189 | Extension UI protocol: extension_ui_response client→server | wire/backend-seam | M9 | TODO |
+| 188 | Extension UI protocol: extension_ui_request server→client (select/confirm/input/editor/notify/setStatus/setWidget/setTitle/set_editor_text) | wire/backend-seam | M9/M12 | TODO |
+| 189 | Extension UI protocol: extension_ui_response client→server | wire/backend-seam | M9/M12 | TODO |
 | 190 | Event catalog: agent_start/turn_start/message_start/message_update/message_end/turn_end/agent_end | wire/backend-seam | M1 | DONE |
 | 191 | Event catalog: tool_execution_start/update/end | wire/backend-seam | M2 | DONE |
 | 192 | Event catalog: compaction_start/end, error, session_info_changed | wire/backend-seam | M1/M9 | TODO |

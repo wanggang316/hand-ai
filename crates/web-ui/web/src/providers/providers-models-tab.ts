@@ -8,9 +8,10 @@
 // wired in. Auto-discovery providers get a live status probe on load and on
 // refresh.
 
-import { html, LitElement, type TemplateResult } from "lit";
+import { html, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { RemoteAgent } from "../client/remote-agent";
+import { SettingsTab } from "../dialogs/settings-tab";
 import { getAppStorage } from "../storage/app-storage";
 import type { AutoDiscoveryProviderType, CustomProvider, CustomProviderType } from "../storage/backend";
 import { i18n } from "../utils/i18n";
@@ -38,17 +39,16 @@ function isAutoDiscovery(type: CustomProviderType): boolean {
 }
 
 @customElement("providers-models-tab")
-export class ProvidersModelsTab extends LitElement {
+export class ProvidersModelsTab extends SettingsTab {
+  readonly id = "providers-models";
+  readonly label = i18n("Providers & Models");
+
   /** Source of the cloud-provider list and the key-save catalog refresh. */
   @property({ attribute: false }) agent?: RemoteAgent;
 
   @state() private cloudProviders: string[] = FALLBACK_CLOUD_PROVIDERS;
   @state() private customProviders: CustomProvider[] = [];
   @state() private providerStatus = new Map<string, ProviderStatus>();
-
-  protected override createRenderRoot(): HTMLElement | DocumentFragment {
-    return this;
-  }
 
   override async connectedCallback(): Promise<void> {
     super.connectedCallback();
@@ -179,7 +179,7 @@ export class ProvidersModelsTab extends LitElement {
     `;
   }
 
-  override render(): TemplateResult {
+  protected override renderContent(): TemplateResult {
     return html`
       <div class="flex flex-col gap-8">
         ${this.renderCloud()}
