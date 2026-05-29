@@ -108,7 +108,7 @@ lacks land as ❌ with a resolution proposal so the gap is tracked.
 | UC-args-049 | ✅ pass | `nbt_short_alias_rewrites_to_no_builtin_tools` |
 | UC-args-050 | ✅ pass | `parses_tools_csv` (long form; pi takes the same CSV) |
 | UC-args-051 | ✅ pass | `parses_tools_short_t` |
-| UC-args-052 | ✅ pass | `parses_no_tools_and_tools_together` — both fields land on the struct; runtime resolves precedence (no_tools wins) downstream |
+| UC-args-052 | ✅ pass | `no_tools_and_tools_are_mutually_exclusive` — clap rejects the combination at parse time (#83) |
 | UC-args-053 | ✅ pass | duplicate of UC-args-048 — `parses_no_builtin_tools_flag` |
 | UC-args-054 | ✅ pass | `positional_plain_text_lands_in_messages` |
 | UC-args-055 | ✅ pass | `positional_at_file_lands_in_file_args` |

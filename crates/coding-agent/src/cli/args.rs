@@ -97,7 +97,11 @@ pub struct Args {
     pub tools: Option<String>,
 
     /// Disable all tools. `-nt` is accepted as a short-form alias.
-    #[arg(long)]
+    /// Mutually exclusive with `--tools <list>` -- pairing them used
+    /// to silently drop the explicit whitelist and run with no
+    /// tools at all, faking a "I read /etc/hosts" reply the model
+    /// fabricated (#83, sibling of #80 / #82).
+    #[arg(long, conflicts_with = "tools")]
     pub no_tools: bool,
 
     /// Disable hand's built-in tools, leaving only extension-provided
@@ -141,10 +145,12 @@ pub struct Args {
     #[arg(long)]
     pub workspace_sessions: bool,
 
-    /// Disable skill discovery (project, user, and builtin). Useful when
-    /// scripts need a baseline system prompt that doesn't pick up
-    /// auto-discovered skill files from user dotfiles.
-    #[arg(long)]
+    /// Disable skill discovery (project, user, and builtin). Useful
+    /// when scripts need a baseline system prompt that doesn't pick
+    /// up auto-discovered skill files from user dotfiles. Mutually
+    /// exclusive with `--skill <path>` -- pairing them used to
+    /// silently drop the explicit path (#83).
+    #[arg(long, conflicts_with = "skills")]
     pub no_skills: bool,
 
     /// Load an extra extension by path (repeatable). Each entry points
@@ -153,11 +159,12 @@ pub struct Args {
     #[arg(short = 'e', long = "extension")]
     pub extensions: Vec<String>,
 
-    /// Disable all extension loading — both the auto-discovered set
-    /// and any explicit `--extension` entries. The flag does NOT clear
-    /// the explicit list (so it can be inspected for diagnostics) but
-    /// the runtime skips registration entirely.
-    #[arg(long)]
+    /// Disable all extension loading. Mutually exclusive with
+    /// `--extension <path>` -- pairing them used to silently
+    /// suppress the explicit override path (#83). The diagnostics-
+    /// inspection use case noted in the previous doc-comment is
+    /// rolled into the clap conflict error message.
+    #[arg(long, conflicts_with = "extensions")]
     pub no_extensions: bool,
 
     /// Add an extra skill path (repeatable). Each entry points at a
@@ -172,7 +179,9 @@ pub struct Args {
     pub prompt_templates: Vec<String>,
 
     /// Disable prompt-template discovery (project, user, and builtin).
-    #[arg(long)]
+    /// Mutually exclusive with `--prompt-template <path>` -- pairing
+    /// them used to silently drop the explicit path (#83).
+    #[arg(long, conflicts_with = "prompt_templates")]
     pub no_prompt_templates: bool,
 
     /// Load an extra theme path (repeatable).
@@ -180,7 +189,9 @@ pub struct Args {
     pub themes: Vec<String>,
 
     /// Disable theme discovery (project, user, and builtin).
-    #[arg(long)]
+    /// Mutually exclusive with `--theme <path>` -- pairing them
+    /// used to silently drop the explicit path (#83).
+    #[arg(long, conflicts_with = "themes")]
     pub no_themes: bool,
 
     /// Non-interactive print mode. `-p` is a bool, not a value-taking
@@ -487,23 +498,59 @@ mod tests {
         assert!(args.verbose, "--verbose must set the flag");
     }
 
-    /// UC-args-052 — supplying both `--no-tools` and `--tools <csv>`
-    /// together is accepted at the parse layer; both fields land on
-    /// the `Args` struct unchanged. Precedence (no_tools wins at
-    /// runtime tool selection) is enforced downstream rather than at
-    /// the clap level so a config-driven `--tools` from a wrapper
-    /// script does not error out when an interactive user supplies
-    /// `--no-tools` on top.
+    /// UC-args-052 (post-#83) -- `--no-tools` and `--tools <csv>` are
+    /// mutually exclusive at parse time. Pre-#83, the combination
+    /// was permitted on the theory that --no-tools would silently
+    /// win at runtime; in practice the model fabricated tool
+    /// results (e.g. claiming to have read /etc/hosts) because the
+    /// user's explicit whitelist was nuked without warning. clap
+    /// surfaces an ArgumentConflict instead so wrappers and
+    /// interactive users have to settle precedence explicitly
+    /// (sibling of #80 / #82).
     #[test]
-    fn parses_no_tools_and_tools_together() {
-        let args = Args::try_parse_from(["hand", "--no-tools", "--tools", "read"])
-            .expect("combination must parse — runtime resolves precedence");
-        assert!(args.no_tools, "--no-tools sets the flag");
-        assert_eq!(
-            args.tools.as_deref(),
-            Some("read"),
-            "--tools value still lands on the struct"
+    fn no_tools_and_tools_are_mutually_exclusive() {
+        let result = Args::try_parse_from(["hand", "--no-tools", "--tools", "read"]);
+        let err = match result {
+            Ok(_) => panic!("conflicting flags must error at parse time"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err.kind(), clap::error::ErrorKind::ArgumentConflict),
+            "expected ArgumentConflict, got {:?}: {err}",
+            err.kind()
         );
+        let msg = err.to_string();
+        assert!(msg.contains("--no-tools"), "error must name --no-tools: {msg}");
+        assert!(msg.contains("--tools"), "error must name --tools: {msg}");
+    }
+
+    /// Regression for #83: every `--no-X` flag that has an explicit
+    /// additive sibling now errors at parse time when paired. This
+    /// table pins all five pairs in one place so a future flag
+    /// addition cannot quietly slip through without picking a
+    /// precedence rule.
+    #[test]
+    fn no_x_flags_conflict_with_their_additive_siblings() {
+        let cases: &[(&str, &[&str])] = &[
+            ("--no-skills", &["--skill", "/tmp/skill"]),
+            ("--no-extensions", &["--extension", "/tmp/ext"]),
+            ("--no-themes", &["--theme", "/tmp/theme"]),
+            ("--no-prompt-templates", &["--prompt-template", "/tmp/tpl"]),
+        ];
+        for (negative, additive_argv) in cases {
+            let mut argv = vec!["hand", negative];
+            argv.extend_from_slice(additive_argv);
+            let result = Args::try_parse_from(&argv);
+            let err = match result {
+                Ok(_) => panic!("{negative} + {additive_argv:?} must conflict"),
+                Err(e) => e,
+            };
+            assert!(
+                matches!(err.kind(), clap::error::ErrorKind::ArgumentConflict),
+                "{negative} + {additive_argv:?}: expected ArgumentConflict, got {:?}: {err}",
+                err.kind()
+            );
+        }
     }
 
     /// UC-args-060 — end-to-end "kitchen sink" composition: provider,
@@ -1063,15 +1110,25 @@ mod tests {
         );
     }
 
-    /// `--no-extensions` is a boolean toggle. It does NOT clear the
-    /// `extensions` Vec (so diagnostics can still inspect what was
-    /// requested), but the runtime is expected to skip registration
-    /// when this flag is set.
+    /// Post-#83: `--no-extensions` and `--extension <path>` are
+    /// mutually exclusive at parse time. The pre-fix design kept
+    /// the explicit `-e` entries on the parsed struct "so
+    /// diagnostics could inspect what was requested" while the
+    /// runtime silently dropped them; that worst-of-both-worlds
+    /// shape is the bug #83 reports. Pin the new conflict so a
+    /// future loosening can't silently bring back the swallow.
     #[test]
-    fn parses_no_extensions_with_explicit_entries() {
-        let args = Args::try_parse_from(["hand", "--no-extensions", "-e", "a", "-e", "b"]).unwrap();
-        assert!(args.no_extensions);
-        assert_eq!(args.extensions, vec!["a".to_string(), "b".to_string()]);
+    fn no_extensions_and_extension_are_mutually_exclusive() {
+        let result =
+            Args::try_parse_from(["hand", "--no-extensions", "-e", "a", "-e", "b"]);
+        let err = match result {
+            Ok(_) => panic!("conflicting flags must error"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        ));
     }
 
     /// Plain-text positional arguments land in `messages()`.
