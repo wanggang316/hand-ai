@@ -282,10 +282,17 @@ header.onThemeChange = (theme) => {
 
 /** Reset to a brand-new session: clear the agent and rebind the auto-save id. */
 function startNewSession(): void {
-  agent.newSession();
+  // Rebind the auto-save id BEFORE resetting the agent. agent.newSession() emits
+  // agent_end synchronously, which schedules refreshHeaderTitle(); reading the
+  // new (metadata-less) id there prevents it from restoring the previous
+  // session's title over the "New Session" label set below.
   sessionId = freshSessionId();
   sessionCreatedAt = new Date().toISOString();
+  agent.newSession();
   header.title = i18n("New Session");
+  // Drop any artifacts carried over from the previous session: an empty
+  // transcript reconstructs to an empty panel (collapsed, stale pill removed).
+  void panel.reconstructArtifacts();
 }
 
 /**
@@ -309,6 +316,10 @@ async function loadSession(id: string): Promise<void> {
     sessionId = data.id;
     sessionCreatedAt = data.createdAt;
     header.title = data.title || i18n("New Session");
+    // Replay the restored transcript's artifacts into the (collapsed) panel so
+    // they are reachable again: the floating "Artifacts N" pill reappears and
+    // inline "Created artifact" pills can reopen each file.
+    await panel.reconstructArtifacts();
   } catch (err) {
     console.warn("session load failed", err);
   }
