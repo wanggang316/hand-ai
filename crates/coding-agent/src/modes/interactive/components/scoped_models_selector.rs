@@ -262,7 +262,9 @@ impl ScopedModelsSelectorComponent {
     fn header_lines(&self) -> Vec<String> {
         vec![
             format!("{ACCENT}{BOLD}Model Configuration{RESET}"),
-            format!("{MUTED}Session-only. Ctrl+S to save to settings.{RESET}"),
+            format!(
+                "{MUTED}Session-only. Ctrl+S to apply for this session (persistence pending).{RESET}"
+            ),
         ]
     }
 
@@ -283,7 +285,7 @@ impl ScopedModelsSelectorComponent {
             "Ctrl+X clear",
             "Ctrl+T provider",
             "Ctrl+Up/Ctrl+Down reorder",
-            "Ctrl+S save",
+            "Ctrl+S apply",
             count_text.as_str(),
         ];
         let body = format!("{DIM}  {}{RESET}", parts.join(" · "));
@@ -637,6 +639,38 @@ mod tests {
         assert!(body.contains("claude-sonnet"));
         assert!(body.contains("gpt-4o"));
         assert!(body.contains("gemini-2-pro"));
+    }
+
+    /// Regression for #81: the overlay must NOT claim Ctrl+S saves
+    /// to settings while the runtime still surfaces "persist not
+    /// yet wired". Pin the honest wording — "apply for this session
+    /// (persistence pending)" in the header and "Ctrl+S apply" in
+    /// the footer — until persist actually lands.
+    #[test]
+    fn overlay_strings_match_runtime_until_persist_lands() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let selector = ScopedModelsSelectorComponent::new(config(None), tx);
+        let body = selector.render(80).join("\n");
+        assert!(
+            !body.contains("to save to settings"),
+            "overlay still claims to save to settings: {body}"
+        );
+        assert!(
+            !body.contains("Ctrl+S save"),
+            "footer still labels Ctrl+S as `save`: {body}"
+        );
+        assert!(
+            body.contains("apply for this session"),
+            "header missing honest apply-for-this-session wording: {body}"
+        );
+        assert!(
+            body.contains("persistence pending"),
+            "header missing persistence-pending hint: {body}"
+        );
+        assert!(
+            body.contains("Ctrl+S apply"),
+            "footer missing Ctrl+S apply label: {body}"
+        );
     }
 
     #[test]
