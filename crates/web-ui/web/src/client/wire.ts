@@ -119,6 +119,24 @@ export interface ToolResultCommand {
   details?: unknown;
 }
 
+/**
+ * Reply to a server-relayed extension UI request (`extension_ui_request`).
+ * Mirrors the server's `RpcExtensionUiResponse` wire shape
+ * (`{ type, id, ... }`), where `id` is the originating request's id (NOT a
+ * fresh request/response correlation id — this frame is fire-and-forget; the
+ * server resumes the suspended extension call keyed by `id`). Exactly one of
+ * `value` / `confirmed` / `cancelled` is present, picked by which dialog the
+ * request rendered:
+ *
+ * - `value` — text from a `select` / `input` / `editor` dialog.
+ * - `confirmed` — boolean from a `confirm` dialog.
+ * - `cancelled: true` — the user dismissed the dialog without answering.
+ */
+export type ExtensionUiResponseCommand = {
+  type: "extension_ui_response";
+  id: string;
+} & ({ value: string } | { confirmed: boolean } | { cancelled: true });
+
 export type ClientCommand =
   | PromptCommand
   | AbortCommand
@@ -132,7 +150,8 @@ export type ClientCommand =
   | SetSessionNameCommand
   | GetSessionStatsCommand
   | ExportHtmlCommand
-  | ToolResultCommand;
+  | ToolResultCommand
+  | ExtensionUiResponseCommand;
 
 // ---- server -> client -------------------------------------------------------
 
@@ -187,8 +206,46 @@ export interface EventFrame {
   event: ServerEvent;
 }
 
-export type ServerFrame = ResponseFrame | EventFrame;
+/**
+ * Server-relayed extension UI request. A distinct top-level frame `type`
+ * (NOT wrapped in an `event` envelope), matching the server's
+ * `RpcExtensionUiRequest` shape: `{ type: "extension_ui_request", id,
+ * method, ... }`, where `method` discriminates the payload. The browser
+ * renders the matching dialog and replies with an `extension_ui_response`
+ * command keyed by `id`.
+ *
+ * NB: the server's RPC dispatcher does not currently EMIT these frames during
+ * normal agent turns — they originate only when a loaded extension calls the
+ * host UI (e.g. an extension's `ui.confirm(...)`). The client is wired to the
+ * protocol shape so that capability lights up automatically once such an
+ * extension is present; see `dialogs/extension-ui.ts`.
+ */
+export type ExtensionUiNotifyType = "info" | "warning" | "error";
+export type ExtensionUiWidgetPlacement = "aboveEditor" | "belowEditor";
+
+export type ExtensionUiRequestFrame = { type: "extension_ui_request"; id: string } & (
+  | { method: "select"; title: string; options: string[]; timeout?: number }
+  | { method: "confirm"; title: string; message: string; timeout?: number }
+  | { method: "input"; title: string; placeholder?: string; timeout?: number }
+  | { method: "editor"; title: string; prefill?: string }
+  | { method: "notify"; message: string; notifyType?: ExtensionUiNotifyType }
+  | { method: "setStatus"; statusKey: string; statusText?: string | null }
+  | {
+      method: "setWidget";
+      widgetKey: string;
+      widgetLines?: string[] | null;
+      widgetPlacement?: ExtensionUiWidgetPlacement;
+    }
+  | { method: "setTitle"; title: string }
+  | { method: "set_editor_text"; text: string }
+);
+
+export type ServerFrame = ResponseFrame | EventFrame | ExtensionUiRequestFrame;
 
 export function isAgentEvent(ev: ServerEvent): ev is AgentEventPayload {
   return ev.kind === "agent";
+}
+
+export function isExtensionUiRequest(frame: ServerFrame): frame is ExtensionUiRequestFrame {
+  return frame.type === "extension_ui_request";
 }

@@ -4,6 +4,7 @@
 //! the existing agent RPC dispatcher (see [`ws`]). Binds loopback only.
 
 mod app;
+mod assets;
 mod blob_store;
 mod browser_tools;
 mod download;
@@ -39,9 +40,14 @@ struct Args {
     #[arg(long)]
     cwd: Option<PathBuf>,
 
-    /// Directory holding the built frontend assets to serve.
-    #[arg(long, default_value = "crates/web-ui/web/dist")]
-    web_dir: PathBuf,
+    /// Directory holding the built frontend assets to serve from disk. When
+    /// omitted, the binary's embedded bundle is served so a release build is
+    /// fully self-contained and runnable from any working directory. Pass an
+    /// existing directory (typically `crates/web-ui/web/dist`) to serve from
+    /// disk instead — a dev convenience that avoids recompiling the server
+    /// after a frontend rebuild.
+    #[arg(long)]
+    web_dir: Option<PathBuf>,
 }
 
 #[tokio::main]

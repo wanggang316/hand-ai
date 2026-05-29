@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::response::Html;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
@@ -23,22 +23,36 @@ pub struct AppState {
     pub model: String,
     /// Optional provider override for the model.
     pub provider: Option<String>,
-    /// Directory holding the built frontend assets.
-    pub web_dir: PathBuf,
+    /// Directory holding the built frontend assets to serve from disk. When
+    /// `None`, the frontend is served from the binary's embedded bundle
+    /// (`crate::assets`) so a release build is fully self-contained.
+    pub web_dir: Option<PathBuf>,
     /// Shared out-of-band blob store backing `/upload` and `/download`.
     pub blobs: BlobStore,
 }
 
 /// Build the axum router: a `/ws` WebSocket upgrade, a health check, and
-/// static asset serving for the built frontend. When the frontend has not
-/// been built yet (e.g. running against the Vite dev server, or a bare
-/// smoke test) `/` falls back to a minimal inline page that exercises the
-/// streaming seam directly.
+/// static asset serving for the built frontend.
+///
+/// Asset serving has two modes, chosen by `state.web_dir`:
+///
+/// - **Disk** (`Some(dir)` and `dir` exists): served via `ServeDir`, with `/`
+///   resolved by the [`index`] handler reading `dir/index.html`. This is the
+///   dev convenience / explicit-override path.
+/// - **Embedded** (`None`, or the directory is missing): served from the
+///   binary's compiled-in bundle (`crate::assets`). A release build with no
+///   `--web-dir` is therefore fully self-contained.
+///
+/// In either mode, when the bundle is unavailable (`index.html` missing on
+/// disk, or the embed is empty) `/` falls back to a minimal inline page that
+/// exercises the streaming seam directly.
 pub fn router(state: AppState) -> Router {
-    let web_dir = state.web_dir.clone();
+    // Resolve the serving mode once at startup. A `--web-dir` that does not
+    // exist falls back to the embedded bundle rather than serving 404s.
+    let disk_dir = state.web_dir.as_ref().filter(|dir| dir.is_dir()).cloned();
     let state = Arc::new(state);
 
-    Router::new()
+    let base = Router::new()
         .route("/ws", get(crate::ws::ws_handler))
         .route("/healthz", get(|| async { "ok" }))
         // Out-of-band attachment upload + artifact download (see §5.4). The
@@ -48,19 +62,27 @@ pub fn router(state: AppState) -> Router {
             post(crate::upload::upload).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route("/download/register", post(crate::download::register))
-        .route("/download/:id", get(crate::download::download))
-        .route("/", get(index))
-        .fallback_service(ServeDir::new(web_dir))
-        .with_state(state)
-        .layer(TraceLayer::new_for_http())
+        .route("/download/:id", get(crate::download::download));
+
+    let routed = match disk_dir {
+        Some(dir) => base
+            .route("/", get(index))
+            .fallback_service(ServeDir::new(dir)),
+        None => base.fallback(crate::assets::embedded_fallback),
+    };
+
+    routed.with_state(state).layer(TraceLayer::new_for_http())
 }
 
-/// Serve the built `index.html` when present, else a minimal inline page.
-async fn index(State(state): State<Arc<AppState>>) -> Html<String> {
-    let index_path = state.web_dir.join("index.html");
-    match tokio::fs::read_to_string(&index_path).await {
-        Ok(html) => Html(html),
-        Err(_) => Html(DEV_INDEX.to_string()),
+/// Serve the built `index.html` from disk when present, else a minimal inline
+/// page. Only reachable in the disk-serving mode (a configured `--web-dir`).
+async fn index(State(state): State<Arc<AppState>>) -> Response {
+    let Some(dir) = state.web_dir.as_ref() else {
+        return Html(DEV_INDEX.to_string()).into_response();
+    };
+    match tokio::fs::read_to_string(dir.join("index.html")).await {
+        Ok(html) => Html(html).into_response(),
+        Err(_) => Html(DEV_INDEX.to_string()).into_response(),
     }
 }
 

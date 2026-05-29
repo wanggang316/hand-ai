@@ -137,7 +137,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             model: "test/model".to_string(),
             provider: None,
-            web_dir: std::env::temp_dir(),
+            web_dir: None,
             blobs: BlobStore::new(),
         });
         let err = download(State(state), Path("missing".to_string()))
@@ -152,7 +152,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             model: "test/model".to_string(),
             provider: None,
-            web_dir: std::env::temp_dir(),
+            web_dir: None,
             blobs: BlobStore::new(),
         });
         let bytes = b"round-trip payload";
@@ -179,7 +179,7 @@ mod tests {
             cwd: dir.clone(),
             model: "test/model".to_string(),
             provider: None,
-            web_dir: std::env::temp_dir(),
+            web_dir: None,
             blobs: BlobStore::new(),
         });
         // A path that escapes the cwd must be rejected (404 because it does not
@@ -205,7 +205,7 @@ mod tests {
             cwd: dir.clone(),
             model: "test/model".to_string(),
             provider: None,
-            web_dir: std::env::temp_dir(),
+            web_dir: None,
             blobs: BlobStore::new(),
         });
 

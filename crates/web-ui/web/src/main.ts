@@ -32,6 +32,7 @@ import { ApiKeysTab } from "./dialogs/api-keys-tab";
 import { ProxyTab } from "./dialogs/proxy-tab";
 import { SessionListDialog } from "./dialogs/session-list-dialog";
 import { SettingsDialog } from "./dialogs/settings-dialog";
+import { installExtensionUiHandler, showToast } from "./dialogs/extension-ui";
 import "./providers/providers-models-tab";
 import type { ProvidersModelsTab } from "./providers/providers-models-tab";
 
@@ -200,6 +201,37 @@ panel.style.minHeight = "0";
 
 app.appendChild(header);
 app.appendChild(panel);
+
+// Render server-relayed extension UI requests (select/confirm/input/editor/
+// notify/...) and reply over the socket. Dormant until a loaded extension
+// calls the host UI.
+installExtensionUiHandler(conn, (extTitle) => {
+  header.title = extTitle;
+});
+
+// Surface non-agent session events (these are not part of the agent-event
+// stream RemoteAgent maps): errors as a toast, compaction status as a toast,
+// and session rename into the header title.
+conn.onFrame((frame) => {
+  if (frame.type !== "event") return;
+  const ev = frame.event as { kind?: string; message?: string; summary?: string; name?: string | null };
+  switch (ev.kind) {
+    case "error":
+      if (ev.message) showToast(ev.message, "error");
+      break;
+    case "compaction_start":
+      showToast(i18n("Compacting conversation..."), "info");
+      break;
+    case "compaction_end":
+      showToast(i18n("Conversation compacted"), "info");
+      break;
+    case "session_info_changed":
+      if (ev.name) header.title = ev.name;
+      break;
+    default:
+      break;
+  }
+});
 
 // Keep the header title in sync with the persisted session title.
 async function refreshHeaderTitle(): Promise<void> {
