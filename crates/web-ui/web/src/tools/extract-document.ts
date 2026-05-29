@@ -11,7 +11,7 @@ import { loadAttachment } from "../attachments/attachment-utils";
 import type { BrowserToolResult } from "../client/remote-agent";
 import type { ToolResultContent, ToolResultMessage } from "../core/messages";
 import { EXTRACT_DOCUMENT_DESCRIPTION } from "../prompts/prompts";
-import { isCorsError } from "../utils/cors";
+import { isCorsError, resolveDocumentFetchUrl } from "../utils/cors";
 import { i18n } from "../utils/i18n";
 import {
   registerToolRenderer,
@@ -101,9 +101,13 @@ export function createExtractDocumentTool(): ExtractDocumentTool {
         throw new Error(`Invalid URL: ${url}`);
       }
 
+      // Route through the document-fetch proxy when enabled (CORS bypass for
+      // remote hosts that block browser reads); falls back to the direct URL.
+      const fetchUrl = await resolveDocumentFetchUrl(url);
+
       let blob: Blob;
       try {
-        const response = await fetch(url, { signal });
+        const response = await fetch(fetchUrl, { signal });
         if (!response.ok) {
           throw new Error(
             `TELL USER: Unable to download the document (${response.status} ${response.statusText}). ` +

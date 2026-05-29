@@ -343,13 +343,18 @@ where
             // push to them inline during the race. Everything else is
             // deferred (no `&self` access path is available while
             // `send_message` borrows mutably). See module docs.
-            Ok(RpcCommand::Prompt { id, message, .. }) => {
+            Ok(RpcCommand::Prompt {
+                id,
+                message,
+                images,
+                ..
+            }) => {
                 let steering_q = session.steering_queue_handle();
                 let follow_up_q = session.follow_up_queue_handle();
                 let cancel_handle = session.cancel_handle();
                 let mut io_fatal: Option<io::Error> = None;
                 let result = {
-                    let prompt_fut = session.send_message(&message);
+                    let prompt_fut = session.send_message_with_images(&message, images);
                     tokio::pin!(prompt_fut);
                     loop {
                         tokio::select! {
@@ -557,7 +562,12 @@ where
 /// stream out via the subscribe channel during the await.
 async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcResponse {
     match cmd {
-        RpcCommand::Prompt { id, message, .. } => {
+        RpcCommand::Prompt {
+            id,
+            message,
+            images,
+            ..
+        } => {
             // Per the brief: emit success once the prompt is queued. In
             // this single-task model the await runs the whole turn
             // synchronously before this match returns, so by the time we
@@ -565,7 +575,7 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             // outbound channel before the response — the writer
             // serializes all frames in send order, so consumers see the
             // event stream first and the success last.
-            match session.send_message(&message).await {
+            match session.send_message_with_images(&message, images).await {
                 Ok(_) => RpcResponse::new(id, RpcResponseBody::Prompt(RpcResultEmpty::ok())),
                 Err(e) => RpcResponse::new(
                     id,

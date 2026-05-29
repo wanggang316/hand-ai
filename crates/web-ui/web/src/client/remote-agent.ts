@@ -23,8 +23,30 @@ import type {
   UserMessage,
 } from "../core/messages";
 import type { Model, ThinkingLevel } from "../core/model";
-import { type AvailableModelsData, isAgentEvent, type ServerFrame, type WireMessage } from "./wire";
+import { downloadServerFile } from "./download";
+import { uploadAttachment } from "./upload";
+import {
+  type AttachmentReference,
+  type AvailableModelsData,
+  type ExportHtmlData,
+  isAgentEvent,
+  type ServerFrame,
+  type WireImage,
+  type WireMessage,
+} from "./wire";
 import type { WsConnection } from "./ws-connection";
+
+/**
+ * Images at or below this base64-decoded size are inlined in the `prompt`
+ * frame's `images` array; larger files are uploaded out-of-band and referenced.
+ */
+const INLINE_IMAGE_LIMIT_BYTES = 256 * 1024;
+
+/** Approximate decoded byte length of a base64 string without decoding it. */
+function base64ByteLength(base64: string): number {
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
+}
 
 /** Result shape a browser-executed tool returns (matches the artifacts tool). */
 export interface BrowserToolResult {
@@ -98,13 +120,82 @@ export class RemoteAgent implements Agent {
     for (const cb of this.subscribers) cb(event);
   }
 
-  async sendMessage(text: string, _attachments?: Attachment[]): Promise<void> {
-    // TODO(M10): attachment dispatch. M6 ingests attachments and shows them in
-    // the composer / overlay, but does not deliver them to the agent. M10 must
-    // put image content into the `prompt` frame (and have the server honor it);
-    // until then `_attachments` is intentionally ignored.
+  /**
+   * Send a prompt with optional attachments using a hybrid dispatch:
+   *
+   * - **Small images** (decoded size <= {@link INLINE_IMAGE_LIMIT_BYTES}) are
+   *   inlined as base64 in the `prompt` frame's `images` array (server
+   *   `ImageContent` shape: `{ data, mime_type }`).
+   * - **Larger files** are uploaded out-of-band via `POST /upload` and carried
+   *   as lightweight `{ id, ... }` references in the frame's `attachments`
+   *   array, keeping the WebSocket frame small.
+   * - **Documents** with extracted text have that text appended to the message
+   *   (with a small per-file header) so the agent receives the content directly,
+   *   regardless of whether the binary was inlined or uploaded.
+   */
+  async sendMessage(text: string, attachments?: Attachment[]): Promise<void> {
     this.state.isStreaming = true;
-    this.conn.send({ type: "prompt", id: String(this.nextId++), message: text });
+
+    const images: WireImage[] = [];
+    const references: AttachmentReference[] = [];
+    const documentTexts: string[] = [];
+
+    for (const attachment of attachments ?? []) {
+      // Deliver document content as text so the agent always sees it.
+      if (attachment.type === "document" && attachment.extractedText) {
+        documentTexts.push(`\n\n[Document: ${attachment.fileName}]\n${attachment.extractedText}`);
+      }
+
+      const byteSize = attachment.size || base64ByteLength(attachment.content);
+
+      if (attachment.type === "image" && byteSize <= INLINE_IMAGE_LIMIT_BYTES) {
+        images.push({ data: attachment.content, mime_type: attachment.mimeType });
+        continue;
+      }
+
+      // Larger files (and large images) upload out-of-band and are referenced.
+      try {
+        const { id, size } = await uploadAttachment(attachment);
+        references.push({
+          id,
+          fileName: attachment.fileName,
+          mimeType: attachment.mimeType,
+          size,
+        });
+      } catch (err) {
+        // Upload failed: fall back to inlining images so the message still has
+        // the visual content; documents already carry their text above.
+        if (attachment.type === "image") {
+          images.push({ data: attachment.content, mime_type: attachment.mimeType });
+        }
+        console.error("Attachment upload failed; falling back to inline/text", err);
+      }
+    }
+
+    const message = documentTexts.length > 0 ? text + documentTexts.join("") : text;
+
+    this.conn.send({
+      type: "prompt",
+      id: String(this.nextId++),
+      message,
+      ...(images.length > 0 ? { images } : {}),
+      ...(references.length > 0 ? { attachments: references } : {}),
+    });
+  }
+
+  /**
+   * Export the current session to a server-side HTML file and trigger a browser
+   * download of it. The `export_html` RPC returns the written file's path; the
+   * out-of-band download flow registers that path and saves the bytes locally.
+   */
+  async exportHtml(outputPath?: string): Promise<void> {
+    const data = await this.conn.request<ExportHtmlData>({
+      type: "export_html",
+      ...(outputPath ? { outputPath } : {}),
+    });
+    if (data?.path) {
+      await downloadServerFile(data.path);
+    }
   }
 
   abort(): void {

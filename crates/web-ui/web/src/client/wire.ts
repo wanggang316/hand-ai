@@ -22,11 +22,36 @@ export interface WireMessage {
 
 // ---- client -> server -------------------------------------------------------
 
+/**
+ * An inline image carried in a `prompt` frame's `images` array. The field names
+ * match the server's `model::types::ImageContent` wire shape (`data` +
+ * `mime_type`), which is snake_case unlike the rest of the camelCase payload.
+ */
+export interface WireImage {
+  data: string;
+  mime_type: string;
+}
+
+/**
+ * An out-of-band attachment reference: the content `id` returned by
+ * `POST /upload` plus enough metadata for the server to fetch and label the
+ * bytes. Larger files are uploaded and referenced here instead of inlined.
+ */
+export interface AttachmentReference {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+}
+
 export interface PromptCommand {
   type: "prompt";
   id?: string;
   message: string;
-  images?: string[];
+  /** Small images inlined as base64 (server `ImageContent` shape). */
+  images?: WireImage[];
+  /** References to larger files uploaded out-of-band via `POST /upload`. */
+  attachments?: AttachmentReference[];
 }
 export interface AbortCommand {
   type: "abort";
@@ -73,6 +98,11 @@ export interface GetSessionStatsCommand {
   type: "get_session_stats";
   id?: string;
 }
+export interface ExportHtmlCommand {
+  type: "export_html";
+  id?: string;
+  outputPath?: string;
+}
 /**
  * Reply to a server-declared, browser-executed tool call (e.g. `artifacts`).
  * The server suspends the tool's execution until this frame arrives, keyed by
@@ -101,6 +131,7 @@ export type ClientCommand =
   | SwitchSessionCommand
   | SetSessionNameCommand
   | GetSessionStatsCommand
+  | ExportHtmlCommand
   | ToolResultCommand;
 
 // ---- server -> client -------------------------------------------------------
@@ -121,6 +152,11 @@ export interface ResponseFrame {
  */
 export interface AvailableModelsData {
   models: Model[];
+}
+
+/** `export_html` response data: the server-side path of the written file. */
+export interface ExportHtmlData {
+  path: string;
 }
 
 /** Agent-loop event payload (`kind: "agent"`), carrying a flattened event. */

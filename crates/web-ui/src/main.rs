@@ -4,8 +4,11 @@
 //! the existing agent RPC dispatcher (see [`ws`]). Binds loopback only.
 
 mod app;
+mod blob_store;
 mod browser_tools;
+mod download;
 mod session;
+mod upload;
 mod ws;
 
 use std::net::SocketAddr;
@@ -61,6 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model: args.model,
         provider: args.provider,
         web_dir: args.web_dir,
+        blobs: blob_store::BlobStore::new(),
     };
 
     let router = app::router(state);

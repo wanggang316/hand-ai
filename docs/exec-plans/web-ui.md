@@ -1,6 +1,6 @@
 # ExecPlan: Implement `crates/web-ui` to 100% Capability Parity with the Reference Web UI
 
-**Status:** In progress (M0-M9 complete; extension-UI protocol deferred to M12)
+**Status:** In progress (M0-M10 complete; extension-UI protocol deferred to M12)
 **Author:** Gump (planned with Claude)
 **Date:** 2026-05-29
 
@@ -47,7 +47,7 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 - [x] **M9 — Dialogs / settings** (settings/session/api-key/persistent dialogs +
   app header done; the extension-UI request/response protocol, rows 188-189, is
   deferred to M12 — niche, needs server extensions that emit UI requests)
-- [ ] **M10 — Proxy / networking / out-of-band upload-download**
+- [x] **M10 — Proxy / networking / out-of-band upload-download**
 - [ ] **M11 — i18n / format / theming / design system**
 - [ ] **M12 — Polish, single-binary packaging, parity verification**
 
@@ -115,6 +115,25 @@ The target architecture is fixed and documented in `docs/web-ui-architecture.md`
 
 ## Outcomes & Retrospective
 
+- **M10 (2026-05-29)**: Networking seam. Server: `POST /upload` (content-addressed
+  SHA-256 blob store, 50MB cap), `GET /download/:id` + `POST /download/register`
+  (serves only files under the session cwd — path-traversal rejected),
+  `multer` multipart. Client: `uploadAttachment`, hybrid `sendMessage` dispatch
+  (small images inline as base64 in the prompt frame's `images`; larger files
+  uploaded by reference; document `extractedText` appended to the message),
+  export → `/download` flow, and the document-fetch proxy applied to
+  `extract_document`. **Closed M6's attachment-delivery gap**: the `coding-agent`
+  rpc `prompt` handler previously dropped the `images` field — added a
+  behavior-preserving `AgentSession::send_message_with_images` (text-only
+  `send_message` now delegates with `images = None`, identical to before) and
+  both rpc Prompt paths now pass `images` through, so inline images reach the
+  agent loop. Verified: full `cargo test -p hand-coding-agent` (1542 lib tests)
+  green = no regression; `cargo test -p hand-web-ui` (upload→download round-trip,
+  traversal rejection) green; a live text-prompt smoke still streams
+  (`PROMPT_OK`). Full image→vision verification needs a vision-capable model;
+  the plumbing (client→wire→build_user_message→loop) is complete and unit-tested.
+  Remaining refinement: resolving uploaded large-image *references* to image
+  content server-side (small images already deliver inline).
 - **M9 (2026-05-29)**: Dialog system + app header. `DialogBase`-based
   `<settings-dialog>` (sidebar/mobile-strip nav, all tabs mounted, display:none
   toggle) hosting Providers&Models + Proxy + ApiKeys tabs; `<session-list-dialog>`
@@ -575,12 +594,12 @@ This matrix is the 100%-alignment checklist. It enumerates every capability surf
 | 161 | PersistentStorageDialog (`persistent-storage-dialog`, navigator.storage.persist, graceful fallback) | dialogs-settings | M9 | DONE |
 | 162 | DialogBase modal base (open/close, backdrop, modalWidth/Height) | dialogs-settings/ui | M8/M9 | TODO |
 | 163 | App header: sessions / new-session / inline-editable title / theme toggle / settings | dialogs-settings/bootstrap | M9 | DONE |
-| 164 | POST /upload endpoint (attachment bytes → content reference) | proxy-networking | M10 | TODO |
-| 165 | GET /download/:id endpoint (serve ExportHtml output bytes) | proxy-networking | M10 | TODO |
-| 166 | Vite dev proxy for /ws, /upload, /download | proxy-networking/build | M10 | TODO |
-| 167 | RemoteAgent hybrid attachment dispatch (inline small base64 vs. upload reference) | proxy-networking/client | M10 | TODO |
-| 168 | Export flow: export_html response → GET /download/:id → browser download | proxy-networking | M10 | TODO |
-| 169 | Document-fetch proxy applied client-side for extract_document only | proxy-networking | M10 | TODO |
+| 164 | POST /upload endpoint (attachment bytes → content reference) | proxy-networking | M10 | DONE |
+| 165 | GET /download/:id endpoint (serve ExportHtml output bytes) | proxy-networking | M10 | DONE |
+| 166 | Vite dev proxy for /ws, /upload, /download | proxy-networking/build | M10 | DONE |
+| 167 | RemoteAgent hybrid attachment dispatch (inline small base64 vs. upload reference) | proxy-networking/client | M10 | DONE |
+| 168 | Export flow: export_html response → GET /download/:id → browser download | proxy-networking | M10 | DONE |
+| 169 | Document-fetch proxy applied client-side for extract_document only | proxy-networking | M10 | DONE |
 | 170 | WsConnection lifecycle (connect, reconnect, framing) | proxy-networking/client | M0/M10 | TODO |
 | 171 | i18n translation system (~200 keys, en + de, exact placeholders, brand-neutral) | utils/i18n | M11 | TODO |
 | 172 | i18n() / setLanguage() / translations exports | utils/i18n | M11 | TODO |

@@ -4,11 +4,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::response::Html;
-use axum::routing::get;
+use axum::routing::{get, post};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
+
+use crate::blob_store::BlobStore;
+use crate::upload::MAX_UPLOAD_BYTES;
 
 /// Per-server configuration used to construct one agent session per
 /// WebSocket connection.
@@ -22,6 +25,8 @@ pub struct AppState {
     pub provider: Option<String>,
     /// Directory holding the built frontend assets.
     pub web_dir: PathBuf,
+    /// Shared out-of-band blob store backing `/upload` and `/download`.
+    pub blobs: BlobStore,
 }
 
 /// Build the axum router: a `/ws` WebSocket upgrade, a health check, and
@@ -36,6 +41,14 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/ws", get(crate::ws::ws_handler))
         .route("/healthz", get(|| async { "ok" }))
+        // Out-of-band attachment upload + artifact download (see §5.4). The
+        // body limit covers both the multipart and raw-body upload paths.
+        .route(
+            "/upload",
+            post(crate::upload::upload).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route("/download/register", post(crate::download::register))
+        .route("/download/:id", get(crate::download::download))
         .route("/", get(index))
         .fallback_service(ServeDir::new(web_dir))
         .with_state(state)
