@@ -257,6 +257,10 @@ export class RemoteAgent implements Agent {
       provider: model.provider,
       modelId: model.id,
     });
+    // Notify subscribers so the composer reflects the new model (label + the
+    // reasoning model's thinking-level selector) immediately, not only after the
+    // next turn.
+    this.emit({ type: "model_change" });
   }
 
   /**

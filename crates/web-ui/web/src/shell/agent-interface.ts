@@ -162,6 +162,7 @@ export class AgentInterface extends LitElement {
         case "turn_start":
         case "turn_end":
         case "agent_start":
+        case "model_change":
           this.requestUpdate();
           break;
         case "message_end":

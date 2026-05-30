@@ -14,7 +14,11 @@ export type AgentEvent =
   | { type: "message_update"; message: AssistantMessage; isStreaming: boolean }
   | { type: "message_end"; message: AssistantMessage }
   | { type: "turn_end" }
-  | { type: "agent_end"; stopReason: string };
+  | { type: "agent_end"; stopReason: string }
+  // Fired when the active model or thinking level changes outside a turn (e.g.
+  // the model selector). Lets views re-render the composer immediately rather
+  // than only on the next turn event.
+  | { type: "model_change" };
 
 export interface AgentState {
   messages: AgentMessage[];
