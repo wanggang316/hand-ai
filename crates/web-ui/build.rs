@@ -16,6 +16,19 @@ fn main() {
     // Rebuild bookkeeping: re-run if the built index changes.
     println!("cargo:rerun-if-changed=web/dist/index.html");
 
+    // `#[derive(RustEmbed)]` requires its `folder` (web/dist) to EXIST at compile
+    // time — it may be empty, but an absent directory hard-errors the derive
+    // before any build-script warning can take effect. On a fresh checkout
+    // `web/dist` is git-ignored and therefore absent, so ensure it exists for
+    // every profile (debug reads it from disk at runtime too). This realizes the
+    // warn-don't-fail contract below: a missing bundle becomes an empty embed,
+    // not a compile error.
+    if let Err(e) = std::fs::create_dir_all("web/dist") {
+        // Non-fatal: surface it as a warning and let the derive report the real
+        // error if the directory still cannot be used.
+        println!("cargo:warning=could not create web/dist for the embedded bundle: {e}");
+    }
+
     // Only meaningful for release; debug reads from disk at runtime.
     let profile = std::env::var("PROFILE").unwrap_or_default();
     if profile != "release" {
