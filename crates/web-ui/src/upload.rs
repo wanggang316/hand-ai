@@ -70,7 +70,8 @@ pub async fn upload(
     store_bytes(&state, &body, file_name, raw_content_type)
 }
 
-/// Parse a multipart body, taking the first non-empty file field.
+/// Parse a multipart body, taking the first non-empty file part (one carrying a
+/// filename). Plain form fields (no filename) are skipped, not stored.
 async fn upload_multipart(
     state: &Arc<AppState>,
     body: Bytes,
@@ -84,10 +85,14 @@ async fn upload_multipart(
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid multipart: {e}")))?
     {
-        let file_name = field
-            .file_name()
-            .map(str::to_string)
-            .unwrap_or_else(|| "attachment".to_string());
+        // Only true file parts (those carrying a filename) are stored; a plain
+        // form field without a filename is not an uploaded file and must not
+        // coalesce into a blob. Drain and skip it. (A request with no file part
+        // falls through to the `no file field in upload` 400 below.)
+        let Some(file_name) = field.file_name().map(str::to_string) else {
+            let _ = field.bytes().await;
+            continue;
+        };
         let content_type = field
             .content_type()
             .map(|m| m.to_string())

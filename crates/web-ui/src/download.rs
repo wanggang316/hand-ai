@@ -16,7 +16,7 @@ use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use std::sync::Arc;
 use tokio_util::io::ReaderStream;
 
@@ -49,13 +49,28 @@ pub async fn register(
         state.cwd.join(requested)
     };
 
-    // Canonicalize both sides so `..` and symlinks cannot escape the cwd.
-    let canonical = tokio::fs::canonicalize(&abs)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "file not found".to_string()))?;
+    // Containment is checked LEXICALLY first (no filesystem I/O), so a path that
+    // escapes the cwd is rejected as 403 whether or not the target exists —
+    // canonicalize would otherwise turn a non-existent escaping path into a 404,
+    // masking the traversal. Both sides are normalized in the same (non-resolved)
+    // space so this is unaffected by symlinked cwд roots (e.g. macOS /var ->
+    // /private/var, where mixing canonical and non-canonical would misfire).
+    let lex_cwd = lexical_normalize(&state.cwd);
+    if !lexical_normalize(&abs).starts_with(&lex_cwd) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "path is outside the session directory".to_string(),
+        ));
+    }
+
+    // Now resolve symlinks and re-check containment (a symlink INSIDE the cwd
+    // could still point outside), then require an existing regular file.
     let cwd = tokio::fs::canonicalize(&state.cwd)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("cwd error: {e}")))?;
+    let canonical = tokio::fs::canonicalize(&abs)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "file not found".to_string()))?;
     if !canonical.starts_with(&cwd) {
         return Err((
             StatusCode::FORBIDDEN,
@@ -103,6 +118,27 @@ pub async fn download(
         body,
     )
         .into_response())
+}
+
+/// Lexically normalize a path WITHOUT touching the filesystem: `.` is dropped
+/// and `..` pops the previous component (never above the root). No symlink
+/// resolution. Used to detect `..`-traversal before any I/O, so an escaping path
+/// that does not exist is still classified as out-of-cwd rather than "not
+/// found". Both the candidate and the cwd are passed through this so the
+/// containment check is consistent regardless of symlinked roots.
+fn lexical_normalize(path: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(c) => out.push(c),
+        }
+    }
+    out
 }
 
 /// Best-effort content type from a file extension. Defaults to a generic binary
@@ -182,16 +218,43 @@ mod tests {
             web_dir: None,
             blobs: BlobStore::new(),
         });
-        // A path that escapes the cwd must be rejected (404 because it does not
-        // exist, or FORBIDDEN if it resolves outside) — never registered.
-        let result = register(
+        // A path that escapes the cwd must be rejected as FORBIDDEN (the lexical
+        // containment check fires before any filesystem lookup), never 404 and
+        // never registered.
+        let err = register(
             State(state),
             Json(RegisterRequest {
                 path: "../../../../etc/hosts".to_string(),
             }),
         )
-        .await;
-        assert!(result.is_err(), "out-of-cwd path must not register");
+        .await
+        .expect_err("out-of-cwd path must not register");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn register_traversal_to_nonexistent_is_403_not_404() {
+        // A `..`-traversal whose target does not exist must still be classified
+        // as out-of-cwd (403) — existence is not checked before containment.
+        let dir = std::env::temp_dir().join(format!("hand-dl-trav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = Arc::new(AppState {
+            cwd: dir.clone(),
+            model: "test/model".to_string(),
+            provider: None,
+            web_dir: None,
+            blobs: BlobStore::new(),
+        });
+        let err = register(
+            State(state),
+            Json(RegisterRequest {
+                path: "../../../../nonexistent-xyzzy/secret.txt".to_string(),
+            }),
+        )
+        .await
+        .expect_err("escaping traversal must not register");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
