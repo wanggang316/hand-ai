@@ -34,7 +34,7 @@ import { SessionListDialog } from "./dialogs/session-list-dialog";
 import { SettingsDialog } from "./dialogs/settings-dialog";
 import { installExtensionUiHandler, showToast } from "./dialogs/extension-ui";
 import "./providers/providers-models-tab";
-import type { ProvidersModelsTab } from "./providers/providers-models-tab";
+import { ProvidersModelsTab } from "./providers/providers-models-tab";
 
 const wsUrl =
   (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
@@ -259,7 +259,12 @@ header.onNewSession = () => startNewSession();
 
 header.onOpenSettings = () => {
   // Tab order matches the architecture: Providers & Models, Proxy, API Keys.
-  const providersTab = document.createElement("providers-models-tab") as ProvidersModelsTab;
+  // Construct directly (like ProxyTab/ApiKeysTab below) rather than via
+  // document.createElement: a freshly upgraded custom element instantiated
+  // through createElement throws NotSupportedError ("the result must not have
+  // attributes") in this environment, which aborted onOpenSettings and left the
+  // settings dialog rendering an empty Providers & Models tab.
+  const providersTab = new ProvidersModelsTab();
   providersTab.agent = agent;
   const proxyTab = new ProxyTab();
   const apiKeysTab = new ApiKeysTab();
