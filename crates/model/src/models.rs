@@ -236,6 +236,25 @@ mod tests {
         }
     }
 
+    /// The committed catalog must equal its own re-serialization through the
+    /// same (lossy) f64 parser the runtime uses, so `generate_models`
+    /// produces a deterministically key-ordered, churn-free file and the
+    /// on-disk values match what every consumer actually loads. If this
+    /// fails, regenerate with `cargo run -p model --bin generate_models`.
+    #[test]
+    fn catalog_json_is_canonical() {
+        use std::collections::BTreeMap;
+        let parsed: BTreeMap<String, BTreeMap<String, Model>> =
+            serde_json::from_str(MODELS_JSON).expect("catalog should parse");
+        let canonical = serde_json::to_string_pretty(&parsed).expect("catalog should serialize");
+        assert_eq!(
+            MODELS_JSON.trim_end(),
+            canonical.trim_end(),
+            "models.json is not canonical (key-order or float-fold drift); \
+             regenerate with `cargo run -p model --bin generate_models`"
+        );
+    }
+
     #[test]
     fn models_parses_non_empty() {
         let parsed = models().expect("models json should parse");

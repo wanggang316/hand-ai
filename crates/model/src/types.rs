@@ -1,8 +1,32 @@
 //! Model interface types for the unified model system.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+
+/// Serialize an optional string-keyed map with its keys in sorted order.
+///
+/// `HashMap` iterates in a random order, which makes the generated model
+/// catalog (and any other serialized `Model`/`Compat`) non-deterministic on
+/// disk. The in-memory type stays a `HashMap` — this only fixes the
+/// serialized byte order — so the catalog round-trips to a stable,
+/// reviewable form and regeneration stays churn-free.
+fn serialize_sorted_map<S, V>(
+    map: &Option<HashMap<String, V>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+    V: Serialize,
+{
+    match map {
+        Some(m) => {
+            let sorted: BTreeMap<&String, &V> = m.iter().collect();
+            sorted.serialize(serializer)
+        }
+        None => serializer.serialize_none(),
+    }
+}
 
 /// Transport mechanism for streaming responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -446,13 +470,20 @@ pub struct Model {
     #[serde(rename = "maxTokens")]
     pub max_tokens: u64,
     /// Custom headers to include in API requests.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_sorted_map"
+    )]
     pub headers: Option<HashMap<String, String>>,
     /// Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from base_url.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compat: Option<Compat>,
     /// Mapping of thinking levels to provider-specific format strings.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "thinkingLevelMap")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "thinkingLevelMap",
+        serialize_with = "serialize_sorted_map"
+    )]
     pub thinking_level_map: Option<ThinkingLevelMap>,
 }
 
@@ -559,7 +590,10 @@ pub struct StreamOptions {
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_sorted_map"
+    )]
     pub headers: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_retry_delay_ms: Option<u64>,
@@ -567,7 +601,10 @@ pub struct StreamOptions {
     pub transport: Option<Transport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_retention: Option<CacheRetention>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_sorted_map"
+    )]
     pub metadata: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
