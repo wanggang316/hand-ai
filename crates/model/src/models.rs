@@ -32,6 +32,15 @@ pub(crate) fn catalog_snapshot() -> Arc<Registry> {
         .clone()
 }
 
+/// Atomically replace the in-memory catalog (used by the remote-refresh
+/// path). Snapshots taken before the swap stay valid until dropped.
+pub(crate) fn install_catalog(catalog: Registry) {
+    let mut guard = registry_cell()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Arc::new(catalog);
+}
+
 /// Parsed models: provider key -> model_id -> Model.
 pub fn models() -> Result<HashMap<String, HashMap<String, Model>>, serde_json::Error> {
     serde_json::from_str(MODELS_JSON)
@@ -276,7 +285,10 @@ mod tests {
     #[test]
     fn catalog_snapshot_serves_baseline() {
         let snap = catalog_snapshot();
-        assert!(!snap.is_empty(), "snapshot should expose the baseline catalog");
+        assert!(
+            !snap.is_empty(),
+            "snapshot should expose the baseline catalog"
+        );
         let provider = get_provider_keys()
             .into_iter()
             .next()
