@@ -2295,25 +2295,6 @@
       "contextWindow": 131072,
       "maxTokens": 32768
     },
-    "qwen-3-235b-a22b-instruct-2507": {
-      "id": "qwen-3-235b-a22b-instruct-2507",
-      "name": "Qwen 3 235B Instruct",
-      "api": "openai-completions",
-      "provider": "cerebras",
-      "baseUrl": "https://api.cerebras.ai/v1",
-      "reasoning": false,
-      "input": [
-        "text"
-      ],
-      "cost": {
-        "input": 0.6,
-        "output": 1.2,
-        "cacheRead": 0.0,
-        "cacheWrite": 0.0
-      },
-      "contextWindow": 131000,
-      "maxTokens": 32000
-    },
     "zai-glm-4.7": {
       "id": "zai-glm-4.7",
       "name": "Z.AI GLM-4.7",

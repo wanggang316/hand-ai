@@ -1829,6 +1829,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     all.extend(azure_models);
 
+    // Drop catalog entries that upstream aggregators still list but the
+    // provider no longer serves on its public API endpoint, so embedders
+    // that trust the catalog don't surface phantom models that fail at send
+    // time with model_not_found. cerebras retired
+    // qwen-3-235b-a22b-instruct-2507 (issue #94).
+    all.retain(|m| {
+        !(m.provider == Provider::Cerebras && m.id == "qwen-3-235b-a22b-instruct-2507")
+    });
+
     let out_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/models.json");
     write_generated(&all, &out_path)?;
     println!("Generated {}", out_path.display());
