@@ -3,7 +3,7 @@
 
 use model::types::*;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
@@ -1622,8 +1622,10 @@ fn write_generated(
     all_models: &[Model],
     out_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Dedupe: group by provider, then by id (first wins = models.dev priority)
-    let mut by_provider: HashMap<String, HashMap<String, Model>> = HashMap::new();
+    // Dedupe: group by provider, then by id (first wins = models.dev priority).
+    // BTreeMap keeps both levels key-sorted so each regeneration produces a
+    // deterministic, reviewable diff instead of HashMap's random iteration order.
+    let mut by_provider: BTreeMap<String, BTreeMap<String, Model>> = BTreeMap::new();
     for m in all_models {
         let key = provider_key(m.provider).to_string();
         by_provider
@@ -1633,8 +1635,16 @@ fn write_generated(
             .or_insert_with(|| m.clone());
     }
 
-    // Write as JSON file directly
+    // Serialize, then fold every value back through serde_json's (non
+    // round-tripping) f64 parser — the same one the runtime uses to load
+    // MODELS_JSON. Price arithmetic leaves 1-ULP artifacts (e.g.
+    // 0.0000002 * 1e6 -> 0.19999999999999998) that the parser collapses to
+    // the neighbouring value (0.2) on read. Folding here makes the on-disk
+    // catalog equal what every consumer actually loads, so regeneration is
+    // churn-free and the committed file is the canonical form.
     let json = serde_json::to_string_pretty(&by_provider)?;
+    let folded: BTreeMap<String, BTreeMap<String, Model>> = serde_json::from_str(&json)?;
+    let json = serde_json::to_string_pretty(&folded)?;
     fs::write(out_path, json)?;
     Ok(())
 }
@@ -1818,6 +1828,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
     all.extend(azure_models);
+
+    // Drop catalog entries that upstream aggregators still list but the
+    // provider no longer serves on its public API endpoint, so embedders
+    // that trust the catalog don't surface phantom models that fail at send
+    // time with model_not_found. cerebras retired
+    // qwen-3-235b-a22b-instruct-2507 (issue #94).
+    all.retain(|m| !(m.provider == Provider::Cerebras && m.id == "qwen-3-235b-a22b-instruct-2507"));
 
     let out_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/models.json");
     write_generated(&all, &out_path)?;

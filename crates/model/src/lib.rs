@@ -5,6 +5,7 @@
 
 pub mod api_registry;
 pub mod capabilities;
+pub mod catalog_refresh;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod client;
@@ -42,6 +43,9 @@ pub use models::{
     calculate_cost, get_model, get_model_by_provider, get_models, get_models_by_provider,
     get_provider_keys, get_providers, models, models_are_equal, supports_xhigh,
 };
+
+// Re-export from catalog_refresh
+pub use catalog_refresh::{RefreshError, RefreshOutcome, load_cached_catalog, refresh_from_remote};
 
 // Re-export from api_registry
 pub use api_registry::{

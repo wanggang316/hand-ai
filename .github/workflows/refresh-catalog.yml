@@ -1,0 +1,60 @@
+name: Refresh Model Catalog
+
+# Regenerates the model catalog from upstream sources and publishes it as a
+# rolling Release asset. Clients pull it at runtime via catalog_refresh
+# (baseline > cache > remote), so the catalog stays fresh without a rebuild.
+#
+# Client URL (stable):
+#   https://github.com/wanggang316/hand-ai/releases/download/catalog/models.json
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # create/update the `catalog` release and its asset
+
+concurrency:
+  group: refresh-catalog
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Regenerate catalog from upstreams
+        run: cargo run -p model --bin generate_models
+
+      - name: Verify catalog is canonical
+        run: cargo test -p model --lib catalog_json_is_canonical
+
+      - name: Sanity-gate the generated catalog
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          catalog = json.load(open("crates/model/src/models.json"))
+          providers = len(catalog)
+          models = sum(len(v) for v in catalog.values())
+          print(f"providers={providers} models={models}")
+          # Guard against an upstream outage producing a gutted catalog:
+          # generate_models swallows fetch failures and emits fewer entries
+          # rather than erroring, so refuse to publish a suspiciously small file.
+          if providers < 10 or models < 300:
+              sys.exit(f"catalog too small (providers={providers}, models={models}); refusing to publish")
+          PY
+
+      - name: Publish to the `catalog` release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view catalog >/dev/null 2>&1 \
+            || gh release create catalog \
+                 --title "Model Catalog (rolling)" \
+                 --notes "Auto-generated model catalog. Do not edit — see refresh-catalog.yml." \
+                 --prerelease
+          gh release upload catalog crates/model/src/models.json --clobber

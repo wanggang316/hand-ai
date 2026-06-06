@@ -1,0 +1,31 @@
+[package]
+name = "hand-web-ui"
+version = "0.1.0"
+edition = "2024"
+description = "Local web server and browser frontend for the hand coding agent"
+license = "MIT"
+
+[[bin]]
+name = "hand-web-ui"
+path = "src/main.rs"
+
+[dependencies]
+hand-coding-agent = { path = "../coding-agent" }
+hand-agent = { path = "../agent" }
+model = { path = "../model" }
+
+axum = { version = "0.7", features = ["ws"] }
+multer = "3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rust-embed = "8"
+mime_guess = "2"

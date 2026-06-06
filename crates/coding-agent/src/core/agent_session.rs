@@ -511,7 +511,18 @@ impl AgentSession {
 
     /// Send a user message and run the agent loop.
     pub async fn send_message(&mut self, text: &str) -> Result<Vec<Message>, CodingAgentError> {
-        let user_msg = Message::User(model::UserMessage::new_text(text));
+        self.send_message_with_images(text, None).await
+    }
+
+    /// Send a user message that may carry images, then run the agent loop.
+    /// [`Self::send_message`] is the text-only shorthand (`images = None`);
+    /// `build_user_message(text, None)` is identical to a plain text message.
+    pub async fn send_message_with_images(
+        &mut self,
+        text: &str,
+        images: Option<Vec<ImageContent>>,
+    ) -> Result<Vec<Message>, CodingAgentError> {
+        let user_msg = Message::User(build_user_message(text, images));
 
         // Persist the user message
         self.session_manager.append_message(user_msg.clone())?;
@@ -924,6 +935,14 @@ impl AgentSession {
     /// Get the current context messages.
     pub fn messages(&self) -> &[Message] {
         &self.context.messages
+    }
+
+    /// Replace the in-memory context messages. Used to restore a previously
+    /// persisted transcript into this (per-connection) session so a follow-up
+    /// turn carries that history. Does not touch the session manager's stored
+    /// file; callers seeding an ephemeral session own persistence separately.
+    pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.context.messages = messages;
     }
 
     /// Get the settings manager.

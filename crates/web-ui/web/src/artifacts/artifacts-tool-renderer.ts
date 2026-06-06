@@ -1,0 +1,306 @@
+// `ArtifactsToolRenderer` — renders the `artifacts` tool call in the chat
+// transcript. create/rewrite show a code-block; update shows a Diff; get shows a
+// code-block; logs show a console-block; delete shows just the header. Each
+// header carries an inline ArtifactPill that opens the file in the panel. The
+// renderer is constructed with the live panel ref so the pill can navigate.
+
+import { html, type TemplateResult } from "lit";
+import { createRef, ref } from "lit/directives/ref.js";
+import { FileCode2 } from "lucide";
+import type { ToolResultMessage } from "../core/messages";
+import "../ui/code-block";
+import "../ui/console-block";
+import { Diff } from "../ui/diff";
+import {
+  renderCollapsibleHeader,
+  renderHeader,
+  type ToolRenderer,
+  type ToolRenderResult,
+} from "../tools/renderer-registry";
+import { i18n } from "../utils/i18n";
+import { ArtifactPill } from "./artifact-pill";
+import type { ArtifactsPanel, ArtifactsParams } from "./artifacts-panel";
+
+function getTextOutput(result: ToolResultMessage | undefined): string {
+  if (!result) return "";
+  return (
+    result.content
+      ?.filter((c) => c.type === "text")
+      .map((c) => c.text ?? "")
+      .join("\n") || ""
+  );
+}
+
+function getLanguageFromFilename(filename?: string): string {
+  if (!filename) return "text";
+  const ext = filename.split(".").pop()?.toLowerCase();
+  const languageMap: Record<string, string> = {
+    js: "javascript",
+    jsx: "javascript",
+    ts: "typescript",
+    tsx: "typescript",
+    html: "html",
+    css: "css",
+    scss: "scss",
+    json: "json",
+    py: "python",
+    md: "markdown",
+    svg: "xml",
+    xml: "xml",
+    yaml: "yaml",
+    yml: "yaml",
+    sh: "bash",
+    bash: "bash",
+    sql: "sql",
+    java: "java",
+    c: "c",
+    cpp: "cpp",
+    cs: "csharp",
+    go: "go",
+    rs: "rust",
+    php: "php",
+    rb: "ruby",
+    swift: "swift",
+    kt: "kotlin",
+    r: "r",
+  };
+  return languageMap[ext || ""] || "text";
+}
+
+export class ArtifactsToolRenderer implements ToolRenderer<ArtifactsParams, undefined> {
+  constructor(public artifactsPanel?: ArtifactsPanel) {}
+
+  render(
+    params: ArtifactsParams | undefined,
+    result: ToolResultMessage<undefined> | undefined,
+    isStreaming?: boolean,
+  ): ToolRenderResult {
+    const state = result
+      ? result.isError
+        ? "error"
+        : "complete"
+      : isStreaming
+        ? "inprogress"
+        : "complete";
+
+    const contentRef = createRef<HTMLDivElement>();
+    const chevronRef = createRef<HTMLSpanElement>();
+
+    const getCommandLabels = (command: string): { streaming: string; complete: string } => {
+      const labels: Record<string, { streaming: string; complete: string }> = {
+        create: { streaming: i18n("Creating artifact"), complete: i18n("Created artifact") },
+        update: { streaming: i18n("Updating artifact"), complete: i18n("Updated artifact") },
+        rewrite: { streaming: i18n("Rewriting artifact"), complete: i18n("Rewrote artifact") },
+        get: { streaming: i18n("Getting artifact"), complete: i18n("Got artifact") },
+        delete: { streaming: i18n("Deleting artifact"), complete: i18n("Deleted artifact") },
+        logs: { streaming: i18n("Getting logs"), complete: i18n("Got logs") },
+      };
+      return labels[command] || { streaming: i18n("Processing artifact"), complete: i18n("Processed artifact") };
+    };
+
+    const renderHeaderWithPill = (labelText: string, filename?: string): TemplateResult => {
+      if (filename) {
+        return html`<span>${labelText} ${ArtifactPill(filename, this.artifactsPanel)}</span>`;
+      }
+      return html`<span>${labelText}</span>`;
+    };
+
+    // --- Error handling ---
+    if (result?.isError) {
+      const command = params?.command;
+      const filename = params?.filename;
+      const labels = command
+        ? getCommandLabels(command)
+        : { streaming: i18n("Processing artifact"), complete: i18n("Processed artifact") };
+      const headerText = labels.streaming;
+
+      if (command === "create" || command === "update" || command === "rewrite") {
+        const content = params?.content || "";
+        const { old_str, new_str } = params || {};
+        const isDiff = command === "update";
+        const diffContent =
+          old_str !== undefined && new_str !== undefined
+            ? Diff({ oldText: old_str, newText: new_str })
+            : "";
+        const isHtml = filename?.endsWith(".html");
+
+        return {
+          content: html`
+            <div>
+              ${renderCollapsibleHeader(state, FileCode2, renderHeaderWithPill(headerText, filename), contentRef, chevronRef, false)}
+              <div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300 space-y-3">
+                ${isDiff
+                  ? diffContent
+                  : content
+                    ? html`<code-block .code=${content} language=${getLanguageFromFilename(filename)}></code-block>`
+                    : ""}
+                ${isHtml
+                  ? html`<console-block .content=${getTextOutput(result) || i18n("An error occurred")} variant="error"></console-block>`
+                  : html`<div class="text-sm text-destructive">${getTextOutput(result) || i18n("An error occurred")}</div>`}
+              </div>
+            </div>
+          `,
+          isCustom: false,
+        };
+      }
+
+      return {
+        content: html`
+          <div class="space-y-3">
+            ${renderHeader(state, FileCode2, headerText)}
+            <div class="text-sm text-destructive">${getTextOutput(result) || i18n("An error occurred")}</div>
+          </div>
+        `,
+        isCustom: false,
+      };
+    }
+
+    // --- Full params + result ---
+    if (result && params) {
+      const { command, filename, content } = params;
+      const labels = command
+        ? getCommandLabels(command)
+        : { streaming: i18n("Processing artifact"), complete: i18n("Processed artifact") };
+      const headerText = labels.complete;
+
+      if (command === "get") {
+        const fileContent = getTextOutput(result) || i18n("(no output)");
+        return {
+          content: html`
+            <div>
+              ${renderCollapsibleHeader(state, FileCode2, renderHeaderWithPill(headerText, filename), contentRef, chevronRef, false)}
+              <div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
+                <code-block .code=${fileContent} language=${getLanguageFromFilename(filename)}></code-block>
+              </div>
+            </div>
+          `,
+          isCustom: false,
+        };
+      }
+
+      if (command === "logs") {
+        const logs = getTextOutput(result) || i18n("(no output)");
+        return {
+          content: html`
+            <div>
+              ${renderCollapsibleHeader(state, FileCode2, renderHeaderWithPill(headerText, filename), contentRef, chevronRef, false)}
+              <div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
+                <console-block .content=${logs}></console-block>
+              </div>
+            </div>
+          `,
+          isCustom: false,
+        };
+      }
+
+      if (command === "create" || command === "rewrite") {
+        const codeContent = content || "";
+        const isHtml = filename?.endsWith(".html");
+        const logs = getTextOutput(result) || "";
+        return {
+          content: html`
+            <div>
+              ${renderCollapsibleHeader(state, FileCode2, renderHeaderWithPill(headerText, filename), contentRef, chevronRef, false)}
+              <div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300 space-y-3">
+                ${codeContent
+                  ? html`<code-block .code=${codeContent} language=${getLanguageFromFilename(filename)}></code-block>`
+                  : ""}
+                ${isHtml && logs ? html`<console-block .content=${logs}></console-block>` : ""}
+              </div>
+            </div>
+          `,
+          isCustom: false,
+        };
+      }
+
+      if (command === "update") {
+        const isHtml = filename?.endsWith(".html");
+        const logs = getTextOutput(result) || "";
+        return {
+          content: html`
+            <div>
+              ${renderCollapsibleHeader(state, FileCode2, renderHeaderWithPill(headerText, filename), contentRef, chevronRef, false)}
+              <div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300 space-y-3">
+                ${Diff({ oldText: params.old_str || "", newText: params.new_str || "" })}
+                ${isHtml && logs ? html`<console-block .content=${logs}></console-block>` : ""}
+              </div>
+            </div>
+          `,
+          isCustom: false,
+        };
+      }
+
+      // delete: just the header.
+      return {
+        content: html`
+          <div class="space-y-3">
+            ${renderHeader(state, FileCode2, renderHeaderWithPill(headerText, filename))}
+          </div>
+        `,
+        isCustom: false,
+      };
+    }
+
+    // --- Params only (streaming / awaiting result) ---
+    if (params) {
+      const { command, filename, content, old_str, new_str } = params;
+
+      if (!command) {
+        return { content: renderHeader(state, FileCode2, i18n("Preparing artifact...")), isCustom: false };
+      }
+
+      const labels = getCommandLabels(command);
+      const headerText = labels.streaming;
+
+      switch (command) {
+        case "create":
+        case "rewrite":
+          return {
+            content: html`
+              <div>
+                ${renderCollapsibleHeader(state, FileCode2, renderHeaderWithPill(headerText, filename), contentRef, chevronRef, false)}
+                <div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
+                  ${content
+                    ? html`<code-block .code=${content} language=${getLanguageFromFilename(filename)}></code-block>`
+                    : ""}
+                </div>
+              </div>
+            `,
+            isCustom: false,
+          };
+        case "update":
+          return {
+            content: html`
+              <div>
+                ${renderCollapsibleHeader(state, FileCode2, renderHeaderWithPill(headerText, filename), contentRef, chevronRef, false)}
+                <div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
+                  ${old_str !== undefined && new_str !== undefined
+                    ? Diff({ oldText: old_str, newText: new_str })
+                    : ""}
+                </div>
+              </div>
+            `,
+            isCustom: false,
+          };
+        case "get":
+        case "logs":
+          return {
+            content: html`
+              <div>
+                ${renderCollapsibleHeader(state, FileCode2, renderHeaderWithPill(headerText, filename), contentRef, chevronRef, false)}
+                <div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300"></div>
+              </div>
+            `,
+            isCustom: false,
+          };
+        default:
+          return {
+            content: html`<div>${renderHeader(state, FileCode2, renderHeaderWithPill(headerText, filename))}</div>`,
+            isCustom: false,
+          };
+      }
+    }
+
+    return { content: renderHeader(state, FileCode2, i18n("Preparing artifact...")), isCustom: false };
+  }
+}
