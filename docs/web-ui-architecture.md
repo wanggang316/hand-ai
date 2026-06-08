@@ -488,7 +488,7 @@ JSONL line framing.
 # crates/web-ui/Cargo.toml
 [package]
 name = "hand-web-ui"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 license = "MIT"
 

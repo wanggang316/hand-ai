@@ -1,6 +1,6 @@
 [package]
 name = "hand-tui"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "Terminal UI component library with differential rendering"
 license = "MIT"

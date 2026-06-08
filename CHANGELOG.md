@@ -1,13 +1,25 @@
 # Changelog
 
 All user-facing changes to the `hand` binary are documented here. The
-format roughly follows [Keep a Changelog](https://keepachangelog.com/);
-versions track the `hand` (coding-agent) binary, not the underlying
-`model` crate (which versions on its own — see its `Cargo.toml`).
+format roughly follows [Keep a Changelog](https://keepachangelog.com/).
+As of 0.3.0 every workspace crate shares one version, declared once in
+the root `[workspace.package]` and inherited via `version.workspace =
+true`; these entries track that unified version.
 
 The `/changelog` slash command and the M5.4 startup auto-display both
 read this file. Add new entries above the previous version with a
 `## [X.Y.Z] - YYYY-MM-DD` header — the parser only accepts that shape.
+
+## [0.3.0] - 2026-06-08
+
+### Changed
+
+- All workspace crates now share a single version, unified at `0.3.0`
+  and inherited from the root `[workspace.package]` via
+  `version.workspace = true`. Previously the `hand` binary
+  (`hand-coding-agent`) and the `model` crate versioned independently
+  (0.1.1 / 0.3.0) while the remaining crates sat at 0.1.0. A single
+  source of truth makes coordinated releases a one-line bump.
 
 ## [0.1.1] - 2026-05-29
 
