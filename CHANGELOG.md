@@ -10,6 +10,19 @@ The `/changelog` slash command and the M5.4 startup auto-display both
 read this file. Add new entries above the previous version with a
 `## [X.Y.Z] - YYYY-MM-DD` header — the parser only accepts that shape.
 
+## [Unreleased]
+
+### Added
+
+- `max` thinking level above `xhigh`. Anthropic's adaptive-thinking
+  Claudes (Opus 4.6/4.7, Sonnet 4.6) send their native top `max`
+  effort; budget-based and effort-capped providers clamp it to `high`
+  exactly like `xhigh`; models with an explicit thinking-level map
+  advertise it only when the map carries a `max` entry (DeepSeek V4's
+  native `max` effort now surfaces as this level). Selectable via
+  `/thinking max`, `--thinking max`, model patterns like `sonnet:max`,
+  and the `default_thinking_level` setting.
+
 ## [0.3.0] - 2026-06-08
 
 ### Changed

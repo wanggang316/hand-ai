@@ -112,7 +112,8 @@ pub fn parse_thinking_level(s: &str) -> Option<ThinkingLevel> {
         "low" => Some(ThinkingLevel::Low),
         "medium" | "med" => Some(ThinkingLevel::Medium),
         "high" => Some(ThinkingLevel::High),
-        "xhigh" | "max" => Some(ThinkingLevel::Xhigh),
+        "xhigh" => Some(ThinkingLevel::Xhigh),
+        "max" => Some(ThinkingLevel::Max),
         _ => None,
     }
 }
@@ -588,14 +589,14 @@ fn try_match_model<'a>(model_pattern: &str, available_models: &'a [Model]) -> Op
 /// Whether `level` is one of the canonical thinking-level literals.
 ///
 /// Strict — accepts only the canonical literals (`off`, `minimal`,
-/// `low`, `medium`, `high`, `xhigh`). Use this for pattern parsing
-/// where the suffix must be one of the documented values, distinct
-/// from the more permissive [`parse_thinking_level`] which accepts
-/// aliases like `min`/`med`/`max`/`none`.
+/// `low`, `medium`, `high`, `xhigh`, `max`). Use this for pattern
+/// parsing where the suffix must be one of the documented values,
+/// distinct from the more permissive [`parse_thinking_level`] which
+/// accepts aliases like `min`/`med`/`none`.
 pub fn is_valid_thinking_level_literal(level: &str) -> bool {
     matches!(
         level,
-        "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
+        "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
     )
 }
 
@@ -611,6 +612,7 @@ fn parse_thinking_level_literal(level: &str) -> Option<ThinkingLevel> {
         "medium" => Some(ThinkingLevel::Medium),
         "high" => Some(ThinkingLevel::High),
         "xhigh" => Some(ThinkingLevel::Xhigh),
+        "max" => Some(ThinkingLevel::Max),
         _ => None,
     }
 }
@@ -1310,7 +1312,7 @@ mod tests {
         assert_eq!(parse_thinking_level("high"), Some(ThinkingLevel::High));
         assert_eq!(parse_thinking_level("off"), Some(ThinkingLevel::Minimal));
         assert_eq!(parse_thinking_level("xhigh"), Some(ThinkingLevel::Xhigh));
-        assert_eq!(parse_thinking_level("max"), Some(ThinkingLevel::Xhigh));
+        assert_eq!(parse_thinking_level("max"), Some(ThinkingLevel::Max));
         assert!(parse_thinking_level("invalid").is_none());
     }
 
@@ -2148,7 +2150,7 @@ mod tests {
 
     /// UC-mr-006 — every canonical thinking-level literal accepted by
     /// the strict parser (`off`, `minimal`, `low`, `medium`, `high`,
-    /// `xhigh`) resolves through `parse_model_pattern_full` against an
+    /// `xhigh`, `max`) resolves through `parse_model_pattern_full` against an
     /// exact model id; the returned `thinking_level` matches the
     /// literal; no warning is emitted.
     #[test]
@@ -2161,6 +2163,7 @@ mod tests {
             ("medium", ThinkingLevel::Medium),
             ("high", ThinkingLevel::High),
             ("xhigh", ThinkingLevel::Xhigh),
+            ("max", ThinkingLevel::Max),
         ];
         for (keyword, expected) in cases {
             let pat = format!("claude-sonnet-4:{keyword}");

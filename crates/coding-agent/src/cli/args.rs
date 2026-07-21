@@ -88,7 +88,7 @@ pub struct Args {
     #[arg(long, action = clap::ArgAction::Append)]
     pub append_system_prompt: Vec<String>,
 
-    /// Thinking level: off, minimal, low, medium, high, xhigh
+    /// Thinking level: off, minimal, low, medium, high, xhigh, max
     #[arg(long)]
     pub thinking: Option<String>,
 

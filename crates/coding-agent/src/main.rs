@@ -612,7 +612,7 @@ async fn handle_slash_command(
 
         "/thinking" => {
             if args.is_empty() {
-                println!("Usage: /thinking <off|minimal|low|medium|high|xhigh>");
+                println!("Usage: /thinking <off|minimal|low|medium|high|xhigh|max>");
             } else if let Some(level) = model_resolver::parse_thinking_level(args) {
                 let mut opts = session.stream_options().clone();
                 opts.reasoning = Some(level);
@@ -620,7 +620,7 @@ async fn handle_slash_command(
                 println!("Thinking level set to: {:?}", level);
             } else {
                 println!(
-                    "Invalid thinking level: {}. Use: off, minimal, low, medium, high, xhigh",
+                    "Invalid thinking level: {}. Use: off, minimal, low, medium, high, xhigh, max",
                     args
                 );
             }
@@ -813,7 +813,7 @@ fn print_help() {
     println!("  /models [search]     List available models");
     println!("  /session             Show session info");
     println!("  /settings            Show current settings");
-    println!("  /thinking <level>    Set thinking level (off/minimal/low/medium/high/xhigh)");
+    println!("  /thinking <level>    Set thinking level (off/minimal/low/medium/high/xhigh/max)");
     println!("  /compact             Compact context (free up token space)");
     println!("  /export [path]       Export session (HTML by default, or .jsonl)");
     println!("  /copy                Copy last assistant message to clipboard");
