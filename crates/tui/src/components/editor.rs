@@ -1459,14 +1459,6 @@ impl Component for EditorComponent {
 }
 
 impl EditorComponent {
-    /// Compose the cursor's logical line with any active IME composition AND
-    /// a visible reverse-video cursor at [`Self::cursor_col`] for rendering.
-    ///
-    /// When [`Self::focused`] is true the [`crate::tui::CURSOR_MARKER`] APC
-    /// sequence is also emitted immediately before the visible cursor so the
-    /// host [`crate::Tui`] can reposition the hardware cursor for IME
-    /// candidate windows. The marker is zero-width and gets stripped by the
-    /// Tui before the line hits the terminal.
     /// Compose the cursor line when the buffer is empty and a placeholder
     /// is set: the cursor marker + reverse-video cell sits at column 0,
     /// followed by the dim placeholder text.
@@ -1480,6 +1472,19 @@ impl EditorComponent {
         format!("{marker}{cursor_cell}\x1b[2m{placeholder}\x1b[0m")
     }
 
+    /// Compose the cursor's logical line with any active IME composition
+    /// and — while [`Self::focused`] — a visible reverse-video cursor at
+    /// [`Self::cursor_col`].
+    ///
+    /// The focused render emits the [`crate::tui::CURSOR_MARKER`] APC
+    /// sequence immediately before the reverse-video cell so the host
+    /// [`crate::Tui`] can park the hardware cursor on it. The marker is
+    /// zero-width and gets stripped by the Tui before the line hits the
+    /// terminal. Unfocused renders paint neither marker nor cell: a
+    /// reverse-video block without the marker never has the hardware
+    /// cursor parked on it, so the exit-time erase (which starts at the
+    /// cursor) would leave it behind as a phantom cursor next to the
+    /// real one.
     fn compose_line_for_render(&self, line: &str) -> String {
         // IME composition path: inline the in-progress string with an
         // underline. Composition handling already prevents a stray cursor
@@ -1495,11 +1500,17 @@ impl EditorComponent {
         // the end of the line).
         let split = self.cursor_col.min(line.len());
         let (before, after) = line.split_at(split);
-        let marker = if self.focused {
-            crate::tui::CURSOR_MARKER
-        } else {
-            ""
-        };
+        // Unfocused: keep the cursor cell's one-column footprint (wrap and
+        // height parity with the focused render, mirroring
+        // `compose_placeholder_line`) but skip the reverse-video block.
+        if !self.focused {
+            return if after.is_empty() {
+                format!("{before} ")
+            } else {
+                line.to_string()
+            };
+        }
+        let marker = crate::tui::CURSOR_MARKER;
         if after.is_empty() {
             format!("{before}{marker}\x1b[7m \x1b[0m")
         } else {
@@ -2232,6 +2243,45 @@ mod tests {
         assert_eq!(
             editor.handle_input(&InputEvent::Raw("a".into())),
             HandleResult::Ignored
+        );
+    }
+
+    /// An unfocused editor must paint neither the reverse-video cursor
+    /// cell nor the cursor marker. The marker is what makes the Tui park
+    /// the hardware cursor on the cell, and the exit-time erase starts at
+    /// the parked cursor — an unmarked reverse-video block would survive
+    /// teardown as a phantom cursor next to the real one.
+    #[test]
+    fn unfocused_editor_paints_no_cursor_cell_or_marker() {
+        let mut editor = EditorComponent::new()
+            .with_viewport_height(1)
+            .with_border(false);
+        editor.set_text("ab");
+
+        let focused = editor.render(40);
+        assert!(focused[0].contains("\x1b[7m"), "got: {:?}", focused[0]);
+        assert!(
+            focused[0].contains(crate::tui::CURSOR_MARKER),
+            "got: {:?}",
+            focused[0]
+        );
+
+        editor.set_focused(false);
+        let unfocused = editor.render(40);
+        assert!(!unfocused[0].contains("\x1b[7m"), "got: {:?}", unfocused[0]);
+        assert!(
+            !unfocused[0].contains(crate::tui::CURSOR_MARKER),
+            "got: {:?}",
+            unfocused[0]
+        );
+        // Focus toggles must not change geometry: the cursor cell keeps a
+        // one-column footprint in both states.
+        assert_eq!(
+            utils::visible_width(&focused[0]),
+            utils::visible_width(&unfocused[0]),
+            "focused: {:?}, unfocused: {:?}",
+            focused[0],
+            unfocused[0]
         );
     }
 
