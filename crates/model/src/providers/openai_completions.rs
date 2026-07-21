@@ -1383,14 +1383,19 @@ pub struct ResolvedCompat {
     /// `convert_messages` injects an empty `reasoning_content: ""` on any
     /// assistant turn that doesn't already carry one.
     pub requires_reasoning_content_on_assistant_messages: bool,
-    /// `true` when the upstream uses three known session-affinity
-    /// headers (`session_id`, `x-client-request-id`,
-    /// `x-session-affinity`) keyed off the caller's session id to
-    /// route repeated prompts to the same cache node. Default
-    /// `false` — OpenAI's prompt cache uses the `prompt_cache_key`
-    /// body field instead. Proxies that rely on header-based affinity
-    /// flip this true via models.dev compat metadata.
+    /// `true` when the endpoint routes repeated prompts to the same
+    /// cache node by reading the caller's session id from
+    /// session-affinity headers. Default `false` — OpenAI's prompt
+    /// cache uses the `prompt_cache_key` body field instead. Proxies
+    /// that rely on header-based affinity flip this true via
+    /// models.dev compat metadata. Which headers are sent is governed
+    /// by `session_affinity_format`.
     pub send_session_affinity_headers: bool,
+    /// Header convention for session affinity when
+    /// `send_session_affinity_headers` is on. Auto-detected:
+    /// OpenRouter endpoints read a single `x-session-id` header,
+    /// everything else gets the OpenAI-style set.
+    pub session_affinity_format: crate::types::SessionAffinityFormat,
 }
 
 fn detect_compat(model: &Model) -> ResolvedCompat {
@@ -1480,6 +1485,11 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
         zai_tool_stream: is_zai,
         requires_reasoning_content_on_assistant_messages: is_deepseek,
         send_session_affinity_headers: false,
+        session_affinity_format: if is_openrouter {
+            crate::types::SessionAffinityFormat::OpenRouter
+        } else {
+            crate::types::SessionAffinityFormat::OpenAI
+        },
     }
 }
 
@@ -1540,6 +1550,9 @@ fn get_compat(model: &Model) -> ResolvedCompat {
             send_session_affinity_headers: compat_settings
                 .send_session_affinity_headers
                 .unwrap_or(detected.send_session_affinity_headers),
+            session_affinity_format: compat_settings
+                .session_affinity_format
+                .unwrap_or(detected.session_affinity_format),
         };
     }
 
@@ -1559,17 +1572,21 @@ pub fn resolve_compat(model: &Model) -> ResolvedCompat {
 ///
 /// A small set of proxies (LiteLLM with affinity routing, vendor
 /// gateways) route repeated prompts to the same cache node by reading
-/// the session id from three headers. Off by default — OpenAI's
+/// the session id from request headers. Off by default — OpenAI's
 /// prompt cache uses the `prompt_cache_key` body field instead.
 /// Models served by affinity-routing proxies set
 /// `OpenAICompletionsCompat.sendSessionAffinityHeaders = true` to
-/// opt in. Caching must not be explicitly disabled
+/// opt in; `session_affinity_format` then picks the header set
+/// (OpenRouter reads a single `x-session-id` header instead of the
+/// OpenAI-style trio). Caching must not be explicitly disabled
 /// (`CacheRetention::None`); otherwise affinity is moot.
 fn resolve_session_affinity_headers(
     compat: &ResolvedCompat,
     session_id: Option<&str>,
     cache_retention: Option<crate::types::CacheRetention>,
 ) -> Vec<(String, String)> {
+    use crate::types::SessionAffinityFormat;
+
     if !compat.send_session_affinity_headers {
         return Vec::new();
     }
@@ -1579,11 +1596,20 @@ fn resolve_session_affinity_headers(
     let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
-    vec![
-        ("session_id".to_string(), sid.to_string()),
-        ("x-client-request-id".to_string(), sid.to_string()),
-        ("x-session-affinity".to_string(), sid.to_string()),
-    ]
+    match compat.session_affinity_format {
+        SessionAffinityFormat::OpenRouter => {
+            vec![("x-session-id".to_string(), sid.to_string())]
+        }
+        SessionAffinityFormat::OpenAI => vec![
+            ("session_id".to_string(), sid.to_string()),
+            ("x-client-request-id".to_string(), sid.to_string()),
+            ("x-session-affinity".to_string(), sid.to_string()),
+        ],
+        SessionAffinityFormat::OpenAINoSession => vec![
+            ("x-client-request-id".to_string(), sid.to_string()),
+            ("x-session-affinity".to_string(), sid.to_string()),
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -1844,15 +1870,22 @@ mod tests {
 
     /// Default behaviour: affinity headers are off so direct OpenAI
     /// calls don't ship the three headers (the prompt_cache_key body
-    /// field handles cache affinity instead).
+    /// field handles cache affinity instead). The gate applies to
+    /// every format, including OpenRouter's `x-session-id`.
     #[test]
     fn session_affinity_headers_off_by_default() {
-        let compat = affinity_compat(false);
-        let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
-        assert!(
-            headers.is_empty(),
-            "default off must return no headers: {headers:?}"
-        );
+        for format in [
+            crate::types::SessionAffinityFormat::OpenAI,
+            crate::types::SessionAffinityFormat::OpenRouter,
+        ] {
+            let mut compat = affinity_compat(false);
+            compat.session_affinity_format = format;
+            let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
+            assert!(
+                headers.is_empty(),
+                "default off must return no headers: {headers:?}"
+            );
+        }
     }
 
     /// When compat opts in AND the caller supplies a non-empty
@@ -1885,12 +1918,77 @@ mod tests {
     }
 
     /// No session id means no affinity headers — they'd carry no
-    /// signal for the proxy to route on.
+    /// signal for the proxy to route on. Holds for every format.
     #[test]
     fn session_affinity_headers_dropped_without_session_id() {
-        let compat = affinity_compat(true);
-        assert!(resolve_session_affinity_headers(&compat, None, None).is_empty());
-        assert!(resolve_session_affinity_headers(&compat, Some(""), None).is_empty());
+        use crate::types::SessionAffinityFormat;
+        for format in [
+            SessionAffinityFormat::OpenAI,
+            SessionAffinityFormat::OpenAINoSession,
+            SessionAffinityFormat::OpenRouter,
+        ] {
+            let mut compat = affinity_compat(true);
+            compat.session_affinity_format = format;
+            assert!(resolve_session_affinity_headers(&compat, None, None).is_empty());
+            assert!(resolve_session_affinity_headers(&compat, Some(""), None).is_empty());
+        }
+    }
+
+    /// OpenRouter reads the session id from a single `x-session-id`
+    /// header; none of the OpenAI-style headers may leak through.
+    #[test]
+    fn session_affinity_openrouter_format_sends_only_x_session_id() {
+        let mut compat = affinity_compat(true);
+        compat.session_affinity_format = crate::types::SessionAffinityFormat::OpenRouter;
+        let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
+        assert_eq!(
+            headers,
+            vec![("x-session-id".to_string(), "sess-abc".to_string())]
+        );
+    }
+
+    /// The no-session variant keeps the two dash-separated headers but
+    /// drops `session_id`, for proxies that reject underscore header
+    /// names.
+    #[test]
+    fn session_affinity_nosession_format_omits_session_id_header() {
+        let mut compat = affinity_compat(true);
+        compat.session_affinity_format = crate::types::SessionAffinityFormat::OpenAINoSession;
+        let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
+        assert_eq!(
+            headers,
+            vec![
+                ("x-client-request-id".to_string(), "sess-abc".to_string()),
+                ("x-session-affinity".to_string(), "sess-abc".to_string()),
+            ]
+        );
+    }
+
+    /// `detect_compat` picks the OpenRouter format from the provider or
+    /// an openrouter.ai base URL; everything else defaults to the
+    /// OpenAI-style header set.
+    #[test]
+    fn session_affinity_format_autodetected_from_endpoint() {
+        use crate::types::SessionAffinityFormat;
+
+        let openai = test_model(Provider::OpenAI);
+        assert_eq!(
+            detect_compat(&openai).session_affinity_format,
+            SessionAffinityFormat::OpenAI
+        );
+
+        let by_provider = test_model(Provider::Openrouter);
+        assert_eq!(
+            detect_compat(&by_provider).session_affinity_format,
+            SessionAffinityFormat::OpenRouter
+        );
+
+        let mut by_url = test_model(Provider::OpenAI);
+        by_url.base_url = "https://openrouter.ai/api/v1".to_string();
+        assert_eq!(
+            detect_compat(&by_url).session_affinity_format,
+            SessionAffinityFormat::OpenRouter
+        );
     }
 
     /// OpenRouter normalizes reasoning across providers via a nested
