@@ -1314,13 +1314,14 @@ fn map_thinking_level(level: ThinkingLevel) -> openai_rust::types::ReasoningEffo
         ThinkingLevel::Low => openai_rust::types::ReasoningEffort::Low,
         ThinkingLevel::Medium => openai_rust::types::ReasoningEffort::Medium,
         ThinkingLevel::High => openai_rust::types::ReasoningEffort::High,
-        ThinkingLevel::Xhigh => openai_rust::types::ReasoningEffort::High,
+        // The wire enum tops out at `high` — the extended levels clamp.
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => openai_rust::types::ReasoningEffort::High,
     }
 }
 
 fn clamp_reasoning(reasoning: Option<ThinkingLevel>) -> Option<ThinkingLevel> {
     reasoning.map(|r| match r {
-        ThinkingLevel::Xhigh => ThinkingLevel::High,
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => ThinkingLevel::High,
         _ => r,
     })
 }
@@ -2478,6 +2479,28 @@ mod tests {
         assert_eq!(
             clamp_reasoning(Some(ThinkingLevel::Xhigh)),
             Some(ThinkingLevel::High)
+        );
+    }
+
+    #[test]
+    fn test_clamp_reasoning_max_to_high() {
+        assert_eq!(
+            clamp_reasoning(Some(ThinkingLevel::Max)),
+            Some(ThinkingLevel::High)
+        );
+    }
+
+    /// The wire enum has no effort above `high`; both extended
+    /// levels map onto it.
+    #[test]
+    fn test_map_thinking_level_clamps_extended_levels() {
+        assert_eq!(
+            map_thinking_level(ThinkingLevel::Xhigh),
+            openai_rust::types::ReasoningEffort::High
+        );
+        assert_eq!(
+            map_thinking_level(ThinkingLevel::Max),
+            openai_rust::types::ReasoningEffort::High
         );
     }
 

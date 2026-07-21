@@ -797,9 +797,10 @@ pub(crate) fn get_gemini3_thinking_level(
     if is_gemini3_pro_model(model_id) {
         match effort {
             ThinkingLevel::Minimal | ThinkingLevel::Low => GoogleThinkingLevel::Low,
-            ThinkingLevel::Medium | ThinkingLevel::High | ThinkingLevel::Xhigh => {
-                GoogleThinkingLevel::High
-            }
+            ThinkingLevel::Medium
+            | ThinkingLevel::High
+            | ThinkingLevel::Xhigh
+            | ThinkingLevel::Max => GoogleThinkingLevel::High,
         }
     } else if is_gemma4_model(model_id) {
         // Gemma 4 collapses the four-level effort surface onto just
@@ -807,16 +808,19 @@ pub(crate) fn get_gemini3_thinking_level(
         // to HIGH so the four-tier callers still produce a valid value.
         match effort {
             ThinkingLevel::Minimal | ThinkingLevel::Low => GoogleThinkingLevel::Minimal,
-            ThinkingLevel::Medium | ThinkingLevel::High | ThinkingLevel::Xhigh => {
-                GoogleThinkingLevel::High
-            }
+            ThinkingLevel::Medium
+            | ThinkingLevel::High
+            | ThinkingLevel::Xhigh
+            | ThinkingLevel::Max => GoogleThinkingLevel::High,
         }
     } else {
         match effort {
             ThinkingLevel::Minimal => GoogleThinkingLevel::Minimal,
             ThinkingLevel::Low => GoogleThinkingLevel::Low,
             ThinkingLevel::Medium => GoogleThinkingLevel::Medium,
-            ThinkingLevel::High | ThinkingLevel::Xhigh => GoogleThinkingLevel::High,
+            ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => {
+                GoogleThinkingLevel::High
+            }
         }
     }
 }
@@ -827,7 +831,7 @@ pub(crate) fn get_google_budget(
     custom_budgets: Option<&crate::types::ThinkingBudgets>,
 ) -> i32 {
     let level = match effort {
-        ThinkingLevel::Xhigh => ThinkingLevel::High,
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => ThinkingLevel::High,
         other => other,
     };
 
@@ -836,7 +840,7 @@ pub(crate) fn get_google_budget(
             ThinkingLevel::Minimal => budgets.minimal,
             ThinkingLevel::Low => budgets.low,
             ThinkingLevel::Medium => budgets.medium,
-            ThinkingLevel::High | ThinkingLevel::Xhigh => budgets.high,
+            ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => budgets.high,
         };
         if let Some(b) = budget {
             return b as i32;
@@ -848,7 +852,7 @@ pub(crate) fn get_google_budget(
             ThinkingLevel::Minimal => 128,
             ThinkingLevel::Low => 2048,
             ThinkingLevel::Medium => 8192,
-            ThinkingLevel::High | ThinkingLevel::Xhigh => 32768,
+            ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => 32768,
         }
     } else if model_id.contains("2.5-flash-lite") {
         // Gemini 2.5 Flash Lite's minimum thinking budget is 512, not
@@ -860,14 +864,14 @@ pub(crate) fn get_google_budget(
             ThinkingLevel::Minimal => 512,
             ThinkingLevel::Low => 2048,
             ThinkingLevel::Medium => 8192,
-            ThinkingLevel::High | ThinkingLevel::Xhigh => 24576,
+            ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => 24576,
         }
     } else if model_id.contains("2.5-flash") {
         match level {
             ThinkingLevel::Minimal => 128,
             ThinkingLevel::Low => 2048,
             ThinkingLevel::Medium => 8192,
-            ThinkingLevel::High | ThinkingLevel::Xhigh => 24576,
+            ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => 24576,
         }
     } else {
         -1

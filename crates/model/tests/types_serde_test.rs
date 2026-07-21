@@ -52,6 +52,21 @@ fn stream_options_callbacks_clone_arc() {
 }
 
 #[test]
+fn thinking_level_serde_lowercase_roundtrip() {
+    for (level, wire) in [
+        (ThinkingLevel::Minimal, "\"minimal\""),
+        (ThinkingLevel::Low, "\"low\""),
+        (ThinkingLevel::Medium, "\"medium\""),
+        (ThinkingLevel::High, "\"high\""),
+        (ThinkingLevel::Xhigh, "\"xhigh\""),
+        (ThinkingLevel::Max, "\"max\""),
+    ] {
+        assert_eq!(serde_json::to_string(&level).unwrap(), wire);
+        assert_eq!(serde_json::from_str::<ThinkingLevel>(wire).unwrap(), level);
+    }
+}
+
+#[test]
 fn thinking_level_map_distinguishes_null_and_missing() {
     let m: ThinkingLevelMap = serde_json::from_str(r#"{"low":null,"high":"detailed"}"#).unwrap();
     assert_eq!(m.get("low"), Some(&None));
