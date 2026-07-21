@@ -20,11 +20,14 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time;
 
+use std::borrow::Cow;
+
 use crate::error::{TuiError, TuiResult};
 use crate::overlay::{OverlayHandle, OverlayOptions, compose_overlays};
 use crate::render::DiffRenderer;
 use crate::stdin_buffer::StdinBufferEvent;
 use crate::terminal::Terminal;
+use crate::utils::normalize_terminal_output;
 
 /// Result of handling user input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1011,6 +1014,17 @@ impl Tui {
             compose_overlays(&base, &refs, width, height)
         };
 
+        // Normalize every composed line before the diff so the bytes we
+        // cache and the bytes we write agree: visible tabs become the fixed
+        // spaces layout already accounted for (terminal tab stops would
+        // otherwise repaint at arbitrary columns and break the frame), while
+        // escape sequences pass through byte-identical.
+        for line in &mut lines {
+            if let Cow::Owned(normalized) = normalize_terminal_output(line) {
+                *line = normalized;
+            }
+        }
+
         // Marker → hardware cursor position, *before* diff so the diff
         // engine sees the stripped lines. Without this the marker bytes
         // would leak into the prev-frame cache and never get cleaned up.
@@ -1952,6 +1966,57 @@ mod tests {
         // Already true (default); setting to true again must not write.
         tui.set_show_hardware_cursor(true);
         assert!(output.lock().unwrap().is_empty());
+    }
+
+    // ---------- terminal output normalization ----------
+
+    /// A raw tab in component output would land on terminal-defined tab
+    /// stops, painting a different width than layout computed. The render
+    /// path must expand it to the fixed spaces `visible_width` accounts for
+    /// before anything reaches the terminal.
+    #[test]
+    fn render_expands_plain_text_tabs_before_write() {
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec!["a\tb"])));
+        tui.request_render();
+        tui.maybe_render();
+
+        let writes: String = output.lock().unwrap().iter().cloned().collect();
+        assert!(
+            writes.contains("a   b"),
+            "expected tab expanded to three spaces, got: {writes:?}"
+        );
+        assert!(
+            !writes.contains('\t'),
+            "no raw tab may reach the terminal: {writes:?}"
+        );
+    }
+
+    /// Tabs inside escape sequences (e.g. an OSC 8 hyperlink target) are
+    /// protocol bytes — the render path must pass them through untouched
+    /// while still expanding the visible tab next to them.
+    #[test]
+    fn render_preserves_tabs_inside_escape_sequences() {
+        let hyperlink = "\x1b]8;;https://example.test/a\tb\x07";
+        let line = format!("{hyperlink}label\ttext");
+        let (term, output) = SharedTerminal::new();
+        let mut tui = Tui::new(Box::new(term));
+        tui.root_mut()
+            .add_child_with_id(Box::new(TestComponent::new(vec![line.as_str()])));
+        tui.request_render();
+        tui.maybe_render();
+
+        let writes: String = output.lock().unwrap().iter().cloned().collect();
+        assert!(
+            writes.contains(hyperlink),
+            "escape-sequence bytes must survive byte-identical: {writes:?}"
+        );
+        assert!(
+            writes.contains("label   text"),
+            "visible tab outside the sequence must expand: {writes:?}"
+        );
     }
 
     // ---------- resize handling (M2.T4) ----------
