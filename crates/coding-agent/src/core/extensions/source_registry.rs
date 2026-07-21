@@ -1484,10 +1484,8 @@ fn parse_http_or_ssh_url(source: &str) -> Option<(String, String)> {
         return None;
     }
     let after_scheme = &source[scheme_end + 3..];
-    let (host_part, path_part) = match after_scheme.find('/') {
-        Some(slash) => (&after_scheme[..slash], &after_scheme[slash + 1..]),
-        None => return None,
-    };
+    let slash = after_scheme.find('/')?;
+    let (host_part, path_part) = (&after_scheme[..slash], &after_scheme[slash + 1..]);
     // Strip any `user@` prefix from the host part.
     let host = host_part
         .rsplit('@')

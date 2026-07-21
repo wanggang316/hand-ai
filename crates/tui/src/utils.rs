@@ -303,10 +303,9 @@ fn parse_osc8(code: &str) -> Option<Option<ActiveHyperlink>> {
     }
     let (body, terminator) = if let Some(stripped) = code.strip_suffix('\x07') {
         (&stripped[prefix.len()..], Osc8Terminator::Bel)
-    } else if let Some(stripped) = code.strip_suffix("\x1b\\") {
-        (&stripped[prefix.len()..], Osc8Terminator::St)
     } else {
-        return None;
+        let stripped = code.strip_suffix("\x1b\\")?;
+        (&stripped[prefix.len()..], Osc8Terminator::St)
     };
     let sep = body.find(';')?;
     let params = &body[..sep];
