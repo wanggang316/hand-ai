@@ -226,7 +226,11 @@ fn convert_to_input_for_model_inner(context: &Context, supports_images: bool) ->
                     // function_call_output that the upstream rejects.
                     Value::String("(see attached image)".to_string())
                 } else {
-                    Value::String(String::new())
+                    // No text and no images: send an explicit placeholder
+                    // instead of an empty output. Some providers reject
+                    // empty tool content, and the model otherwise can't
+                    // tell the tool ran and returned nothing.
+                    Value::String("(no tool output)".to_string())
                 };
 
                 input.push(serde_json::json!({
@@ -1270,6 +1274,46 @@ mod tests {
         let input = convert_to_input_for_model(&context, &vision_responses_model());
         let out = &input.as_array().unwrap()[0]["output"];
         assert_eq!(out.as_str(), Some("hello"));
+    }
+
+    /// Empty tool results (no text, no images) must ship the explicit
+    /// "(no tool output)" placeholder instead of an empty output field —
+    /// some providers reject empty tool content, and the model otherwise
+    /// can't tell the tool ran and returned nothing.
+    #[test]
+    fn tool_result_empty_uses_no_output_placeholder() {
+        use crate::types::{Message, TextContent, ToolResultContent, ToolResultMessage};
+        let make_result = |id: &str, content: Vec<ToolResultContent>| {
+            Message::ToolResult(ToolResultMessage {
+                role: "toolResult".to_string(),
+                tool_call_id: id.to_string(),
+                tool_name: "bash".to_string(),
+                content,
+                details: None,
+                is_error: false,
+                timestamp: 0,
+            })
+        };
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                // Empty text block and no content at all must both hit
+                // the placeholder.
+                make_result(
+                    "call_empty_text",
+                    vec![ToolResultContent::Text(TextContent::new(""))],
+                ),
+                make_result("call_no_content", vec![]),
+            ],
+            tools: None,
+        };
+        let input = convert_to_input_for_model(&context, &vision_responses_model());
+        let arr = input.as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+        for item in arr {
+            assert_eq!(item["type"], "function_call_output");
+            assert_eq!(item["output"].as_str(), Some("(no tool output)"));
+        }
     }
 
     /// The Responses API surfaces a `response.failed` SSE event when
