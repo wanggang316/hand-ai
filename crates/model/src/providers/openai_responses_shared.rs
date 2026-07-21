@@ -278,6 +278,13 @@ pub(crate) struct ResponsesParseState {
     pub(crate) current_tool_name: String,
     pub(crate) current_tool_id: String,
     pub(crate) current_tool_args: String,
+    /// Content indexes of thinking blocks created from `reasoning`
+    /// output items, keyed by the item id. Some transports omit
+    /// `encrypted_content` on `response.output_item.done` and only
+    /// include it in the terminal `response.completed` payload; this
+    /// map lets the terminal handler backfill the signature onto the
+    /// right block.
+    pub(crate) reasoning_blocks_by_id: Vec<(String, usize)>,
 }
 
 /// Dispatch a single decoded SSE event into the parser. Returns the events
@@ -437,10 +444,42 @@ pub(crate) fn dispatch_responses_event(
                                 .join("\n\n")
                         })
                         .unwrap_or_default();
-                    if !summary_text.is_empty() {
-                        state.thinking_buffer = summary_text;
+                    let streamed_text = std::mem::take(&mut state.thinking_buffer);
+                    let thinking = if !summary_text.is_empty() {
+                        summary_text
                     } else if !content_text.is_empty() {
-                        state.thinking_buffer = content_text;
+                        content_text
+                    } else {
+                        streamed_text
+                    };
+                    // The reasoning signature (`encrypted_content`) must
+                    // survive into the assistant message: replaying the
+                    // turn without it drops the reasoning chain on
+                    // stateless (`store: false`) multi-turn requests.
+                    let signature = item
+                        .get("encrypted_content")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    // One block per reasoning item so each keeps its own
+                    // signature. Items with an id are recorded even when
+                    // empty — `response.completed` may still backfill a
+                    // signature for them.
+                    if !thinking.is_empty() || signature.is_some() || !item_id.is_empty() {
+                        if !item_id.is_empty() {
+                            state
+                                .reasoning_blocks_by_id
+                                .push((item_id.to_string(), output.content.len()));
+                        }
+                        output
+                            .content
+                            .push(AssistantContentBlock::Thinking(ThinkingContent {
+                                content_type: "thinking".to_string(),
+                                thinking,
+                                thinking_signature: signature,
+                                redacted: None,
+                            }));
                     }
                 }
             }
@@ -491,6 +530,33 @@ pub(crate) fn dispatch_responses_event(
                         .get("output_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
+                }
+                // Some transports omit `encrypted_content` on the streamed
+                // `output_item.done` reasoning items and only carry it in
+                // the terminal payload's `output` array. Backfill missing
+                // signatures from here, matched by item id; blocks that
+                // already carry a signature keep the streamed value.
+                if let Some(items) = response.get("output").and_then(|o| o.as_array()) {
+                    for item in items {
+                        if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
+                            continue;
+                        }
+                        if let Some(signature) = item
+                            .get("encrypted_content")
+                            .and_then(|v| v.as_str())
+                            .filter(|s| !s.is_empty())
+                            && let Some(id) = item.get("id").and_then(|v| v.as_str())
+                            && let Some(&(_, index)) = state
+                                .reasoning_blocks_by_id
+                                .iter()
+                                .find(|(block_id, _)| block_id == id)
+                            && let Some(AssistantContentBlock::Thinking(t)) =
+                                output.content.get_mut(index)
+                            && t.thinking_signature.is_none()
+                        {
+                            t.thinking_signature = Some(signature.to_string());
+                        }
+                    }
                 }
             }
         }
@@ -1520,5 +1586,117 @@ mod tests {
             })
             .expect("thinking block missing");
         assert_eq!(thinking, "kept");
+    }
+
+    fn thinking_blocks(output: &AssistantMessage) -> Vec<(&str, Option<&str>)> {
+        output
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                AssistantContentBlock::Thinking(t) => {
+                    Some((t.thinking.as_str(), t.thinking_signature.as_deref()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A reasoning item that already carries `encrypted_content` in
+    /// `output_item.done` keeps that signature — the terminal
+    /// `response.completed` payload must not overwrite it.
+    #[test]
+    fn output_item_done_reasoning_keeps_streamed_signature() {
+        let output = run_events(&[
+            (
+                "response.output_item.done",
+                json!({
+                    "item": {
+                        "type": "reasoning",
+                        "id": "rs_1",
+                        "summary": [{ "text": "thought" }],
+                        "encrypted_content": "sig-from-done",
+                    }
+                }),
+            ),
+            (
+                "response.completed",
+                json!({
+                    "response": {
+                        "id": "resp_sig1",
+                        "output": [{
+                            "type": "reasoning",
+                            "id": "rs_1",
+                            "summary": [{ "text": "thought" }],
+                            "encrypted_content": "sig-from-completed",
+                        }]
+                    }
+                }),
+            ),
+        ]);
+        assert_eq!(
+            thinking_blocks(&output),
+            vec![("thought", Some("sig-from-done"))]
+        );
+    }
+
+    /// Some transports omit `encrypted_content` from the streamed
+    /// `output_item.done` reasoning items and only include it in the
+    /// `response.completed` output array. The terminal event must
+    /// backfill the signature onto the matching block (by item id)
+    /// while blocks that already have one keep their streamed value.
+    /// Losing the signature breaks stateless multi-turn reasoning:
+    /// the replayed conversation can no longer restore the chain.
+    #[test]
+    fn response_completed_backfills_missing_reasoning_signatures_by_id() {
+        let output = run_events(&[
+            (
+                "response.output_item.done",
+                json!({
+                    "item": {
+                        "type": "reasoning",
+                        "id": "rs_a",
+                        "summary": [{ "text": "first" }],
+                    }
+                }),
+            ),
+            (
+                "response.output_item.done",
+                json!({
+                    "item": {
+                        "type": "reasoning",
+                        "id": "rs_b",
+                        "summary": [{ "text": "second" }],
+                        "encrypted_content": "sig-b-done",
+                    }
+                }),
+            ),
+            (
+                "response.completed",
+                json!({
+                    "response": {
+                        "id": "resp_sig2",
+                        "output": [
+                            {
+                                "type": "reasoning",
+                                "id": "rs_a",
+                                "encrypted_content": "sig-a-completed",
+                            },
+                            {
+                                "type": "reasoning",
+                                "id": "rs_b",
+                                "encrypted_content": "sig-b-completed",
+                            }
+                        ]
+                    }
+                }),
+            ),
+        ]);
+        assert_eq!(
+            thinking_blocks(&output),
+            vec![
+                ("first", Some("sig-a-completed")),
+                ("second", Some("sig-b-done")),
+            ]
+        );
     }
 }
