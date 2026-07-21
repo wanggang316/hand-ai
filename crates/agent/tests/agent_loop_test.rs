@@ -188,10 +188,10 @@ async fn length_truncated_tool_calls_fail_without_execution() {
     assert_eq!(*executed.lock().unwrap(), 0);
 
     let evs = events.lock().unwrap();
-    assert!(evs.iter().any(|e| matches!(
-        e,
-        AgentEvent::ToolExecutionEnd { is_error: true, .. }
-    )));
+    assert!(
+        evs.iter()
+            .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. }))
+    );
 
     let tool_result = result
         .messages
