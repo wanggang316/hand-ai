@@ -1059,8 +1059,11 @@ fn match_printable_key(data: &str, key: &str, modifier: u32) -> bool {
         // fall through to Kitty / modifyOtherKeys forms
     }
 
-    // Legacy alt+letter/digit = ESC + key.
-    if modifier == MOD_ALT && !is_kitty_protocol_active() && (is_letter || is_digit) {
+    // Legacy alt+letter/digit/symbol = ESC + key.
+    if modifier == MOD_ALT
+        && !is_kitty_protocol_active()
+        && (is_letter || is_digit || is_symbol_key(lower))
+    {
         let mut s = String::with_capacity(2);
         s.push('\x1b');
         s.push(lower);
@@ -1291,8 +1294,9 @@ pub fn parse_key_id(data: &str) -> Option<KeyId> {
                 let letter = (code + b'a' - 1) as char;
                 return Some(format!("ctrl+alt+{}", letter));
             }
-            if (97..=122).contains(&code) || (48..=57).contains(&code) {
-                return Some(format!("alt+{}", code as char));
+            let key = code as char;
+            if key.is_ascii_lowercase() || is_digit_key(key) || is_symbol_key(key) {
+                return Some(format!("alt+{}", key));
             }
         }
     }
@@ -1959,6 +1963,39 @@ mod tests {
     }
 
     #[test]
+    fn matches_key_legacy_alt_symbols() {
+        let _guard = lock_global();
+        set_kitty_protocol_active(false);
+        // Legacy terminals encode alt+symbol as ESC followed by the symbol,
+        // exactly like alt+letter/digit.
+        assert!(matches_key("\x1b,", "alt+,"));
+        assert!(matches_key("\x1b.", "alt+."));
+        assert!(matches_key("\x1b/", "alt+/"));
+        assert!(!matches_key("\x1b,", "alt+."));
+    }
+
+    #[test]
+    fn matches_key_legacy_alt_symbols_suppressed_when_kitty_active() {
+        let _guard = lock_global();
+        let _g = KittyGuard::enable();
+        // With the Kitty protocol active, alt combos arrive as CSI-u
+        // sequences; a bare ESC-prefixed symbol must not match.
+        assert!(!matches_key("\x1b,", "alt+,"));
+        assert!(!matches_key("\x1b.", "alt+."));
+    }
+
+    #[test]
+    fn matches_key_csi_sequences_not_treated_as_alt_symbol() {
+        let _guard = lock_global();
+        set_kitty_protocol_active(false);
+        // ESC [ introduces a control sequence; a complete CSI sequence must
+        // never match an alt+[ binding.
+        assert!(!matches_key("\x1b[A", "alt+["));
+        assert!(!matches_key("\x1b[3~", "alt+["));
+        assert!(matches_key("\x1b[A", "up"));
+    }
+
+    #[test]
     fn matches_key_alt_arrows() {
         let _guard = lock_global();
         set_kitty_protocol_active(false);
@@ -2122,6 +2159,9 @@ mod tests {
         assert_eq!(parse_key_id("\x1bB").as_deref(), Some("alt+left"));
         assert_eq!(parse_key_id("\x1ba").as_deref(), Some("alt+a"));
         assert_eq!(parse_key_id("\x1b1").as_deref(), Some("alt+1"));
+        assert_eq!(parse_key_id("\x1b,").as_deref(), Some("alt+,"));
+        assert_eq!(parse_key_id("\x1b.").as_deref(), Some("alt+."));
+        assert_eq!(parse_key_id("\x1b/").as_deref(), Some("alt+/"));
     }
 
     #[test]
@@ -2132,8 +2172,20 @@ mod tests {
         assert_eq!(parse_key_id("\x1b\x03"), None);
         assert_eq!(parse_key_id("\x1bB"), None);
         assert_eq!(parse_key_id("\x1ba"), None);
+        assert_eq!(parse_key_id("\x1b,"), None);
         // alt+backspace is unambiguous in both modes.
         assert_eq!(parse_key_id("\x1b\x08").as_deref(), Some("alt+backspace"));
+    }
+
+    #[test]
+    fn parse_key_id_csi_sequences_not_parsed_as_alt_symbol() {
+        let _guard = lock_global();
+        set_kitty_protocol_active(false);
+        // The two-byte alt fallback must not swallow complete CSI sequences:
+        // ESC [ plus a final byte keeps its control-sequence meaning.
+        assert_eq!(parse_key_id("\x1b[A").as_deref(), Some("up"));
+        assert_eq!(parse_key_id("\x1b[3~").as_deref(), Some("delete"));
+        assert_eq!(parse_key_id("\x1b[Z").as_deref(), Some("shift+tab"));
     }
 
     #[test]
