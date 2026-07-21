@@ -2326,4 +2326,46 @@ mod tests {
             "refresh must replay registered providers",
         );
     }
+
+    /// `refresh()` sits on the startup / reload path of every mode and
+    /// must stay a synchronous local-disk reload: it re-reads
+    /// `models.json` plus the in-process catalog snapshot and nothing
+    /// else. A remote catalog pull belongs exclusively to the async
+    /// `model::refresh_from_remote`, which runs in the background and
+    /// hot-swaps the shared snapshot when it completes — so interactive
+    /// startup can never block on the network to build its registry.
+    #[test]
+    fn refresh_reloads_models_json_from_disk_synchronously() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("models.json");
+        fs::write(
+            &path,
+            r#"{ "providers": { "openai": { "baseUrl": "http://first.local" } } }"#,
+        )
+        .unwrap();
+        let mut registry = ModelRegistry::with_path(auth(&dir), Some(path.clone()));
+        let base_url = |r: &ModelRegistry| {
+            r.all()
+                .iter()
+                .find(|m| m.provider.as_str() == "openai")
+                .map(|m| m.base_url.clone())
+                .unwrap()
+        };
+        assert_eq!(base_url(&registry), "http://first.local");
+
+        // Mutate the file on disk; a pure disk reload must pick it up
+        // without any network round-trip or async runtime in scope.
+        fs::write(
+            &path,
+            r#"{ "providers": { "openai": { "baseUrl": "http://second.local" } } }"#,
+        )
+        .unwrap();
+        registry.refresh();
+        assert_eq!(
+            base_url(&registry),
+            "http://second.local",
+            "refresh must re-read models.json from disk",
+        );
+        assert!(registry.error().is_none());
+    }
 }
