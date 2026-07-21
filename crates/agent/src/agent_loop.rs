@@ -261,16 +261,24 @@ async fn run_loop(
             let mut tool_results: Vec<ToolResultMessage> = Vec::new();
 
             if !tool_calls.is_empty() {
-                let batch = execute_tool_calls(
-                    context,
-                    assistant_ref,
-                    &tool_calls,
-                    tools,
-                    config,
-                    emit,
-                    cancel,
-                )
-                .await;
+                // A `Length` stop means the output was cut off by the token
+                // limit, so every tool call in the message may carry truncated
+                // arguments. Fail them all instead of executing potentially
+                // incomplete calls.
+                let batch = if assistant_ref.stop_reason == StopReason::Length {
+                    fail_truncated_tool_calls(&tool_calls, emit)
+                } else {
+                    execute_tool_calls(
+                        context,
+                        assistant_ref,
+                        &tool_calls,
+                        tools,
+                        config,
+                        emit,
+                        cancel,
+                    )
+                    .await
+                };
 
                 for result in &batch.messages {
                     let result_msg = Message::ToolResult(result.clone());
@@ -574,6 +582,35 @@ fn default_convert_to_llm(messages: Vec<Message>) -> Vec<Message> {
 struct ExecutedToolBatch {
     messages: Vec<ToolResultMessage>,
     terminate: bool,
+}
+
+/// Fail every tool call from an assistant message that stopped with
+/// `StopReason::Length`. Streamed tool-call arguments are finalized with a
+/// best-effort JSON parser, so a message cut off by the output token limit
+/// can carry calls whose arguments parse and validate but are silently
+/// incomplete. None of them are safe to run; report each as an error so the
+/// model can re-issue the call with complete arguments.
+fn fail_truncated_tool_calls(tool_calls: &[&ToolCall], emit: &AgentEventSink) -> ExecutedToolBatch {
+    let mut messages = Vec::with_capacity(tool_calls.len());
+    for tool_call in tool_calls {
+        emit(AgentEvent::ToolExecutionStart {
+            tool_call_id: tool_call.id.clone(),
+            tool_name: tool_call.name.clone(),
+            args: tool_call.arguments.clone(),
+        });
+        let result = ToolResult::error(format!(
+            "Tool call '{}' was not executed: the response hit the output token limit, \
+             so its arguments may be truncated. Re-issue the tool call with complete arguments.",
+            tool_call.name
+        ));
+        emit_tool_execution_end(tool_call, &result, true, emit);
+        let tr_msg = emit_tool_result_message(tool_call, result, true, emit);
+        messages.push(tr_msg);
+    }
+    ExecutedToolBatch {
+        messages,
+        terminate: false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

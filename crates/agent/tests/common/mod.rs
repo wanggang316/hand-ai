@@ -146,6 +146,80 @@ impl ApiProvider for MockTextProvider {
     }
 }
 
+/// Returns a tool call inside a `Length`-truncated message on the first call,
+/// then plain text on subsequent calls. Used to verify that tool calls from
+/// truncated messages are failed instead of executed.
+pub struct MockTruncatedToolProvider {
+    pub tool_name: String,
+    pub tool_args: serde_json::Value,
+    pub final_text: String,
+}
+
+impl MockTruncatedToolProvider {
+    pub fn new(
+        tool_name: impl Into<String>,
+        tool_args: serde_json::Value,
+        final_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            tool_args,
+            final_text: final_text.into(),
+        }
+    }
+}
+
+impl ApiProvider for MockTruncatedToolProvider {
+    fn stream(
+        &self,
+        _model: Model,
+        context: Context,
+        _options: Option<StreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        let has_tool_result = context
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::ToolResult(_)));
+
+        if has_tool_result {
+            let text = self.final_text.clone();
+            Box::pin(async_stream::stream! {
+                let msg = test_assistant_message(&text);
+                yield AssistantMessageEvent::Start { partial: msg.clone() };
+                yield AssistantMessageEvent::Done { reason: StopReason::Stop, message: msg };
+            })
+        } else {
+            let tool_name = self.tool_name.clone();
+            let tool_args = self.tool_args.clone();
+            Box::pin(async_stream::stream! {
+                let mut msg = test_assistant_message_with_tool_call(&tool_name, "call_1", tool_args);
+                msg.stop_reason = StopReason::Length;
+                let tc = match &msg.content[0] {
+                    AssistantContentBlock::ToolCall(tc) => tc.clone(),
+                    _ => unreachable!(),
+                };
+                yield AssistantMessageEvent::Start { partial: msg.clone() };
+                yield AssistantMessageEvent::ToolCallStart { content_index: 0, partial: msg.clone() };
+                yield AssistantMessageEvent::ToolCallEnd {
+                    content_index: 0,
+                    tool_call: tc,
+                    partial: msg.clone(),
+                };
+                yield AssistantMessageEvent::Done { reason: StopReason::Length, message: msg };
+            })
+        }
+    }
+
+    fn stream_simple(
+        &self,
+        model: Model,
+        context: Context,
+        options: Option<SimpleStreamOptions>,
+    ) -> AssistantMessageEventStream<'static> {
+        self.stream(model, context, options.map(|o| o.base))
+    }
+}
+
 /// Returns a single tool call on the first call, then plain text on subsequent calls.
 pub struct MockToolProvider {
     pub tool_name: String,
