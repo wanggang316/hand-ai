@@ -3149,10 +3149,7 @@ mod tests {
     fn composite_tool_call_id_without_item_part_keeps_call_id() {
         let model = test_model(Provider::OpenAI);
         let compat = detect_compat(&model);
-        assert_eq!(
-            normalize_tool_call_id("call_1|", &compat, &model),
-            "call_1"
-        );
+        assert_eq!(normalize_tool_call_id("call_1|", &compat, &model), "call_1");
     }
 
     /// Item ids from some providers run past 400 chars with base64
