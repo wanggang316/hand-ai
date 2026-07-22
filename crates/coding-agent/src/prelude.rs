@@ -26,6 +26,6 @@ pub use crate::cli::Args;
 pub use crate::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 pub use crate::core::error::CodingAgentError;
 pub use crate::core::model_resolver::ResolvedModel;
-pub use crate::core::session_manager::SessionManager;
+pub use crate::core::session_manager::{SessionBackend, SessionManager};
 pub use crate::core::settings::SettingsManager;
 pub use crate::core::system_prompt::build_system_prompt;

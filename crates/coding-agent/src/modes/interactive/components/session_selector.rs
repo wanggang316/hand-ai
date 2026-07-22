@@ -39,8 +39,14 @@ use crate::core::session_manager::SessionInfo;
 /// Outcome surfaced via the events channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionSelectorEvent {
-    /// User confirmed a session — payload is its on-disk path.
-    Selected(std::path::PathBuf),
+    /// User confirmed a session — payload is its id and on-disk path.
+    /// Under the jsonl backend the path identifies the session file;
+    /// under sqlite every session shares the database path and the id
+    /// is the selector, so the driver branches on the active backend.
+    Selected {
+        id: String,
+        path: std::path::PathBuf,
+    },
     /// User pressed `tui.select.cancel`.
     Cancelled,
 }
@@ -225,9 +231,10 @@ impl Component for SessionSelectorComponent {
         if kb.matches(&raw, Keybinding::SelectConfirm)
             && let Some(s) = self.selected()
         {
-            let _ = self
-                .events
-                .send(SessionSelectorEvent::Selected(s.path.clone()));
+            let _ = self.events.send(SessionSelectorEvent::Selected {
+                id: s.id.clone(),
+                path: s.path.clone(),
+            });
             return HandleResult::Handled;
         }
         if kb.matches(&raw, Keybinding::SelectCancel) {
@@ -312,12 +319,13 @@ mod tests {
     }
 
     #[test]
-    fn enter_emits_selected_event_with_path() {
+    fn enter_emits_selected_event_with_id_and_path() {
         let (mut c, mut rx) = make(vec![session("a1", Some("a"))]);
         c.handle_input(&InputEvent::Raw("\r".into()));
         match rx.try_recv() {
-            Ok(SessionSelectorEvent::Selected(p)) => {
-                assert_eq!(p, PathBuf::from("/tmp/a1.jsonl"));
+            Ok(SessionSelectorEvent::Selected { id, path }) => {
+                assert_eq!(id, "a1");
+                assert_eq!(path, PathBuf::from("/tmp/a1.jsonl"));
             }
             other => panic!("expected Selected, got {other:?}"),
         }

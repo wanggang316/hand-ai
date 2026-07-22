@@ -29,10 +29,11 @@ pub use slash_commands::{
 
 use std::path::{Path, PathBuf};
 
-use crate::SessionManager;
 use crate::cli::Args;
 use crate::core::agent_session::{AgentSession, AgentSessionConfig};
+use crate::core::settings::SettingsManager;
 use crate::modes::session_setup::SessionSetup;
+use crate::{SessionBackend, SessionManager};
 
 /// High-level entry point for the interactive TUI mode. Mirrors
 /// `run_interactive` in `main.rs` but launches the [`InteractiveMode`] driver
@@ -76,14 +77,20 @@ fn build_session(
     agent_tools: Vec<hand_agent::types::AgentTool>,
     cwd: &Path,
 ) -> Result<AgentSession, Box<dyn std::error::Error>> {
+    let backend = SettingsManager::session_backend_for_cwd(cwd);
     let session = if continue_like {
-        // Discovery only header-scans candidates; the resolved path is
-        // handed to AgentSession::new so the session body is read
-        // exactly once, by the open inside it.
-        match SessionManager::most_recent_session_path(cwd, base_config.session_dir.as_deref()) {
-            Some(path) => {
+        // Discovery only header-scans candidates (jsonl) or reads the
+        // store's session table (sqlite); the resolved key is handed
+        // to AgentSession::new so the session body is read exactly
+        // once, by the open inside it.
+        match SessionManager::most_recent_session_key_with_backend(
+            backend,
+            cwd,
+            base_config.session_dir.as_deref(),
+        ) {
+            Some(key) => {
                 let config = AgentSessionConfig {
-                    resume_session: Some(path.to_string_lossy().into_owned()),
+                    resume_session: Some(key),
                     ..base_config.clone()
                 };
                 AgentSession::new(config, agent_tools)?
@@ -94,9 +101,14 @@ fn build_session(
             }
         }
     } else if let Some(ref fork_source) = args.fork {
-        let fork_path =
-            resolve_session_path_in(base_config.session_dir.as_deref(), cwd, fork_source);
-        match SessionManager::fork_from_in(&fork_path, cwd, base_config.session_dir.as_deref()) {
+        let forked = if backend == SessionBackend::Sqlite {
+            SessionManager::fork_in_sqlite(cwd, base_config.session_dir.as_deref(), fork_source)
+        } else {
+            let fork_path =
+                resolve_session_path_in(base_config.session_dir.as_deref(), cwd, fork_source);
+            SessionManager::fork_from_in(&fork_path, cwd, base_config.session_dir.as_deref())
+        };
+        match forked {
             Ok(sm) => {
                 let config = AgentSessionConfig {
                     resume_session: Some(sm.id().to_string()),

@@ -11,7 +11,7 @@ use crate::core::extensions::api::{
 use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_before_tool_call};
 use crate::core::extensions::registry::builtin_tier1_extensions;
 use crate::core::model_registry::ModelRegistry;
-use crate::core::session_manager::{SessionEntry, SessionManager};
+use crate::core::session_manager::{SessionBackend, SessionEntry, SessionManager};
 use crate::core::settings::SettingsManager;
 use crate::core::skills::{self, Skill, SkillError};
 use crate::core::system_prompt::{self, BuildSystemPromptOptions};
@@ -253,6 +253,7 @@ impl AgentSession {
     ) -> Result<Self, CodingAgentError> {
         let settings_manager = SettingsManager::from_cwd(&config.cwd)
             .map_err(|e| CodingAgentError::Settings(e.to_string()))?;
+        let session_backend: SessionBackend = settings_manager.current().session_backend().into();
         let client = model::Client::new();
 
         // Create or resume session
@@ -287,72 +288,80 @@ impl AgentSession {
             } else {
                 None
             };
-            let primary = session_dir.join(format!("{}.jsonl", session_id));
-            let legacy = config
-                .cwd
-                .join(".hand")
-                .join("sessions")
-                .join(format!("{}.jsonl", session_id));
-            // Prefix-match: when the exact `<dir>/<id>.jsonl` does
-            // not exist, scan the dir for `*.jsonl` files whose
-            // basename starts with the user's value. Restores the
-            // `--resume <prefix>` behaviour that regressed (#78)
-            // after the new long id format (#76) made the full id
-            // tedious to type. Ambiguous matches return None so the
-            // caller surfaces the "not found" error rather than
-            // silently picking one.
-            let prefix_match = |dir: &Path| -> Option<PathBuf> {
-                let entries = std::fs::read_dir(dir).ok()?;
-                let mut candidates: Vec<PathBuf> = entries
-                    .flatten()
-                    .filter_map(|e| {
-                        let name = e.file_name().to_string_lossy().into_owned();
-                        if name.starts_with(session_id.as_str()) && name.ends_with(".jsonl") {
-                            Some(e.path())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                if candidates.len() == 1 {
-                    candidates.pop()
-                } else {
-                    None
-                }
-            };
-            let legacy_dir = config.cwd.join(".hand").join("sessions");
-            let resolved = if let Some(p) = direct {
-                p
-            } else if primary.exists() {
-                primary
-            } else if legacy.exists() && legacy != primary {
-                legacy
-            } else if let Some(p) = prefix_match(&session_dir) {
-                p
-            } else if let Some(p) = prefix_match(&legacy_dir) {
-                p
+            if session_backend == SessionBackend::Sqlite && direct.is_none() {
+                // Sqlite backend: ids resolve inside the session
+                // directory's database. An explicit literal path
+                // (`direct`) always wins and opens via the jsonl flow
+                // below, regardless of the setting.
+                SessionManager::open_by_id_in(SessionBackend::Sqlite, &session_dir, session_id)?
             } else {
-                // Nothing matched. Surface both attempted locations
-                // plus a hint that id-prefix lookup was also tried.
-                return Err(CodingAgentError::Session(format!(
-                    "Session \"{session_id}\" not found. Looked in:\n  - {primary}\n  - {legacy}\n  (also tried matching as an id prefix)",
-                    primary = primary.display(),
-                    legacy = legacy.display(),
-                )));
-            };
-            SessionManager::open(&resolved)?
+                let primary = session_dir.join(format!("{}.jsonl", session_id));
+                let legacy = config
+                    .cwd
+                    .join(".hand")
+                    .join("sessions")
+                    .join(format!("{}.jsonl", session_id));
+                // Prefix-match: when the exact `<dir>/<id>.jsonl` does
+                // not exist, scan the dir for `*.jsonl` files whose
+                // basename starts with the user's value. Restores the
+                // `--resume <prefix>` behaviour that regressed (#78)
+                // after the new long id format (#76) made the full id
+                // tedious to type. Ambiguous matches return None so the
+                // caller surfaces the "not found" error rather than
+                // silently picking one.
+                let prefix_match = |dir: &Path| -> Option<PathBuf> {
+                    let entries = std::fs::read_dir(dir).ok()?;
+                    let mut candidates: Vec<PathBuf> = entries
+                        .flatten()
+                        .filter_map(|e| {
+                            let name = e.file_name().to_string_lossy().into_owned();
+                            if name.starts_with(session_id.as_str()) && name.ends_with(".jsonl") {
+                                Some(e.path())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if candidates.len() == 1 {
+                        candidates.pop()
+                    } else {
+                        None
+                    }
+                };
+                let legacy_dir = config.cwd.join(".hand").join("sessions");
+                let resolved = if let Some(p) = direct {
+                    p
+                } else if primary.exists() {
+                    primary
+                } else if legacy.exists() && legacy != primary {
+                    legacy
+                } else if let Some(p) = prefix_match(&session_dir) {
+                    p
+                } else if let Some(p) = prefix_match(&legacy_dir) {
+                    p
+                } else {
+                    // Nothing matched. Surface both attempted locations
+                    // plus a hint that id-prefix lookup was also tried.
+                    return Err(CodingAgentError::Session(format!(
+                        "Session \"{session_id}\" not found. Looked in:\n  - {primary}\n  - {legacy}\n  (also tried matching as an id prefix)",
+                        primary = primary.display(),
+                        legacy = legacy.display(),
+                    )));
+                };
+                SessionManager::open(&resolved)?
+            }
         } else if config.no_session {
             // --no-session: pure in-memory, no JSONL file under
             // .hand/sessions.
             SessionManager::in_memory()
         } else if let Some(dir) = &config.session_dir {
-            SessionManager::create_in(&config.cwd, dir)?
+            SessionManager::create_in_with_backend(session_backend, &config.cwd, dir)?
         } else if let Some(base) = &config.base_dir {
             let dir =
                 SessionManager::default_session_dir_with_base(Some(base.as_path()), &config.cwd);
-            SessionManager::create_in(&config.cwd, &dir)?
+            SessionManager::create_in_with_backend(session_backend, &config.cwd, &dir)?
         } else {
-            SessionManager::create(&config.cwd)?
+            SessionManager::create_with_backend(session_backend, &config.cwd)?
         };
 
         // Build tool names for system prompt
@@ -748,7 +757,7 @@ impl AgentSession {
         let new_sm = if self.session_manager.is_in_memory() {
             SessionManager::in_memory()
         } else {
-            SessionManager::create(&self.config.cwd)?
+            SessionManager::create_with_backend(self.session_manager.backend(), &self.config.cwd)?
         };
         self.session_manager = new_sm;
         self.context.messages.clear();
@@ -853,7 +862,8 @@ impl AgentSession {
         body: Vec<SessionEntry>,
     ) -> Result<(), CodingAgentError> {
         let parent_id = self.session_manager.id().to_string();
-        let new_sm = SessionManager::from_branched_entries(
+        let new_sm = SessionManager::from_branched_entries_with_backend(
+            self.session_manager.backend(),
             &self.config.cwd,
             self.session_manager.is_in_memory(),
             Some(&parent_id),
@@ -882,6 +892,23 @@ impl AgentSession {
         let new_sm = SessionManager::open(path)?;
         self.adopt_session_manager(new_sm);
         Ok(())
+    }
+
+    /// [`Self::switch_session`] addressed by session id instead of
+    /// file path, resolved through the active backend in `cwd`'s
+    /// default session directory. The `/resume` picker uses this under
+    /// the sqlite backend, where every session shares one database
+    /// path and only the id identifies the session.
+    pub fn switch_session_by_id(&mut self, id: &str) -> Result<(), CodingAgentError> {
+        let dir = SessionManager::default_session_dir(&self.config.cwd);
+        let new_sm = SessionManager::open_by_id_in(self.session_manager.backend(), &dir, id)?;
+        self.adopt_session_manager(new_sm);
+        Ok(())
+    }
+
+    /// Storage backend of the active session manager.
+    pub fn session_backend(&self) -> SessionBackend {
+        self.session_manager.backend()
     }
 
     /// Adopt `new_sm` as the active session manager: rebuild the
@@ -2921,5 +2948,79 @@ mod tests {
             Some(serde_json::json!({"original": true})),
             "with replace_args removed upstream, tool observes the model's original args"
         );
+    }
+
+    /// An explicit literal `.jsonl` path handed to `--resume` opens
+    /// via the jsonl flow even when the `session-backend: sqlite`
+    /// setting is active — explicit file wins.
+    #[test]
+    fn resume_literal_jsonl_path_bypasses_sqlite_backend() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+
+        // Project-layer setting selects the sqlite backend.
+        let hand_dir = cwd.join(".hand");
+        fs::create_dir_all(&hand_dir).unwrap();
+        fs::write(hand_dir.join("settings.yaml"), "session-backend: sqlite\n").unwrap();
+
+        // Literal session file outside any session dir.
+        let session_id = "s_literal_wins_1";
+        let session_path = cwd.join(format!("{session_id}.jsonl"));
+        let header = format!(
+            "{{\"type\":\"session\",\"data\":{{\"version\":3,\"id\":\"{session_id}\",\"timestamp\":0,\"cwd\":\"{}\"}}}}\n",
+            cwd.display()
+        );
+        fs::write(&session_path, header).unwrap();
+
+        let fake_home = TempDir::new().unwrap();
+        unsafe {
+            std::env::set_var("HAND_HOME", fake_home.path());
+        }
+        let mut config = test_config(cwd.to_path_buf());
+        config.resume_session = Some(session_path.to_string_lossy().into_owned());
+        let result = AgentSession::new_with_skill_dirs(config, vec![], None, None);
+        unsafe {
+            std::env::remove_var("HAND_HOME");
+        }
+
+        let session = result.expect("literal .jsonl path must open via the jsonl flow");
+        assert_eq!(session.session_id(), session_id);
+        assert_eq!(session.session_backend(), SessionBackend::Jsonl);
+        assert_eq!(
+            session
+                .session_file()
+                .and_then(|p| p.extension())
+                .and_then(|e| e.to_str()),
+            Some("jsonl")
+        );
+    }
+
+    /// With `session-backend: sqlite` in the project settings, a fresh
+    /// session lands in the session directory's database.
+    #[test]
+    fn new_session_honours_sqlite_backend_setting() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let hand_dir = cwd.join(".hand");
+        fs::create_dir_all(&hand_dir).unwrap();
+        fs::write(hand_dir.join("settings.yaml"), "session-backend: sqlite\n").unwrap();
+
+        // Explicit session_dir override keeps the db inside the test's
+        // tempdir without touching HAND_HOME.
+        let session_dir = tmp.path().join("sessions");
+        let mut config = test_config(cwd.to_path_buf());
+        config.session_dir = Some(session_dir.clone());
+        let session = AgentSession::new_with_skill_dirs(config, vec![], None, None)
+            .expect("sqlite-backed session");
+
+        assert_eq!(session.session_backend(), SessionBackend::Sqlite);
+        assert_eq!(
+            session
+                .session_file()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str()),
+            Some("sessions.db")
+        );
+        assert!(session_dir.join("sessions.db").exists());
     }
 }

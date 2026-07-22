@@ -221,19 +221,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let base_config = setup.to_config(resume_session);
     let agent_tools = setup.agent_tools;
 
+    let backend = hand_coding_agent::SettingsManager::session_backend_for_cwd(&cwd);
     let mut session = if continue_like {
         // Continue most recent session — honouring --session-dir so the
         // search and the resume-open agree on which directory holds the
-        // session (#58). Discovery only header-scans candidates; the
-        // resolved path is handed to AgentSession::new so the session
-        // body is read exactly once, by the open inside it.
-        match hand_coding_agent::SessionManager::most_recent_session_path(
+        // session (#58). Discovery only header-scans candidates (jsonl)
+        // or reads the store's session table (sqlite); the resolved key
+        // is handed to AgentSession::new so the session body is read
+        // exactly once, by the open inside it.
+        match hand_coding_agent::SessionManager::most_recent_session_key_with_backend(
+            backend,
             &cwd,
             base_config.session_dir.as_deref(),
         ) {
-            Some(path) => {
+            Some(key) => {
                 let config = AgentSessionConfig {
-                    resume_session: Some(path.to_string_lossy().into_owned()),
+                    resume_session: Some(key),
                     ..base_config.clone()
                 };
                 AgentSession::new(config, agent_tools)?
@@ -245,13 +248,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else if let Some(ref fork_source) = cli.fork {
         // Fork from existing session
-        let fork_path =
-            resolve_session_path_in(base_config.session_dir.as_deref(), &cwd, fork_source);
-        match hand_coding_agent::SessionManager::fork_from_in(
-            &fork_path,
-            &cwd,
-            base_config.session_dir.as_deref(),
-        ) {
+        let forked = if backend == hand_coding_agent::SessionBackend::Sqlite {
+            hand_coding_agent::SessionManager::fork_in_sqlite(
+                &cwd,
+                base_config.session_dir.as_deref(),
+                fork_source,
+            )
+        } else {
+            let fork_path =
+                resolve_session_path_in(base_config.session_dir.as_deref(), &cwd, fork_source);
+            hand_coding_agent::SessionManager::fork_from_in(
+                &fork_path,
+                &cwd,
+                base_config.session_dir.as_deref(),
+            )
+        };
+        match forked {
             Ok(sm) => {
                 let config = AgentSessionConfig {
                     resume_session: Some(sm.id().to_string()),

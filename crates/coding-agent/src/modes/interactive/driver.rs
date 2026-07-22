@@ -2505,6 +2505,12 @@ pub(crate) fn build_settings_entries(
         ThemeSetting::System => 3,
     };
 
+    let session_backend_choices = vec!["jsonl".to_string(), "sqlite".to_string()];
+    let session_backend_selected = match s.session_backend() {
+        crate::core::settings::SessionBackendSetting::Jsonl => 0,
+        crate::core::settings::SessionBackendSetting::Sqlite => 1,
+    };
+
     let provider_display = s
         .default_provider
         .clone()
@@ -2548,6 +2554,18 @@ pub(crate) fn build_settings_entries(
                 selected: theme_selected,
             },
             description: "Color theme used for the chat UI.".to_string(),
+        },
+        SettingEntry {
+            key: "session_backend".to_string(),
+            value: SettingValue::Enum {
+                choices: session_backend_choices,
+                selected: session_backend_selected,
+            },
+            description:
+                "Session storage backend. sqlite keeps sessions in one database per session \
+                 directory and adopts existing JSONL sessions on first use (takes effect for \
+                 new sessions)."
+                    .to_string(),
         },
         SettingEntry {
             key: "auto_compact".to_string(),
@@ -2868,13 +2886,15 @@ async fn mount_resume_picker(
         );
         return;
     };
-    let sessions = match crate::core::session_manager::SessionManager::list(cwd) {
-        Ok(list) => list,
-        Err(e) => {
-            push_status(chat, format!("[/resume failed: {e}]"), Some(RED_FG));
-            return;
-        }
-    };
+    let backend = session.session_backend();
+    let sessions =
+        match crate::core::session_manager::SessionManager::list_with_backend(backend, cwd) {
+            Ok(list) => list,
+            Err(e) => {
+                push_status(chat, format!("[/resume failed: {e}]"), Some(RED_FG));
+                return;
+            }
+        };
     let (tx, mut rx) = mpsc::unbounded_channel::<SessionSelectorEvent>();
     let component = SessionSelectorComponent::new(sessions, tx);
     let handle = match mounter
@@ -2888,13 +2908,23 @@ async fn mount_resume_picker(
         }
     };
     match rx.recv().await {
-        Some(SessionSelectorEvent::Selected(path)) => {
-            // Swap the AgentSession in-place via `switch_session`. After
-            // success the scrollback is stale (still shows the previous
-            // session's messages) — wipe it and replay the new session's
-            // history so the chat reflects what `session.messages()` now
-            // returns.
-            match session.switch_session(&path) {
+        Some(SessionSelectorEvent::Selected { id, path }) => {
+            // Swap the AgentSession in-place. Under jsonl the path
+            // identifies the session file; under sqlite every row
+            // shares the database path, so selection resolves by id.
+            // After success the scrollback is stale (still shows the
+            // previous session's messages) — wipe it and replay the
+            // new session's history so the chat reflects what
+            // `session.messages()` now returns.
+            let (switched, resumed_label) = match backend {
+                crate::core::session_manager::SessionBackend::Sqlite => {
+                    (session.switch_session_by_id(&id), id.clone())
+                }
+                crate::core::session_manager::SessionBackend::Jsonl => {
+                    (session.switch_session(&path), path.display().to_string())
+                }
+            };
+            match switched {
                 Ok(()) => {
                     {
                         let mut list = chat.lock().expect("chat list mutex poisoned");
@@ -2902,7 +2932,7 @@ async fn mount_resume_picker(
                     }
                     push_welcome_header(chat, session.model());
                     replay_messages_into(chat, session.messages());
-                    push_status(chat, format!("[resumed: {}]", path.display()), None);
+                    push_status(chat, format!("[resumed: {resumed_label}]"), None);
                 }
                 Err(e) => {
                     push_status(chat, format!("[/resume failed: {e}]"), Some(RED_FG));
@@ -4491,6 +4521,24 @@ mod tests {
                 assert_eq!(choices.len(), 4);
                 assert_eq!(*selected, 0);
                 assert_eq!(choices[0], "dark");
+            }
+            other => panic!("expected enum value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn settings_entries_list_session_backend_choices() {
+        let manager = crate::core::settings::SettingsManager::in_memory();
+        let entries = build_settings_entries(&manager);
+        let entry = entries
+            .iter()
+            .find(|e| e.key == "session_backend")
+            .expect("session_backend entry present");
+        match &entry.value {
+            hand_tui::SettingValue::Enum { choices, selected } => {
+                assert_eq!(choices, &["jsonl".to_string(), "sqlite".to_string()]);
+                // Default backend is jsonl (index 0).
+                assert_eq!(*selected, 0);
             }
             other => panic!("expected enum value, got {other:?}"),
         }
