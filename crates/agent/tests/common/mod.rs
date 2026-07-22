@@ -1,6 +1,8 @@
 //! Shared test utilities for the agent crate.
 #![allow(dead_code)]
 
+pub mod session_suite;
+
 use hand_agent::{AgentEvent, AgentEventSink, AgentTool, ToolResult};
 use model::types::Provider;
 use model::{

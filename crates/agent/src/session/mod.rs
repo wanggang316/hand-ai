@@ -6,6 +6,8 @@
 //! JSONL files, and [`InMemoryStore`] backs ephemeral sessions and
 //! tests. The JSONL layout is the same format the `hand` binary
 //! writes, so session files are interchangeable between the two.
+//! With the `sqlite` cargo feature, `SqliteStore` adds a single-file
+//! database backend that can import an existing JSONL directory.
 //!
 //! Entries are open-ended `{"type": <kind>, "data": <payload>}`
 //! envelopes ([`SessionEntry`]); the store never enumerates kinds, so
@@ -19,12 +21,16 @@
 pub mod jsonl;
 pub mod memory;
 pub mod projection;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 pub mod store;
 pub mod types;
 
 pub use jsonl::JsonlStore;
 pub use memory::InMemoryStore;
 pub use projection::{ContextProjection, Projector};
+#[cfg(feature = "sqlite")]
+pub use sqlite::SqliteStore;
 pub use store::SessionStore;
 pub use types::{
     SESSION_FORMAT_VERSION, SessionEntry, SessionHeader, SessionStoreError, SessionSummary,

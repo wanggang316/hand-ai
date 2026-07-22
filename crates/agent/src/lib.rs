@@ -25,6 +25,8 @@ pub use agent_loop::{
 };
 pub use error::AgentError;
 pub use proxy::{ProxyAssistantMessageEvent, ProxyStreamOptions, stream_fn_proxy, stream_proxy};
+#[cfg(feature = "sqlite")]
+pub use session::SqliteStore;
 pub use session::{
     ContextProjection, InMemoryStore, JsonlStore, Projector, SESSION_FORMAT_VERSION, SessionEntry,
     SessionHeader, SessionStore, SessionStoreError, SessionSummary,
