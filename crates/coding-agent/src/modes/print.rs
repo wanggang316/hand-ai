@@ -5,13 +5,15 @@
 //! stderr exactly as in the interactive flow, so callers piping output into
 //! a file see the same bytes either way.
 
-use crate::SessionManager;
 use crate::cli::Args;
 use crate::core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEvent};
 use crate::core::export;
+use crate::core::settings::SettingsManager;
 use crate::modes::interactive::slash_commands::ExportFormat;
 use crate::modes::session_setup::SessionSetup;
+use crate::{SessionBackend, SessionManager};
 use std::io::{self, Write};
+use std::path::Path;
 
 /// Run the agent in non-interactive print mode.
 ///
@@ -56,35 +58,65 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let base_config = setup.to_config(resume_session);
 
-    let mut session = if continue_like {
-        // Discovery only header-scans candidates; the resolved path is
-        // handed to AgentSession::new so the session body is read
-        // exactly once, by the open inside it. `--continue` in a fresh
-        // dir is informational, not an error.
-        match SessionManager::most_recent_session_path(&cwd, base_config.session_dir.as_deref()) {
-            Some(path) => {
+    let session = build_print_session(&args, continue_like, base_config, setup.agent_tools, &cwd)?;
+
+    let json_mode = args.mode == "json";
+    run_with_session(args, session, json_mode, cwd).await
+}
+
+/// Build the [`AgentSession`] honouring `--continue` / `--fork`,
+/// selecting the storage backend from the session-backend setting the
+/// same way the interactive and legacy flows do. Print mode keeps its
+/// own error policy: a `--fork` source that can't be resolved is a
+/// hard error (scripts must not silently get an empty session), unlike
+/// the interactive fallback to a fresh session.
+fn build_print_session(
+    args: &Args,
+    continue_like: bool,
+    base_config: AgentSessionConfig,
+    agent_tools: Vec<hand_agent::types::AgentTool>,
+    cwd: &Path,
+) -> Result<AgentSession, Box<dyn std::error::Error>> {
+    let backend = SettingsManager::session_backend_for_cwd(cwd);
+    let session = if continue_like {
+        // Discovery only header-scans candidates (jsonl) or reads the
+        // store's session table (sqlite); the resolved key is handed
+        // to AgentSession::new so the session body is read exactly
+        // once, by the open inside it. `--continue` in a fresh dir is
+        // informational, not an error.
+        match SessionManager::most_recent_session_key_with_backend(
+            backend,
+            cwd,
+            base_config.session_dir.as_deref(),
+        ) {
+            Some(key) => {
                 let config = AgentSessionConfig {
-                    resume_session: Some(path.to_string_lossy().into_owned()),
+                    resume_session: Some(key),
                     ..base_config.clone()
                 };
-                AgentSession::new(config, setup.agent_tools)?
+                AgentSession::new(config, agent_tools)?
             }
             None => {
                 eprintln!("No previous session found. Starting a new session.");
-                AgentSession::new(base_config, setup.agent_tools)?
+                AgentSession::new(base_config, agent_tools)?
             }
         }
     } else if let Some(ref fork_source) = args.fork {
-        let fork_path =
-            resolve_session_path_in(base_config.session_dir.as_deref(), &cwd, fork_source);
-        match SessionManager::fork_from_in(&fork_path, &cwd, base_config.session_dir.as_deref()) {
+        let forked = if backend == SessionBackend::Sqlite {
+            SessionManager::fork_in_sqlite(cwd, base_config.session_dir.as_deref(), fork_source)
+        } else {
+            let fork_path =
+                resolve_session_path_in(base_config.session_dir.as_deref(), cwd, fork_source);
+            SessionManager::fork_from_in(&fork_path, cwd, base_config.session_dir.as_deref())
+        };
+        match forked {
             Ok(sm) => {
                 let config = AgentSessionConfig {
                     resume_session: Some(sm.id().to_string()),
                     ..base_config.clone()
                 };
                 drop(sm);
-                AgentSession::new(config, setup.agent_tools)?
+                AgentSession::new(config, agent_tools)?
             }
             Err(_) => {
                 // An explicit --fork <id> that can't be resolved must
@@ -95,11 +127,17 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
-        AgentSession::new(base_config, setup.agent_tools)?
+        AgentSession::new(base_config, agent_tools)?
     };
+    Ok(session)
+}
 
-    let json_mode = args.mode == "json";
-
+async fn run_with_session(
+    args: Args,
+    mut session: AgentSession,
+    json_mode: bool,
+    cwd: std::path::PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     if json_mode {
         // Emit the JSONL session header before any agent events fire.
         emit_json_session(&cwd, session.session_id());
@@ -1365,5 +1403,76 @@ mod tests {
             .unwrap();
         assert!(out.contains("hello world"), "{out}");
         assert!(out.contains("<file path="), "{out}");
+    }
+
+    /// Regression: print-mode `--continue` must honour the
+    /// session-backend setting. It previously called the jsonl-only
+    /// discovery, so a sqlite-backed project silently started a fresh
+    /// session instead of resuming and never touched the database.
+    #[test]
+    fn print_continue_honours_sqlite_backend_setting() {
+        use clap::Parser as _;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().to_path_buf();
+        let session_dir = cwd.join("sessions");
+
+        std::fs::create_dir_all(cwd.join(".hand")).expect("mkdir .hand");
+        std::fs::write(
+            cwd.join(".hand").join("settings.yaml"),
+            "session-backend: sqlite\n",
+        )
+        .expect("write settings");
+
+        let mut sm = crate::SessionManager::create_in_with_backend(
+            crate::SessionBackend::Sqlite,
+            &cwd,
+            &session_dir,
+        )
+        .expect("create sqlite session");
+        sm.append_message(model::Message::User(model::UserMessage::new_text("seed")))
+            .expect("append");
+        let seeded_id = sm.id().to_string();
+        drop(sm);
+
+        let model = model::Model {
+            id: "test-model".into(),
+            name: "Test".into(),
+            api: model::types::Api::AnthropicMessages,
+            provider: model::types::Provider::Anthropic,
+            base_url: String::new(),
+            reasoning: false,
+            input: vec![model::InputType::Text],
+            cost: model::Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 200_000,
+            max_tokens: 4096,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        };
+        let base = crate::core::agent_session::AgentSessionConfig {
+            cwd: cwd.clone(),
+            model,
+            stream_options: model::SimpleStreamOptions::default(),
+            custom_system_prompt: None,
+            custom_guidelines: None,
+            resume_session: None,
+            no_session: false,
+            no_context_files: true,
+            session_dir: Some(session_dir),
+            no_skills: true,
+            extra_skill_dirs: Vec::new(),
+            base_dir: None,
+        };
+
+        let args = crate::cli::Args::try_parse_from(["hand"]).expect("args");
+        let session =
+            super::build_print_session(&args, true, base, vec![], &cwd).expect("continue resumes");
+        assert_eq!(session.session_id(), seeded_id, "must resume, not recreate");
+        assert_eq!(session.session_backend(), crate::SessionBackend::Sqlite);
     }
 }
