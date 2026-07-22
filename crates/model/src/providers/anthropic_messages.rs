@@ -671,10 +671,15 @@ fn convert_assistant_content(asst_msg: &AssistantMessage, model: &Model) -> Vec<
                 if is_same_model {
                     if let Some(sig) = &tc.thinking_signature {
                         if !sig.is_empty() {
-                            // Redacted thinking or normal thinking with signature
-                            if tc.thinking.contains("[Reasoning redacted]")
-                                || tc.thinking.is_empty()
-                            {
+                            // Only the in-band redacted marker replays as
+                            // redacted_thinking (its signature holds the
+                            // opaque `data` payload). A signed block whose
+                            // text ended up empty (e.g. minimal thinking
+                            // budget) is a normal thinking block: replaying
+                            // it as redacted would pass a thinking signature
+                            // where the API expects redacted data, and
+                            // dropping it would lose the signature.
+                            if tc.thinking.contains("[Reasoning redacted]") {
                                 blocks.push(serde_json::json!({
                                     "type": "redacted_thinking",
                                     "data": sig,
@@ -2158,5 +2163,55 @@ mod tests {
             "unsigned thinking must not be wrapped in <thinking> tags: {text}"
         );
         assert_eq!(text, "partial reasoning");
+    }
+
+    fn same_model_assistant(model: &Model, thinking: ThinkingContent) -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::Thinking(thinking)],
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            model: model.id.clone(),
+            usage: crate::types::Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    /// A signed thinking block whose text is empty (e.g. minimal thinking
+    /// budget yields a signature without any thinking deltas) must replay
+    /// as a `thinking` block that preserves the signature — not as
+    /// `redacted_thinking`, whose `data` field expects a different opaque
+    /// payload, and not dropped, which would lose the signature.
+    #[test]
+    fn test_thinking_same_model_signed_empty_replays_as_thinking() {
+        let model = test_model();
+        let mut thinking = ThinkingContent::new("");
+        thinking.thinking_signature = Some("sig-1".to_string());
+        let asst = same_model_assistant(&model, thinking);
+        let result = convert_assistant_content(&asst, &model);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["type"], "thinking");
+        assert_eq!(result[0]["thinking"], "");
+        assert_eq!(result[0]["signature"], "sig-1");
+    }
+
+    /// Real redacted thinking (marked in-band at parse time) must keep
+    /// round-tripping as `redacted_thinking` with the opaque payload in
+    /// `data`.
+    #[test]
+    fn test_thinking_redacted_marker_replays_as_redacted() {
+        let model = test_model();
+        let mut thinking = ThinkingContent::new("[Reasoning redacted]");
+        thinking.thinking_signature = Some("opaque-data".to_string());
+        let asst = same_model_assistant(&model, thinking);
+        let result = convert_assistant_content(&asst, &model);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["type"], "redacted_thinking");
+        assert_eq!(result[0]["data"], "opaque-data");
     }
 }
