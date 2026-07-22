@@ -19,8 +19,12 @@ thiserror = "2"
 tracing = "0.1"
 jsonschema = { version = "0.18", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["default-tls", "json", "stream"] }
+rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 wiremock = "0.6"
+
+[features]
+sqlite = ["dep:rusqlite"]

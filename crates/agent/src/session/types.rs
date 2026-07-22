@@ -96,6 +96,10 @@ pub enum SessionStoreError {
     /// Invalid request (e.g. creating a session id that already exists).
     #[error("Invalid: {0}")]
     Invalid(String),
+
+    /// Backend-specific failure (e.g. a database error).
+    #[error("Backend error: {0}")]
+    Backend(String),
 }
 
 #[cfg(test)]
