@@ -2,7 +2,7 @@
 //!
 //! This module groups small, dependency-free helpers: streaming primitives,
 //! diagnostics, JSON repair, Unicode sanitization, request validation, header
-//! merging, hashing, and context-overflow detection.
+//! merging, hashing, UUID generation, and context-overflow detection.
 
 pub mod diagnostics;
 pub mod event_stream;
@@ -11,6 +11,7 @@ pub mod headers;
 pub mod json_parse;
 pub mod overflow;
 pub mod sanitize_unicode;
+pub mod uuid;
 pub mod validation;
 
 pub use diagnostics::{AssistantMessageDiagnostic, DiagnosticKind};
@@ -20,4 +21,5 @@ pub use headers::merge_headers;
 pub use json_parse::{safe_parse_partial, try_parse_strict};
 pub use overflow::is_context_overflow;
 pub use sanitize_unicode::{sanitize, sanitize_bytes};
+pub use uuid::uuid_v7;
 pub use validation::{ValidationIssue, ValidationIssueKind, validate_context};

@@ -379,8 +379,8 @@ fn extract_account_id(token: &str) -> Option<String> {
 /// Whether to emit the `session_id` cache-affinity header. Strict
 /// OpenAI-compatible proxies reject the underscore-bearing header name;
 /// they opt out via `OpenAIResponsesCompat.sendSessionIdHeader = false`.
-/// `x-client-request-id` is unaffected and always rides along when a
-/// session id is present.
+/// `x-client-request-id` is unaffected and always sent — with the session
+/// id when present, otherwise with a generated fallback.
 pub(crate) fn should_send_session_id_header(compat: Option<&crate::types::Compat>) -> bool {
     match compat {
         Some(crate::types::Compat::OpenAIResponses(c)) => c.send_session_id_header.unwrap_or(true),
@@ -389,6 +389,11 @@ pub(crate) fn should_send_session_id_header(compat: Option<&crate::types::Compat
 }
 
 /// Build the SSE headers for a Codex request.
+///
+/// `x-client-request-id` is always emitted: the backend keys prompt caching
+/// and request correlation on it, and some endpoints require a time-ordered
+/// identifier. Without a session id we fall back to a fresh UUIDv7 instead
+/// of sending nothing.
 fn build_sse_headers(
     builder: reqwest::RequestBuilder,
     model_headers: Option<&std::collections::HashMap<String, String>>,
@@ -408,11 +413,16 @@ fn build_sse_headers(
         b = b.header("chatgpt-account-id", account_id);
     }
 
-    if let Some(sid) = session_id {
-        if send_session_id_header {
-            b = b.header("session_id", sid);
+    match session_id {
+        Some(sid) => {
+            if send_session_id_header {
+                b = b.header("session_id", sid);
+            }
+            b = b.header("x-client-request-id", sid);
         }
-        b = b.header("x-client-request-id", sid);
+        None => {
+            b = b.header("x-client-request-id", crate::utils::uuid_v7());
+        }
     }
 
     if let Some(headers) = model_headers {
@@ -897,6 +907,70 @@ mod tests {
         use crate::types::Compat;
         let other = Compat::OpenAICompletions(Box::default());
         assert!(should_send_session_id_header(Some(&other)));
+    }
+
+    /// Build a request through `build_sse_headers` and return the header map.
+    fn sse_request_headers(
+        session_id: Option<&str>,
+        send_session_id_header: bool,
+    ) -> reqwest::header::HeaderMap {
+        let builder = reqwest::Client::new().post("http://localhost/responses");
+        build_sse_headers(
+            builder,
+            None,
+            None,
+            "sk-test",
+            session_id,
+            send_session_id_header,
+        )
+        .build()
+        .expect("request must build")
+        .headers()
+        .clone()
+    }
+
+    /// With a session id, `x-client-request-id` carries the session id and
+    /// `session_id` rides along (subject to the compat gate).
+    #[test]
+    fn sse_headers_use_session_id_as_request_id() {
+        let headers = sse_request_headers(Some("sess-codex"), true);
+        assert_eq!(
+            headers.get("x-client-request-id").unwrap(),
+            "sess-codex",
+            "request id must echo the session id"
+        );
+        assert_eq!(headers.get("session_id").unwrap(), "sess-codex");
+
+        let gated = sse_request_headers(Some("sess-codex"), false);
+        assert_eq!(gated.get("x-client-request-id").unwrap(), "sess-codex");
+        assert!(
+            gated.get("session_id").is_none(),
+            "compat gate must suppress the session_id header"
+        );
+    }
+
+    /// Without a session id the request must still carry a request id —
+    /// the backend keys prompt caching and correlation on it — and the
+    /// fallback must be a time-ordered UUIDv7. The `session_id` header
+    /// must never be fabricated.
+    #[test]
+    fn sse_headers_fall_back_to_uuidv7_request_id() {
+        let headers = sse_request_headers(None, true);
+        assert!(
+            headers.get("session_id").is_none(),
+            "no session id means no session_id header"
+        );
+        let request_id = headers
+            .get("x-client-request-id")
+            .expect("fallback request id must be present")
+            .to_str()
+            .unwrap();
+        assert_eq!(request_id.len(), 36, "hyphenated UUID: {request_id}");
+        assert_eq!(
+            request_id.as_bytes()[14],
+            b'7',
+            "version nibble must be 7: {request_id}"
+        );
     }
 
     /// Codex defaults to `text.verbosity: "low"` so the backend returns
