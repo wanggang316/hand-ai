@@ -30,6 +30,7 @@ Only when the user explicitly asks to release a version: `/release <version>`, "
 
 - Rename `## [Unreleased]` to `## [<version>] - <date>` — date from `date "+%F"`, never from memory. The parser only accepts that header shape; entries left under `[Unreleased]` are invisible to `/changelog` and the startup banner.
 - Audit the range from step 1 for user-perceivable `hand` changes missing from the section (fixes and features often land without entries when they live in the tui/agent/model crates but still change what users see). Add concise entries under the proper subsection (`### Added` / `### Fixed` / …) with PR links in the established format. Library-internal changes stay out.
+- One line per bullet — never hard-wrap entries at a fixed column (GitHub renders release-body newlines as hard breaks; the workflow's reflow pass is a fallback, not a license to wrap).
 - Never touch already-released sections.
 
 ### 3. Bump the version
