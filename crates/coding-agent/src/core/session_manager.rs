@@ -316,8 +316,9 @@ pub fn load_entries_from_file(path: &Path) -> Result<Vec<SessionEntry>, CodingAg
 
 /// Find the most recent session file in `session_dir` by file mtime.
 /// Returns `None` if the directory is missing, empty, or contains no
-/// valid `.jsonl` session files (header validated cheaply by reading
-/// the first line). Mirrors `findMostRecentSession` in TS.
+/// valid `.jsonl` session files (candidates validated via the bounded
+/// header scan in [`read_session_header`], never a full-file load).
+/// Mirrors `findMostRecentSession` in TS.
 pub fn find_most_recent_session(session_dir: &Path) -> Option<PathBuf> {
     let read_dir = std::fs::read_dir(session_dir).ok()?;
 
@@ -343,10 +344,12 @@ pub fn find_most_recent_session(session_dir: &Path) -> Option<PathBuf> {
     best.map(|(p, _)| p)
 }
 
-/// Cheap session-header check: read up to 512 bytes from the start of
-/// the file and confirm the first line parses as a `SessionEntry::Session`.
-/// Used by [`find_most_recent_session`] to skip corrupted / unrelated
-/// `.jsonl` files without loading the whole content.
+/// Byte cap for the bounded header scan in [`read_session_header`].
+/// Generous enough for a header line with a long cwd plus some leading
+/// line noise, small enough that scanning a directory of multi-megabyte
+/// sessions stays proportional to the number of files, not their sizes.
+const MAX_SESSION_HEADER_SCAN_BYTES: u64 = 64 * 1024;
+
 /// Flatten an absolute cwd into a single directory name suitable for
 /// nesting under `~/.hand/agent/sessions/`. Mirrors the upstream's flattening
 /// (`/Users/x/proj` → `--Users-x-proj--`): replaces every path
@@ -360,26 +363,47 @@ fn flatten_cwd_for_session_dir(cwd: &Path) -> String {
     format!("-{body}--")
 }
 
+/// Bounded header scan: read at most [`MAX_SESSION_HEADER_SCAN_BYTES`]
+/// from the start of `path` and return its parsed session header, if
+/// any. Line handling mirrors [`parse_session_entries`]: blank and
+/// malformed lines are skipped, and the first line that parses as a
+/// [`SessionEntry`] decides the outcome — a `Session` header yields
+/// `Some`, anything else yields `None` (matching
+/// [`load_entries_from_file`], which treats such files as non-sessions).
+///
+/// Discovery is best-effort: I/O errors, non-UTF-8 content, and
+/// headers buried beyond the scan cap all yield `None` rather than an
+/// error, so one odd file can't break scanning a directory.
+fn read_session_header(path: &Path) -> Option<SessionHeader> {
+    use std::io::{BufRead, Read};
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file.take(MAX_SESSION_HEADER_SCAN_BYTES));
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            // EOF without a parseable entry. A line the cap truncated
+            // mid-way fails the parse below and lands here on the
+            // next iteration.
+            return None;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<SessionEntry>(&line) {
+            Ok(SessionEntry::Session(header)) => return Some(header),
+            Ok(_) => return None,
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Cheap validity probe over [`read_session_header`]: `true` when the
+/// bounded scan finds a session header. Used by
+/// [`find_most_recent_session`] to skip corrupted / unrelated `.jsonl`
+/// files without loading whole session bodies.
 fn is_valid_session_file(path: &Path) -> bool {
-    use std::io::Read;
-    let mut file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-    let mut buf = [0u8; 512];
-    let n = match file.read(&mut buf) {
-        Ok(n) => n,
-        Err(_) => return false,
-    };
-    let head = match std::str::from_utf8(&buf[..n]) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let first_line = head.lines().next().unwrap_or("");
-    matches!(
-        serde_json::from_str::<SessionEntry>(first_line),
-        Ok(SessionEntry::Session(_))
-    )
+    read_session_header(path).is_some()
 }
 
 /// Build a [`SessionInfo`] from a session file by loading the
@@ -852,29 +876,35 @@ impl SessionManager {
     /// open it because the resume site dutifully looked in
     /// `--session-dir` (#58). Now the search and the open agree on
     /// the same directory.
+    ///
+    /// Discovery goes through [`Self::most_recent_session_path`]
+    /// (bounded header scans + file mtime), so the only full read is
+    /// the single [`Self::open`] of the chosen file.
     pub fn continue_recent_in(
         cwd: &Path,
         session_dir: Option<&Path>,
     ) -> Result<Self, CodingAgentError> {
-        let mut sessions = match session_dir {
-            Some(dir) => list_sessions_from_dir(dir)?,
-            None => return Self::continue_recent_default(cwd),
-        };
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
-        let most_recent = sessions
-            .into_iter()
-            .next()
+        let most_recent = Self::most_recent_session_path(cwd, session_dir)
             .ok_or_else(|| CodingAgentError::Session("No sessions found to continue".into()))?;
-        Self::open(&most_recent.path)
+        Self::open(&most_recent)
     }
 
-    fn continue_recent_default(cwd: &Path) -> Result<Self, CodingAgentError> {
-        let sessions = Self::list(cwd)?;
-        let most_recent = sessions
-            .into_iter()
-            .next()
-            .ok_or_else(|| CodingAgentError::Session("No sessions found to continue".into()))?;
-        Self::open(&most_recent.path)
+    /// Locate the most recent session file for `cwd` without opening
+    /// it: candidates are validated with a bounded header scan and
+    /// ranked by file mtime, so discovery cost scales with the number
+    /// of files, not their sizes. `session_dir` overrides the
+    /// home-based default when set (`--session-dir`).
+    ///
+    /// Callers that resume via
+    /// [`crate::core::agent_session::AgentSessionConfig::resume_session`]
+    /// should pass this path straight through so the session body is
+    /// read exactly once — by whoever finally opens it.
+    pub fn most_recent_session_path(cwd: &Path, session_dir: Option<&Path>) -> Option<PathBuf> {
+        let dir = match session_dir {
+            Some(dir) => dir.to_path_buf(),
+            None => Self::default_session_dir(cwd),
+        };
+        find_most_recent_session(&dir)
     }
 
     /// Fork a session from an existing session file: produce a new
@@ -1616,6 +1646,129 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nope");
         assert!(find_most_recent_session(&missing).is_none());
+    }
+
+    fn header_line_for(id: &str, cwd: &str) -> String {
+        serde_json::to_string(&SessionEntry::Session(SessionHeader {
+            version: CURRENT_SESSION_VERSION,
+            id: id.into(),
+            timestamp: 1,
+            cwd: cwd.into(),
+            parent_session: None,
+        }))
+        .unwrap()
+    }
+
+    /// Discovery must validate candidates from a bounded header read,
+    /// not a full-file load: a valid header followed by a megabyte of
+    /// invalid tail is still a session, and a header line longer than
+    /// a small fixed probe (the old 512-byte one-shot read) still
+    /// parses.
+    #[test]
+    fn header_scan_accepts_long_header_and_invalid_tail() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let mut content = header_line_for("s_long_header", &format!("/deep/{}", "x".repeat(700)));
+        assert!(content.len() > 512, "header must exceed a small probe");
+        content.push('\n');
+        // ~1 MiB of lines that never parse as session entries.
+        for _ in 0..20_000 {
+            content.push_str("tail junk that is definitely not a session entry\n");
+        }
+        let path = session_dir.join("big.jsonl");
+        std::fs::write(&path, &content).unwrap();
+
+        assert_eq!(find_most_recent_session(&session_dir), Some(path));
+    }
+
+    /// Header discovery tolerates the same line noise as
+    /// [`parse_session_entries`]: blank / malformed lines before the
+    /// header are skipped, while a file whose first parseable entry is
+    /// not a header stays invalid — exactly the files
+    /// [`load_entries_from_file`] loads and rejects respectively, so
+    /// discovery and open can never disagree on what counts as a
+    /// session.
+    #[test]
+    fn header_scan_matches_loader_line_tolerance() {
+        let dir = TempDir::new().unwrap();
+
+        // Junk-then-header: valid to the full loader, so the bounded
+        // scan must agree.
+        let junk_then_header = dir.path().join("junk-then-header");
+        std::fs::create_dir_all(&junk_then_header).unwrap();
+        let file = junk_then_header.join("a.jsonl");
+        let header_line = header_line_for("s_after_junk", "/x");
+        std::fs::write(&file, format!("\n   \nnot json\n{header_line}\n")).unwrap();
+        assert!(matches!(
+            load_entries_from_file(&file).unwrap().first(),
+            Some(SessionEntry::Session(_))
+        ));
+        assert_eq!(find_most_recent_session(&junk_then_header), Some(file));
+
+        // Message-first: the loader treats it as a non-session, so
+        // discovery must skip it too.
+        let message_first = dir.path().join("message-first");
+        std::fs::create_dir_all(&message_first).unwrap();
+        let file = message_first.join("b.jsonl");
+        std::fs::write(
+            &file,
+            "{\"type\":\"message\",\"data\":{\"id\":\"e_1\",\"message\":{\"role\":\"user\",\"content\":\"hi\"},\"timestamp\":1}}\n",
+        )
+        .unwrap();
+        assert!(load_entries_from_file(&file).unwrap().is_empty());
+        assert!(find_most_recent_session(&message_first).is_none());
+    }
+
+    /// Pins the "bounded" in bounded header scan: a header buried past
+    /// [`MAX_SESSION_HEADER_SCAN_BYTES`] of junk is not discovered even
+    /// though a full-file load would find it — proving discovery never
+    /// falls back to reading whole session bodies.
+    #[test]
+    fn header_scan_stops_at_byte_cap() {
+        let dir = TempDir::new().unwrap();
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let junk_line = "leading junk before the real header\n";
+        let junk_lines = (MAX_SESSION_HEADER_SCAN_BYTES as usize / junk_line.len()) + 2;
+        let mut content = junk_line.repeat(junk_lines);
+        content.push_str(&header_line_for("s_beyond_cap", "/x"));
+        content.push('\n');
+        let path = session_dir.join("buried.jsonl");
+        std::fs::write(&path, &content).unwrap();
+
+        // The full loader tolerates any amount of leading junk...
+        assert!(matches!(
+            load_entries_from_file(&path).unwrap().first(),
+            Some(SessionEntry::Session(_))
+        ));
+        // ...but the bounded scan gives up at the cap, so discovery
+        // (deliberately) does not see this pathological file.
+        assert!(find_most_recent_session(&session_dir).is_none());
+    }
+
+    /// `most_recent_session_path` honours the `--session-dir` override
+    /// and returns `None` (not an error) when nothing is there — the
+    /// discovery half of what `continue_recent_in` pins end-to-end.
+    #[test]
+    fn most_recent_session_path_honours_override_dir() {
+        let cwd = TempDir::new().unwrap();
+        let override_dir = TempDir::new().unwrap();
+
+        assert!(
+            SessionManager::most_recent_session_path(cwd.path(), Some(override_dir.path()))
+                .is_none()
+        );
+
+        let file = override_dir.path().join("s_ovr.jsonl");
+        std::fs::write(&file, header_line_for("s_ovr", "/x") + "\n").unwrap();
+
+        assert_eq!(
+            SessionManager::most_recent_session_path(cwd.path(), Some(override_dir.path())),
+            Some(file)
+        );
     }
 
     #[test]

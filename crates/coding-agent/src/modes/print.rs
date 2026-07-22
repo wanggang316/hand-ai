@@ -57,21 +57,19 @@ async fn run_inner(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let base_config = setup.to_config(resume_session);
 
     let mut session = if continue_like {
-        match SessionManager::continue_recent_in(&cwd, base_config.session_dir.as_deref()) {
-            Ok(sm) => {
+        // Discovery only header-scans candidates; the resolved path is
+        // handed to AgentSession::new so the session body is read
+        // exactly once, by the open inside it. `--continue` in a fresh
+        // dir is informational, not an error.
+        match SessionManager::most_recent_session_path(&cwd, base_config.session_dir.as_deref()) {
+            Some(path) => {
                 let config = AgentSessionConfig {
-                    resume_session: Some(sm.id().to_string()),
+                    resume_session: Some(path.to_string_lossy().into_owned()),
                     ..base_config.clone()
                 };
-                drop(sm);
                 AgentSession::new(config, setup.agent_tools)?
             }
-            Err(e) => {
-                // The underlying error is always a "no sessions found" variant
-                // when --continue is invoked in a fresh dir. Don't leak the
-                // CodingAgentError Display prefix into the user-facing notice
-                // — the message is now informational, not an error.
-                let _ = e;
+            None => {
                 eprintln!("No previous session found. Starting a new session.");
                 AgentSession::new(base_config, setup.agent_tools)?
             }
