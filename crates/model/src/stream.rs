@@ -374,6 +374,11 @@ fn is_retriable_error(message: &str) -> bool {
         // response body lands, so the SDK throws `http2 request did
         // not get a response`. Transient — retry.
         "http2 request did not get a response",
+        // gRPC-style capacity wording forwarded by some
+        // OpenAI-compatible gateways when a serving worker hits its
+        // request cap, e.g. "ResourceExhausted: Worker local total
+        // request limit reached (288/48)". Transient — retry.
+        "resourceexhausted",
     ] {
         if lower.contains(needle) {
             return true;
@@ -523,6 +528,21 @@ mod tests {
         // unrelated copy.
         assert!(!is_retriable_error("Network is fine."));
         assert!(!is_retriable_error("Connection details: ..."));
+    }
+
+    /// Some OpenAI-compatible gateways forward gRPC-style status text
+    /// when a serving worker hits its request cap. The message carries
+    /// no retriable HTTP status code, so the `ResourceExhausted` token
+    /// itself must be recognised — otherwise a momentary capacity blip
+    /// terminates the agent loop instead of retrying.
+    #[test]
+    fn retriable_recognizes_resource_exhausted() {
+        assert!(is_retriable_error(
+            "ResourceExhausted: Worker local total request limit reached (288/48)"
+        ));
+        assert!(is_retriable_error("resourceexhausted"));
+        // Unrelated resource wording must not match.
+        assert!(!is_retriable_error("resource not found"));
     }
 
     #[test]

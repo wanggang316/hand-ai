@@ -130,6 +130,64 @@ async fn stream_simple_retries_on_503() {
     );
 }
 
+/// A caller abort that lands while a retry is waiting out its backoff
+/// must terminate as `Aborted` with the scheduled retry still recorded
+/// in the diagnostics. The `Aborted` stop reason is what marks the
+/// retry attempt as unsuccessful — the record must neither be dropped
+/// nor end up attached to a successful-looking terminal message.
+#[tokio::test]
+async fn stream_simple_abort_during_backoff_reports_unsuccessful_retry() {
+    let calls = Arc::new(Mutex::new(0u32));
+    let calls_for_factory = Arc::clone(&calls);
+    let provider = FauxProvider::from_factory(Api::Faux, Provider::OpenAI, move || {
+        *calls_for_factory.lock().unwrap() += 1;
+        vec![FauxScriptStep::Error(
+            "HTTP 503 service unavailable".to_string(),
+        )]
+    });
+    let registry = faux_registry(provider);
+    let model = faux_model(Api::Faux, Provider::OpenAI, "faux-1");
+    let token = CancellationToken::new();
+
+    // The first attempt errors immediately, scheduling a 1s backoff.
+    // Cancel well inside that window so the abort lands mid-backoff.
+    let token_for_cancel = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        token_for_cancel.cancel();
+    });
+
+    let options = {
+        let mut base = model::StreamOptions::default();
+        base.signal = Some(token);
+        base.max_retries = Some(2);
+        let mut o = SimpleStreamOptions::default();
+        o.base = base;
+        o
+    };
+    let msg = complete_simple(&registry, &model, Context::default(), Some(options))
+        .await
+        .expect("complete_simple should resolve");
+
+    assert_eq!(msg.stop_reason, StopReason::Aborted);
+    let err = msg.error_message.as_deref().unwrap_or("");
+    assert!(
+        err.to_ascii_lowercase().contains("aborted"),
+        "expected aborted error message, got {err:?}"
+    );
+    let diagnostics: &Vec<AssistantMessageDiagnostic> = msg
+        .diagnostics
+        .as_ref()
+        .expect("scheduled retry must stay recorded on the aborted message");
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].kind, DiagnosticKind::Retry);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        1,
+        "retried call must not start after the abort"
+    );
+}
+
 #[tokio::test]
 async fn stream_simple_no_retry_on_400() {
     let calls = Arc::new(Mutex::new(0u32));
