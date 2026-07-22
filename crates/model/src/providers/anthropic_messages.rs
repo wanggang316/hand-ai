@@ -742,23 +742,36 @@ fn convert_assistant_content(asst_msg: &AssistantMessage, model: &Model) -> Vec<
 }
 
 fn convert_tool_result_content(content: &[ToolResultContent]) -> Vec<Value> {
-    content
+    // Anthropic rejects text blocks whose `text` is empty (min length 1),
+    // so drop them instead of forwarding.
+    let blocks: Vec<Value> = content
         .iter()
-        .map(|block| match block {
-            ToolResultContent::Text(tc) => serde_json::json!({
+        .filter_map(|block| match block {
+            ToolResultContent::Text(tc) if tc.text.is_empty() => None,
+            ToolResultContent::Text(tc) => Some(serde_json::json!({
                 "type": "text",
                 "text": sanitize_surrogates(&tc.text),
-            }),
-            ToolResultContent::Image(img) => serde_json::json!({
+            })),
+            ToolResultContent::Image(img) => Some(serde_json::json!({
                 "type": "image",
                 "source": {
                     "type": "base64",
                     "media_type": &img.mime_type,
                     "data": &img.data,
                 }
-            }),
+            })),
         })
-        .collect()
+        .collect();
+
+    // Neither text nor images: emit an explicit placeholder so the model
+    // can tell the tool ran and returned nothing.
+    if blocks.is_empty() {
+        return vec![serde_json::json!({
+            "type": "text",
+            "text": "(no tool output)",
+        })];
+    }
+    blocks
 }
 
 fn convert_tool_to_anthropic(tool: &Tool) -> Value {
@@ -1411,6 +1424,62 @@ mod tests {
         let content = result[0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "tool_result");
         assert_eq!(content[0]["tool_use_id"], "call_1");
+    }
+
+    /// Empty tool results (no text, no images) must emit an explicit
+    /// "(no tool output)" text block. Anthropic rejects text blocks
+    /// whose `text` is empty, and the model otherwise can't tell the
+    /// tool ran and returned nothing.
+    #[test]
+    fn empty_tool_result_gets_no_output_placeholder() {
+        let model = test_model();
+        let msgs = vec![
+            // An empty text block and no content at all must both hit
+            // the placeholder.
+            Message::ToolResult(ToolResultMessage::new(
+                "call_1",
+                "bash",
+                vec![ToolResultContent::Text(TextContent::new(""))],
+            )),
+            Message::ToolResult(ToolResultMessage::new("call_2", "bash", vec![])),
+        ];
+        let result = convert_messages_to_anthropic(&msgs, &model);
+        assert_eq!(result.len(), 1);
+        let content = result[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        for block in content {
+            assert_eq!(block["type"], "tool_result");
+            let inner = block["content"].as_array().unwrap();
+            assert_eq!(inner.len(), 1, "exactly one placeholder block: {inner:?}");
+            assert_eq!(inner[0]["type"], "text");
+            assert_eq!(inner[0]["text"], "(no tool output)");
+        }
+    }
+
+    /// A tool result carrying an image next to an empty text block keeps
+    /// the image and drops the empty text — no placeholder is added when
+    /// real content is present.
+    #[test]
+    fn image_only_tool_result_keeps_image_without_placeholder() {
+        use crate::types::ImageContent;
+        let model = test_model();
+        let msgs = vec![Message::ToolResult(ToolResultMessage::new(
+            "call_img",
+            "screenshot",
+            vec![
+                ToolResultContent::Text(TextContent::new("")),
+                ToolResultContent::Image(ImageContent::new("ZmFrZQ==", "image/png")),
+            ],
+        ))];
+        let result = convert_messages_to_anthropic(&msgs, &model);
+        let content = result[0]["content"].as_array().unwrap();
+        let inner = content[0]["content"].as_array().unwrap();
+        assert_eq!(
+            inner.len(),
+            1,
+            "empty text block must be dropped: {inner:?}"
+        );
+        assert_eq!(inner[0]["type"], "image");
     }
 
     #[test]

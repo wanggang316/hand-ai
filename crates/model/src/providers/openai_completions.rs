@@ -1038,8 +1038,18 @@ pub fn convert_messages(
                             .iter()
                             .any(|c| matches!(c, crate::types::ToolResultContent::Image(_)));
 
-                        let content = if text_result.is_empty() && has_images {
-                            "(see attached image)".to_string()
+                        // Tool results always ship non-empty content: image-only
+                        // results point at the batched image message below, and
+                        // fully empty results get an explicit placeholder — some
+                        // providers reject empty tool content outright, and the
+                        // model otherwise can't tell the tool ran and returned
+                        // nothing.
+                        let content = if text_result.is_empty() {
+                            if has_images {
+                                "(see attached image)".to_string()
+                            } else {
+                                "(no tool output)".to_string()
+                            }
                         } else {
                             sanitize_surrogates(&text_result)
                         };
@@ -2690,6 +2700,124 @@ mod tests {
             .filter(|p| matches!(p, ContentPart::ImageUrl { .. }))
             .count();
         assert_eq!(image_count, 2, "both images must be batched");
+    }
+
+    fn tool_call_assistant(model: &Model, tool_name: &str) -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::ToolCall(ToolCall::new(
+                "tool-1",
+                tool_name,
+                serde_json::json!({}),
+            ))],
+            api: model.api,
+            provider: model.provider,
+            model: model.id.clone(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    /// Empty tool results (no text, no images) must ship the explicit
+    /// "(no tool output)" placeholder instead of empty content — some
+    /// providers reject empty tool content, and the model otherwise
+    /// can't tell the tool ran and returned nothing.
+    #[test]
+    fn convert_messages_empty_tool_result_uses_no_output_placeholder() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage::new_text("Run the command")),
+                Message::Assistant(tool_call_assistant(&model, "bash")),
+                Message::ToolResult(ToolResultMessage::new(
+                    "tool-1",
+                    "bash",
+                    vec![ToolResultContent::Text(TextContent::new(""))],
+                )),
+            ],
+            tools: None,
+        };
+
+        let msgs = convert_messages(&model, &context, &compat);
+        let roles: Vec<&'static str> = msgs
+            .iter()
+            .map(|m| match m.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+                Role::System => "system",
+            })
+            .collect();
+        // No synthetic trailing user message — there is no image to batch.
+        assert_eq!(roles, vec!["user", "assistant", "tool"]);
+        let tool_msg = msgs
+            .iter()
+            .find(|m| matches!(m.role, Role::Tool))
+            .expect("tool message present");
+        match &tool_msg.content {
+            Content::Text(s) => assert_eq!(s, "(no tool output)"),
+            other => panic!("expected plain string tool content, got {other:?}"),
+        }
+    }
+
+    /// Image-only tool results keep the "(see attached image)" pointer —
+    /// the "(no tool output)" placeholder applies only when the result
+    /// has neither text nor images. The image itself still lands in the
+    /// trailing synthetic user message.
+    #[test]
+    fn convert_messages_image_only_tool_result_keeps_image_placeholder() {
+        use crate::types::ImageContent;
+
+        let mut model = test_model(Provider::OpenAI);
+        model.input = vec![InputType::Text, InputType::Image];
+        let compat = detect_compat(&model);
+
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage::new_text("Take a screenshot")),
+                Message::Assistant(tool_call_assistant(&model, "screenshot")),
+                Message::ToolResult(ToolResultMessage::new(
+                    "tool-1",
+                    "screenshot",
+                    vec![ToolResultContent::Image(ImageContent::new(
+                        "ZmFrZQ==",
+                        "image/png",
+                    ))],
+                )),
+            ],
+            tools: None,
+        };
+
+        let msgs = convert_messages(&model, &context, &compat);
+        let tool_msg = msgs
+            .iter()
+            .find(|m| matches!(m.role, Role::Tool))
+            .expect("tool message present");
+        match &tool_msg.content {
+            Content::Text(s) => assert_eq!(s, "(see attached image)"),
+            other => panic!("expected plain string tool content, got {other:?}"),
+        }
+        let trailing = msgs.last().expect("trailing user message");
+        assert!(matches!(trailing.role, Role::User));
+        let parts = match &trailing.content {
+            Content::Array(parts) => parts,
+            other => panic!("expected Array content, got {other:?}"),
+        };
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+            "image must be batched into the trailing user message: {parts:?}"
+        );
     }
 
     /// Assistant turns with text-only content must serialize as a plain
