@@ -38,7 +38,7 @@ read this file. Add new entries above the previous version with a
 
 ### Added
 
-- `--workspace-sessions` flag opts session storage into the project- local `<cwd>/.hand/sessions/` layout. Explicit `--session-dir` still wins; the global default remains the home-based layout. (#24)
+- `--workspace-sessions` flag opts session storage into the project-local `<cwd>/.hand/sessions/` layout. Explicit `--session-dir` still wins; the global default remains the home-based layout. (#24)
 - `model::ClientBuilder` lets embedders register an arbitrary subset of built-in providers (or plug in a custom one) instead of always paying the binary-size cost of the full provider list. `Client::new()` is now sugar for `Client::builder().with_all_builtins().build()`. (#33)
 
 ### Changed
