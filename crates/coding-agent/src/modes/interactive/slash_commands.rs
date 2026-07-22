@@ -448,6 +448,7 @@ Inline:
              Up / Down  History navigation\n  \
              Ctrl+C     Cancel current turn / clear input\n  \
              Ctrl+D     Quit\n  \
+             Ctrl+X     Copy last assistant message\n  \
              Esc        Cancel running turn / close overlay\n",
         );
         for (category, entries) in groups {
@@ -1064,6 +1065,11 @@ mod tests {
         assert!(
             text.contains("Move cursor up"),
             "expected editor cursorUp description, got: {text}"
+        );
+        // Session-level shortcuts live in the static header.
+        assert!(
+            text.contains("Ctrl+X     Copy last assistant message"),
+            "expected Ctrl+X copy hint, got: {text}"
         );
     }
 

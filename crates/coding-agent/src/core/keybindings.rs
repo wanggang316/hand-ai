@@ -55,6 +55,9 @@ pub enum Action {
     ToggleThinking,
     /// Open the slash-command palette.
     OpenSlashPalette,
+    /// Copy the last assistant message to the clipboard (same routine
+    /// as `/copy`).
+    CopyLastMessage,
 }
 
 impl Action {
@@ -71,6 +74,7 @@ impl Action {
         Action::Quit,
         Action::ToggleThinking,
         Action::OpenSlashPalette,
+        Action::CopyLastMessage,
     ];
 
     /// Kebab-case name as used in YAML config keys.
@@ -87,6 +91,7 @@ impl Action {
             Action::Quit => "quit",
             Action::ToggleThinking => "toggle-thinking",
             Action::OpenSlashPalette => "open-slash-palette",
+            Action::CopyLastMessage => "copy-last-message",
         }
     }
 
@@ -265,6 +270,10 @@ impl KeyBindings {
             KeyChord::with_mods(Key::Char('t'), KeyModifiers::CTRL),
         );
         by_action.insert(Action::OpenSlashPalette, KeyChord::plain(Key::Char('/')));
+        by_action.insert(
+            Action::CopyLastMessage,
+            KeyChord::with_mods(Key::Char('x'), KeyModifiers::CTRL),
+        );
 
         Self::build(by_action)
     }
@@ -517,7 +526,27 @@ mod tests {
             kb.resolve(Action::Quit),
             Some(&KeyChord::with_mods(Key::Char('c'), KeyModifiers::CTRL))
         );
+        assert_eq!(
+            kb.resolve(Action::CopyLastMessage),
+            Some(&KeyChord::with_mods(Key::Char('x'), KeyModifiers::CTRL))
+        );
         assert!(kb.conflicts().is_empty());
+    }
+
+    #[test]
+    fn copy_last_message_is_remappable() {
+        let dir = TempDir::new().unwrap();
+        let path = write_yaml(&dir, "kb.yaml", "copy-last-message: alt+c\n");
+        let kb = KeyBindings::load(Some(&path), None).unwrap();
+        assert_eq!(
+            kb.resolve(Action::CopyLastMessage),
+            Some(&KeyChord::with_mods(Key::Char('c'), KeyModifiers::ALT))
+        );
+        // The vacated default no longer reverse-resolves to the action.
+        assert_eq!(
+            kb.resolve_chord(&KeyChord::with_mods(Key::Char('x'), KeyModifiers::CTRL)),
+            None
+        );
     }
 
     #[test]

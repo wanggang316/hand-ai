@@ -22,6 +22,12 @@ read this file. Add new entries above the previous version with a
   native `max` effort now surfaces as this level). Selectable via
   `/thinking max`, `--thinking max`, model patterns like `sonnet:max`,
   and the `default_thinking_level` setting.
+- `Ctrl+X` in interactive mode copies the last assistant message to
+  the clipboard — the keyboard shortcut for what `/copy` already does.
+  Both paths share one routine, so status feedback and the OSC 52
+  remote-session fallback behave identically. Listed under `/hotkeys`;
+  the `copy-last-message` action is declared in the keybindings config
+  layer for remapping once runtime chord translation lands.
 
 ## [0.3.0] - 2026-06-08
 
