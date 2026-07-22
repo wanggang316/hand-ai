@@ -1231,24 +1231,53 @@ pub fn normalize_mistral_tool_id(id: &str) -> String {
     }
 }
 
+/// Deterministic FNV-1a 64-bit hash rendered as 8 hex chars. Keeps oversized
+/// composite tool call ids unique and stable within the 40-char API limit.
+fn short_tool_call_id_hash(input: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")[..8].to_string()
+}
+
 fn normalize_tool_call_id(id: &str, compat: &ResolvedCompat, model: &Model) -> String {
     if compat.requires_mistral_tool_ids {
         return normalize_mistral_tool_id(id);
     }
 
-    if id.contains('|') {
-        let call_id = id.split('|').next().unwrap_or(id);
-        return call_id
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .take(40)
-            .collect();
+    if let Some((raw_call_id, raw_item_id)) = id.split_once('|') {
+        let sanitize = |s: &str| -> String {
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect()
+        };
+        // Multiple tool calls in the same turn can share the call_id part
+        // while differing by item id. Keep both parts so replayed Chat
+        // Completions payloads carry distinct tool call ids; collapse to a
+        // hash suffix when the combination exceeds the 40-char limit.
+        let call_id = sanitize(raw_call_id);
+        let item_id = sanitize(raw_item_id);
+        let combined = if item_id.is_empty() {
+            call_id.clone()
+        } else {
+            format!("{call_id}_{item_id}")
+        };
+        if combined.len() <= 40 {
+            return combined;
+        }
+        let hash = short_tool_call_id_hash(id);
+        let prefix: String = call_id.chars().take(40 - hash.len() - 1).collect();
+        return format!("{prefix}_{hash}");
     }
 
     if model.provider == Provider::OpenAI {
@@ -3097,5 +3126,55 @@ mod tests {
         let mut output = empty_output();
         capture_chunk_metadata("chatcmpl-1", "", "gpt-4o", &mut output);
         assert_eq!(output.response_model, None);
+    }
+
+    /// Composite `{call_id}|{item_id}` ids can repeat the call_id part
+    /// across tool calls in the same turn. The item id must survive
+    /// normalization so replayed Chat Completions payloads keep the
+    /// ids distinct — the API rejects duplicate tool call ids.
+    #[test]
+    fn composite_tool_call_ids_stay_unique_per_item() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        let a = normalize_tool_call_id("call_1|item_a", &compat, &model);
+        let b = normalize_tool_call_id("call_1|item_b", &compat, &model);
+        assert_eq!(a, "call_1_item_a");
+        assert_eq!(b, "call_1_item_b");
+        assert_ne!(a, b);
+    }
+
+    /// A composite id with an empty item part keeps the sanitized
+    /// call_id alone, matching the previous behaviour.
+    #[test]
+    fn composite_tool_call_id_without_item_part_keeps_call_id() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        assert_eq!(normalize_tool_call_id("call_1|", &compat, &model), "call_1");
+    }
+
+    /// Item ids from some providers run past 400 chars with base64
+    /// characters. Over the 40-char limit the id collapses to a
+    /// sanitized call_id prefix plus a deterministic hash of the full
+    /// composite id: stable across calls, distinct across items.
+    #[test]
+    fn composite_tool_call_id_over_limit_hashes_deterministically() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        let long_item_a = format!("call_abc|{}+/=", "x".repeat(400));
+        let long_item_b = format!("call_abc|{}+/=", "y".repeat(400));
+
+        let a1 = normalize_tool_call_id(&long_item_a, &compat, &model);
+        let a2 = normalize_tool_call_id(&long_item_a, &compat, &model);
+        let b = normalize_tool_call_id(&long_item_b, &compat, &model);
+
+        assert_eq!(a1, a2, "same input must normalize identically");
+        assert_ne!(a1, b, "different item ids must stay distinct");
+        assert!(a1.len() <= 40, "must respect the 40-char limit: {a1}");
+        assert!(a1.starts_with("call_abc_"), "keeps call_id prefix: {a1}");
+        assert!(
+            a1.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "only allowed chars survive: {a1}"
+        );
     }
 }
