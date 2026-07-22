@@ -118,13 +118,30 @@ jobs:
         # version header. An empty section fails the release: a version
         # without CHANGELOG content is a process error to fix before
         # tagging, not something to paper over.
+        #
+        # The CHANGELOG source is hard-wrapped at ~72 columns, but
+        # GitHub renders release-body newlines as hard breaks (no
+        # paragraph reflow), which cramps the text into a narrow ragged
+        # column. The second awk pass joins each bullet's indented
+        # continuation lines into one line so the browser wraps to the
+        # container width; headers, blank lines, and standalone lines
+        # pass through verbatim.
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           awk -v ver="$VERSION" '
             $0 ~ "^## \\[" ver "\\]" { f = 1; next }
             /^## \[/ { f = 0 }
             f
-          ' CHANGELOG.md > release-notes.md
+          ' CHANGELOG.md | awk '
+            function flush() { if (buf != "") { print buf; buf = "" } }
+            buf != "" && /^[[:space:]]+[^[:space:]]/ {
+              line = $0; sub(/^[[:space:]]+/, "", line)
+              buf = buf " " line; next
+            }
+            /^- / { flush(); buf = $0; next }
+            { flush(); print }
+            END { flush() }
+          ' > release-notes.md
           PREV_TAG="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
           if [ -n "$PREV_TAG" ]; then
             printf '\n**Full changelog**: https://github.com/%s/compare/%s...%s\n' \
