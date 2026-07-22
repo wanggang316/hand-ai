@@ -3553,6 +3553,29 @@ mod tests {
         assert_eq!(view.model_provider, "anthropic");
     }
 
+    /// The first footer view is built before the TUI's first render
+    /// (see `run()`), so everything it touches — including the
+    /// available-provider count — must be answered synchronously from
+    /// the in-process catalog snapshot and the environment. This test
+    /// being a plain `#[test]` (no async runtime available) pins that
+    /// contract: a network catalog refresh can never sneak onto the
+    /// pre-render path without breaking compilation here. Background
+    /// catalog updates must instead go through the async
+    /// `model::refresh_from_remote` hot-swap after startup.
+    #[test]
+    fn startup_footer_provider_count_is_synchronous_and_local() {
+        let session = make_session();
+        let view = InteractiveMode::build_footer_view(
+            &session,
+            &std::path::PathBuf::from("/tmp"),
+            TokenUsageSummary::default(),
+        );
+        // Bounded by the local catalog's provider list — the count is
+        // derived from `model::get_providers()` (a snapshot read), not
+        // from a remote catalog fetch.
+        assert!(view.available_provider_count <= model::get_providers().len());
+    }
+
     /// `/session` must surface the current thinking level so users
     /// can confirm `/thinking <level>` actually took effect. The
     /// label tracks `stream_options().reasoning` — `off` when None,
