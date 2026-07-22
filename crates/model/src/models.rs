@@ -171,7 +171,7 @@ const EXTENDED_THINKING_LEVELS: &[Option<crate::types::ThinkingLevel>] = &[
 /// Translate the `None = off` / `Some(level)` representation into the
 /// lower-case key that `Model.thinking_level_map` uses on disk so the
 /// helpers below can consult per-model overrides.
-fn thinking_level_map_key(level: Option<crate::types::ThinkingLevel>) -> &'static str {
+pub(crate) fn thinking_level_map_key(level: Option<crate::types::ThinkingLevel>) -> &'static str {
     match level {
         None => "off",
         Some(crate::types::ThinkingLevel::Minimal) => "minimal",

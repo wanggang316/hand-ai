@@ -26,6 +26,11 @@ pub struct OpenAICompletionsOptions {
     pub base: StreamOptions,
     pub tool_choice: Option<ToolChoice>,
     pub reasoning_effort: Option<openai_rust::types::ReasoningEffort>,
+    /// Provider-native effort keyword from the model's thinking level map
+    /// (e.g. a level the wire enum cannot express). Takes precedence over
+    /// `reasoning_effort` at emission time; the typed field still signals
+    /// that thinking is enabled for compat toggles.
+    pub native_reasoning_effort: Option<String>,
 }
 
 impl OpenAICompletionsOptions {
@@ -72,6 +77,7 @@ impl crate::api_registry::ApiProvider for OpenAICompletionsProvider {
             base,
             tool_choice: None,
             reasoning_effort: None,
+            native_reasoning_effort: None,
         });
         stream_openai_completions(model, context, opts)
     }
@@ -118,11 +124,14 @@ impl crate::api_registry::ApiProvider for OpenAICompletionsProvider {
                 .as_ref()
                 .and_then(|o| clamp_reasoning(o.reasoning).map(map_thinking_level))
         };
+        let native_reasoning_effort =
+            resolve_native_effort(&model, options.as_ref().and_then(|o| o.reasoning));
 
         let opts = OpenAICompletionsOptions {
             base,
             tool_choice: None,
             reasoning_effort,
+            native_reasoning_effort,
         };
 
         stream_openai_completions(model, context, Some(opts))
@@ -607,18 +616,20 @@ fn finish_current_block(
 // Client & Request Building
 // =============================================================================
 
-fn create_client(
+/// Assemble the per-request header set: model catalog headers, session
+/// affinity headers, GitHub Copilot protocol headers, then caller
+/// overrides (later entries win).
+fn assemble_request_headers(
     model: &Model,
     context: &Context,
-    api_key: &str,
+    compat: &ResolvedCompat,
     options_headers: Option<&HashMap<String, String>>,
     session_id: Option<&str>,
     cache_retention: Option<crate::types::CacheRetention>,
-) -> Result<Client, String> {
-    let compat = get_compat(model);
+) -> HashMap<String, String> {
     let mut headers = model.headers.clone().unwrap_or_default();
 
-    for (k, v) in resolve_session_affinity_headers(&compat, session_id, cache_retention) {
+    for (k, v) in resolve_session_affinity_headers(compat, session_id, cache_retention) {
         headers.insert(k, v);
     }
 
@@ -660,9 +671,49 @@ fn create_client(
         headers.extend(opts.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
 
+    headers
+}
+
+fn create_client(
+    model: &Model,
+    context: &Context,
+    api_key: &str,
+    options_headers: Option<&HashMap<String, String>>,
+    session_id: Option<&str>,
+    cache_retention: Option<crate::types::CacheRetention>,
+) -> Result<Client, String> {
+    let compat = get_compat(model);
+    let headers = assemble_request_headers(
+        model,
+        context,
+        &compat,
+        options_headers,
+        session_id,
+        cache_retention,
+    );
+
+    // The SDK client only sets bearer auth itself; everything assembled
+    // above must ride on the underlying HTTP client as default headers,
+    // or it never reaches the wire. Entries that don't form valid header
+    // names/values are skipped rather than failing the whole request.
+    let mut header_map = reqwest::header::HeaderMap::new();
+    for (k, v) in &headers {
+        if let (Ok(name), Ok(value)) = (
+            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+            reqwest::header::HeaderValue::from_str(v),
+        ) {
+            header_map.insert(name, value);
+        }
+    }
+    let http_client = reqwest::Client::builder()
+        .default_headers(header_map)
+        .build()
+        .map_err(|e| e.to_string())?;
+
     Client::builder()
         .api_key(api_key.to_string())
         .base_url(model.base_url.clone())
+        .http_client(http_client)
         .build()
         .map_err(|e| e.to_string())
 }
@@ -779,20 +830,32 @@ fn build_params(
         // thinking tokens by default. The SDK's top-level
         // `reasoning_effort` field is the wrong shape for OpenRouter
         // — fall through to extra_params for the nested form.
-        let effort_str = match options.reasoning_effort {
-            Some(openai_rust::types::ReasoningEffort::Minimal) => "minimal",
-            Some(openai_rust::types::ReasoningEffort::Low) => "low",
-            Some(openai_rust::types::ReasoningEffort::Medium) => "medium",
-            Some(openai_rust::types::ReasoningEffort::High) => "high",
-            None => "none",
-        };
+        // A provider-native keyword from the thinking level map beats the
+        // clamped enum — it names an effort the enum cannot express.
+        let effort_str =
+            options
+                .native_reasoning_effort
+                .as_deref()
+                .unwrap_or(match options.reasoning_effort {
+                    Some(openai_rust::types::ReasoningEffort::Minimal) => "minimal",
+                    Some(openai_rust::types::ReasoningEffort::Low) => "low",
+                    Some(openai_rust::types::ReasoningEffort::Medium) => "medium",
+                    Some(openai_rust::types::ReasoningEffort::High) => "high",
+                    None => "none",
+                });
         builder =
             builder.insert_extra_param("reasoning", serde_json::json!({ "effort": effort_str }));
-    } else if let Some(effort) = options.reasoning_effort
+    } else if options.reasoning_effort.is_some()
         && model.reasoning
         && compat.supports_reasoning_effort
     {
-        builder = builder.reasoning_effort(effort);
+        if let Some(native) = &options.native_reasoning_effort {
+            // Same wire key as the typed field, but free of the enum's
+            // ceiling; serde flattens it into the request body.
+            builder = builder.insert_extra_param("reasoning_effort", serde_json::json!(native));
+        } else if let Some(effort) = options.reasoning_effort {
+            builder = builder.reasoning_effort(effort);
+        }
     }
 
     if model.base_url.contains("openrouter.ai")
@@ -1054,8 +1117,14 @@ pub fn convert_messages(
                             sanitize_surrogates(&text_result)
                         };
 
-                        let mut tool_msg =
-                            RequestMessage::tool_response(content, tr.tool_call_id.clone());
+                        // The id must be normalized with the same rules as the
+                        // assistant tool_calls id above — the API matches tool
+                        // messages to prior calls by exact id, so an
+                        // unnormalized composite id here would orphan the pair.
+                        let mut tool_msg = RequestMessage::tool_response(
+                            content,
+                            normalize_tool_call_id(&tr.tool_call_id, compat, model),
+                        );
 
                         if compat.requires_tool_result_name {
                             tool_msg = tool_msg.with_name(tr.tool_name.clone());
@@ -1363,6 +1432,16 @@ fn clamp_reasoning(reasoning: Option<ThinkingLevel>) -> Option<ThinkingLevel> {
         ThinkingLevel::Xhigh | ThinkingLevel::Max => ThinkingLevel::High,
         _ => r,
     })
+}
+
+/// Provider-native effort keyword for the requested level, if the model's
+/// thinking level map defines one. The map values name what the provider
+/// itself accepts (e.g. an effort above the wire enum's ceiling), so when
+/// present they beat the clamped enum at emission time.
+fn resolve_native_effort(model: &Model, level: Option<ThinkingLevel>) -> Option<String> {
+    let map = model.thinking_level_map.as_ref()?;
+    map.get(crate::models::thinking_level_map_key(Some(level?)))?
+        .clone()
 }
 
 fn map_stop_reason(reason: &str) -> StopReason {
@@ -3375,6 +3454,176 @@ mod tests {
         let mut output = empty_output();
         capture_chunk_metadata("chatcmpl-1", "", "gpt-4o", &mut output);
         assert_eq!(output.response_model, None);
+    }
+
+    /// A composite tool call id must normalize identically on the
+    /// assistant side and the tool-response side — the API pairs tool
+    /// messages to prior calls by exact id, so a one-sided rewrite
+    /// orphans the pair.
+    #[test]
+    fn convert_messages_normalizes_tool_result_ids_to_match_assistant() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+
+        let mut assistant = tool_call_assistant(&model, "bash");
+        if let AssistantContentBlock::ToolCall(tc) = &mut assistant.content[0] {
+            tc.id = "call_1|item_a".to_string();
+        }
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage::new_text("run")),
+                Message::Assistant(assistant),
+                Message::ToolResult(ToolResultMessage::new(
+                    "call_1|item_a",
+                    "bash",
+                    vec![ToolResultContent::Text(TextContent::new("ok"))],
+                )),
+            ],
+            tools: None,
+        };
+
+        let msgs = convert_messages(&model, &context, &compat);
+        let assistant_id = msgs
+            .iter()
+            .find_map(|m| m.tool_calls.as_ref())
+            .and_then(|tcs| tcs.first())
+            .map(|tc| tc.id.clone())
+            .expect("assistant tool call present");
+        let tool_id = msgs
+            .iter()
+            .find_map(|m| m.tool_call_id.clone())
+            .expect("tool message present");
+        assert_eq!(assistant_id, "call_1_item_a");
+        assert_eq!(tool_id, assistant_id);
+    }
+
+    /// The assembled header set must combine catalog headers, session
+    /// affinity headers, and the GitHub Copilot protocol headers, with
+    /// caller overrides winning. `create_client` installs exactly this
+    /// map as default headers on the underlying HTTP client.
+    #[test]
+    fn assemble_request_headers_collects_all_sources() {
+        use crate::types::{CacheRetention, SessionAffinityFormat};
+        let mut model = test_model(Provider::GitHubCopilot);
+        model.headers = Some(HashMap::from([(
+            "Editor-Version".to_string(),
+            "hand/1.0".to_string(),
+        )]));
+        let mut compat = detect_compat(&model);
+        compat.send_session_affinity_headers = true;
+        compat.session_affinity_format = SessionAffinityFormat::OpenRouter;
+
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage::new_text("hi")),
+                Message::Assistant(tool_call_assistant(&model, "bash")),
+            ],
+            tools: None,
+        };
+        let overrides = HashMap::from([("X-Custom".to_string(), "1".to_string())]);
+        let headers = assemble_request_headers(
+            &model,
+            &context,
+            &compat,
+            Some(&overrides),
+            Some("sess-1"),
+            Some(CacheRetention::Short),
+        );
+        assert_eq!(
+            headers.get("Editor-Version").map(String::as_str),
+            Some("hand/1.0")
+        );
+        assert_eq!(
+            headers.get("x-session-id").map(String::as_str),
+            Some("sess-1")
+        );
+        // Last message is an assistant turn → agent-initiated call.
+        assert_eq!(
+            headers.get("X-Initiator").map(String::as_str),
+            Some("agent")
+        );
+        assert_eq!(headers.get("X-Custom").map(String::as_str), Some("1"));
+    }
+
+    /// A provider-native effort keyword from the thinking level map must
+    /// reach the wire even though the typed enum clamps the level to
+    /// `high`.
+    #[test]
+    fn build_params_prefers_native_effort_over_clamped_enum() {
+        let mut model = test_model(Provider::OpenAI);
+        model.reasoning = true;
+        model.thinking_level_map = Some(HashMap::from([(
+            "max".to_string(),
+            Some("max".to_string()),
+        )]));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let options = OpenAICompletionsOptions {
+            reasoning_effort: Some(openai_rust::types::ReasoningEffort::High),
+            native_reasoning_effort: resolve_native_effort(&model, Some(ThinkingLevel::Max)),
+            ..OpenAICompletionsOptions::default()
+        };
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(
+            body["reasoning_effort"], "max",
+            "native keyword must beat the clamped enum: {body}"
+        );
+    }
+
+    /// The OpenRouter nested reasoning object honours the native keyword
+    /// the same way.
+    #[test]
+    fn build_params_openrouter_prefers_native_effort() {
+        let mut model = test_model(Provider::Openrouter);
+        model.reasoning = true;
+        model.base_url = "https://openrouter.ai/api/v1".to_string();
+        model.thinking_level_map = Some(HashMap::from([(
+            "max".to_string(),
+            Some("max".to_string()),
+        )]));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage::new_text("hi"))],
+            tools: None,
+        };
+        let options = OpenAICompletionsOptions {
+            reasoning_effort: Some(openai_rust::types::ReasoningEffort::High),
+            native_reasoning_effort: resolve_native_effort(&model, Some(ThinkingLevel::Max)),
+            ..OpenAICompletionsOptions::default()
+        };
+        let params = build_params(&model, &context, &options).expect("build ok");
+        let body = serde_json::to_value(&params).expect("serialize");
+        assert_eq!(body["reasoning"], serde_json::json!({ "effort": "max" }));
+    }
+
+    /// Map lookup semantics: value string when defined, None when the
+    /// map or the key is absent, and None for the off sentinel.
+    #[test]
+    fn resolve_native_effort_reads_map_value() {
+        let mut model = test_model(Provider::OpenAI);
+        assert_eq!(
+            resolve_native_effort(&model, Some(ThinkingLevel::Max)),
+            None
+        );
+        model.thinking_level_map = Some(HashMap::from([(
+            "max".to_string(),
+            Some("max".to_string()),
+        )]));
+        assert_eq!(
+            resolve_native_effort(&model, Some(ThinkingLevel::Max)),
+            Some("max".to_string())
+        );
+        assert_eq!(
+            resolve_native_effort(&model, Some(ThinkingLevel::High)),
+            None
+        );
+        assert_eq!(resolve_native_effort(&model, None), None);
     }
 
     /// Composite `{call_id}|{item_id}` ids can repeat the call_id part
