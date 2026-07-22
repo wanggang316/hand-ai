@@ -58,6 +58,7 @@ impl crate::api_registry::ApiProvider for AnthropicMessagesProvider {
 
         let reasoning = reasoning.map(|r| match r {
             ThinkingLevel::Xhigh if !supports_xhigh(&model) => ThinkingLevel::High,
+            ThinkingLevel::Max if !supports_adaptive_thinking(&model.id) => ThinkingLevel::High,
             other => other,
         });
 
@@ -507,8 +508,9 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
         // - Opus 4.7+ exposes `xhigh` natively; sending `max` on 4.7
         //   is rejected with "invalid effort".
         // Other adaptive-thinking models (Sonnet 4.6, ...) don't
-        // support either xhigh OR max; clamp to `high` so the request
-        // still passes validation.
+        // support xhigh; clamp to `high` so the request still passes
+        // validation. The `max` level needs no per-generation split:
+        // every adaptive-thinking Claude accepts the top `max` effort.
         let is_opus_4_6 = model.id.contains("opus-4-6") || model.id.contains("opus-4.6");
         let is_opus_4_7 = model.id.contains("opus-4-7") || model.id.contains("opus-4.7");
         let effort = match level {
@@ -524,6 +526,7 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
                     "high"
                 }
             }
+            ThinkingLevel::Max => "max",
         };
 
         serde_json::json!({
@@ -532,12 +535,13 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
             "display": "summarized",
         })
     } else {
-        // Budget-based thinking for older models
+        // Budget-based thinking for older models; the extended levels
+        // clamp to the high budget.
         let budget = match level {
             ThinkingLevel::Minimal => 1024u32,
             ThinkingLevel::Low => 2048,
             ThinkingLevel::Medium => 8192,
-            ThinkingLevel::High | ThinkingLevel::Xhigh => 16384,
+            ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => 16384,
         };
 
         serde_json::json!({
@@ -1661,7 +1665,7 @@ mod tests {
     }
 
     /// Other adaptive-thinking models (Sonnet 4.6, ...) don't accept
-    /// xhigh OR max. Clamp to `high` so the request stays valid.
+    /// a native xhigh. Clamp to `high` so the request stays valid.
     #[test]
     fn thinking_config_xhigh_clamps_to_high_on_sonnet_4_6() {
         let model = Model {
@@ -1671,6 +1675,38 @@ mod tests {
         let config = build_thinking_config(ThinkingLevel::Xhigh, &model);
         assert_eq!(config["type"], "adaptive");
         assert_eq!(config["effort"], "high");
+    }
+
+    /// The `max` level maps to the top `"max"` effort on every
+    /// adaptive-thinking generation — no per-model split like xhigh.
+    #[test]
+    fn thinking_config_max_maps_to_max_on_adaptive_models() {
+        for id in [
+            "claude-opus-4-6-20251022",
+            "claude-opus-4-7-20260101",
+            "claude-sonnet-4-6-20251022",
+        ] {
+            let model = Model {
+                id: id.to_string(),
+                ..test_model()
+            };
+            let config = build_thinking_config(ThinkingLevel::Max, &model);
+            assert_eq!(config["type"], "adaptive", "model {id}");
+            assert_eq!(config["effort"], "max", "model {id}");
+        }
+    }
+
+    /// Budget-based models have no effort tiers — `max` clamps to the
+    /// high budget, exactly like xhigh.
+    #[test]
+    fn thinking_config_max_clamps_to_high_budget_on_budget_models() {
+        let model = Model {
+            id: "claude-3-5-sonnet-20241022".to_string(),
+            ..test_model()
+        };
+        let config = build_thinking_config(ThinkingLevel::Max, &model);
+        assert_eq!(config["type"], "enabled");
+        assert_eq!(config["budget_tokens"], 16384);
     }
 
     /// Extended thinking is incompatible with `temperature`: the

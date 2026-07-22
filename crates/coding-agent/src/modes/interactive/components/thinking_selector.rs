@@ -30,6 +30,7 @@ fn level_label(level: Option<ThinkingLevel>) -> &'static str {
         Some(ThinkingLevel::Medium) => "medium",
         Some(ThinkingLevel::High) => "high",
         Some(ThinkingLevel::Xhigh) => "xhigh",
+        Some(ThinkingLevel::Max) => "max",
     }
 }
 
@@ -41,7 +42,8 @@ fn level_description(level: Option<ThinkingLevel>) -> &'static str {
         Some(ThinkingLevel::Low) => "Light reasoning (~2k tokens)",
         Some(ThinkingLevel::Medium) => "Moderate reasoning (~8k tokens)",
         Some(ThinkingLevel::High) => "Deep reasoning (~16k tokens)",
-        Some(ThinkingLevel::Xhigh) => "Maximum reasoning (~32k tokens)",
+        Some(ThinkingLevel::Xhigh) => "Extra-high reasoning (~32k tokens)",
+        Some(ThinkingLevel::Max) => "Maximum reasoning",
     }
 }
 
@@ -150,6 +152,7 @@ mod tests {
             Some(ThinkingLevel::Medium),
             Some(ThinkingLevel::High),
             Some(ThinkingLevel::Xhigh),
+            Some(ThinkingLevel::Max),
         ]
     }
 

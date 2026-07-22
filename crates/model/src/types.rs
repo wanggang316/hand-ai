@@ -583,6 +583,9 @@ pub enum ThinkingLevel {
     High,
     /// Extra high reasoning (clamped to High for most providers).
     Xhigh,
+    /// Maximum reasoning (provider's top effort tier; clamped to High
+    /// for providers without a native "max" effort).
+    Max,
 }
 
 /// Token budgets for each thinking level (token-based providers only).
@@ -744,10 +747,10 @@ impl SimpleStreamOptions {
         }
     }
 
-    /// Clamp thinking level to exclude "xhigh".
+    /// Clamp thinking level to exclude "xhigh" and "max".
     pub fn clamp_reasoning(&self) -> Option<ThinkingLevel> {
         self.reasoning.map(|r| match r {
-            ThinkingLevel::Xhigh => ThinkingLevel::High,
+            ThinkingLevel::Xhigh | ThinkingLevel::Max => ThinkingLevel::High,
             _ => r,
         })
     }
@@ -790,7 +793,9 @@ impl SimpleStreamOptions {
             ThinkingLevel::Minimal => budgets.minimal.unwrap_or(1024),
             ThinkingLevel::Low => budgets.low.unwrap_or(2048),
             ThinkingLevel::Medium => budgets.medium.unwrap_or(8192),
-            ThinkingLevel::High | ThinkingLevel::Xhigh => budgets.high.unwrap_or(16384),
+            ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => {
+                budgets.high.unwrap_or(16384)
+            }
         };
 
         const MIN_OUTPUT_TOKENS: u32 = 1024;

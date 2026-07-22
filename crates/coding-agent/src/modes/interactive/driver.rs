@@ -1565,7 +1565,7 @@ fn refresh_footer(
 
 /// Tint the editor's focused border with the active thinking level.
 /// The palette uses truecolor literals for `thinkingOff`/`Minimal`/
-/// `Low`/`Medium`/`High`/`Xhigh` so the colours work under any
+/// `Low`/`Medium`/`High`/`Xhigh`/`Max` so the colours work under any
 /// terminal.
 fn refresh_editor_border(session: &AgentSession, editor: &Arc<StdMutex<EditorComponent>>) {
     let colour = thinking_level_border_color(session.stream_options().reasoning);
@@ -1576,9 +1576,10 @@ fn refresh_editor_border(session: &AgentSession, editor: &Arc<StdMutex<EditorCom
 
 /// Map a thinking level to the focused-border SGR. Uses the
 /// dark-theme palette: `thinking_off`=#505050, `Minimal`=#6e6e6e,
-/// `Low`=#5f87af, `Medium`=#81a2be, `High`=#b294bb, `Xhigh`=#d183e8.
-/// `None` (reasoning off) returns the default `BORDER_FOCUS` cyan so
-/// the border stays consistent with the editor's idle state.
+/// `Low`=#5f87af, `Medium`=#81a2be, `High`=#b294bb, `Xhigh`=#d183e8,
+/// `Max`=#ff5fff. `None` (reasoning off) returns the default
+/// `BORDER_FOCUS` cyan so the border stays consistent with the
+/// editor's idle state.
 fn thinking_level_border_color(level: Option<model::ThinkingLevel>) -> String {
     use model::ThinkingLevel;
     match level {
@@ -1588,6 +1589,7 @@ fn thinking_level_border_color(level: Option<model::ThinkingLevel>) -> String {
         Some(ThinkingLevel::Medium) => "\x1b[38;2;129;162;190m".to_string(),
         Some(ThinkingLevel::High) => "\x1b[38;2;178;148;187m".to_string(),
         Some(ThinkingLevel::Xhigh) => "\x1b[38;2;209;131;232m".to_string(),
+        Some(ThinkingLevel::Max) => "\x1b[38;2;255;95;255m".to_string(),
     }
 }
 
@@ -2250,7 +2252,7 @@ async fn mount_thinking_selector(
                 push_status(
                     chat,
                     format!(
-                        "[/thinking: unknown level '{trimmed}' — try off/minimal/low/medium/high/xhigh]"
+                        "[/thinking: unknown level '{trimmed}' — try off/minimal/low/medium/high/xhigh/max]"
                     ),
                     Some(YELLOW_FG),
                 );
@@ -2271,6 +2273,7 @@ async fn mount_thinking_selector(
         Some(ThinkingLevel::Medium),
         Some(ThinkingLevel::High),
         Some(ThinkingLevel::Xhigh),
+        Some(ThinkingLevel::Max),
     ];
     // Seed the selector with the active level so the cursor lands on it.
     let current = session.stream_options().reasoning;
@@ -2340,6 +2343,7 @@ fn level_label(level: model::ThinkingLevel) -> &'static str {
         ThinkingLevel::Medium => "medium",
         ThinkingLevel::High => "high",
         ThinkingLevel::Xhigh => "xhigh",
+        ThinkingLevel::Max => "max",
     }
 }
 
@@ -2442,6 +2446,7 @@ pub(crate) fn build_settings_entries(
         Some(ThinkingLevelSetting::Medium) => "medium".to_string(),
         Some(ThinkingLevelSetting::High) => "high".to_string(),
         Some(ThinkingLevelSetting::Xhigh) => "xhigh".to_string(),
+        Some(ThinkingLevelSetting::Max) => "max".to_string(),
         None => "(unset)".to_string(),
     };
 
@@ -4205,6 +4210,7 @@ mod tests {
             ThinkingLevel::Medium,
             ThinkingLevel::High,
             ThinkingLevel::Xhigh,
+            ThinkingLevel::Max,
         ];
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for l in levels {

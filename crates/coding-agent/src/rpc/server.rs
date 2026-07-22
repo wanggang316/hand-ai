@@ -773,8 +773,8 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
             RpcResponse::new(id, RpcResponseBody::SetThinkingLevel(RpcResultEmpty::ok()))
         }
         RpcCommand::CycleThinkingLevel { id } => {
-            // Cycle order matches the TS reference's full ladder:
-            // minimal → low → medium → high → xhigh → minimal.
+            // Cycle through the full ladder:
+            // minimal → low → medium → high → xhigh → max → minimal.
             // Treat "unset" as Medium so cycling from the implicit
             // default lands somewhere predictable (High).
             let current = session
@@ -786,7 +786,8 @@ async fn handle_command(session: &mut AgentSession, cmd: RpcCommand) -> RpcRespo
                 ThinkingLevel::Low => ThinkingLevel::Medium,
                 ThinkingLevel::Medium => ThinkingLevel::High,
                 ThinkingLevel::High => ThinkingLevel::Xhigh,
-                ThinkingLevel::Xhigh => ThinkingLevel::Minimal,
+                ThinkingLevel::Xhigh => ThinkingLevel::Max,
+                ThinkingLevel::Max => ThinkingLevel::Minimal,
             };
             let mut opts = session.stream_options().clone();
             opts.reasoning = Some(next);

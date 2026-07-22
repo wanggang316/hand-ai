@@ -602,6 +602,7 @@ pub enum ThinkingLevelSetting {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 /// Which on-disk settings layer a write targets.
@@ -1331,6 +1332,7 @@ impl SettingsManager {
                     "medium" => Some(ThinkingLevelSetting::Medium),
                     "high" => Some(ThinkingLevelSetting::High),
                     "xhigh" => Some(ThinkingLevelSetting::Xhigh),
+                    "max" => Some(ThinkingLevelSetting::Max),
                     // The display value `(unset)` and any unrecognised
                     // text both map back to None — the merged-view
                     // entry uses `(unset)` as the placeholder, so a
@@ -1780,7 +1782,7 @@ const ENUM_VALUE_FIELDS: &[(&str, &[&str])] = &[
     ("theme", &["dark", "light", "high-contrast", "system"]),
     (
         "default-thinking-level",
-        &["off", "minimal", "low", "medium", "high", "xhigh"],
+        &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
     ),
 ];
 
@@ -2144,6 +2146,7 @@ mod tests {
             ("medium", ThinkingLevelSetting::Medium),
             ("high", ThinkingLevelSetting::High),
             ("xhigh", ThinkingLevelSetting::Xhigh),
+            ("max", ThinkingLevelSetting::Max),
         ] {
             mgr.apply_setting_by_id(SettingsScope::Global, "default_thinking_level", s)
                 .unwrap();

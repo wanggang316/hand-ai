@@ -1533,7 +1533,9 @@ fn static_deepseek_models() -> Vec<Model> {
     thinking_map.insert("low".to_string(), None);
     thinking_map.insert("medium".to_string(), None);
     thinking_map.insert("high".to_string(), Some("high".to_string()));
-    thinking_map.insert("xhigh".to_string(), Some("max".to_string()));
+    // DeepSeek's native top effort is `max` — surface it as the `max`
+    // level; `xhigh` stays unmapped and clamps up to it.
+    thinking_map.insert("max".to_string(), Some("max".to_string()));
 
     let compat = Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
         thinking_format: Some("deepseek".to_string()),
