@@ -679,6 +679,53 @@ mod tests {
         assert_eq!(to_compact.len() + to_keep.len(), 10);
     }
 
+    /// A context-visible custom message reaches the model context as a
+    /// plain user message via `convert_to_llm` — the same projection the
+    /// context assembly uses. Once projected, its tokens must count
+    /// toward the keep-recent budget exactly like any other context
+    /// message, shifting the cut point instead of being skipped as
+    /// zero-cost metadata.
+    #[test]
+    fn split_for_compaction_counts_context_visible_custom_messages() {
+        use crate::core::messages::{
+            AgentMessage, CustomMessageContent, convert_to_llm, create_custom_message,
+        };
+
+        let plain: Vec<Message> = (0..4)
+            .map(|i| Message::User(UserMessage::new_text(format!("plain message {i}"))))
+            .collect();
+
+        // Baseline: four tiny messages fit the budget — nothing compacts.
+        let (to_compact, to_keep, split_idx) = split_for_compaction(&plain, 1_000);
+        assert!(to_compact.is_empty());
+        assert_eq!(to_keep.len(), 4);
+        assert_eq!(split_idx, 0);
+
+        // Inject a large context-visible custom message (~2000 tokens),
+        // projected through the real entry→context conversion.
+        let custom = AgentMessage::Custom(create_custom_message(
+            "extension/status",
+            CustomMessageContent::Text("x".repeat(8_000)),
+            true,
+            None,
+            "1970-01-01T00:00:01Z",
+        ));
+        let projected = convert_to_llm(std::slice::from_ref(&custom));
+        assert_eq!(projected.len(), 1, "custom message must project to context");
+
+        let mut messages = plain;
+        messages.insert(3, projected[0].clone());
+
+        // Same budget: the projected custom message blows the keep-recent
+        // budget, so the cut point moves past it — only the final plain
+        // message stays, and the custom message lands in the compacted
+        // (summarized) prefix.
+        let (to_compact, to_keep, split_idx) = split_for_compaction(&messages, 1_000);
+        assert_eq!(split_idx, 4);
+        assert_eq!(to_keep.len(), 1);
+        assert_eq!(to_compact.len(), 4);
+    }
+
     #[test]
     fn build_compaction_prompt_lists_files_and_messages() {
         let messages = vec![Message::User(UserMessage::new_text("hello"))];
