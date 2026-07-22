@@ -59,6 +59,7 @@ Use these sections under `## [Unreleased]`:
 - Append to existing subsections (e.g., `### Fixed`), do not create duplicates
 - NEVER modify already-released version sections (e.g., `## [0.12.2]`)
 - Each version section is immutable once released
+- One line per bullet — never hard-wrap entries at a fixed column. GitHub renders release bodies with newlines as hard breaks, so wrapped source lines display as a cramped ragged column
 
 ### Attribution
 
