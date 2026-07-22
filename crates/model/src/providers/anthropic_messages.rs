@@ -675,15 +675,20 @@ fn convert_assistant_content(asst_msg: &AssistantMessage, model: &Model) -> Vec<
                 if is_same_model {
                     if let Some(sig) = &tc.thinking_signature {
                         if !sig.is_empty() {
-                            // Only the in-band redacted marker replays as
-                            // redacted_thinking (its signature holds the
-                            // opaque `data` payload). A signed block whose
-                            // text ended up empty (e.g. minimal thinking
-                            // budget) is a normal thinking block: replaying
-                            // it as redacted would pass a thinking signature
-                            // where the API expects redacted data, and
-                            // dropping it would lose the signature.
-                            if tc.thinking.contains("[Reasoning redacted]") {
+                            // Only genuinely redacted blocks replay as
+                            // redacted_thinking (their signature holds the
+                            // opaque `data` payload). The `redacted` flag is
+                            // authoritative; the in-band marker text is kept
+                            // as a fallback for sessions stored before the
+                            // flag existed. A signed block whose text ended
+                            // up empty (e.g. minimal thinking budget) is a
+                            // normal thinking block: replaying it as redacted
+                            // would pass a thinking signature where the API
+                            // expects redacted data, and dropping it would
+                            // lose the signature.
+                            if tc.redacted == Some(true)
+                                || tc.thinking.contains("[Reasoning redacted]")
+                            {
                                 blocks.push(serde_json::json!({
                                     "type": "redacted_thinking",
                                     "data": sig,
@@ -958,6 +963,7 @@ fn parse_sse_body(body: &str, model: &Model) -> Result<Vec<AssistantMessageEvent
                                 .to_string();
                             let mut thinking_content = ThinkingContent::new("[Reasoning redacted]");
                             thinking_content.thinking_signature = Some(data);
+                            thinking_content.redacted = Some(true);
                             content_blocks.insert(
                                 index,
                                 ContentBlockState::Thinking(thinking_content.clone()),
@@ -2313,6 +2319,22 @@ mod tests {
         let model = test_model();
         let mut thinking = ThinkingContent::new("[Reasoning redacted]");
         thinking.thinking_signature = Some("opaque-data".to_string());
+        let asst = same_model_assistant(&model, thinking);
+        let result = convert_assistant_content(&asst, &model);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["type"], "redacted_thinking");
+        assert_eq!(result[0]["data"], "opaque-data");
+    }
+
+    /// The `redacted` flag set at parse time is authoritative: it routes
+    /// replay to `redacted_thinking` regardless of the block's text, so
+    /// routing no longer depends on the legacy in-band marker string.
+    #[test]
+    fn test_thinking_redacted_flag_replays_as_redacted_without_marker() {
+        let model = test_model();
+        let mut thinking = ThinkingContent::new("");
+        thinking.thinking_signature = Some("opaque-data".to_string());
+        thinking.redacted = Some(true);
         let asst = same_model_assistant(&model, thinking);
         let result = convert_assistant_content(&asst, &model);
         assert_eq!(result.len(), 1);
