@@ -10,7 +10,7 @@ The `/changelog` slash command and the M5.4 startup auto-display both
 read this file. Add new entries above the previous version with a
 `## [X.Y.Z] - YYYY-MM-DD` header — the parser only accepts that shape.
 
-## [Unreleased]
+## [0.3.1] - 2026-07-22
 
 ### Added
 
@@ -37,6 +37,33 @@ read this file. Add new entries above the previous version with a
   remote-session fallback behave identically. Listed under `/hotkeys`;
   the `copy-last-message` action is declared in the keybindings config
   layer for remapping once runtime chord translation lands.
+
+### Fixed
+
+- Tool calls from responses cut off by the output token limit are no
+  longer executed with possibly truncated arguments; each is failed
+  with an explanatory result so the model re-issues it
+  ([#97](https://github.com/wanggang316/hand-ai/pull/97))
+- `--continue` reads the resumed session file once instead of fully
+  parsing every session in the directory plus the winner three times;
+  discovery now scans bounded headers
+  ([#116](https://github.com/wanggang316/hand-ai/pull/116))
+- `Ctrl+V` falls back to clipboard text when there is no image or the
+  image read fails, instead of erroring or doing nothing
+  ([#113](https://github.com/wanggang316/hand-ai/pull/113))
+- `shell_path` setting expands a leading `~`
+  ([#115](https://github.com/wanggang316/hand-ai/pull/115))
+- Editor paste markers stay consistent through marker deletion, undo,
+  and redo — no more literal `[paste #N]` leaking into submissions
+  ([#107](https://github.com/wanggang316/hand-ai/pull/107))
+- CRLF and CR line endings wrap correctly in rendered output
+  ([#108](https://github.com/wanggang316/hand-ai/pull/108)); tabs
+  render at the editor's tab width without corrupting terminal
+  hyperlinks ([#111](https://github.com/wanggang316/hand-ai/pull/111))
+- `alt+<symbol>` keybindings (e.g. `alt+,`) fire on legacy terminal
+  protocols ([#109](https://github.com/wanggang316/hand-ai/pull/109));
+  no phantom cursor is left on screen after exit
+  ([#110](https://github.com/wanggang316/hand-ai/pull/110))
 
 ## [0.3.0] - 2026-06-08
 
