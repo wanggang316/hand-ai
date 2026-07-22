@@ -2,6 +2,10 @@
 
 use crate::core::error::CodingAgentError;
 use chrono::Utc;
+use hand_agent::session::{
+    InMemoryStore, JsonlStore, SessionEntry as StoreEntry, SessionHeader as StoreHeader,
+    SessionStore, SessionStoreError,
+};
 use model::Message;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -412,17 +416,28 @@ fn is_valid_session_file(path: &Path) -> bool {
 ///
 /// Returns `Ok(None)` for files that have no valid header (so the
 /// caller can `flatten` over a directory listing). I/O errors
-/// propagate; malformed JSONL lines are tolerated by
-/// [`parse_session_entries`].
+/// propagate; entry kinds the typed enum doesn't know are skipped.
 pub fn build_session_info(path: &Path) -> Result<Option<SessionInfo>, CodingAgentError> {
-    let entries = load_entries_from_file(path)?;
-    if entries.is_empty() {
+    let Ok((dir, stem)) = store_addr(path) else {
         return Ok(None);
-    }
-    let header = match &entries[0] {
-        SessionEntry::Session(h) => h.clone(),
-        _ => return Ok(None),
     };
+    let (store_header, body) = match JsonlStore::new(&dir).load(&stem) {
+        Ok(loaded) => loaded,
+        // Missing / corrupt / header-less files list as non-sessions,
+        // matching the tolerant reader this replaced.
+        Err(SessionStoreError::NotFound(_)) | Err(SessionStoreError::Corrupt { .. }) => {
+            return Ok(None);
+        }
+        Err(SessionStoreError::Io(e)) => {
+            return Err(CodingAgentError::Session(format!(
+                "Failed to read session: {}",
+                e
+            )));
+        }
+        Err(e) => return Err(store_err(e)),
+    };
+    let header = to_typed_header(&store_header);
+    let entries: Vec<SessionEntry> = body.iter().filter_map(to_typed_entry).collect();
 
     let mtime = std::fs::metadata(path)
         .and_then(|m| m.modified())
@@ -552,13 +567,81 @@ fn extract_message_text(message: &Message) -> String {
     }
 }
 
-/// Manages session files (JSONL format).
+/// Convert the manager's typed header into the store's header shape.
+fn to_store_header(header: &SessionHeader) -> StoreHeader {
+    StoreHeader {
+        version: header.version,
+        id: header.id.clone(),
+        timestamp: header.timestamp,
+        cwd: header.cwd.clone(),
+        parent_session: header.parent_session.clone(),
+        extra: serde_json::Map::new(),
+    }
+}
+
+/// Convert a store header back into the typed header. Unknown header
+/// fields are dropped, exactly as the previous typed-struct parse did.
+fn to_typed_header(header: &StoreHeader) -> SessionHeader {
+    SessionHeader {
+        version: header.version,
+        id: header.id.clone(),
+        timestamp: header.timestamp,
+        cwd: header.cwd.clone(),
+        parent_session: header.parent_session.clone(),
+    }
+}
+
+/// Convert a typed entry into the store's envelope. The typed enum's
+/// serde shape IS the `{"type","data"}` envelope (adjacent tagging), so
+/// conversion is serializing into a `Value` and re-reading that as the
+/// envelope struct — kind and payload land unchanged.
+fn to_store_entry(entry: &SessionEntry) -> Result<StoreEntry, CodingAgentError> {
+    Ok(serde_json::from_value(serde_json::to_value(entry)?)?)
+}
+
+/// Convert a store envelope back into a typed entry. Returns `None`
+/// for kinds or payloads the typed enum doesn't know — the previous
+/// tolerant line-parser skipped exactly those lines on read.
+fn to_typed_entry(entry: &StoreEntry) -> Option<SessionEntry> {
+    serde_json::to_value(entry)
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+}
+
+/// Map a store error into the session error domain.
+fn store_err(e: SessionStoreError) -> CodingAgentError {
+    CodingAgentError::Session(e.to_string())
+}
+
+/// Derive the store addressing (directory + file-stem key) for a
+/// session file path. The stem is the store key even when the header
+/// id differs (literal-path sessions keep working).
+fn store_addr(path: &Path) -> Result<(PathBuf, String), CodingAgentError> {
+    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            CodingAgentError::Session(format!("Invalid session path: {}", path.display()))
+        })?;
+    Ok((dir, stem))
+}
+
+/// Manages session logs. Storage is delegated to a
+/// [`hand_agent::session::SessionStore`]: JSONL files for on-disk
+/// sessions, the in-memory backend for ephemeral ones. The manager
+/// keeps the typed entry list as its in-memory representation and
+/// mirrors every mutation through the store.
 pub struct SessionManager {
     path: PathBuf,
     session_dir: PathBuf,
     header: SessionHeader,
     entries: Vec<SessionEntry>,
-    in_memory: bool,
+    store: Box<dyn SessionStore>,
+    /// Store key: the session file's stem for on-disk sessions, the
+    /// header id for in-memory ones.
+    store_key: String,
 }
 
 impl SessionManager {
@@ -586,44 +669,46 @@ impl SessionManager {
 
         let path = session_dir.join(format!("{}.jsonl", id));
 
-        let mgr = Self {
-            path: path.clone(),
+        let store: Box<dyn SessionStore> = Box::new(JsonlStore::new(&session_dir));
+        store.create(&to_store_header(&header)).map_err(store_err)?;
+
+        Ok(Self {
+            path,
             session_dir,
             header: header.clone(),
             entries: vec![SessionEntry::Session(header)],
-            in_memory: false,
-        };
-
-        mgr.flush()?;
-        Ok(mgr)
+            store,
+            store_key: id,
+        })
     }
 
-    /// Open an existing session file.
+    /// Open an existing session file. The file's stem addresses the
+    /// session in its directory's store, even when the header id
+    /// differs (literal-path sessions).
     pub fn open(path: &Path) -> Result<Self, CodingAgentError> {
-        let entries = load_entries_from_file(path)?;
-        if entries.is_empty() {
-            return Err(CodingAgentError::Session(format!(
-                "No session header found in {}",
-                path.display()
-            )));
-        }
-        // load_entries_from_file guarantees entries[0] is a Session
-        // header when the vec is non-empty.
-        let header = match &entries[0] {
-            SessionEntry::Session(h) => h.clone(),
-            _ => {
-                return Err(CodingAgentError::Session("No session header found".into()));
+        let (session_dir, stem) = store_addr(path)?;
+        let store: Box<dyn SessionStore> = Box::new(JsonlStore::new(&session_dir));
+        let (store_header, body) = store.load(&stem).map_err(|e| match e {
+            SessionStoreError::Io(io) => {
+                CodingAgentError::Session(format!("Failed to read session: {}", io))
             }
-        };
+            _ => {
+                CodingAgentError::Session(format!("No session header found in {}", path.display()))
+            }
+        })?;
 
-        let session_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let header = to_typed_header(&store_header);
+        let mut entries = Vec::with_capacity(body.len() + 1);
+        entries.push(SessionEntry::Session(header.clone()));
+        entries.extend(body.iter().filter_map(to_typed_entry));
 
         Ok(Self {
             path: path.to_path_buf(),
             session_dir,
             header,
             entries,
-            in_memory: false,
+            store,
+            store_key: stem,
         })
     }
 
@@ -632,17 +717,22 @@ impl SessionManager {
         let id = generate_session_id();
         let header = SessionHeader {
             version: CURRENT_SESSION_VERSION,
-            id,
+            id: id.clone(),
             timestamp: Utc::now().timestamp_millis(),
             cwd: ".".into(),
             parent_session: None,
         };
+        let store: Box<dyn SessionStore> = Box::new(InMemoryStore::new());
+        store
+            .create(&to_store_header(&header))
+            .expect("in-memory create with a fresh id cannot fail");
         Self {
             path: PathBuf::new(),
             session_dir: PathBuf::new(),
             header: header.clone(),
             entries: vec![SessionEntry::Session(header)],
-            in_memory: true,
+            store,
+            store_key: id,
         }
     }
 
@@ -686,33 +776,38 @@ impl SessionManager {
             parent_session: parent_id.map(|s| s.to_string()),
         };
 
+        let (store, path, session_dir): (Box<dyn SessionStore>, PathBuf, PathBuf) = if in_memory {
+            (
+                Box::new(InMemoryStore::new()),
+                PathBuf::new(),
+                PathBuf::new(),
+            )
+        } else {
+            let session_dir = Self::default_session_dir(cwd);
+            std::fs::create_dir_all(&session_dir)?;
+            let path = session_dir.join(format!("{}.jsonl", id));
+            (Box::new(JsonlStore::new(&session_dir)), path, session_dir)
+        };
+
+        store.create(&to_store_header(&header)).map_err(store_err)?;
+        for entry in &body_entries {
+            store
+                .append(&id, &to_store_entry(entry)?)
+                .map_err(store_err)?;
+        }
+
         let mut entries = Vec::with_capacity(body_entries.len() + 1);
         entries.push(SessionEntry::Session(header.clone()));
         entries.extend(body_entries);
 
-        if in_memory {
-            return Ok(Self {
-                path: PathBuf::new(),
-                session_dir: PathBuf::new(),
-                header,
-                entries,
-                in_memory: true,
-            });
-        }
-
-        let session_dir = Self::default_session_dir(cwd);
-        std::fs::create_dir_all(&session_dir)?;
-        let path = session_dir.join(format!("{}.jsonl", id));
-
-        let mgr = Self {
+        Ok(Self {
             path,
             session_dir,
             header,
             entries,
-            in_memory: false,
-        };
-        mgr.flush()?;
-        Ok(mgr)
+            store,
+            store_key: id,
+        })
     }
 
     /// Whether this session manager is purely in-memory (no JSONL file
@@ -721,8 +816,10 @@ impl SessionManager {
     /// the right constructor for the replacement manager — an in-memory
     /// session must reset to an in-memory session, otherwise we would
     /// suddenly try to write `./.hand/sessions/*.jsonl` from a test.
+    /// Derived from the absence of a backing file path — only the
+    /// in-memory constructor leaves it empty.
     pub fn is_in_memory(&self) -> bool {
-        self.in_memory
+        self.path.as_os_str().is_empty()
     }
 
     /// Get the session file path.
@@ -745,9 +842,7 @@ impl SessionManager {
             timestamp: Utc::now().timestamp_millis(),
         };
         self.entries.push(entry);
-        if !self.in_memory {
-            self.append_to_file(self.entries.last().unwrap())?;
-        }
+        self.persist_entry(self.entries.last().unwrap())?;
         Ok(id)
     }
 
@@ -765,9 +860,7 @@ impl SessionManager {
             timestamp: Utc::now().timestamp_millis(),
         };
         self.entries.push(entry);
-        if !self.in_memory {
-            self.append_to_file(self.entries.last().unwrap())?;
-        }
+        self.persist_entry(self.entries.last().unwrap())?;
         Ok(())
     }
 
@@ -788,9 +881,7 @@ impl SessionManager {
             timestamp: Utc::now().timestamp_millis(),
         };
         self.entries.push(entry);
-        if !self.in_memory {
-            self.append_to_file(self.entries.last().unwrap())?;
-        }
+        self.persist_entry(self.entries.last().unwrap())?;
         Ok(())
     }
 
@@ -804,9 +895,7 @@ impl SessionManager {
             timestamp: Utc::now().timestamp_millis(),
         };
         self.entries.push(entry);
-        if !self.in_memory {
-            self.append_to_file(self.entries.last().unwrap())?;
-        }
+        self.persist_entry(self.entries.last().unwrap())?;
         Ok(())
     }
 
@@ -932,23 +1021,21 @@ impl SessionManager {
         cwd: &Path,
         session_dir: Option<&Path>,
     ) -> Result<Self, CodingAgentError> {
-        let source_entries = load_entries_from_file(source_path)?;
-        if source_entries.is_empty() {
-            return Err(CodingAgentError::Session(format!(
-                "Cannot fork: source session is empty or has no header: {}",
-                source_path.display()
-            )));
-        }
-
-        let source_header = match &source_entries[0] {
-            SessionEntry::Session(h) => h.clone(),
-            _ => {
-                return Err(CodingAgentError::Session(format!(
-                    "Cannot fork: source session has no header: {}",
+        // Load through a store rooted at the source's directory: the
+        // source may live in a different dir than the fork target, so
+        // reads and writes go through separate stores.
+        let (source_dir, source_stem) = store_addr(source_path)?;
+        let source_store = JsonlStore::new(&source_dir);
+        let (source_header, source_body) =
+            source_store.load(&source_stem).map_err(|e| match e {
+                SessionStoreError::Io(io) => {
+                    CodingAgentError::Session(format!("Failed to read session: {}", io))
+                }
+                _ => CodingAgentError::Session(format!(
+                    "Cannot fork: source session is empty or has no header: {}",
                     source_path.display()
-                )));
-            }
-        };
+                )),
+            })?;
 
         let session_dir = match session_dir {
             Some(dir) => dir.to_path_buf(),
@@ -962,7 +1049,7 @@ impl SessionManager {
         let (id, path) = mint_unique_session_path(&session_dir)?;
         let header = SessionHeader {
             version: CURRENT_SESSION_VERSION,
-            id,
+            id: id.clone(),
             timestamp: Utc::now().timestamp_millis(),
             cwd: cwd.to_string_lossy().to_string(),
             parent_session: Some(source_header.id.clone()),
@@ -970,25 +1057,34 @@ impl SessionManager {
 
         // Preserve every non-header entry from the source verbatim --
         // ids included, so downstream cross-references stay valid.
-        let mut entries = Vec::with_capacity(source_entries.len());
-        entries.push(SessionEntry::Session(header.clone()));
-        for entry in source_entries.into_iter().skip(1) {
-            if matches!(entry, SessionEntry::Session(_)) {
-                continue;
-            }
-            entries.push(entry);
+        // Envelopes the typed enum can't represent are skipped, same
+        // as the previous tolerant line-parser.
+        let body: Vec<SessionEntry> = source_body
+            .iter()
+            .filter(|e| !e.is_header())
+            .filter_map(to_typed_entry)
+            .collect();
+
+        let store: Box<dyn SessionStore> = Box::new(JsonlStore::new(&session_dir));
+        store.create(&to_store_header(&header)).map_err(store_err)?;
+        for entry in &body {
+            store
+                .append(&id, &to_store_entry(entry)?)
+                .map_err(store_err)?;
         }
 
-        let mgr = Self {
-            path: path.clone(),
+        let mut entries = Vec::with_capacity(body.len() + 1);
+        entries.push(SessionEntry::Session(header.clone()));
+        entries.extend(body);
+
+        Ok(Self {
+            path,
             session_dir,
             header,
             entries,
-            in_memory: false,
-        };
-
-        mgr.flush()?;
-        Ok(mgr)
+            store,
+            store_key: id,
+        })
     }
 
     /// Get the session display name or ID.
@@ -1015,7 +1111,7 @@ impl SessionManager {
     /// [`crate::core::session_cwd::SessionCwdSource`] trait without
     /// hard-coding a coupling — the impl lives at the call site.
     pub fn on_disk_session_file(&self) -> Option<PathBuf> {
-        if self.in_memory {
+        if self.is_in_memory() {
             None
         } else {
             Some(self.path.clone())
@@ -1174,28 +1270,13 @@ impl SessionManager {
         }
     }
 
-    fn flush(&self) -> Result<(), CodingAgentError> {
-        if self.in_memory {
-            return Ok(());
-        }
-        let mut content = String::new();
-        for entry in &self.entries {
-            content.push_str(&serde_json::to_string(entry)?);
-            content.push('\n');
-        }
-        std::fs::write(&self.path, content)?;
-        Ok(())
-    }
-
-    fn append_to_file(&self, entry: &SessionEntry) -> Result<(), CodingAgentError> {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        let json = serde_json::to_string(entry)?;
-        writeln!(file, "{}", json)?;
-        Ok(())
+    /// Persist one just-recorded entry through the store. The
+    /// in-memory backend absorbs what used to be `if !self.in_memory`
+    /// guards at every append site.
+    fn persist_entry(&self, entry: &SessionEntry) -> Result<(), CodingAgentError> {
+        self.store
+            .append(&self.store_key, &to_store_entry(entry)?)
+            .map_err(store_err)
     }
 }
 
@@ -2345,5 +2426,70 @@ mod tests {
             .expect("missing cwd must surface an issue");
         assert_eq!(issue.session_cwd, PathBuf::from(bad_cwd));
         assert_eq!(issue.fallback_cwd, fallback);
+    }
+
+    /// The store-mediated writer must be format-identical to the
+    /// previous direct writer: every on-disk line equals the typed
+    /// enum's own serde serialization, byte for byte, across every
+    /// append surface.
+    #[test]
+    fn store_writer_is_format_identical_to_typed_serde() {
+        let cwd = TempDir::new().unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let mut mgr = SessionManager::create_in(cwd.path(), session_dir.path()).unwrap();
+        let msg_id = mgr
+            .append_message(Message::User(UserMessage::new_text("hello")))
+            .unwrap();
+        mgr.append_model_change("acme", "acme-large").unwrap();
+        mgr.append_compaction("rolled-up", &msg_id).unwrap();
+        mgr.append_label("pinned").unwrap();
+
+        let expected: String = mgr
+            .entries()
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap() + "\n")
+            .collect();
+        let on_disk = std::fs::read_to_string(mgr.path()).unwrap();
+        assert_eq!(
+            on_disk, expected,
+            "on-disk JSONL must be byte-identical to typed-enum serde"
+        );
+    }
+
+    /// `create` persists the header immediately through the store: the
+    /// file exists with exactly the header line and nothing else — no
+    /// separate flush step involved.
+    #[test]
+    fn create_writes_exactly_the_header_line() {
+        let cwd = TempDir::new().unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let mgr = SessionManager::create_in(cwd.path(), session_dir.path()).unwrap();
+
+        let content = std::fs::read_to_string(mgr.path()).unwrap();
+        let expected =
+            serde_json::to_string(&SessionEntry::Session(mgr.header().clone())).unwrap() + "\n";
+        assert_eq!(content, expected);
+    }
+
+    /// An in-memory manager performs zero disk IO for a create+append
+    /// sequence: the HAND_HOME-rooted session tree is never created.
+    #[test]
+    fn in_memory_manager_does_no_disk_io() {
+        let home = TempDir::new().unwrap();
+        let _g = scoped_hand_home(home.path());
+
+        let mut mgr = SessionManager::in_memory();
+        mgr.append_message(Message::User(UserMessage::new_text("hi")))
+            .unwrap();
+        mgr.append_model_change("acme", "acme-large").unwrap();
+        mgr.append_label("ephemeral").unwrap();
+
+        assert!(mgr.is_in_memory());
+        assert!(mgr.path().as_os_str().is_empty());
+        assert_eq!(mgr.message_count(), 1);
+        assert!(
+            !home.path().join(".hand").exists(),
+            "in-memory session must not touch the session tree"
+        );
     }
 }

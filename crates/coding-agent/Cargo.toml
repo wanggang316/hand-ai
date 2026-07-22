@@ -17,7 +17,11 @@ hand-agent = { path = "../agent" }
 hand-tui = { path = "../tui" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order keeps JSON object keys in insertion order, so session
+# entries routed through `serde_json::Value` (the store envelope's
+# payload) serialize byte-identically to the typed structs they came
+# from — the on-disk JSONL format must not change shape.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["full"] }
 glob = "0.3"
