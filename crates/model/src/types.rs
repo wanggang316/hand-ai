@@ -290,6 +290,26 @@ impl Provider {
     }
 }
 
+/// Header convention used to carry the session id for cache affinity.
+///
+/// Only consulted when session-affinity headers are enabled for the
+/// model; the format decides *which* headers are emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionAffinityFormat {
+    /// OpenAI-style set: `session_id`, `x-client-request-id`,
+    /// `x-session-affinity`.
+    #[serde(rename = "openai")]
+    OpenAI,
+    /// OpenAI-style set minus the underscore-containing `session_id`
+    /// header, for proxies that reject non-token header names.
+    #[serde(rename = "openai-nosession")]
+    OpenAINoSession,
+    /// Single `x-session-id` header, as read by OpenRouter's
+    /// prompt-cache routing.
+    #[serde(rename = "openrouter")]
+    OpenRouter,
+}
+
 /// Compatibility overrides for OpenAI Completions API.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenAICompletionsCompat {
@@ -350,6 +370,11 @@ pub struct OpenAICompletionsCompat {
         rename = "sendSessionAffinityHeaders"
     )]
     pub send_session_affinity_headers: Option<bool>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "sessionAffinityFormat"
+    )]
+    pub session_affinity_format: Option<SessionAffinityFormat>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         rename = "supportsLongCacheRetention"
