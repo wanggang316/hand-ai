@@ -500,33 +500,33 @@ impl InteractiveMode {
             ListenerResult::pass()
         }));
 
-        // Ctrl+V listener: read an image from the system clipboard,
-        // write it to a temp file, and insert the path at the cursor.
-        // The actual clipboard read + file write runs off-thread
-        // (arboard / tempfile are sync) and the resulting path is
-        // inserted via the editor's Arc handle.
-        let chat_for_img = Arc::clone(&chat);
-        let editor_for_img = Arc::clone(&editor);
-        let render_for_img: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(tui.render_handle());
+        // Ctrl+V listener: read an image from the system clipboard, write
+        // it to a temp file, and insert the path at the cursor; when the
+        // clipboard holds text instead, insert the text itself. The actual
+        // clipboard read + file write runs off-thread (arboard / tempfile
+        // are sync) and the result is inserted via the editor's Arc handle.
+        let chat_for_paste = Arc::clone(&chat);
+        let editor_for_paste = Arc::clone(&editor);
+        let render_for_paste: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(tui.render_handle());
         tui.add_input_listener(Box::new(move |event: &InputEvent| {
             if let InputEvent::Key(key) = event
                 && matches!(&key.name, KeyName::Char('v'))
                 && key.modifiers.ctrl
             {
-                let chat_clone = Arc::clone(&chat_for_img);
-                let editor_clone = Arc::clone(&editor_for_img);
-                let render_clone = Arc::clone(&render_for_img);
-                std::thread::spawn(move || match handle_clipboard_image_paste() {
-                    Ok(Some(path)) => {
+                let chat_clone = Arc::clone(&chat_for_paste);
+                let editor_clone = Arc::clone(&editor_for_paste);
+                let render_clone = Arc::clone(&render_for_paste);
+                std::thread::spawn(move || match handle_clipboard_paste() {
+                    Ok(Some(insert)) => {
                         if let Ok(mut e) = editor_clone.lock() {
-                            e.insert_text(&path);
+                            e.insert_text(&insert);
                         }
                         render_clone();
                     }
                     Ok(None) => {}
                     Err(e) => push_status(
                         &chat_clone,
-                        format!("[clipboard image paste failed: {e}]"),
+                        format!("[clipboard paste failed: {e}]"),
                         Some(RED_FG),
                     ),
                 });
@@ -1054,12 +1054,47 @@ enum ProgressState {
     Error,
 }
 
-/// M4.2 — Ctrl+V clipboard-image handler. Reads an image from the system
+/// M4.2 — Ctrl+V clipboard handler. Prefers an image: reads it via
+/// [`handle_clipboard_image_paste`] and returns the temp-file path to
+/// insert at the cursor. When the clipboard holds no image — the common
+/// "you Ctrl+V'd with text on the clipboard" case — falls back to plain
+/// clipboard text so the keystroke still pastes something useful.
+/// Returns `Ok(None)` when the clipboard offers neither; an image-read
+/// failure surfaces only when the text fallback also comes up empty.
+fn handle_clipboard_paste() -> Result<Option<String>, String> {
+    resolve_clipboard_paste(
+        handle_clipboard_image_paste(),
+        crate::utils::clipboard::read_clipboard_text,
+    )
+}
+
+/// Decision logic for [`handle_clipboard_paste`], split out so the
+/// image-vs-text fallback rules are unit-testable without a real
+/// clipboard.
+///
+/// * Image available → insert the image path; text is never consulted.
+/// * No image → insert clipboard text, or nothing when there is none.
+/// * Image read failed → still try text; the error is reported only when
+///   the text fallback also produced nothing.
+fn resolve_clipboard_paste(
+    image: Result<Option<String>, String>,
+    read_text: impl FnOnce() -> Option<String>,
+) -> Result<Option<String>, String> {
+    match image {
+        Ok(Some(path)) => Ok(Some(path)),
+        Ok(None) => Ok(read_text()),
+        Err(e) => match read_text() {
+            Some(text) => Ok(Some(text)),
+            None => Err(e),
+        },
+    }
+}
+
+/// Image half of the Ctrl+V handler. Reads an image from the system
 /// clipboard via `arboard` (re-encoded to PNG), writes it to a temp file
-/// named `hand-clipboard-<uuid>.png`, and returns the absolute path so the
-/// driver can insert it at the cursor. Returns `Ok(None)` when the
-/// clipboard exists but doesn't hold an image — the common "you Ctrl+V'd
-/// with text on the clipboard" case.
+/// named `hand-clipboard-<uuid>.png`, and returns the absolute path.
+/// Returns `Ok(None)` when the clipboard exists but doesn't hold an
+/// image.
 fn handle_clipboard_image_paste() -> Result<Option<String>, String> {
     let image = match crate::utils::clipboard_image::read_clipboard_image() {
         Ok(Some(img)) => img,
@@ -4192,6 +4227,44 @@ mod tests {
         assert!(out.contains("outside.txt"));
         // Path is absolute since it's outside cwd.
         assert!(out[1..].starts_with('/') || out[1..].contains(":\\"));
+    }
+
+    /// Ctrl+V decision logic: an image on the clipboard wins outright —
+    /// the text fallback must not even be consulted.
+    #[test]
+    fn clipboard_paste_prefers_image_over_text() {
+        let out = resolve_clipboard_paste(Ok(Some("/tmp/img.png".into())), || {
+            panic!("text fallback must not run when an image pasted")
+        });
+        assert_eq!(out, Ok(Some("/tmp/img.png".to_string())));
+    }
+
+    #[test]
+    fn clipboard_paste_falls_back_to_text_when_no_image() {
+        let out = resolve_clipboard_paste(Ok(None), || Some("hello".into()));
+        assert_eq!(out, Ok(Some("hello".to_string())));
+    }
+
+    /// Nothing usable on the clipboard → silent no-op, not an error.
+    #[test]
+    fn clipboard_paste_is_noop_when_clipboard_empty() {
+        let out = resolve_clipboard_paste(Ok(None), || None);
+        assert_eq!(out, Ok(None));
+    }
+
+    /// A hard image-read failure (headless host, sandbox, no clipboard
+    /// service) must still try the text transport before giving up.
+    #[test]
+    fn clipboard_paste_recovers_from_image_error_via_text() {
+        let out = resolve_clipboard_paste(Err("no clipboard".into()), || Some("hello".into()));
+        assert_eq!(out, Ok(Some("hello".to_string())));
+    }
+
+    /// The error only surfaces when every transport came up empty.
+    #[test]
+    fn clipboard_paste_reports_error_only_when_all_transports_fail() {
+        let out = resolve_clipboard_paste(Err("no clipboard".into()), || None);
+        assert_eq!(out, Err("no clipboard".to_string()));
     }
 
     #[test]
