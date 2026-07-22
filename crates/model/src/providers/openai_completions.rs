@@ -1038,8 +1038,18 @@ pub fn convert_messages(
                             .iter()
                             .any(|c| matches!(c, crate::types::ToolResultContent::Image(_)));
 
-                        let content = if text_result.is_empty() && has_images {
-                            "(see attached image)".to_string()
+                        // Tool results always ship non-empty content: image-only
+                        // results point at the batched image message below, and
+                        // fully empty results get an explicit placeholder — some
+                        // providers reject empty tool content outright, and the
+                        // model otherwise can't tell the tool ran and returned
+                        // nothing.
+                        let content = if text_result.is_empty() {
+                            if has_images {
+                                "(see attached image)".to_string()
+                            } else {
+                                "(no tool output)".to_string()
+                            }
                         } else {
                             sanitize_surrogates(&text_result)
                         };
@@ -1231,24 +1241,53 @@ pub fn normalize_mistral_tool_id(id: &str) -> String {
     }
 }
 
+/// Deterministic FNV-1a 64-bit hash rendered as 8 hex chars. Keeps oversized
+/// composite tool call ids unique and stable within the 40-char API limit.
+fn short_tool_call_id_hash(input: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")[..8].to_string()
+}
+
 fn normalize_tool_call_id(id: &str, compat: &ResolvedCompat, model: &Model) -> String {
     if compat.requires_mistral_tool_ids {
         return normalize_mistral_tool_id(id);
     }
 
-    if id.contains('|') {
-        let call_id = id.split('|').next().unwrap_or(id);
-        return call_id
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .take(40)
-            .collect();
+    if let Some((raw_call_id, raw_item_id)) = id.split_once('|') {
+        let sanitize = |s: &str| -> String {
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect()
+        };
+        // Multiple tool calls in the same turn can share the call_id part
+        // while differing by item id. Keep both parts so replayed Chat
+        // Completions payloads carry distinct tool call ids; collapse to a
+        // hash suffix when the combination exceeds the 40-char limit.
+        let call_id = sanitize(raw_call_id);
+        let item_id = sanitize(raw_item_id);
+        let combined = if item_id.is_empty() {
+            call_id.clone()
+        } else {
+            format!("{call_id}_{item_id}")
+        };
+        if combined.len() <= 40 {
+            return combined;
+        }
+        let hash = short_tool_call_id_hash(id);
+        let prefix: String = call_id.chars().take(40 - hash.len() - 1).collect();
+        return format!("{prefix}_{hash}");
     }
 
     if model.provider == Provider::OpenAI {
@@ -1314,13 +1353,14 @@ fn map_thinking_level(level: ThinkingLevel) -> openai_rust::types::ReasoningEffo
         ThinkingLevel::Low => openai_rust::types::ReasoningEffort::Low,
         ThinkingLevel::Medium => openai_rust::types::ReasoningEffort::Medium,
         ThinkingLevel::High => openai_rust::types::ReasoningEffort::High,
-        ThinkingLevel::Xhigh => openai_rust::types::ReasoningEffort::High,
+        // The wire enum tops out at `high` — the extended levels clamp.
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => openai_rust::types::ReasoningEffort::High,
     }
 }
 
 fn clamp_reasoning(reasoning: Option<ThinkingLevel>) -> Option<ThinkingLevel> {
     reasoning.map(|r| match r {
-        ThinkingLevel::Xhigh => ThinkingLevel::High,
+        ThinkingLevel::Xhigh | ThinkingLevel::Max => ThinkingLevel::High,
         _ => r,
     })
 }
@@ -1383,14 +1423,19 @@ pub struct ResolvedCompat {
     /// `convert_messages` injects an empty `reasoning_content: ""` on any
     /// assistant turn that doesn't already carry one.
     pub requires_reasoning_content_on_assistant_messages: bool,
-    /// `true` when the upstream uses three known session-affinity
-    /// headers (`session_id`, `x-client-request-id`,
-    /// `x-session-affinity`) keyed off the caller's session id to
-    /// route repeated prompts to the same cache node. Default
-    /// `false` — OpenAI's prompt cache uses the `prompt_cache_key`
-    /// body field instead. Proxies that rely on header-based affinity
-    /// flip this true via models.dev compat metadata.
+    /// `true` when the endpoint routes repeated prompts to the same
+    /// cache node by reading the caller's session id from
+    /// session-affinity headers. Default `false` — OpenAI's prompt
+    /// cache uses the `prompt_cache_key` body field instead. Proxies
+    /// that rely on header-based affinity flip this true via
+    /// models.dev compat metadata. Which headers are sent is governed
+    /// by `session_affinity_format`.
     pub send_session_affinity_headers: bool,
+    /// Header convention for session affinity when
+    /// `send_session_affinity_headers` is on. Auto-detected:
+    /// OpenRouter endpoints read a single `x-session-id` header,
+    /// everything else gets the OpenAI-style set.
+    pub session_affinity_format: crate::types::SessionAffinityFormat,
 }
 
 fn detect_compat(model: &Model) -> ResolvedCompat {
@@ -1480,6 +1525,11 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
         zai_tool_stream: is_zai,
         requires_reasoning_content_on_assistant_messages: is_deepseek,
         send_session_affinity_headers: false,
+        session_affinity_format: if is_openrouter {
+            crate::types::SessionAffinityFormat::OpenRouter
+        } else {
+            crate::types::SessionAffinityFormat::OpenAI
+        },
     }
 }
 
@@ -1540,6 +1590,9 @@ fn get_compat(model: &Model) -> ResolvedCompat {
             send_session_affinity_headers: compat_settings
                 .send_session_affinity_headers
                 .unwrap_or(detected.send_session_affinity_headers),
+            session_affinity_format: compat_settings
+                .session_affinity_format
+                .unwrap_or(detected.session_affinity_format),
         };
     }
 
@@ -1559,17 +1612,21 @@ pub fn resolve_compat(model: &Model) -> ResolvedCompat {
 ///
 /// A small set of proxies (LiteLLM with affinity routing, vendor
 /// gateways) route repeated prompts to the same cache node by reading
-/// the session id from three headers. Off by default — OpenAI's
+/// the session id from request headers. Off by default — OpenAI's
 /// prompt cache uses the `prompt_cache_key` body field instead.
 /// Models served by affinity-routing proxies set
 /// `OpenAICompletionsCompat.sendSessionAffinityHeaders = true` to
-/// opt in. Caching must not be explicitly disabled
+/// opt in; `session_affinity_format` then picks the header set
+/// (OpenRouter reads a single `x-session-id` header instead of the
+/// OpenAI-style trio). Caching must not be explicitly disabled
 /// (`CacheRetention::None`); otherwise affinity is moot.
 fn resolve_session_affinity_headers(
     compat: &ResolvedCompat,
     session_id: Option<&str>,
     cache_retention: Option<crate::types::CacheRetention>,
 ) -> Vec<(String, String)> {
+    use crate::types::SessionAffinityFormat;
+
     if !compat.send_session_affinity_headers {
         return Vec::new();
     }
@@ -1579,11 +1636,20 @@ fn resolve_session_affinity_headers(
     let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
-    vec![
-        ("session_id".to_string(), sid.to_string()),
-        ("x-client-request-id".to_string(), sid.to_string()),
-        ("x-session-affinity".to_string(), sid.to_string()),
-    ]
+    match compat.session_affinity_format {
+        SessionAffinityFormat::OpenRouter => {
+            vec![("x-session-id".to_string(), sid.to_string())]
+        }
+        SessionAffinityFormat::OpenAI => vec![
+            ("session_id".to_string(), sid.to_string()),
+            ("x-client-request-id".to_string(), sid.to_string()),
+            ("x-session-affinity".to_string(), sid.to_string()),
+        ],
+        SessionAffinityFormat::OpenAINoSession => vec![
+            ("x-client-request-id".to_string(), sid.to_string()),
+            ("x-session-affinity".to_string(), sid.to_string()),
+        ],
+    }
 }
 
 #[cfg(test)]
@@ -1844,15 +1910,22 @@ mod tests {
 
     /// Default behaviour: affinity headers are off so direct OpenAI
     /// calls don't ship the three headers (the prompt_cache_key body
-    /// field handles cache affinity instead).
+    /// field handles cache affinity instead). The gate applies to
+    /// every format, including OpenRouter's `x-session-id`.
     #[test]
     fn session_affinity_headers_off_by_default() {
-        let compat = affinity_compat(false);
-        let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
-        assert!(
-            headers.is_empty(),
-            "default off must return no headers: {headers:?}"
-        );
+        for format in [
+            crate::types::SessionAffinityFormat::OpenAI,
+            crate::types::SessionAffinityFormat::OpenRouter,
+        ] {
+            let mut compat = affinity_compat(false);
+            compat.session_affinity_format = format;
+            let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
+            assert!(
+                headers.is_empty(),
+                "default off must return no headers: {headers:?}"
+            );
+        }
     }
 
     /// When compat opts in AND the caller supplies a non-empty
@@ -1885,12 +1958,77 @@ mod tests {
     }
 
     /// No session id means no affinity headers — they'd carry no
-    /// signal for the proxy to route on.
+    /// signal for the proxy to route on. Holds for every format.
     #[test]
     fn session_affinity_headers_dropped_without_session_id() {
-        let compat = affinity_compat(true);
-        assert!(resolve_session_affinity_headers(&compat, None, None).is_empty());
-        assert!(resolve_session_affinity_headers(&compat, Some(""), None).is_empty());
+        use crate::types::SessionAffinityFormat;
+        for format in [
+            SessionAffinityFormat::OpenAI,
+            SessionAffinityFormat::OpenAINoSession,
+            SessionAffinityFormat::OpenRouter,
+        ] {
+            let mut compat = affinity_compat(true);
+            compat.session_affinity_format = format;
+            assert!(resolve_session_affinity_headers(&compat, None, None).is_empty());
+            assert!(resolve_session_affinity_headers(&compat, Some(""), None).is_empty());
+        }
+    }
+
+    /// OpenRouter reads the session id from a single `x-session-id`
+    /// header; none of the OpenAI-style headers may leak through.
+    #[test]
+    fn session_affinity_openrouter_format_sends_only_x_session_id() {
+        let mut compat = affinity_compat(true);
+        compat.session_affinity_format = crate::types::SessionAffinityFormat::OpenRouter;
+        let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
+        assert_eq!(
+            headers,
+            vec![("x-session-id".to_string(), "sess-abc".to_string())]
+        );
+    }
+
+    /// The no-session variant keeps the two dash-separated headers but
+    /// drops `session_id`, for proxies that reject underscore header
+    /// names.
+    #[test]
+    fn session_affinity_nosession_format_omits_session_id_header() {
+        let mut compat = affinity_compat(true);
+        compat.session_affinity_format = crate::types::SessionAffinityFormat::OpenAINoSession;
+        let headers = resolve_session_affinity_headers(&compat, Some("sess-abc"), None);
+        assert_eq!(
+            headers,
+            vec![
+                ("x-client-request-id".to_string(), "sess-abc".to_string()),
+                ("x-session-affinity".to_string(), "sess-abc".to_string()),
+            ]
+        );
+    }
+
+    /// `detect_compat` picks the OpenRouter format from the provider or
+    /// an openrouter.ai base URL; everything else defaults to the
+    /// OpenAI-style header set.
+    #[test]
+    fn session_affinity_format_autodetected_from_endpoint() {
+        use crate::types::SessionAffinityFormat;
+
+        let openai = test_model(Provider::OpenAI);
+        assert_eq!(
+            detect_compat(&openai).session_affinity_format,
+            SessionAffinityFormat::OpenAI
+        );
+
+        let by_provider = test_model(Provider::Openrouter);
+        assert_eq!(
+            detect_compat(&by_provider).session_affinity_format,
+            SessionAffinityFormat::OpenRouter
+        );
+
+        let mut by_url = test_model(Provider::OpenAI);
+        by_url.base_url = "https://openrouter.ai/api/v1".to_string();
+        assert_eq!(
+            detect_compat(&by_url).session_affinity_format,
+            SessionAffinityFormat::OpenRouter
+        );
     }
 
     /// OpenRouter normalizes reasoning across providers via a nested
@@ -2482,6 +2620,28 @@ mod tests {
     }
 
     #[test]
+    fn test_clamp_reasoning_max_to_high() {
+        assert_eq!(
+            clamp_reasoning(Some(ThinkingLevel::Max)),
+            Some(ThinkingLevel::High)
+        );
+    }
+
+    /// The wire enum has no effort above `high`; both extended
+    /// levels map onto it.
+    #[test]
+    fn test_map_thinking_level_clamps_extended_levels() {
+        assert_eq!(
+            map_thinking_level(ThinkingLevel::Xhigh),
+            openai_rust::types::ReasoningEffort::High
+        );
+        assert_eq!(
+            map_thinking_level(ThinkingLevel::Max),
+            openai_rust::types::ReasoningEffort::High
+        );
+    }
+
+    #[test]
     fn test_clamp_reasoning_low_unchanged() {
         assert_eq!(
             clamp_reasoning(Some(ThinkingLevel::Low)),
@@ -2661,6 +2821,124 @@ mod tests {
             .filter(|p| matches!(p, ContentPart::ImageUrl { .. }))
             .count();
         assert_eq!(image_count, 2, "both images must be batched");
+    }
+
+    fn tool_call_assistant(model: &Model, tool_name: &str) -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::ToolCall(ToolCall::new(
+                "tool-1",
+                tool_name,
+                serde_json::json!({}),
+            ))],
+            api: model.api,
+            provider: model.provider,
+            model: model.id.clone(),
+            usage: Usage::default(),
+            stop_reason: StopReason::ToolUse,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    /// Empty tool results (no text, no images) must ship the explicit
+    /// "(no tool output)" placeholder instead of empty content — some
+    /// providers reject empty tool content, and the model otherwise
+    /// can't tell the tool ran and returned nothing.
+    #[test]
+    fn convert_messages_empty_tool_result_uses_no_output_placeholder() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage::new_text("Run the command")),
+                Message::Assistant(tool_call_assistant(&model, "bash")),
+                Message::ToolResult(ToolResultMessage::new(
+                    "tool-1",
+                    "bash",
+                    vec![ToolResultContent::Text(TextContent::new(""))],
+                )),
+            ],
+            tools: None,
+        };
+
+        let msgs = convert_messages(&model, &context, &compat);
+        let roles: Vec<&'static str> = msgs
+            .iter()
+            .map(|m| match m.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::Tool => "tool",
+                Role::System => "system",
+            })
+            .collect();
+        // No synthetic trailing user message — there is no image to batch.
+        assert_eq!(roles, vec!["user", "assistant", "tool"]);
+        let tool_msg = msgs
+            .iter()
+            .find(|m| matches!(m.role, Role::Tool))
+            .expect("tool message present");
+        match &tool_msg.content {
+            Content::Text(s) => assert_eq!(s, "(no tool output)"),
+            other => panic!("expected plain string tool content, got {other:?}"),
+        }
+    }
+
+    /// Image-only tool results keep the "(see attached image)" pointer —
+    /// the "(no tool output)" placeholder applies only when the result
+    /// has neither text nor images. The image itself still lands in the
+    /// trailing synthetic user message.
+    #[test]
+    fn convert_messages_image_only_tool_result_keeps_image_placeholder() {
+        use crate::types::ImageContent;
+
+        let mut model = test_model(Provider::OpenAI);
+        model.input = vec![InputType::Text, InputType::Image];
+        let compat = detect_compat(&model);
+
+        let context = Context {
+            system_prompt: None,
+            messages: vec![
+                Message::User(UserMessage::new_text("Take a screenshot")),
+                Message::Assistant(tool_call_assistant(&model, "screenshot")),
+                Message::ToolResult(ToolResultMessage::new(
+                    "tool-1",
+                    "screenshot",
+                    vec![ToolResultContent::Image(ImageContent::new(
+                        "ZmFrZQ==",
+                        "image/png",
+                    ))],
+                )),
+            ],
+            tools: None,
+        };
+
+        let msgs = convert_messages(&model, &context, &compat);
+        let tool_msg = msgs
+            .iter()
+            .find(|m| matches!(m.role, Role::Tool))
+            .expect("tool message present");
+        match &tool_msg.content {
+            Content::Text(s) => assert_eq!(s, "(see attached image)"),
+            other => panic!("expected plain string tool content, got {other:?}"),
+        }
+        let trailing = msgs.last().expect("trailing user message");
+        assert!(matches!(trailing.role, Role::User));
+        let parts = match &trailing.content {
+            Content::Array(parts) => parts,
+            other => panic!("expected Array content, got {other:?}"),
+        };
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+            "image must be batched into the trailing user message: {parts:?}"
+        );
     }
 
     /// Assistant turns with text-only content must serialize as a plain
@@ -3097,5 +3375,55 @@ mod tests {
         let mut output = empty_output();
         capture_chunk_metadata("chatcmpl-1", "", "gpt-4o", &mut output);
         assert_eq!(output.response_model, None);
+    }
+
+    /// Composite `{call_id}|{item_id}` ids can repeat the call_id part
+    /// across tool calls in the same turn. The item id must survive
+    /// normalization so replayed Chat Completions payloads keep the
+    /// ids distinct — the API rejects duplicate tool call ids.
+    #[test]
+    fn composite_tool_call_ids_stay_unique_per_item() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        let a = normalize_tool_call_id("call_1|item_a", &compat, &model);
+        let b = normalize_tool_call_id("call_1|item_b", &compat, &model);
+        assert_eq!(a, "call_1_item_a");
+        assert_eq!(b, "call_1_item_b");
+        assert_ne!(a, b);
+    }
+
+    /// A composite id with an empty item part keeps the sanitized
+    /// call_id alone, matching the previous behaviour.
+    #[test]
+    fn composite_tool_call_id_without_item_part_keeps_call_id() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        assert_eq!(normalize_tool_call_id("call_1|", &compat, &model), "call_1");
+    }
+
+    /// Item ids from some providers run past 400 chars with base64
+    /// characters. Over the 40-char limit the id collapses to a
+    /// sanitized call_id prefix plus a deterministic hash of the full
+    /// composite id: stable across calls, distinct across items.
+    #[test]
+    fn composite_tool_call_id_over_limit_hashes_deterministically() {
+        let model = test_model(Provider::OpenAI);
+        let compat = detect_compat(&model);
+        let long_item_a = format!("call_abc|{}+/=", "x".repeat(400));
+        let long_item_b = format!("call_abc|{}+/=", "y".repeat(400));
+
+        let a1 = normalize_tool_call_id(&long_item_a, &compat, &model);
+        let a2 = normalize_tool_call_id(&long_item_a, &compat, &model);
+        let b = normalize_tool_call_id(&long_item_b, &compat, &model);
+
+        assert_eq!(a1, a2, "same input must normalize identically");
+        assert_ne!(a1, b, "different item ids must stay distinct");
+        assert!(a1.len() <= 40, "must respect the 40-char limit: {a1}");
+        assert!(a1.starts_with("call_abc_"), "keeps call_id prefix: {a1}");
+        assert!(
+            a1.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "only allowed chars survive: {a1}"
+        );
     }
 }

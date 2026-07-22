@@ -123,6 +123,10 @@ pub struct ThemeColors {
     pub thinking_medium: RawColorValue,
     pub thinking_high: RawColorValue,
     pub thinking_xhigh: RawColorValue,
+    /// Optional so pre-existing custom themes keep loading; falls back
+    /// to `thinking_xhigh` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_max: Option<RawColorValue>,
     // Bash mode
     pub bash_mode: RawColorValue,
 }
@@ -187,6 +191,7 @@ pub enum ThemeColor {
     ThinkingMedium,
     ThinkingHigh,
     ThinkingXhigh,
+    ThinkingMax,
     BashMode,
 }
 
@@ -212,6 +217,7 @@ pub enum ThinkingLevel {
     Medium,
     High,
     XHigh,
+    Max,
 }
 
 /// Errors surfaced when constructing a theme.
@@ -355,6 +361,7 @@ impl Theme {
             ThinkingLevel::Medium => ThemeColor::ThinkingMedium,
             ThinkingLevel::High => ThemeColor::ThinkingHigh,
             ThinkingLevel::XHigh => ThemeColor::ThinkingXhigh,
+            ThinkingLevel::Max => ThemeColor::ThinkingMax,
         }
     }
 }
@@ -465,6 +472,11 @@ fn fg_entries(c: &ThemeColors) -> Vec<(ThemeColor, &RawColorValue)> {
         (ThinkingMedium, &c.thinking_medium),
         (ThinkingHigh, &c.thinking_high),
         (ThinkingXhigh, &c.thinking_xhigh),
+        // Fallback keeps themes authored before the max level working.
+        (
+            ThinkingMax,
+            c.thinking_max.as_ref().unwrap_or(&c.thinking_xhigh),
+        ),
         (BashMode, &c.bash_mode),
     ]
 }
@@ -608,6 +620,34 @@ mod tests {
         assert_eq!(
             theme.thinking_color(ThinkingLevel::XHigh),
             ThemeColor::ThinkingXhigh
+        );
+        assert_eq!(
+            theme.thinking_color(ThinkingLevel::Max),
+            ThemeColor::ThinkingMax
+        );
+    }
+
+    /// Themes authored before the max level omit `thinkingMax`; the
+    /// slot must resolve to the xhigh colour instead of erroring.
+    #[test]
+    fn thinking_max_falls_back_to_xhigh_when_omitted() {
+        let mut json = parse_dark();
+        json.colors.thinking_max = None;
+        let theme = Theme::from_json(&json, Some(ColorMode::Truecolor)).unwrap();
+        assert_eq!(
+            theme.fg_ansi(ThemeColor::ThinkingMax).unwrap(),
+            theme.fg_ansi(ThemeColor::ThinkingXhigh).unwrap()
+        );
+    }
+
+    /// With an explicit `thinkingMax` the slot resolves independently.
+    #[test]
+    fn thinking_max_uses_own_color_when_present() {
+        let json = parse_dark();
+        let theme = Theme::from_json(&json, Some(ColorMode::Truecolor)).unwrap();
+        assert_ne!(
+            theme.fg_ansi(ThemeColor::ThinkingMax).unwrap(),
+            theme.fg_ansi(ThemeColor::ThinkingXhigh).unwrap()
         );
     }
 

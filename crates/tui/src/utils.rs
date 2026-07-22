@@ -4,6 +4,8 @@
 //! hyperlinks across line breaks, truncation with ellipsis, and
 //! ANSI-aware column slicing.
 
+use std::borrow::Cow;
+
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
@@ -135,7 +137,7 @@ pub fn visible_width(s: &str) -> usize {
         let rest = &s[i..];
         let ch = rest.chars().next().expect("non-empty remainder");
         if ch == '\t' {
-            clean.push_str("   ");
+            clean.push_str(TAB_SPACES);
         } else {
             clean.push(ch);
         }
@@ -615,6 +617,30 @@ fn split_into_tokens_with_ansi(text: &str) -> Vec<String> {
 // Wrapping
 // ---------------------------------------------------------------------------
 
+/// Split `text` into lines on `\r\n`, `\r`, or `\n`.
+///
+/// Like [`str::split`] with `'\n'`, terminators are not included in the
+/// yielded lines and a trailing terminator yields a final empty line. CRLF
+/// counts as a single break so pasted or file-sourced text never leaks a
+/// stray `\r` into line content.
+fn split_line_endings(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = Some(text);
+    std::iter::from_fn(move || {
+        let s = rest?;
+        match s.find(['\r', '\n']) {
+            Some(idx) => {
+                let skip = if s[idx..].starts_with("\r\n") { 2 } else { 1 };
+                rest = Some(&s[idx + skip..]);
+                Some(&s[..idx])
+            }
+            None => {
+                rest = None;
+                Some(s)
+            }
+        }
+    })
+}
+
 /// Wrap `text` to `width` visible columns, preserving SGR attributes and
 /// OSC 8 hyperlinks across wrapped lines.
 ///
@@ -632,7 +658,7 @@ pub fn wrap_text_with_ansi(text: &str, width: usize) -> Vec<String> {
     let mut result: Vec<String> = Vec::new();
     let mut tracker = AnsiCodeTracker::new();
 
-    for input_line in text.split('\n') {
+    for input_line in split_line_endings(text) {
         let prefix = if !result.is_empty() {
             tracker.active_codes()
         } else {
@@ -1389,20 +1415,43 @@ pub fn extract_segments(
 }
 
 // ---------------------------------------------------------------------------
-// Normalize Thai/Lao AM vowels for terminal output
+// Normalize text for terminal output
 // ---------------------------------------------------------------------------
 
+/// Fixed replacement for a visible tab in rendered output. Must stay in sync
+/// with the tab accounting in [`visible_width`] and the truncation/slicing
+/// helpers, which all count a tab as this many columns.
+const TAB_SPACES: &str = "   ";
+
 /// Normalize text for terminal output without changing logical content.
-/// Decomposes Thai/Lao AM precomposed vowels (U+0E33, U+0EB3) into their
-/// compatibility decompositions, which render more reliably in differential
-/// repaint.
-pub fn normalize_terminal_output(s: &str) -> String {
-    if !s.chars().any(|c| c == '\u{0e33}' || c == '\u{0eb3}') {
-        return s.to_string();
+///
+/// - Decomposes Thai/Lao AM precomposed vowels (U+0E33, U+0EB3) into their
+///   compatibility decompositions, which render more reliably in
+///   differential repaint.
+/// - Expands visible tabs to the fixed width used by layout math
+///   ([`TAB_SPACES`]) so terminal-defined tab stops cannot desync the
+///   painted width from what [`visible_width`] and wrapping computed.
+///
+/// ANSI/OSC/APC escape sequences are protocol bytes (OSC 8 hyperlink
+/// targets, cursor markers, …) and are copied through byte-identical — a
+/// tab inside a sequence is never rewritten.
+pub fn normalize_terminal_output(s: &str) -> Cow<'_, str> {
+    let has_am = s.chars().any(|c| c == '\u{0e33}' || c == '\u{0eb3}');
+    let has_tabs = s.as_bytes().contains(&b'\t');
+    if !has_am && !has_tabs {
+        return Cow::Borrowed(s);
     }
-    let mut out = String::with_capacity(s.len() + 2);
-    for c in s.chars() {
-        match c {
+    let mut out = String::with_capacity(s.len() + 8);
+    let mut i = 0;
+    while i < s.len() {
+        if let Some((code, len)) = extract_ansi_code_at(s, i) {
+            out.push_str(code);
+            i += len;
+            continue;
+        }
+        let ch = s[i..].chars().next().expect("non-empty remainder");
+        match ch {
+            '\t' => out.push_str(TAB_SPACES),
             '\u{0e33}' => {
                 out.push('\u{0e4d}');
                 out.push('\u{0e32}');
@@ -1413,8 +1462,9 @@ pub fn normalize_terminal_output(s: &str) -> String {
             }
             other => out.push(other),
         }
+        i += ch.len_utf8();
     }
-    out
+    Cow::Owned(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1459,10 +1509,14 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
             continue;
         }
         let ch = text[i..].chars().next().expect("non-empty remainder");
-        if ch == '\n' {
+        if ch == '\n' || ch == '\r' {
             lines.push(std::mem::take(&mut current_line));
             current_width = 0;
             i += ch.len_utf8();
+            // CRLF is a single line break.
+            if ch == '\r' && text[i..].starts_with('\n') {
+                i += 1;
+            }
             continue;
         }
         if ch.is_control() {
@@ -2092,6 +2146,42 @@ mod tests {
     #[test]
     fn normalize_terminal_output_passthrough() {
         assert_eq!(normalize_terminal_output("hello"), "hello");
+    }
+
+    #[test]
+    fn normalize_terminal_output_expands_tabs_to_three_spaces() {
+        assert_eq!(normalize_terminal_output("a\tb"), "a   b");
+        assert_eq!(normalize_terminal_output("\t\t"), "      ");
+        // Expansion matches the tab accounting in visible_width, so the
+        // painted width equals what layout computed.
+        assert_eq!(
+            visible_width(&normalize_terminal_output("a\tb")),
+            visible_width("a\tb")
+        );
+    }
+
+    #[test]
+    fn normalize_terminal_output_keeps_escape_sequence_tabs_intact() {
+        let sequences = [
+            "\x1b]8;;https://example.test/a\tb\x07",
+            "\x1b]0;window\ttitle\x1b\\",
+            "\x1b_payload\tdata\x1b\\",
+        ];
+        for seq in sequences {
+            let input = format!("{seq}label\ttext");
+            let expected = format!("{seq}label   text");
+            assert_eq!(normalize_terminal_output(&input), expected, "seq: {seq:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_terminal_output_mixed_ansi_and_tabs() {
+        let input = "\x1b[31mred\tstop\x1b[0m";
+        let out = normalize_terminal_output(input);
+        assert_eq!(out, "\x1b[31mred   stop\x1b[0m");
+        // No visible tab survives normalization; width math never sees one.
+        assert!(!strip_ansi(&out).contains('\t'));
+        assert_eq!(visible_width(&out), visible_width(input));
     }
 
     // --- whitespace / punctuation -----------------------------------------

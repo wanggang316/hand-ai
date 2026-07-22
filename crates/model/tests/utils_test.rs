@@ -14,7 +14,7 @@ use model::types::{
 use model::utils::sanitize_unicode::{sanitize, sanitize_bytes};
 use model::utils::{
     AssistantMessageDiagnostic, DiagnosticKind, EventStream, Provenance, ValidationIssueKind,
-    merge_headers, safe_parse_partial, sha256_hex, try_parse_strict, validate_context,
+    merge_headers, safe_parse_partial, sha256_hex, try_parse_strict, uuid_v7, validate_context,
 };
 
 // -----------------------------------------------------------------------------
@@ -306,6 +306,43 @@ fn sha256_hex_empty_input() {
     assert_eq!(
         sha256_hex(b""),
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// uuid
+// -----------------------------------------------------------------------------
+
+#[test]
+fn uuid_v7_has_rfc_shape() {
+    let id = uuid_v7();
+    assert_eq!(id.len(), 36, "hyphenated form: {id}");
+    let groups: Vec<&str> = id.split('-').collect();
+    let lens: Vec<usize> = groups.iter().map(|g| g.len()).collect();
+    assert_eq!(lens, vec![8, 4, 4, 4, 12], "group layout: {id}");
+    assert!(
+        groups.iter().all(|g| g
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())),
+        "lowercase hex only: {id}"
+    );
+    // Version nibble: first char of the third group.
+    assert_eq!(groups[2].as_bytes()[0], b'7', "version nibble: {id}");
+    // RFC 4122 variant: top two bits of the fourth group's first byte are 0b10.
+    let variant = u8::from_str_radix(&groups[3][..2], 16).unwrap();
+    assert_eq!(variant & 0xc0, 0x80, "variant bits: {id}");
+}
+
+#[test]
+fn uuid_v7_timestamps_are_non_decreasing_and_ids_unique() {
+    let a = uuid_v7();
+    let b = uuid_v7();
+    assert_ne!(a, b, "random tail must differentiate ids");
+    // First 48 bits (chars 0..13 including the hyphen) are the unix-ms
+    // timestamp; lexicographic order on the hex prefix matches numeric order.
+    assert!(
+        a[..13] <= b[..13],
+        "time prefix must be non-decreasing: {a} then {b}"
     );
 }
 

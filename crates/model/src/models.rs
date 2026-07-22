@@ -132,9 +132,32 @@ pub fn supports_xhigh(model: &Model) -> bool {
         .any(|needle| model.id.contains(needle))
 }
 
+/// Substrings that mark a model id as max-capable. Anthropic's
+/// adaptive-thinking Claudes (Opus 4.6/4.7, Sonnet 4.6) all accept the
+/// top `max` effort tier; other families need an explicit
+/// `thinking_level_map` entry to advertise max. Both dashed and dotted
+/// id variants are listed for the same reason as
+/// [`XHIGH_MODEL_ID_PATTERNS`].
+const MAX_MODEL_ID_PATTERNS: &[&str] = &[
+    "opus-4-6",
+    "opus-4.6",
+    "opus-4-7",
+    "opus-4.7",
+    "sonnet-4-6",
+    "sonnet-4.6",
+];
+
+/// Whether this model supports the max thinking level.
+#[inline]
+pub fn supports_max(model: &Model) -> bool {
+    MAX_MODEL_ID_PATTERNS
+        .iter()
+        .any(|needle| model.id.contains(needle))
+}
+
 /// Ordered set of thinking levels surfaced to callers, where `None`
 /// represents the "off" sentinel (no reasoning) and each `Some` variant
-/// is a budget tier from minimal up through xhigh.
+/// is a budget tier from minimal up through max.
 const EXTENDED_THINKING_LEVELS: &[Option<crate::types::ThinkingLevel>] = &[
     None,
     Some(crate::types::ThinkingLevel::Minimal),
@@ -142,6 +165,7 @@ const EXTENDED_THINKING_LEVELS: &[Option<crate::types::ThinkingLevel>] = &[
     Some(crate::types::ThinkingLevel::Medium),
     Some(crate::types::ThinkingLevel::High),
     Some(crate::types::ThinkingLevel::Xhigh),
+    Some(crate::types::ThinkingLevel::Max),
 ];
 
 /// Translate the `None = off` / `Some(level)` representation into the
@@ -155,6 +179,7 @@ fn thinking_level_map_key(level: Option<crate::types::ThinkingLevel>) -> &'stati
         Some(crate::types::ThinkingLevel::Medium) => "medium",
         Some(crate::types::ThinkingLevel::High) => "high",
         Some(crate::types::ThinkingLevel::Xhigh) => "xhigh",
+        Some(crate::types::ThinkingLevel::Max) => "max",
     }
 }
 
@@ -165,11 +190,12 @@ fn thinking_level_map_key(level: Option<crate::types::ThinkingLevel>) -> &'stati
 /// When the model carries an explicit `thinking_level_map`, each level
 /// is filtered by that table: a `Some(None)` entry (JSON `null`) marks
 /// a level as unsupported, while a missing key keeps the level for the
-/// general tiers and drops `xhigh` (matching the upstream `xhigh
-/// requires an explicit entry` rule). Without a map, every tier is
-/// admitted and `xhigh` falls back to the substring-based
-/// [`supports_xhigh`] heuristic so existing GPT-5.x / Opus 4.6+ /
-/// DeepSeek V4 catalog entries keep advertising xhigh.
+/// general tiers and drops `xhigh` / `max` (both extended levels
+/// require an explicit entry). Without a map, every general tier is
+/// admitted and `xhigh` / `max` fall back to the substring-based
+/// [`supports_xhigh`] / [`supports_max`] heuristics so existing
+/// GPT-5.x / Opus 4.6+ / DeepSeek V4 catalog entries keep advertising
+/// their extended levels.
 pub fn get_supported_thinking_levels(model: &Model) -> Vec<Option<crate::types::ThinkingLevel>> {
     if !model.reasoning {
         return vec![None];
@@ -183,10 +209,15 @@ pub fn get_supported_thinking_levels(model: &Model) -> Vec<Option<crate::types::
                 Some(map) => match map.get(key) {
                     Some(None) => false,
                     Some(Some(_)) => true,
-                    None => !matches!(level, Some(crate::types::ThinkingLevel::Xhigh)),
+                    None => !matches!(
+                        level,
+                        Some(crate::types::ThinkingLevel::Xhigh)
+                            | Some(crate::types::ThinkingLevel::Max)
+                    ),
                 },
                 None => match level {
                     Some(crate::types::ThinkingLevel::Xhigh) => supports_xhigh(model),
+                    Some(crate::types::ThinkingLevel::Max) => supports_max(model),
                     _ => true,
                 },
             }
@@ -475,8 +506,9 @@ mod tests {
     }
 
     /// Non-reasoning models advertise exactly `[off]`; reasoning models
-    /// without an explicit map admit every tier and fall back to the
-    /// substring `supports_xhigh` heuristic for the top slot.
+    /// without an explicit map admit every general tier and fall back to
+    /// the substring `supports_xhigh` / `supports_max` heuristics for
+    /// the extended slots.
     #[test]
     fn get_supported_thinking_levels_uses_substring_default_when_map_missing() {
         // Non-reasoning -> only off.
@@ -484,7 +516,7 @@ mod tests {
         non_reasoning.reasoning = false;
         assert_eq!(get_supported_thinking_levels(&non_reasoning), vec![None]);
 
-        // Reasoning, xhigh-substring -> all six levels.
+        // Reasoning, xhigh-substring (no max substring) -> six levels.
         let mut xhigh_model = test_model("gpt-5.3-mini", Provider::OpenAI);
         xhigh_model.reasoning = true;
         let levels = get_supported_thinking_levels(&xhigh_model);
@@ -500,18 +532,37 @@ mod tests {
             ]
         );
 
-        // Reasoning, no xhigh substring -> xhigh excluded.
-        let mut no_xhigh = test_model("claude-sonnet-4", Provider::Anthropic);
-        no_xhigh.reasoning = true;
-        let levels = get_supported_thinking_levels(&no_xhigh);
+        // Reasoning, no extended substrings -> xhigh and max excluded.
+        let mut no_extended = test_model("claude-sonnet-4", Provider::Anthropic);
+        no_extended.reasoning = true;
+        let levels = get_supported_thinking_levels(&no_extended);
         assert!(!levels.contains(&Some(ThinkingLevel::Xhigh)));
+        assert!(!levels.contains(&Some(ThinkingLevel::Max)));
         assert!(levels.contains(&Some(ThinkingLevel::High)));
         assert!(levels.contains(&None));
     }
 
+    /// Adaptive-thinking Claudes advertise `max`: Opus 4.6 supports
+    /// both extended tiers, while Sonnet 4.6 takes the top `max`
+    /// effort without a native `xhigh`.
+    #[test]
+    fn get_supported_thinking_levels_admits_max_for_adaptive_claude() {
+        let mut opus = test_model("claude-opus-4-6-20251001", Provider::Anthropic);
+        opus.reasoning = true;
+        let levels = get_supported_thinking_levels(&opus);
+        assert!(levels.contains(&Some(ThinkingLevel::Xhigh)));
+        assert!(levels.contains(&Some(ThinkingLevel::Max)));
+
+        let mut sonnet = test_model("claude-sonnet-4-6", Provider::Anthropic);
+        sonnet.reasoning = true;
+        let levels = get_supported_thinking_levels(&sonnet);
+        assert!(!levels.contains(&Some(ThinkingLevel::Xhigh)));
+        assert!(levels.contains(&Some(ThinkingLevel::Max)));
+    }
+
     /// An explicit `thinking_level_map` is authoritative — a `null`
     /// entry marks the level unsupported; an omitted key drops the
-    /// xhigh slot but admits the other tiers.
+    /// xhigh / max slots but admits the other tiers.
     #[test]
     fn get_supported_thinking_levels_respects_explicit_map() {
         let mut model = test_model("custom", Provider::OpenAI);
@@ -569,6 +620,28 @@ mod tests {
         assert_eq!(clamp_thinking_level(&model, None), None);
     }
 
+    /// A map may leave a hole between `high` and `max` — a requested
+    /// `xhigh` then rises to `max` rather than falling to `high`.
+    #[test]
+    fn clamp_thinking_level_rises_through_xhigh_hole_to_max() {
+        let mut model = test_model("custom", Provider::OpenAI);
+        model.reasoning = true;
+        let mut map = std::collections::HashMap::new();
+        map.insert("high".to_string(), Some("high".to_string()));
+        // xhigh omitted -> excluded; max explicitly supported.
+        map.insert("max".to_string(), Some("max".to_string()));
+        model.thinking_level_map = Some(map);
+
+        assert_eq!(
+            clamp_thinking_level(&model, Some(ThinkingLevel::Xhigh)),
+            Some(ThinkingLevel::Max)
+        );
+        assert_eq!(
+            clamp_thinking_level(&model, Some(ThinkingLevel::Max)),
+            Some(ThinkingLevel::Max)
+        );
+    }
+
     /// Non-reasoning models clamp every request to `off`.
     #[test]
     fn clamp_thinking_level_collapses_to_off_for_non_reasoning_models() {
@@ -581,6 +654,7 @@ mod tests {
             Some(ThinkingLevel::Medium),
             Some(ThinkingLevel::High),
             Some(ThinkingLevel::Xhigh),
+            Some(ThinkingLevel::Max),
         ] {
             assert_eq!(
                 clamp_thinking_level(&model, level),

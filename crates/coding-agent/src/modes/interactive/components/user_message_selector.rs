@@ -326,6 +326,27 @@ mod tests {
         );
     }
 
+    /// A confirm after the driver has stopped listening (single-recv
+    /// contract: the receiver is dropped once the first event is
+    /// consumed) must stay inert — no panic, no re-fired action — and
+    /// still report `Handled` so the key cannot leak through the modal
+    /// overlay to components underneath.
+    #[test]
+    fn repeat_confirm_after_listener_drop_is_inert() {
+        let (tx, rx) = mpsc::channel();
+        let messages = vec![item("a", "1"), item("b", "2")];
+        let mut comp = UserMessageSelectorComponent::new(messages, Some("a"), tx, None);
+        comp.handle_input(&make_event("\r"));
+        assert_eq!(
+            rx.recv().unwrap(),
+            UserMessageSelectorEvent::Select {
+                entry_id: "a".into()
+            }
+        );
+        drop(rx);
+        assert_eq!(comp.handle_input(&make_event("\r")), HandleResult::Handled);
+    }
+
     #[test]
     fn escape_cancels() {
         let (tx, rx) = mpsc::channel();

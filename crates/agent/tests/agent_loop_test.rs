@@ -4,10 +4,10 @@ mod common;
 
 use common::*;
 use hand_agent::{
-    AgentContext, AgentEvent, AgentLoopConfig, BeforeToolCallResult, CancellationToken,
+    AgentContext, AgentEvent, AgentLoopConfig, AgentTool, BeforeToolCallResult, CancellationToken,
     QueueDeliveryMode, ToolExecutionMode, ToolResult, run_agent_loop, run_agent_loop_continue,
 };
-use model::{Api, Client, Message, SimpleStreamOptions, UserMessage};
+use model::{Api, Client, Message, SimpleStreamOptions, ToolResultContent, UserMessage};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -132,6 +132,97 @@ async fn single_turn_tool_call() {
             ..
         }
     )));
+}
+
+#[tokio::test]
+async fn length_truncated_tool_calls_fail_without_execution() {
+    let client = Client::new();
+    client.registry.register(
+        Api::OpenAICompletions,
+        Box::new(MockTruncatedToolProvider::new(
+            "echo",
+            serde_json::json!({"message": "cut off"}),
+            "Recovered",
+        )),
+        Some("test".into()),
+    );
+
+    let executed = Arc::new(Mutex::new(0u32));
+    let executed_probe = executed.clone();
+    let tool = AgentTool::simple(
+        "echo",
+        "Echoes back the input",
+        serde_json::json!({
+            "type": "object",
+            "properties": { "message": { "type": "string" } },
+            "required": ["message"]
+        }),
+        "Echo",
+        move |_id, _args| {
+            let executed = executed_probe.clone();
+            async move {
+                *executed.lock().unwrap() += 1;
+                ToolResult::text("ran")
+            }
+        },
+    );
+
+    let (emit, events) = collecting_event_sink();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext::default();
+    let prompt = vec![Message::User(UserMessage::new_text("Use echo"))];
+
+    let result = run_agent_loop(
+        prompt,
+        &mut context,
+        &[tool],
+        &default_config(),
+        &client,
+        &emit,
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    // The tool itself must never run for a Length-truncated message.
+    assert_eq!(*executed.lock().unwrap(), 0);
+
+    let evs = events.lock().unwrap();
+    assert!(
+        evs.iter()
+            .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. }))
+    );
+
+    let tool_result = result
+        .messages
+        .iter()
+        .find_map(|m| match m {
+            Message::ToolResult(tr) => Some(tr),
+            _ => None,
+        })
+        .expect("truncated tool call produces an error tool result");
+    assert!(tool_result.is_error);
+    let text = tool_result
+        .content
+        .iter()
+        .find_map(|c| match c {
+            ToolResultContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .unwrap_or("");
+    assert!(text.contains("output token limit"));
+
+    // The loop keeps going so the model can re-issue the call.
+    let final_assistant = result
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            Message::Assistant(a) => Some(a),
+            _ => None,
+        })
+        .expect("loop continues after failing truncated calls");
+    assert_eq!(final_assistant.stop_reason, model::StopReason::Stop);
 }
 
 #[tokio::test]

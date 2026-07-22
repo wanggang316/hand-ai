@@ -504,33 +504,33 @@ impl InteractiveMode {
             ListenerResult::pass()
         }));
 
-        // Ctrl+V listener: read an image from the system clipboard,
-        // write it to a temp file, and insert the path at the cursor.
-        // The actual clipboard read + file write runs off-thread
-        // (arboard / tempfile are sync) and the resulting path is
-        // inserted via the editor's Arc handle.
-        let chat_for_img = Arc::clone(&chat);
-        let editor_for_img = Arc::clone(&editor);
-        let render_for_img: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(tui.render_handle());
+        // Ctrl+V listener: read an image from the system clipboard, write
+        // it to a temp file, and insert the path at the cursor; when the
+        // clipboard holds text instead, insert the text itself. The actual
+        // clipboard read + file write runs off-thread (arboard / tempfile
+        // are sync) and the result is inserted via the editor's Arc handle.
+        let chat_for_paste = Arc::clone(&chat);
+        let editor_for_paste = Arc::clone(&editor);
+        let render_for_paste: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(tui.render_handle());
         tui.add_input_listener(Box::new(move |event: &InputEvent| {
             if let InputEvent::Key(key) = event
                 && matches!(&key.name, KeyName::Char('v'))
                 && key.modifiers.ctrl
             {
-                let chat_clone = Arc::clone(&chat_for_img);
-                let editor_clone = Arc::clone(&editor_for_img);
-                let render_clone = Arc::clone(&render_for_img);
-                std::thread::spawn(move || match handle_clipboard_image_paste() {
-                    Ok(Some(path)) => {
+                let chat_clone = Arc::clone(&chat_for_paste);
+                let editor_clone = Arc::clone(&editor_for_paste);
+                let render_clone = Arc::clone(&render_for_paste);
+                std::thread::spawn(move || match handle_clipboard_paste() {
+                    Ok(Some(insert)) => {
                         if let Ok(mut e) = editor_clone.lock() {
-                            e.insert_text(&path);
+                            e.insert_text(&insert);
                         }
                         render_clone();
                     }
                     Ok(None) => {}
                     Err(e) => push_status(
                         &chat_clone,
-                        format!("[clipboard image paste failed: {e}]"),
+                        format!("[clipboard paste failed: {e}]"),
                         Some(RED_FG),
                     ),
                 });
@@ -1086,12 +1086,47 @@ enum ProgressState {
     Error,
 }
 
-/// M4.2 — Ctrl+V clipboard-image handler. Reads an image from the system
+/// M4.2 — Ctrl+V clipboard handler. Prefers an image: reads it via
+/// [`handle_clipboard_image_paste`] and returns the temp-file path to
+/// insert at the cursor. When the clipboard holds no image — the common
+/// "you Ctrl+V'd with text on the clipboard" case — falls back to plain
+/// clipboard text so the keystroke still pastes something useful.
+/// Returns `Ok(None)` when the clipboard offers neither; an image-read
+/// failure surfaces only when the text fallback also comes up empty.
+fn handle_clipboard_paste() -> Result<Option<String>, String> {
+    resolve_clipboard_paste(
+        handle_clipboard_image_paste(),
+        crate::utils::clipboard::read_clipboard_text,
+    )
+}
+
+/// Decision logic for [`handle_clipboard_paste`], split out so the
+/// image-vs-text fallback rules are unit-testable without a real
+/// clipboard.
+///
+/// * Image available → insert the image path; text is never consulted.
+/// * No image → insert clipboard text, or nothing when there is none.
+/// * Image read failed → still try text; the error is reported only when
+///   the text fallback also produced nothing.
+fn resolve_clipboard_paste(
+    image: Result<Option<String>, String>,
+    read_text: impl FnOnce() -> Option<String>,
+) -> Result<Option<String>, String> {
+    match image {
+        Ok(Some(path)) => Ok(Some(path)),
+        Ok(None) => Ok(read_text()),
+        Err(e) => match read_text() {
+            Some(text) => Ok(Some(text)),
+            None => Err(e),
+        },
+    }
+}
+
+/// Image half of the Ctrl+V handler. Reads an image from the system
 /// clipboard via `arboard` (re-encoded to PNG), writes it to a temp file
-/// named `hand-clipboard-<uuid>.png`, and returns the absolute path so the
-/// driver can insert it at the cursor. Returns `Ok(None)` when the
-/// clipboard exists but doesn't hold an image — the common "you Ctrl+V'd
-/// with text on the clipboard" case.
+/// named `hand-clipboard-<uuid>.png`, and returns the absolute path.
+/// Returns `Ok(None)` when the clipboard exists but doesn't hold an
+/// image.
 fn handle_clipboard_image_paste() -> Result<Option<String>, String> {
     let image = match crate::utils::clipboard_image::read_clipboard_image() {
         Ok(Some(img)) => img,
@@ -1597,7 +1632,7 @@ fn refresh_footer(
 
 /// Tint the editor's focused border with the active thinking level.
 /// The palette uses truecolor literals for `thinkingOff`/`Minimal`/
-/// `Low`/`Medium`/`High`/`Xhigh` so the colours work under any
+/// `Low`/`Medium`/`High`/`Xhigh`/`Max` so the colours work under any
 /// terminal.
 fn refresh_editor_border(session: &AgentSession, editor: &Arc<StdMutex<EditorComponent>>) {
     let colour = thinking_level_border_color(session.stream_options().reasoning);
@@ -1608,9 +1643,10 @@ fn refresh_editor_border(session: &AgentSession, editor: &Arc<StdMutex<EditorCom
 
 /// Map a thinking level to the focused-border SGR. Uses the
 /// dark-theme palette: `thinking_off`=#505050, `Minimal`=#6e6e6e,
-/// `Low`=#5f87af, `Medium`=#81a2be, `High`=#b294bb, `Xhigh`=#d183e8.
-/// `None` (reasoning off) returns the default `BORDER_FOCUS` cyan so
-/// the border stays consistent with the editor's idle state.
+/// `Low`=#5f87af, `Medium`=#81a2be, `High`=#b294bb, `Xhigh`=#d183e8,
+/// `Max`=#ff5fff. `None` (reasoning off) returns the default
+/// `BORDER_FOCUS` cyan so the border stays consistent with the
+/// editor's idle state.
 fn thinking_level_border_color(level: Option<model::ThinkingLevel>) -> String {
     use model::ThinkingLevel;
     match level {
@@ -1620,6 +1656,7 @@ fn thinking_level_border_color(level: Option<model::ThinkingLevel>) -> String {
         Some(ThinkingLevel::Medium) => "\x1b[38;2;129;162;190m".to_string(),
         Some(ThinkingLevel::High) => "\x1b[38;2;178;148;187m".to_string(),
         Some(ThinkingLevel::Xhigh) => "\x1b[38;2;209;131;232m".to_string(),
+        Some(ThinkingLevel::Max) => "\x1b[38;2;255;95;255m".to_string(),
     }
 }
 
@@ -2289,7 +2326,7 @@ async fn mount_thinking_selector(
                 push_status(
                     chat,
                     format!(
-                        "[/thinking: unknown level '{trimmed}' — try off/minimal/low/medium/high/xhigh]"
+                        "[/thinking: unknown level '{trimmed}' — try off/minimal/low/medium/high/xhigh/max]"
                     ),
                     Some(YELLOW_FG),
                 );
@@ -2310,6 +2347,7 @@ async fn mount_thinking_selector(
         Some(ThinkingLevel::Medium),
         Some(ThinkingLevel::High),
         Some(ThinkingLevel::Xhigh),
+        Some(ThinkingLevel::Max),
     ];
     // Seed the selector with the active level so the cursor lands on it.
     let current = session.stream_options().reasoning;
@@ -2379,6 +2417,7 @@ fn level_label(level: model::ThinkingLevel) -> &'static str {
         ThinkingLevel::Medium => "medium",
         ThinkingLevel::High => "high",
         ThinkingLevel::Xhigh => "xhigh",
+        ThinkingLevel::Max => "max",
     }
 }
 
@@ -2481,6 +2520,7 @@ pub(crate) fn build_settings_entries(
         Some(ThinkingLevelSetting::Medium) => "medium".to_string(),
         Some(ThinkingLevelSetting::High) => "high".to_string(),
         Some(ThinkingLevelSetting::Xhigh) => "xhigh".to_string(),
+        Some(ThinkingLevelSetting::Max) => "max".to_string(),
         None => "(unset)".to_string(),
     };
 
@@ -3587,6 +3627,29 @@ mod tests {
         assert_eq!(view.model_provider, "anthropic");
     }
 
+    /// The first footer view is built before the TUI's first render
+    /// (see `run()`), so everything it touches — including the
+    /// available-provider count — must be answered synchronously from
+    /// the in-process catalog snapshot and the environment. This test
+    /// being a plain `#[test]` (no async runtime available) pins that
+    /// contract: a network catalog refresh can never sneak onto the
+    /// pre-render path without breaking compilation here. Background
+    /// catalog updates must instead go through the async
+    /// `model::refresh_from_remote` hot-swap after startup.
+    #[test]
+    fn startup_footer_provider_count_is_synchronous_and_local() {
+        let session = make_session();
+        let view = InteractiveMode::build_footer_view(
+            &session,
+            &std::path::PathBuf::from("/tmp"),
+            TokenUsageSummary::default(),
+        );
+        // Bounded by the local catalog's provider list — the count is
+        // derived from `model::get_providers()` (a snapshot read), not
+        // from a remote catalog fetch.
+        assert!(view.available_provider_count <= model::get_providers().len());
+    }
+
     /// `/session` must surface the current thinking level so users
     /// can confirm `/thinking <level>` actually took effect. The
     /// label tracks `stream_options().reasoning` — `off` when None,
@@ -4246,6 +4309,44 @@ mod tests {
         assert!(out[1..].starts_with('/') || out[1..].contains(":\\"));
     }
 
+    /// Ctrl+V decision logic: an image on the clipboard wins outright —
+    /// the text fallback must not even be consulted.
+    #[test]
+    fn clipboard_paste_prefers_image_over_text() {
+        let out = resolve_clipboard_paste(Ok(Some("/tmp/img.png".into())), || {
+            panic!("text fallback must not run when an image pasted")
+        });
+        assert_eq!(out, Ok(Some("/tmp/img.png".to_string())));
+    }
+
+    #[test]
+    fn clipboard_paste_falls_back_to_text_when_no_image() {
+        let out = resolve_clipboard_paste(Ok(None), || Some("hello".into()));
+        assert_eq!(out, Ok(Some("hello".to_string())));
+    }
+
+    /// Nothing usable on the clipboard → silent no-op, not an error.
+    #[test]
+    fn clipboard_paste_is_noop_when_clipboard_empty() {
+        let out = resolve_clipboard_paste(Ok(None), || None);
+        assert_eq!(out, Ok(None));
+    }
+
+    /// A hard image-read failure (headless host, sandbox, no clipboard
+    /// service) must still try the text transport before giving up.
+    #[test]
+    fn clipboard_paste_recovers_from_image_error_via_text() {
+        let out = resolve_clipboard_paste(Err("no clipboard".into()), || Some("hello".into()));
+        assert_eq!(out, Ok(Some("hello".to_string())));
+    }
+
+    /// The error only surfaces when every transport came up empty.
+    #[test]
+    fn clipboard_paste_reports_error_only_when_all_transports_fail() {
+        let out = resolve_clipboard_paste(Err("no clipboard".into()), || None);
+        assert_eq!(out, Err("no clipboard".to_string()));
+    }
+
     #[test]
     fn editor_border_color_tracks_thinking_level() {
         use model::ThinkingLevel;
@@ -4257,6 +4358,7 @@ mod tests {
             ThinkingLevel::Medium,
             ThinkingLevel::High,
             ThinkingLevel::Xhigh,
+            ThinkingLevel::Max,
         ];
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for l in levels {
@@ -4708,6 +4810,71 @@ mod tests {
         apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
         let joined = chat.lock().unwrap()[0].render(80).join("\n");
         assert!(joined.contains("no user messages"), "{joined:?}");
+    }
+
+    /// Guard: a burst of repeated Enter presses while the fork picker is
+    /// mounted must fork exactly once. The picker helper consumes a single
+    /// `Select` event, queues the overlay hide before `session.fork` runs,
+    /// and drops its receiver on return — repeat confirms land in a closed
+    /// channel instead of re-firing the fork.
+    #[tokio::test]
+    async fn fork_picker_double_confirm_forks_once() {
+        let mut tui = hand_tui::Tui::new(Box::new(hand_tui::TestTerminal::new(80, 24)));
+        let mounter = tui.overlay_mounter();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let run_handle = tokio::spawn(async move {
+            let _ = tui.run_with_events(event_rx).await;
+        });
+
+        let mut session = make_session();
+        {
+            // Seed two user messages directly — a full `send_message`
+            // round-trip is too heavy here (same pattern as the RPC
+            // dispatcher's fork tests).
+            let mgr = session.session_manager_mut();
+            for text in ["first", "second"] {
+                mgr.append_message(model::Message::User(model::UserMessage::new_text(text)))
+                    .expect("append_message must succeed on in-memory session");
+            }
+        }
+        let original_id = session.session_id().to_string();
+
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let fork_chat = Arc::clone(&chat);
+        let fork_mounter = mounter.clone();
+        let fork_task = tokio::spawn(async move {
+            apply_fork(&fork_chat, &mut session, None, Some(&fork_mounter)).await;
+            session
+        });
+
+        // Feed paired Enters until the fork resolves: whenever a confirm
+        // reaches the mounted picker, a second confirm is already queued
+        // right behind it.
+        let mut budget = 1000u32;
+        while !fork_task.is_finished() {
+            budget = budget
+                .checked_sub(1)
+                .expect("fork task did not resolve after repeated confirms");
+            let _ = event_tx.send(hand_tui::StdinBufferEvent::Data("\r".into()));
+            let _ = event_tx.send(hand_tui::StdinBufferEvent::Data("\r".into()));
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let session = fork_task.await.unwrap();
+        run_handle.abort();
+
+        let statuses: Vec<String> = chat
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.render(120).join("\n"))
+            .collect();
+        let forked = statuses.iter().filter(|s| s.contains("[forked at")).count();
+        assert_eq!(forked, 1, "fork must fire exactly once: {statuses:?}");
+        assert_ne!(
+            session.session_id(),
+            original_id,
+            "session id must advance exactly one branch"
+        );
     }
 
     #[tokio::test]

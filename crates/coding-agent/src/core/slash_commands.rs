@@ -154,7 +154,7 @@ impl SlashCommandRegistry {
             (
                 "thinking",
                 vec![],
-                "Set thinking level (minimal/low/medium/high/xhigh)",
+                "Set thinking level (minimal/low/medium/high/xhigh/max)",
                 true,
             ),
             (

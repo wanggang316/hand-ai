@@ -58,6 +58,7 @@ impl crate::api_registry::ApiProvider for AnthropicMessagesProvider {
 
         let reasoning = reasoning.map(|r| match r {
             ThinkingLevel::Xhigh if !supports_xhigh(&model) => ThinkingLevel::High,
+            ThinkingLevel::Max if !supports_adaptive_thinking(&model.id) => ThinkingLevel::High,
             other => other,
         });
 
@@ -507,8 +508,9 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
         // - Opus 4.7+ exposes `xhigh` natively; sending `max` on 4.7
         //   is rejected with "invalid effort".
         // Other adaptive-thinking models (Sonnet 4.6, ...) don't
-        // support either xhigh OR max; clamp to `high` so the request
-        // still passes validation.
+        // support xhigh; clamp to `high` so the request still passes
+        // validation. The `max` level needs no per-generation split:
+        // every adaptive-thinking Claude accepts the top `max` effort.
         let is_opus_4_6 = model.id.contains("opus-4-6") || model.id.contains("opus-4.6");
         let is_opus_4_7 = model.id.contains("opus-4-7") || model.id.contains("opus-4.7");
         let effort = match level {
@@ -524,6 +526,7 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
                     "high"
                 }
             }
+            ThinkingLevel::Max => "max",
         };
 
         serde_json::json!({
@@ -532,12 +535,13 @@ fn build_thinking_config(level: ThinkingLevel, model: &Model) -> Value {
             "display": "summarized",
         })
     } else {
-        // Budget-based thinking for older models
+        // Budget-based thinking for older models; the extended levels
+        // clamp to the high budget.
         let budget = match level {
             ThinkingLevel::Minimal => 1024u32,
             ThinkingLevel::Low => 2048,
             ThinkingLevel::Medium => 8192,
-            ThinkingLevel::High | ThinkingLevel::Xhigh => 16384,
+            ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => 16384,
         };
 
         serde_json::json!({
@@ -671,10 +675,15 @@ fn convert_assistant_content(asst_msg: &AssistantMessage, model: &Model) -> Vec<
                 if is_same_model {
                     if let Some(sig) = &tc.thinking_signature {
                         if !sig.is_empty() {
-                            // Redacted thinking or normal thinking with signature
-                            if tc.thinking.contains("[Reasoning redacted]")
-                                || tc.thinking.is_empty()
-                            {
+                            // Only the in-band redacted marker replays as
+                            // redacted_thinking (its signature holds the
+                            // opaque `data` payload). A signed block whose
+                            // text ended up empty (e.g. minimal thinking
+                            // budget) is a normal thinking block: replaying
+                            // it as redacted would pass a thinking signature
+                            // where the API expects redacted data, and
+                            // dropping it would lose the signature.
+                            if tc.thinking.contains("[Reasoning redacted]") {
                                 blocks.push(serde_json::json!({
                                     "type": "redacted_thinking",
                                     "data": sig,
@@ -737,23 +746,36 @@ fn convert_assistant_content(asst_msg: &AssistantMessage, model: &Model) -> Vec<
 }
 
 fn convert_tool_result_content(content: &[ToolResultContent]) -> Vec<Value> {
-    content
+    // Anthropic rejects text blocks whose `text` is empty (min length 1),
+    // so drop them instead of forwarding.
+    let blocks: Vec<Value> = content
         .iter()
-        .map(|block| match block {
-            ToolResultContent::Text(tc) => serde_json::json!({
+        .filter_map(|block| match block {
+            ToolResultContent::Text(tc) if tc.text.is_empty() => None,
+            ToolResultContent::Text(tc) => Some(serde_json::json!({
                 "type": "text",
                 "text": sanitize_surrogates(&tc.text),
-            }),
-            ToolResultContent::Image(img) => serde_json::json!({
+            })),
+            ToolResultContent::Image(img) => Some(serde_json::json!({
                 "type": "image",
                 "source": {
                     "type": "base64",
                     "media_type": &img.mime_type,
                     "data": &img.data,
                 }
-            }),
+            })),
         })
-        .collect()
+        .collect();
+
+    // Neither text nor images: emit an explicit placeholder so the model
+    // can tell the tool ran and returned nothing.
+    if blocks.is_empty() {
+        return vec![serde_json::json!({
+            "type": "text",
+            "text": "(no tool output)",
+        })];
+    }
+    blocks
 }
 
 fn convert_tool_to_anthropic(tool: &Tool) -> Value {
@@ -1408,6 +1430,62 @@ mod tests {
         assert_eq!(content[0]["tool_use_id"], "call_1");
     }
 
+    /// Empty tool results (no text, no images) must emit an explicit
+    /// "(no tool output)" text block. Anthropic rejects text blocks
+    /// whose `text` is empty, and the model otherwise can't tell the
+    /// tool ran and returned nothing.
+    #[test]
+    fn empty_tool_result_gets_no_output_placeholder() {
+        let model = test_model();
+        let msgs = vec![
+            // An empty text block and no content at all must both hit
+            // the placeholder.
+            Message::ToolResult(ToolResultMessage::new(
+                "call_1",
+                "bash",
+                vec![ToolResultContent::Text(TextContent::new(""))],
+            )),
+            Message::ToolResult(ToolResultMessage::new("call_2", "bash", vec![])),
+        ];
+        let result = convert_messages_to_anthropic(&msgs, &model);
+        assert_eq!(result.len(), 1);
+        let content = result[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        for block in content {
+            assert_eq!(block["type"], "tool_result");
+            let inner = block["content"].as_array().unwrap();
+            assert_eq!(inner.len(), 1, "exactly one placeholder block: {inner:?}");
+            assert_eq!(inner[0]["type"], "text");
+            assert_eq!(inner[0]["text"], "(no tool output)");
+        }
+    }
+
+    /// A tool result carrying an image next to an empty text block keeps
+    /// the image and drops the empty text — no placeholder is added when
+    /// real content is present.
+    #[test]
+    fn image_only_tool_result_keeps_image_without_placeholder() {
+        use crate::types::ImageContent;
+        let model = test_model();
+        let msgs = vec![Message::ToolResult(ToolResultMessage::new(
+            "call_img",
+            "screenshot",
+            vec![
+                ToolResultContent::Text(TextContent::new("")),
+                ToolResultContent::Image(ImageContent::new("ZmFrZQ==", "image/png")),
+            ],
+        ))];
+        let result = convert_messages_to_anthropic(&msgs, &model);
+        let content = result[0]["content"].as_array().unwrap();
+        let inner = content[0]["content"].as_array().unwrap();
+        assert_eq!(
+            inner.len(),
+            1,
+            "empty text block must be dropped: {inner:?}"
+        );
+        assert_eq!(inner[0]["type"], "image");
+    }
+
     #[test]
     fn test_convert_assistant_with_tool_call() {
         let model = test_model();
@@ -1587,7 +1665,7 @@ mod tests {
     }
 
     /// Other adaptive-thinking models (Sonnet 4.6, ...) don't accept
-    /// xhigh OR max. Clamp to `high` so the request stays valid.
+    /// a native xhigh. Clamp to `high` so the request stays valid.
     #[test]
     fn thinking_config_xhigh_clamps_to_high_on_sonnet_4_6() {
         let model = Model {
@@ -1597,6 +1675,38 @@ mod tests {
         let config = build_thinking_config(ThinkingLevel::Xhigh, &model);
         assert_eq!(config["type"], "adaptive");
         assert_eq!(config["effort"], "high");
+    }
+
+    /// The `max` level maps to the top `"max"` effort on every
+    /// adaptive-thinking generation — no per-model split like xhigh.
+    #[test]
+    fn thinking_config_max_maps_to_max_on_adaptive_models() {
+        for id in [
+            "claude-opus-4-6-20251022",
+            "claude-opus-4-7-20260101",
+            "claude-sonnet-4-6-20251022",
+        ] {
+            let model = Model {
+                id: id.to_string(),
+                ..test_model()
+            };
+            let config = build_thinking_config(ThinkingLevel::Max, &model);
+            assert_eq!(config["type"], "adaptive", "model {id}");
+            assert_eq!(config["effort"], "max", "model {id}");
+        }
+    }
+
+    /// Budget-based models have no effort tiers — `max` clamps to the
+    /// high budget, exactly like xhigh.
+    #[test]
+    fn thinking_config_max_clamps_to_high_budget_on_budget_models() {
+        let model = Model {
+            id: "claude-3-5-sonnet-20241022".to_string(),
+            ..test_model()
+        };
+        let config = build_thinking_config(ThinkingLevel::Max, &model);
+        assert_eq!(config["type"], "enabled");
+        assert_eq!(config["budget_tokens"], 16384);
     }
 
     /// Extended thinking is incompatible with `temperature`: the
@@ -2158,5 +2268,55 @@ mod tests {
             "unsigned thinking must not be wrapped in <thinking> tags: {text}"
         );
         assert_eq!(text, "partial reasoning");
+    }
+
+    fn same_model_assistant(model: &Model, thinking: ThinkingContent) -> AssistantMessage {
+        AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::Thinking(thinking)],
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            model: model.id.clone(),
+            usage: crate::types::Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    /// A signed thinking block whose text is empty (e.g. minimal thinking
+    /// budget yields a signature without any thinking deltas) must replay
+    /// as a `thinking` block that preserves the signature — not as
+    /// `redacted_thinking`, whose `data` field expects a different opaque
+    /// payload, and not dropped, which would lose the signature.
+    #[test]
+    fn test_thinking_same_model_signed_empty_replays_as_thinking() {
+        let model = test_model();
+        let mut thinking = ThinkingContent::new("");
+        thinking.thinking_signature = Some("sig-1".to_string());
+        let asst = same_model_assistant(&model, thinking);
+        let result = convert_assistant_content(&asst, &model);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["type"], "thinking");
+        assert_eq!(result[0]["thinking"], "");
+        assert_eq!(result[0]["signature"], "sig-1");
+    }
+
+    /// Real redacted thinking (marked in-band at parse time) must keep
+    /// round-tripping as `redacted_thinking` with the opaque payload in
+    /// `data`.
+    #[test]
+    fn test_thinking_redacted_marker_replays_as_redacted() {
+        let model = test_model();
+        let mut thinking = ThinkingContent::new("[Reasoning redacted]");
+        thinking.thinking_signature = Some("opaque-data".to_string());
+        let asst = same_model_assistant(&model, thinking);
+        let result = convert_assistant_content(&asst, &model);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["type"], "redacted_thinking");
+        assert_eq!(result[0]["data"], "opaque-data");
     }
 }

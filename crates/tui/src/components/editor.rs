@@ -68,6 +68,14 @@ pub struct PasteContent {
     pub char_count: u32,
 }
 
+/// Paste registry state (markers plus id counter) captured by undo entries
+/// whose operation mutates it. See [`UndoEntry::paste_registry`].
+#[derive(Debug, Clone)]
+pub struct PasteRegistrySnapshot {
+    pub markers: HashMap<u32, PasteContent>,
+    pub next_id: u32,
+}
+
 // ============================================================================
 // Undo / redo
 // ============================================================================
@@ -94,6 +102,12 @@ pub struct UndoEntry {
     pub op: UndoOp,
     pub cursor_before: (usize, usize),
     pub cursor_after: (usize, usize),
+    /// Paste registry state captured before ops that mutate it (paste-marker
+    /// creation, marker deletion, whole-buffer replacement); `None` for
+    /// plain text ops. Undo and redo swap it with the live registry so both
+    /// directions restore the marker content and id counter that match the
+    /// restored text.
+    pub paste_registry: Option<PasteRegistrySnapshot>,
     pub timestamp: Instant,
 }
 
@@ -434,9 +448,27 @@ impl EditorComponent {
         expand_paste_markers(&self.text(), &self.paste_markers)
     }
 
-    /// Replace the editor buffer. Clears undo/redo, paste markers, and
-    /// autocomplete state.
+    /// Replace the editor buffer. When the content actually changes, the
+    /// outgoing text and paste registry are captured as a single undo entry
+    /// so programmatic replacements — including the clear-on-submit — are
+    /// undoable. Paste markers, the paste id counter, and autocomplete
+    /// state are reset for the new content.
     pub fn set_text(&mut self, text: &str) {
+        let old_text = self.text();
+        if old_text != text {
+            let snapshot = self.paste_registry_snapshot();
+            self.push_undo(UndoEntry {
+                op: UndoOp::Replace {
+                    position: 0,
+                    removed: old_text,
+                    inserted: text.to_string(),
+                },
+                cursor_before: (self.cursor_line, self.cursor_col),
+                cursor_after: (0, 0),
+                paste_registry: Some(snapshot),
+                timestamp: Instant::now(),
+            });
+        }
         self.lines = if text.is_empty() {
             vec![String::new()]
         } else {
@@ -449,8 +481,6 @@ impl EditorComponent {
         self.cursor_line = 0;
         self.cursor_col = 0;
         self.viewport_top = 0;
-        self.undo_stack.clear();
-        self.redo_stack.clear();
         self.paste_markers.clear();
         self.next_paste_id = 0;
         self.autocomplete_state = None;
@@ -566,6 +596,7 @@ impl EditorComponent {
         let line_count = text.split('\n').count();
         let char_count = text.chars().count();
         if line_count > PASTE_LINES_THRESHOLD || char_count > PASTE_CHARS_THRESHOLD {
+            let snapshot = self.paste_registry_snapshot();
             self.next_paste_id += 1;
             let id = self.next_paste_id;
             let marker = if line_count > PASTE_LINES_THRESHOLD {
@@ -583,6 +614,12 @@ impl EditorComponent {
                 },
             );
             self.insert_text(&marker);
+            // `insert_text` pushed the marker's undo entry; tag it with the
+            // pre-paste registry so undoing the paste also unwinds the
+            // registry entry and the id counter.
+            if let Some(entry) = self.undo_stack.last_mut() {
+                entry.paste_registry = Some(snapshot);
+            }
         } else {
             self.insert_text(text);
         }
@@ -605,6 +642,7 @@ impl EditorComponent {
             },
             cursor_before,
             cursor_after,
+            paste_registry: None,
             timestamp: Instant::now(),
         });
         self.maybe_trigger_autocomplete();
@@ -805,6 +843,7 @@ impl EditorComponent {
             },
             cursor_before,
             cursor_after,
+            paste_registry: None,
             timestamp: Instant::now(),
         });
         self.maybe_trigger_autocomplete();
@@ -827,6 +866,7 @@ impl EditorComponent {
             },
             cursor_before,
             cursor_after,
+            paste_registry: None,
             timestamp: Instant::now(),
         });
         self.cancel_autocomplete();
@@ -835,6 +875,17 @@ impl EditorComponent {
     fn delete_back(&mut self) {
         let cursor_before = (self.cursor_line, self.cursor_col);
         if self.cursor_col > 0 {
+            // Backspacing over the closing bracket of a paste marker removes
+            // the whole marker: its registry entry is dropped and the
+            // remaining markers are renumbered so ids stay dense.
+            let before = &self.current_line()[..self.cursor_col];
+            if let Some((start_col, id)) = paste_marker_ending_at(before)
+                && self.paste_markers.contains_key(&id)
+            {
+                self.delete_paste_marker(start_col, id, cursor_before);
+                self.maybe_trigger_autocomplete();
+                return;
+            }
             // Delete one grapheme backward.
             let line = self.current_line();
             let before = &line[..self.cursor_col];
@@ -854,6 +905,7 @@ impl EditorComponent {
                 },
                 cursor_before,
                 cursor_after: (self.cursor_line, self.cursor_col),
+                paste_registry: None,
                 timestamp: Instant::now(),
             });
         } else if self.cursor_line > 0 {
@@ -871,10 +923,62 @@ impl EditorComponent {
                 },
                 cursor_before,
                 cursor_after: (self.cursor_line, self.cursor_col),
+                paste_registry: None,
                 timestamp: Instant::now(),
             });
         }
         self.maybe_trigger_autocomplete();
+    }
+
+    /// Remove the complete marker token spanning `start_col..cursor_col` on
+    /// the cursor line: drop its registry entry, decrement the id counter,
+    /// and renumber the remaining markers so ids stay dense. Registry keys
+    /// are shifted in ascending id order *before* the marker text is
+    /// rewritten so text and registry never disagree — `[paste #3]` becomes
+    /// `[paste #2]` when `[paste #1]` is removed, regardless of where the
+    /// markers sit in the text. Recorded as one whole-buffer Replace entry
+    /// so a single undo restores text and registry together.
+    fn delete_paste_marker(&mut self, start_col: usize, id: u32, cursor_before: (usize, usize)) {
+        let removed_text = self.text();
+        let snapshot = self.paste_registry_snapshot();
+
+        self.paste_markers.remove(&id);
+        self.next_paste_id = self.next_paste_id.saturating_sub(1);
+        let mut higher: Vec<u32> = self
+            .paste_markers
+            .keys()
+            .copied()
+            .filter(|&key| key > id)
+            .collect();
+        higher.sort_unstable();
+        for old_id in higher {
+            if let Some(mut content) = self.paste_markers.remove(&old_id) {
+                content.id = old_id - 1;
+                self.paste_markers.insert(old_id - 1, content);
+            }
+        }
+
+        self.lines[self.cursor_line].drain(start_col..self.cursor_col);
+        self.cursor_col = start_col;
+        for line in &mut self.lines {
+            *line = renumber_paste_markers(line, id);
+        }
+        // Renumbering can shorten a marker ahead of the cursor on the same
+        // line (`#10` → `#9`); keep the cursor on a valid boundary.
+        self.clamp_cursor();
+
+        let inserted = self.text();
+        self.push_undo(UndoEntry {
+            op: UndoOp::Replace {
+                position: 0,
+                removed: removed_text,
+                inserted,
+            },
+            cursor_before,
+            cursor_after: (self.cursor_line, self.cursor_col),
+            paste_registry: Some(snapshot),
+            timestamp: Instant::now(),
+        });
     }
 
     fn delete_forward(&mut self) {
@@ -898,6 +1002,7 @@ impl EditorComponent {
                 },
                 cursor_before,
                 cursor_after: (self.cursor_line, self.cursor_col),
+                paste_registry: None,
                 timestamp: Instant::now(),
             });
         } else if self.cursor_line + 1 < self.lines.len() {
@@ -911,6 +1016,7 @@ impl EditorComponent {
                 },
                 cursor_before,
                 cursor_after: (self.cursor_line, self.cursor_col),
+                paste_registry: None,
                 timestamp: Instant::now(),
             });
         }
@@ -937,6 +1043,7 @@ impl EditorComponent {
             },
             cursor_before,
             cursor_after: (self.cursor_line, self.cursor_col),
+            paste_registry: None,
             timestamp: Instant::now(),
         });
         self.maybe_trigger_autocomplete();
@@ -961,6 +1068,7 @@ impl EditorComponent {
             },
             cursor_before,
             cursor_after: (self.cursor_line, self.cursor_col),
+            paste_registry: None,
             timestamp: Instant::now(),
         });
         self.maybe_trigger_autocomplete();
@@ -983,6 +1091,7 @@ impl EditorComponent {
             },
             cursor_before,
             cursor_after: (self.cursor_line, self.cursor_col),
+            paste_registry: None,
             timestamp: Instant::now(),
         });
         self.maybe_trigger_autocomplete();
@@ -1007,6 +1116,7 @@ impl EditorComponent {
             },
             cursor_before,
             cursor_after: (self.cursor_line, self.cursor_col),
+            paste_registry: None,
             timestamp: Instant::now(),
         });
         self.maybe_trigger_autocomplete();
@@ -1045,6 +1155,22 @@ impl EditorComponent {
         self.redo_stack.clear();
     }
 
+    /// Capture the current paste registry for an undo entry.
+    fn paste_registry_snapshot(&self) -> PasteRegistrySnapshot {
+        PasteRegistrySnapshot {
+            markers: self.paste_markers.clone(),
+            next_id: self.next_paste_id,
+        }
+    }
+
+    /// Exchange the live paste registry with `snapshot`. Undo and redo both
+    /// call this: the entry always holds the registry state on the *other*
+    /// side of its operation, so a swap moves it in either direction.
+    fn swap_paste_registry(&mut self, snapshot: &mut PasteRegistrySnapshot) {
+        std::mem::swap(&mut self.paste_markers, &mut snapshot.markers);
+        std::mem::swap(&mut self.next_paste_id, &mut snapshot.next_id);
+    }
+
     /// Push an entry, coalescing with the previous one if it is a same-typed
     /// adjacent insert/delete within the coalescing window.
     fn push_undo_coalesce(&mut self, entry: UndoEntry) {
@@ -1078,7 +1204,7 @@ impl EditorComponent {
 
     /// Undo the most recent operation.
     pub fn undo(&mut self) {
-        let Some(entry) = self.undo_stack.pop() else {
+        let Some(mut entry) = self.undo_stack.pop() else {
             return;
         };
         match &entry.op {
@@ -1097,6 +1223,9 @@ impl EditorComponent {
                 self.insert_at(*position, removed);
             }
         }
+        if let Some(snapshot) = entry.paste_registry.as_mut() {
+            self.swap_paste_registry(snapshot);
+        }
         let (l, c) = entry.cursor_before;
         self.cursor_line = l;
         self.cursor_col = c;
@@ -1107,7 +1236,7 @@ impl EditorComponent {
 
     /// Redo the most recently undone operation.
     pub fn redo(&mut self) {
-        let Some(entry) = self.redo_stack.pop() else {
+        let Some(mut entry) = self.redo_stack.pop() else {
             return;
         };
         match &entry.op {
@@ -1125,6 +1254,9 @@ impl EditorComponent {
                 self.delete_range(*position, removed.len());
                 self.insert_at(*position, inserted);
             }
+        }
+        if let Some(snapshot) = entry.paste_registry.as_mut() {
+            self.swap_paste_registry(snapshot);
         }
         let (l, c) = entry.cursor_after;
         self.cursor_line = l;
@@ -1459,14 +1591,6 @@ impl Component for EditorComponent {
 }
 
 impl EditorComponent {
-    /// Compose the cursor's logical line with any active IME composition AND
-    /// a visible reverse-video cursor at [`Self::cursor_col`] for rendering.
-    ///
-    /// When [`Self::focused`] is true the [`crate::tui::CURSOR_MARKER`] APC
-    /// sequence is also emitted immediately before the visible cursor so the
-    /// host [`crate::Tui`] can reposition the hardware cursor for IME
-    /// candidate windows. The marker is zero-width and gets stripped by the
-    /// Tui before the line hits the terminal.
     /// Compose the cursor line when the buffer is empty and a placeholder
     /// is set: the cursor marker + reverse-video cell sits at column 0,
     /// followed by the dim placeholder text.
@@ -1480,6 +1604,19 @@ impl EditorComponent {
         format!("{marker}{cursor_cell}\x1b[2m{placeholder}\x1b[0m")
     }
 
+    /// Compose the cursor's logical line with any active IME composition
+    /// and — while [`Self::focused`] — a visible reverse-video cursor at
+    /// [`Self::cursor_col`].
+    ///
+    /// The focused render emits the [`crate::tui::CURSOR_MARKER`] APC
+    /// sequence immediately before the reverse-video cell so the host
+    /// [`crate::Tui`] can park the hardware cursor on it. The marker is
+    /// zero-width and gets stripped by the Tui before the line hits the
+    /// terminal. Unfocused renders paint neither marker nor cell: a
+    /// reverse-video block without the marker never has the hardware
+    /// cursor parked on it, so the exit-time erase (which starts at the
+    /// cursor) would leave it behind as a phantom cursor next to the
+    /// real one.
     fn compose_line_for_render(&self, line: &str) -> String {
         // IME composition path: inline the in-progress string with an
         // underline. Composition handling already prevents a stray cursor
@@ -1495,11 +1632,17 @@ impl EditorComponent {
         // the end of the line).
         let split = self.cursor_col.min(line.len());
         let (before, after) = line.split_at(split);
-        let marker = if self.focused {
-            crate::tui::CURSOR_MARKER
-        } else {
-            ""
-        };
+        // Unfocused: keep the cursor cell's one-column footprint (wrap and
+        // height parity with the focused render, mirroring
+        // `compose_placeholder_line`) but skip the reverse-video block.
+        if !self.focused {
+            return if after.is_empty() {
+                format!("{before} ")
+            } else {
+                line.to_string()
+            };
+        }
+        let marker = crate::tui::CURSOR_MARKER;
         if after.is_empty() {
             format!("{before}{marker}\x1b[7m \x1b[0m")
         } else {
@@ -1854,14 +1997,74 @@ fn word_wrap_line(line: &str, max_width: usize) -> Vec<String> {
     utils::wrap_text_with_ansi(line, max_width)
 }
 
+/// Prefix shared by every paste-marker token.
+const PASTE_MARKER_PREFIX: &str = "[paste #";
+
+/// If `before` (the text from line start up to the cursor) ends with a
+/// complete paste-marker token, return the byte column where the token
+/// starts together with its parsed id. Parsing is deliberately as loose as
+/// [`expand_paste_markers`]: whatever would expand on submit is treated as
+/// a marker here.
+fn paste_marker_ending_at(before: &str) -> Option<(usize, u32)> {
+    if !before.ends_with(']') {
+        return None;
+    }
+    let start = before.rfind(PASTE_MARKER_PREFIX)?;
+    let token = &before[start..];
+    // An embedded ']' means the trailing bracket closes something else.
+    if token[..token.len() - 1].contains(']') {
+        return None;
+    }
+    let body = &token[PASTE_MARKER_PREFIX.len()..token.len() - 1];
+    let digit_end = body
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(body.len());
+    body[..digit_end].parse().ok().map(|id| (start, id))
+}
+
+/// Rewrite marker tokens in `line`, decrementing every id greater than
+/// `removed_id` by one. Non-marker text and markers with ids at or below
+/// `removed_id` pass through untouched.
+fn renumber_paste_markers(line: &str, removed_id: u32) -> String {
+    if !line.contains(PASTE_MARKER_PREFIX) {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find(PASTE_MARKER_PREFIX) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let Some(end) = after.find(']') else {
+            out.push_str(after);
+            return out;
+        };
+        let token = &after[..=end];
+        let body = &token[PASTE_MARKER_PREFIX.len()..];
+        let digit_end = body
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(body.len());
+        match body[..digit_end].parse::<u32>() {
+            Ok(id) if id > removed_id => {
+                out.push_str(PASTE_MARKER_PREFIX);
+                out.push_str(&(id - 1).to_string());
+                out.push_str(&body[digit_end..]);
+            }
+            _ => out.push_str(token),
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Substitute paste markers in `text` with their full content.
 fn expand_paste_markers(text: &str, markers: &HashMap<u32, PasteContent>) -> String {
-    if markers.is_empty() || !text.contains("[paste #") {
+    if markers.is_empty() || !text.contains(PASTE_MARKER_PREFIX) {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(start) = rest.find("[paste #") {
+    while let Some(start) = rest.find(PASTE_MARKER_PREFIX) {
         out.push_str(&rest[..start]);
         let after = &rest[start..];
         if let Some(end) = after.find(']') {
@@ -1869,7 +2072,7 @@ fn expand_paste_markers(text: &str, markers: &HashMap<u32, PasteContent>) -> Str
             // Parse "[paste #<id>...]" — extract the id digits.
             let id_str: String = token
                 .chars()
-                .skip("[paste #".len())
+                .skip(PASTE_MARKER_PREFIX.len())
                 .take_while(|c| c.is_ascii_digit())
                 .collect();
             if let Ok(id) = id_str.parse::<u32>()
@@ -2232,6 +2435,45 @@ mod tests {
         assert_eq!(
             editor.handle_input(&InputEvent::Raw("a".into())),
             HandleResult::Ignored
+        );
+    }
+
+    /// An unfocused editor must paint neither the reverse-video cursor
+    /// cell nor the cursor marker. The marker is what makes the Tui park
+    /// the hardware cursor on the cell, and the exit-time erase starts at
+    /// the parked cursor — an unmarked reverse-video block would survive
+    /// teardown as a phantom cursor next to the real one.
+    #[test]
+    fn unfocused_editor_paints_no_cursor_cell_or_marker() {
+        let mut editor = EditorComponent::new()
+            .with_viewport_height(1)
+            .with_border(false);
+        editor.set_text("ab");
+
+        let focused = editor.render(40);
+        assert!(focused[0].contains("\x1b[7m"), "got: {:?}", focused[0]);
+        assert!(
+            focused[0].contains(crate::tui::CURSOR_MARKER),
+            "got: {:?}",
+            focused[0]
+        );
+
+        editor.set_focused(false);
+        let unfocused = editor.render(40);
+        assert!(!unfocused[0].contains("\x1b[7m"), "got: {:?}", unfocused[0]);
+        assert!(
+            !unfocused[0].contains(crate::tui::CURSOR_MARKER),
+            "got: {:?}",
+            unfocused[0]
+        );
+        // Focus toggles must not change geometry: the cursor cell keeps a
+        // one-column footprint in both states.
+        assert_eq!(
+            utils::visible_width(&focused[0]),
+            utils::visible_width(&unfocused[0]),
+            "focused: {:?}, unfocused: {:?}",
+            focused[0],
+            unfocused[0]
         );
     }
 
@@ -2728,6 +2970,83 @@ mod tests {
     fn expand_paste_markers_no_markers_passthrough() {
         let markers: HashMap<u32, PasteContent> = HashMap::new();
         assert_eq!(expand_paste_markers("hello", &markers), "hello");
+    }
+
+    // -- paste marker deletion -------------------------------------------
+
+    #[test]
+    fn paste_marker_ending_at_detects_complete_token() {
+        assert_eq!(
+            paste_marker_ending_at("hi [paste #3 +12 lines]"),
+            Some((3, 3))
+        );
+        assert_eq!(
+            paste_marker_ending_at("[paste #10 2000 chars]"),
+            Some((0, 10))
+        );
+        // Not a marker / trailing bracket closes something else.
+        assert_eq!(paste_marker_ending_at("plain]"), None);
+        assert_eq!(paste_marker_ending_at("[paste #1 +2 lines] x]"), None);
+        assert_eq!(paste_marker_ending_at("[paste #]"), None);
+        // Cursor not directly after the closing bracket.
+        assert_eq!(paste_marker_ending_at("[paste #1 +2 lines]x"), None);
+    }
+
+    #[test]
+    fn renumber_paste_markers_decrements_only_higher_ids() {
+        let line = "keep [paste #2 +9 lines] and [paste #10 30 chars]";
+        assert_eq!(
+            renumber_paste_markers(line, 1),
+            "keep [paste #1 +9 lines] and [paste #9 30 chars]"
+        );
+        assert_eq!(renumber_paste_markers(line, 10), line);
+        assert_eq!(
+            renumber_paste_markers("no markers here", 1),
+            "no markers here"
+        );
+    }
+
+    #[test]
+    fn deleting_marker_renumbers_out_of_text_order_markers() {
+        let mut editor = EditorComponent::new();
+        let first = (0..15)
+            .map(|i| format!("a{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let second = (0..12)
+            .map(|i| format!("b{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.paste(&first);
+        editor.cursor_col = 0;
+        editor.paste(&second);
+        // Marker #2 sits before marker #1 in the text.
+        assert_eq!(editor.text(), "[paste #2 +12 lines][paste #1 +15 lines]");
+
+        editor.cursor_col = editor.lines[0].len();
+        editor.delete_back();
+        assert_eq!(editor.text(), "[paste #1 +12 lines]");
+        assert_eq!(editor.next_paste_id, 1);
+        assert_eq!(editor.paste_markers()[&1].id, 1);
+        assert_eq!(editor.submit_text(), second);
+    }
+
+    #[test]
+    fn undo_of_paste_unwinds_registry_and_counter() {
+        let mut editor = EditorComponent::new();
+        let big = (0..15)
+            .map(|i| format!("x{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.paste(&big);
+        assert_eq!(editor.paste_markers().len(), 1);
+        editor.undo();
+        assert_eq!(editor.text(), "");
+        assert!(editor.paste_markers().is_empty());
+        assert_eq!(editor.next_paste_id, 0);
+        editor.redo();
+        assert_eq!(editor.text(), "[paste #1 +15 lines]");
+        assert_eq!(editor.submit_text(), big);
     }
 
     // -- detect_trigger --------------------------------------------------

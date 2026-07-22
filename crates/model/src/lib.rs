@@ -35,7 +35,7 @@ pub use utils::sanitize_unicode::{sanitize, sanitize_bytes};
 pub use utils::{
     AssistantMessageDiagnostic, DiagnosticKind, EventStream, Provenance, ValidationIssue,
     ValidationIssueKind, is_context_overflow, merge_headers, safe_parse_partial, sha256_hex,
-    try_parse_strict, validate_context,
+    try_parse_strict, uuid_v7, validate_context,
 };
 
 // Re-export from models module

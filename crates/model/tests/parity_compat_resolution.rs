@@ -10,6 +10,7 @@
 use model::providers::resolve_compat;
 use model::types::{
     Api, Compat, Cost, InputType, Model, OpenAICompletionsCompat, OpenRouterRouting, Provider,
+    SessionAffinityFormat,
 };
 
 fn base_model() -> Model {
@@ -63,6 +64,11 @@ fn resolve_compat_openrouter_url_detection() {
         "openrouter.ai base_url should populate open_router_routing default"
     );
     assert_eq!(resolved.thinking_format.as_deref(), Some("openrouter"));
+    assert_eq!(
+        resolved.session_affinity_format,
+        SessionAffinityFormat::OpenRouter,
+        "openrouter.ai base_url should pick the x-session-id affinity format"
+    );
 }
 
 #[test]
@@ -122,6 +128,53 @@ fn resolve_compat_unknown_url_returns_default() {
     assert!(resolved.supports_store);
     assert!(resolved.supports_developer_role);
     assert!(resolved.supports_reasoning_effort);
+    assert_eq!(
+        resolved.session_affinity_format,
+        SessionAffinityFormat::OpenAI
+    );
+}
+
+#[test]
+fn resolve_compat_session_affinity_format_override_wins() {
+    // Explicit compat pins the OpenAI-style header set even though the
+    // base_url would auto-detect the OpenRouter format.
+    let mut model = base_model();
+    model.base_url = "https://openrouter.ai/api/v1".to_string();
+    model.compat = Some(Compat::OpenAICompletions(Box::new(
+        OpenAICompletionsCompat {
+            session_affinity_format: Some(SessionAffinityFormat::OpenAI),
+            ..Default::default()
+        },
+    )));
+
+    let resolved = resolve_compat(&model);
+    assert_eq!(
+        resolved.session_affinity_format,
+        SessionAffinityFormat::OpenAI
+    );
+}
+
+#[test]
+fn resolve_compat_session_affinity_format_deserializes_from_catalog_json() {
+    // Model catalog compat blocks are plain JSON; the kebab-case wire
+    // values must round-trip into the typed enum.
+    let compat: Compat = serde_json::from_str(
+        r#"{
+            "type": "openai-completions",
+            "sendSessionAffinityHeaders": true,
+            "sessionAffinityFormat": "openai-nosession"
+        }"#,
+    )
+    .expect("catalog compat block should deserialize");
+
+    let mut model = base_model();
+    model.compat = Some(compat);
+    let resolved = resolve_compat(&model);
+    assert!(resolved.send_session_affinity_headers);
+    assert_eq!(
+        resolved.session_affinity_format,
+        SessionAffinityFormat::OpenAINoSession
+    );
 }
 
 #[test]

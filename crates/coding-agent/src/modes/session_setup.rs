@@ -233,7 +233,7 @@ impl SessionSetup {
                 None => {
                     eprintln!(
                         "Warning: Invalid thinking level \"{raw}\". \
-                         Valid values: off, minimal, low, medium, high, xhigh"
+                         Valid values: off, minimal, low, medium, high, xhigh, max"
                     );
                     settings_thinking.or(resolved.thinking_level)
                 }
@@ -416,6 +416,7 @@ fn thinking_setting_to_runtime(
         ThinkingLevelSetting::Medium => ThinkingLevel::Medium,
         ThinkingLevelSetting::High => ThinkingLevel::High,
         ThinkingLevelSetting::Xhigh => ThinkingLevel::Xhigh,
+        ThinkingLevelSetting::Max => ThinkingLevel::Max,
     }
 }
 

@@ -3,6 +3,7 @@
 //! The `Args` struct mirrors the top-level command-line surface; it is parsed
 //! by clap in `main.rs` and consumed by the dispatcher.
 
+use crate::utils::paths::{expand_tilde, expand_tilde_pathbuf};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -88,7 +89,7 @@ pub struct Args {
     #[arg(long, action = clap::ArgAction::Append)]
     pub append_system_prompt: Vec<String>,
 
-    /// Thinking level: off, minimal, low, medium, high, xhigh
+    /// Thinking level: off, minimal, low, medium, high, xhigh, max
     #[arg(long)]
     pub thinking: Option<String>,
 
@@ -326,35 +327,6 @@ impl Args {
         for s in self.prompt_templates.iter_mut() {
             *s = expand_tilde(s);
         }
-    }
-}
-
-/// Replace a leading `~` / `~/` with the user's home directory.
-/// Returns the input verbatim when it does not start with a tilde
-/// or when `dirs::home_dir()` fails. Internal helper for
-/// [`Args::expand_tilde_paths`]; the bigger
-/// [`crate::tools::path_utils::expand_path`] helper also strips a
-/// leading `@` sigil which is the wrong semantics for CLI flags.
-fn expand_tilde(s: &str) -> String {
-    if s == "~" {
-        return dirs::home_dir()
-            .map(|h| h.to_string_lossy().into_owned())
-            .unwrap_or_else(|| s.to_string());
-    }
-    if let Some(rest) = s.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest).to_string_lossy().into_owned();
-    }
-    s.to_string()
-}
-
-fn expand_tilde_pathbuf(p: &std::path::Path) -> PathBuf {
-    let s = p.to_string_lossy();
-    if s == "~" || s.starts_with("~/") {
-        PathBuf::from(expand_tilde(&s))
-    } else {
-        p.to_path_buf()
     }
 }
 

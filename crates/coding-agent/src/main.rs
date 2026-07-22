@@ -224,21 +224,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = if continue_like {
         // Continue most recent session — honouring --session-dir so the
         // search and the resume-open agree on which directory holds the
-        // session (#58).
-        match hand_coding_agent::SessionManager::continue_recent_in(
+        // session (#58). Discovery only header-scans candidates; the
+        // resolved path is handed to AgentSession::new so the session
+        // body is read exactly once, by the open inside it.
+        match hand_coding_agent::SessionManager::most_recent_session_path(
             &cwd,
             base_config.session_dir.as_deref(),
         ) {
-            Ok(sm) => {
+            Some(path) => {
                 let config = AgentSessionConfig {
-                    resume_session: Some(sm.id().to_string()),
+                    resume_session: Some(path.to_string_lossy().into_owned()),
                     ..base_config.clone()
                 };
-                drop(sm);
                 AgentSession::new(config, agent_tools)?
             }
-            Err(e) => {
-                let _ = e;
+            None => {
                 eprintln!("No previous session found. Starting a new session.");
                 AgentSession::new(base_config, agent_tools)?
             }
@@ -612,7 +612,7 @@ async fn handle_slash_command(
 
         "/thinking" => {
             if args.is_empty() {
-                println!("Usage: /thinking <off|minimal|low|medium|high|xhigh>");
+                println!("Usage: /thinking <off|minimal|low|medium|high|xhigh|max>");
             } else if let Some(level) = model_resolver::parse_thinking_level(args) {
                 let mut opts = session.stream_options().clone();
                 opts.reasoning = Some(level);
@@ -620,7 +620,7 @@ async fn handle_slash_command(
                 println!("Thinking level set to: {:?}", level);
             } else {
                 println!(
-                    "Invalid thinking level: {}. Use: off, minimal, low, medium, high, xhigh",
+                    "Invalid thinking level: {}. Use: off, minimal, low, medium, high, xhigh, max",
                     args
                 );
             }
@@ -813,7 +813,7 @@ fn print_help() {
     println!("  /models [search]     List available models");
     println!("  /session             Show session info");
     println!("  /settings            Show current settings");
-    println!("  /thinking <level>    Set thinking level (off/minimal/low/medium/high/xhigh)");
+    println!("  /thinking <level>    Set thinking level (off/minimal/low/medium/high/xhigh/max)");
     println!("  /compact             Compact context (free up token space)");
     println!("  /export [path]       Export session (HTML by default, or .jsonl)");
     println!("  /copy                Copy last assistant message to clipboard");

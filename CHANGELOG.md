@@ -14,6 +14,14 @@ read this file. Add new entries above the previous version with a
 
 ### Added
 
+- `max` thinking level above `xhigh`. Anthropic's adaptive-thinking
+  Claudes (Opus 4.6/4.7, Sonnet 4.6) send their native top `max`
+  effort; budget-based and effort-capped providers clamp it to `high`
+  exactly like `xhigh`; models with an explicit thinking-level map
+  advertise it only when the map carries a `max` entry (DeepSeek V4's
+  native `max` effort now surfaces as this level). Selectable via
+  `/thinking max`, `--thinking max`, model patterns like `sonnet:max`,
+  and the `default_thinking_level` setting.
 - `Ctrl+X` in interactive mode copies the last assistant message to
   the clipboard — the keyboard shortcut for what `/copy` already does.
   Both paths share one routine, so status feedback and the OSC 52

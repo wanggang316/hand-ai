@@ -45,6 +45,18 @@ pub fn is_remote_session() -> bool {
         || std::env::var_os("MOSH_CONNECTION").is_some()
 }
 
+/// Read plain text from the system clipboard via the native handle.
+///
+/// Returns `None` when the clipboard is unavailable (headless host,
+/// sandbox, no display server) or holds no text — callers treat both as
+/// "nothing to paste" rather than an error. Empty strings are folded
+/// into `None` so callers never insert a zero-length paste.
+pub fn read_clipboard_text() -> Option<String> {
+    let mut cb = arboard::Clipboard::new().ok()?;
+    let text = cb.get_text().ok()?;
+    if text.is_empty() { None } else { Some(text) }
+}
+
 /// Emit an OSC 52 clipboard escape sequence on stdout.
 ///
 /// Returns `Ok(true)` when the escape was emitted, `Ok(false)` when the
@@ -145,5 +157,9 @@ mod tests {
         }
         let got = cb.get_text().expect("get_text after set_text");
         assert_eq!(got, payload);
+        // Same payload through the public read helper — kept inside this
+        // test so parallel test threads can't race on the shared system
+        // clipboard between set and read.
+        assert_eq!(read_clipboard_text().as_deref(), Some(payload));
     }
 }

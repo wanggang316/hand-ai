@@ -253,7 +253,7 @@ fn map_reasoning_effort(model: &Model, level: ThinkingLevel) -> MistralReasoning
         ThinkingLevel::Minimal => "minimal",
         ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
-        ThinkingLevel::High | ThinkingLevel::Xhigh => "high",
+        ThinkingLevel::High | ThinkingLevel::Xhigh | ThinkingLevel::Max => "high",
     };
 
     if let Some(map) = model.thinking_level_map.as_ref()

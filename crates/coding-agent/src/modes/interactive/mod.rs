@@ -77,17 +77,18 @@ fn build_session(
     cwd: &Path,
 ) -> Result<AgentSession, Box<dyn std::error::Error>> {
     let session = if continue_like {
-        match SessionManager::continue_recent_in(cwd, base_config.session_dir.as_deref()) {
-            Ok(sm) => {
+        // Discovery only header-scans candidates; the resolved path is
+        // handed to AgentSession::new so the session body is read
+        // exactly once, by the open inside it.
+        match SessionManager::most_recent_session_path(cwd, base_config.session_dir.as_deref()) {
+            Some(path) => {
                 let config = AgentSessionConfig {
-                    resume_session: Some(sm.id().to_string()),
+                    resume_session: Some(path.to_string_lossy().into_owned()),
                     ..base_config.clone()
                 };
-                drop(sm);
                 AgentSession::new(config, agent_tools)?
             }
-            Err(e) => {
-                let _ = e;
+            None => {
                 eprintln!("No previous session found. Starting a new session.");
                 AgentSession::new(base_config, agent_tools)?
             }
