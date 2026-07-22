@@ -209,6 +209,10 @@ impl Component for LoaderSlot {
 struct Pending {
     text: Option<String>,
     quit: bool,
+    /// Ctrl+X — copy the last assistant message via the `/copy` routine.
+    /// Staged here because the input listener can't reach the
+    /// [`AgentSession`] (owned by the background driver task).
+    copy_last: bool,
 }
 
 /// The interactive TUI driver.
@@ -538,6 +542,27 @@ impl InteractiveMode {
             ListenerResult::pass()
         }));
 
+        // Ctrl+X listener: copy the last assistant message to the
+        // clipboard. Only stages a flag — the background driver task
+        // owns the AgentSession, so it performs the actual copy via the
+        // same routine `/copy` uses and pushes the status line.
+        let pending_for_copy = Arc::clone(&pending);
+        tui.add_input_listener(Box::new(move |event: &InputEvent| {
+            if let InputEvent::Key(key) = event
+                && matches!(&key.name, KeyName::Char('x'))
+                && key.modifiers.ctrl
+            {
+                if let Ok(mut p) = pending_for_copy.lock() {
+                    p.copy_last = true;
+                }
+                return ListenerResult {
+                    consume: true,
+                    data: None,
+                };
+            }
+            ListenerResult::pass()
+        }));
+
         // Escape listener: cancel the in-flight agent turn (HTTP call,
         // tool execution, retry, etc). Only fires when a loader is mounted
         // — otherwise Escape falls through so the editor can use it for
@@ -764,10 +789,17 @@ Changelog: https://github.com/badlogic/hand-ai/blob/main/crates/coding-agent/CHA
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             while !stop_for_agent.load(Ordering::Relaxed) {
                 interval.tick().await;
-                let (submitted, quit) = {
+                let (submitted, quit, copy_last) = {
                     let mut p = agent_pending.lock().unwrap();
-                    (p.text.take(), std::mem::take(&mut p.quit))
+                    (
+                        p.text.take(),
+                        std::mem::take(&mut p.quit),
+                        std::mem::take(&mut p.copy_last),
+                    )
                 };
+                if copy_last {
+                    apply_copy_last_assistant(&agent_chat, &session);
+                }
                 if quit {
                     // Restore terminal cooked mode + cursor, then
                     // hard-exit. Going through the normal `tui.stop()`
@@ -1791,18 +1823,7 @@ async fn apply_slash_action_inner(
             Err(e) => push_status(chat, format!("[/new failed: {e}]"), Some(RED_FG)),
         },
         SlashCommandAction::CopyLastAssistant => {
-            let text = last_assistant_text(session);
-            match text {
-                Some(body) => match crate::utils::clipboard::copy_to_clipboard(&body) {
-                    Ok(()) => push_status(chat, "[copied to clipboard]".to_string(), None),
-                    Err(e) => push_status(chat, format!("[copy failed: {e}]"), Some(RED_FG)),
-                },
-                None => push_status(
-                    chat,
-                    "[no assistant message to copy]".to_string(),
-                    Some(YELLOW_FG),
-                ),
-            }
+            apply_copy_last_assistant(chat, session);
         }
         SlashCommandAction::Logout => match crate::core::auth_storage::AuthStorage::new() {
             Ok(storage) => match storage.save(&std::collections::HashMap::new()) {
@@ -1866,6 +1887,24 @@ async fn apply_slash_action_inner(
         SlashCommandAction::Noop => {}
     }
     SlashOutcome::Continue
+}
+
+/// `/copy` (and its Ctrl+X shortcut) — copy the last assistant
+/// message's text to the clipboard and push a status line describing
+/// the outcome. Shared by the slash dispatch and the keyboard
+/// listener so both paths behave identically.
+fn apply_copy_last_assistant(chat: &ChatList, session: &AgentSession) {
+    match last_assistant_text(session) {
+        Some(body) => match crate::utils::clipboard::copy_to_clipboard(&body) {
+            Ok(()) => push_status(chat, "[copied to clipboard]".to_string(), None),
+            Err(e) => push_status(chat, format!("[copy failed: {e}]"), Some(RED_FG)),
+        },
+        None => push_status(
+            chat,
+            "[no assistant message to copy]".to_string(),
+            Some(YELLOW_FG),
+        ),
+    }
 }
 
 /// Pull the trailing assistant message's textual body, if any. Used by
@@ -3923,6 +3962,19 @@ mod tests {
         let outcome =
             apply_slash_action(action, &chat, &mut session, Path::new("/tmp"), None).await;
         assert_eq!(outcome, SlashOutcome::Continue);
+        let joined = chat.lock().unwrap()[0].render(80).join("\n");
+        assert!(joined.contains("no assistant message"), "{joined:?}");
+    }
+
+    /// The Ctrl+X shortcut funnels into `apply_copy_last_assistant` —
+    /// the exact routine the `/copy` arm calls — so both paths emit the
+    /// same status line. Pin the shared helper's warning against the
+    /// slash path's known output.
+    #[test]
+    fn copy_shortcut_shares_slash_copy_routine() {
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let session = make_session();
+        apply_copy_last_assistant(&chat, &session);
         let joined = chat.lock().unwrap()[0].render(80).join("\n");
         assert!(joined.contains("no assistant message"), "{joined:?}");
     }
