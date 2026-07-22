@@ -4760,6 +4760,71 @@ mod tests {
         assert!(joined.contains("no user messages"), "{joined:?}");
     }
 
+    /// Guard: a burst of repeated Enter presses while the fork picker is
+    /// mounted must fork exactly once. The picker helper consumes a single
+    /// `Select` event, queues the overlay hide before `session.fork` runs,
+    /// and drops its receiver on return — repeat confirms land in a closed
+    /// channel instead of re-firing the fork.
+    #[tokio::test]
+    async fn fork_picker_double_confirm_forks_once() {
+        let mut tui = hand_tui::Tui::new(Box::new(hand_tui::TestTerminal::new(80, 24)));
+        let mounter = tui.overlay_mounter();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let run_handle = tokio::spawn(async move {
+            let _ = tui.run_with_events(event_rx).await;
+        });
+
+        let mut session = make_session();
+        {
+            // Seed two user messages directly — a full `send_message`
+            // round-trip is too heavy here (same pattern as the RPC
+            // dispatcher's fork tests).
+            let mgr = session.session_manager_mut();
+            for text in ["first", "second"] {
+                mgr.append_message(model::Message::User(model::UserMessage::new_text(text)))
+                    .expect("append_message must succeed on in-memory session");
+            }
+        }
+        let original_id = session.session_id().to_string();
+
+        let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
+        let fork_chat = Arc::clone(&chat);
+        let fork_mounter = mounter.clone();
+        let fork_task = tokio::spawn(async move {
+            apply_fork(&fork_chat, &mut session, None, Some(&fork_mounter)).await;
+            session
+        });
+
+        // Feed paired Enters until the fork resolves: whenever a confirm
+        // reaches the mounted picker, a second confirm is already queued
+        // right behind it.
+        let mut budget = 1000u32;
+        while !fork_task.is_finished() {
+            budget = budget
+                .checked_sub(1)
+                .expect("fork task did not resolve after repeated confirms");
+            let _ = event_tx.send(hand_tui::StdinBufferEvent::Data("\r".into()));
+            let _ = event_tx.send(hand_tui::StdinBufferEvent::Data("\r".into()));
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let session = fork_task.await.unwrap();
+        run_handle.abort();
+
+        let statuses: Vec<String> = chat
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.render(120).join("\n"))
+            .collect();
+        let forked = statuses.iter().filter(|s| s.contains("[forked at")).count();
+        assert_eq!(forked, 1, "fork must fire exactly once: {statuses:?}");
+        assert_ne!(
+            session.session_id(),
+            original_id,
+            "session id must advance exactly one branch"
+        );
+    }
+
     #[tokio::test]
     async fn name_sets_session_label() {
         let chat: ChatList = Arc::new(StdMutex::new(Vec::new()));
