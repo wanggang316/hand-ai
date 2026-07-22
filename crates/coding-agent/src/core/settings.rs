@@ -56,6 +56,8 @@ pub struct Settings {
     #[serde(alias = "shellCommandPrefix")]
     pub shell_command_prefix: Option<String>,
     pub theme: Option<ThemeSetting>,
+    #[serde(alias = "sessionBackend")]
+    pub session_backend: Option<SessionBackendSetting>,
     pub compaction: CompactionSettings,
     /// Branch summarisation knobs.
     #[serde(default, alias = "branchSummary")]
@@ -605,6 +607,27 @@ pub enum ThinkingLevelSetting {
     Max,
 }
 
+/// Session storage backend. `jsonl` keeps one `.jsonl` file per
+/// session; `sqlite` keeps every session of a session directory in a
+/// single `sessions.db` database (existing JSONL sessions are imported
+/// on first use; the source files are left untouched).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionBackendSetting {
+    #[default]
+    Jsonl,
+    Sqlite,
+}
+
+impl From<SessionBackendSetting> for crate::core::session_manager::SessionBackend {
+    fn from(setting: SessionBackendSetting) -> Self {
+        match setting {
+            SessionBackendSetting::Jsonl => Self::Jsonl,
+            SessionBackendSetting::Sqlite => Self::Sqlite,
+        }
+    }
+}
+
 /// Which on-disk settings layer a write targets.
 ///
 /// Read-side resolution still prefers project over global; this enum only
@@ -670,6 +693,7 @@ impl Settings {
             shell_path: None,
             shell_command_prefix: None,
             theme: Some(ThemeSetting::Dark),
+            session_backend: None,
             compaction: CompactionSettings::with_defaults(),
             branch_summary: BranchSummarySettings::default(),
             retry: RetrySettings::with_defaults(),
@@ -733,6 +757,12 @@ impl Settings {
         self.theme.unwrap_or_default()
     }
 
+    /// Effective session backend — the merged value or
+    /// [`SessionBackendSetting::Jsonl`] if unset.
+    pub fn session_backend(&self) -> SessionBackendSetting {
+        self.session_backend.unwrap_or_default()
+    }
+
     /// Effective `quiet_startup` flag — defaults to `false` if unset.
     pub fn quiet_startup(&self) -> bool {
         self.quiet_startup.unwrap_or(false)
@@ -764,6 +794,7 @@ impl Settings {
             shell_path: project.shell_path.or(base.shell_path),
             shell_command_prefix: project.shell_command_prefix.or(base.shell_command_prefix),
             theme: project.theme.or(base.theme),
+            session_backend: project.session_backend.or(base.session_backend),
             compaction: CompactionSettings::merge(base.compaction, project.compaction),
             branch_summary: BranchSummarySettings::merge(
                 base.branch_summary,
@@ -986,6 +1017,8 @@ fn parse_yaml_with_warning(path: &Path, content: &str) -> Result<Settings, Setti
             "shell-path",
             "shell-command-prefix",
             "theme",
+            "session-backend",
+            "session_backend",
             "compaction",
             "branch-summary",
             "retry",
@@ -1122,6 +1155,17 @@ impl SettingsManager {
             global_path,
             watch_handle: None,
         })
+    }
+
+    /// Effective session backend for `cwd`: loads and merges the
+    /// settings layers best-effort. Unreadable settings fall back to
+    /// the default backend so session startup never fails on a bad
+    /// YAML — the subsequent full load surfaces the error.
+    pub fn session_backend_for_cwd(cwd: &Path) -> crate::core::session_manager::SessionBackend {
+        Self::from_cwd(cwd)
+            .map(|m| m.current().session_backend())
+            .unwrap_or_default()
+            .into()
     }
 
     /// Construct with in-memory defaults — no disk I/O. Intended for tests.
@@ -1276,6 +1320,18 @@ impl SettingsManager {
                     }
                 };
                 layer.theme = Some(parsed);
+            }
+            "session_backend" => {
+                let parsed = match value {
+                    "jsonl" => SessionBackendSetting::Jsonl,
+                    "sqlite" => SessionBackendSetting::Sqlite,
+                    other => {
+                        return Err(SettingsError::Other(format!(
+                            "unknown session backend {other:?}"
+                        )));
+                    }
+                };
+                layer.session_backend = Some(parsed);
             }
             "auto_compact" => {
                 let b = parse_bool(value)?;
@@ -1731,6 +1787,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "shell-path",
     "shell-command-prefix",
     "theme",
+    "session-backend",
     "compaction",
     "branch-summary",
     "retry",
@@ -1787,6 +1844,7 @@ fn snake_to_kebab(s: &str) -> String {
 /// Each entry is `(field_name_in_kebab_case, &[allowed_kebab_values])`.
 const ENUM_VALUE_FIELDS: &[(&str, &[&str])] = &[
     ("theme", &["dark", "light", "high-contrast", "system"]),
+    ("session-backend", &["jsonl", "sqlite"]),
     (
         "default-thinking-level",
         &["off", "minimal", "low", "medium", "high", "xhigh", "max"],
@@ -3416,6 +3474,41 @@ warnings:
         let s = Settings::load(Some(&p), None).unwrap();
         assert_eq!(s.steering_mode, Some(SteeringMode::All));
         assert_eq!(s.follow_up_mode, Some(SteeringMode::OneAtATime));
+    }
+
+    #[test]
+    fn session_backend_round_trips_through_yaml() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(&dir, "settings.yaml", "session-backend: sqlite\n");
+        let s = Settings::load(Some(&p), None).unwrap();
+        assert_eq!(s.session_backend, Some(SessionBackendSetting::Sqlite));
+        assert_eq!(s.session_backend(), SessionBackendSetting::Sqlite);
+
+        // Unset defaults to jsonl.
+        let p2 = write_yaml(&dir, "empty.yaml", "");
+        let s2 = Settings::load(Some(&p2), None).unwrap();
+        assert_eq!(s2.session_backend, None);
+        assert_eq!(s2.session_backend(), SessionBackendSetting::Jsonl);
+    }
+
+    #[test]
+    fn apply_setting_by_id_accepts_session_backend() {
+        let mut mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            None,
+            None,
+        );
+        mgr.apply_setting_by_id(SettingsScope::Global, "session_backend", "sqlite")
+            .expect("apply session_backend=sqlite");
+        assert_eq!(
+            mgr.current().session_backend(),
+            SessionBackendSetting::Sqlite
+        );
+        assert!(
+            mgr.apply_setting_by_id(SettingsScope::Global, "session_backend", "bogus")
+                .is_err()
+        );
     }
 
     #[test]

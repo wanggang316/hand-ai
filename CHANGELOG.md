@@ -14,6 +14,15 @@ read this file. Add new entries above the previous version with a
 
 ### Added
 
+- `session-backend` setting (`jsonl` | `sqlite`, default `jsonl`,
+  global or per-project). With `sqlite`, sessions live in a single
+  `sessions.db` database per session directory — the directory layout
+  itself (per-project subdirs, `--session-dir`) is unchanged. On first
+  use the database imports every existing JSONL session found in the
+  directory; the `.jsonl` files are never modified or deleted. Resume,
+  continue, the `/resume` picker, and fork all work against the
+  database. Note: sessions created while on `sqlite` are not visible
+  after switching back to `jsonl` — the import is one-way.
 - `max` thinking level above `xhigh`. Anthropic's adaptive-thinking
   Claudes (Opus 4.6/4.7, Sonnet 4.6) send their native top `max`
   effort; budget-based and effort-capped providers clamp it to `high`

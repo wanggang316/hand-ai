@@ -28,7 +28,7 @@ pub use core::agent_session::{AgentSession, AgentSessionConfig, AgentSessionEven
 pub use core::error::CodingAgentError;
 pub use core::export::{export_to_html, export_to_json, export_to_jsonl};
 pub use core::model_resolver::{self, ResolvedModel};
-pub use core::session_manager::SessionManager;
+pub use core::session_manager::{SessionBackend, SessionManager};
 pub use core::settings::SettingsManager;
 pub use core::skills::{Skill, SkillError};
 pub use core::system_prompt::build_system_prompt;

@@ -4,7 +4,7 @@ use crate::core::error::CodingAgentError;
 use chrono::Utc;
 use hand_agent::session::{
     InMemoryStore, JsonlStore, SessionEntry as StoreEntry, SessionHeader as StoreHeader,
-    SessionStore, SessionStoreError,
+    SessionStore, SessionStoreError, SqliteStore,
 };
 use model::Message;
 use serde::{Deserialize, Serialize};
@@ -446,13 +446,32 @@ pub fn build_session_info(path: &Path) -> Result<Option<SessionInfo>, CodingAgen
         .map(|d| d.as_millis() as i64)
         .unwrap_or(header.timestamp);
 
+    Ok(Some(session_info_from_parts(
+        path.to_path_buf(),
+        header,
+        &entries,
+        mtime,
+    )))
+}
+
+/// Assemble a [`SessionInfo`] from loaded parts: scan the body
+/// entries for the latest label, first user message, searchable text,
+/// and message count. `fallback_modified` is used when no message
+/// carries a timestamp — file mtime for jsonl listings, store
+/// `updated_ms` for sqlite ones.
+fn session_info_from_parts(
+    path: PathBuf,
+    header: SessionHeader,
+    entries: &[SessionEntry],
+    fallback_modified: i64,
+) -> SessionInfo {
     let mut message_count = 0usize;
     let mut first_message = String::new();
     let mut all_messages: Vec<String> = Vec::new();
     let mut name: Option<String> = None;
     let mut last_message_timestamp: Option<i64> = None;
 
-    for entry in &entries {
+    for entry in entries {
         match entry {
             SessionEntry::Label {
                 target_id, label, ..
@@ -491,10 +510,10 @@ pub fn build_session_info(path: &Path) -> Result<Option<SessionInfo>, CodingAgen
     // Prefer latest message timestamp when present (closer to "last
     // activity"), falling back to file mtime, finally header
     // timestamp. Mirrors `getSessionModifiedDate` in TS.
-    let modified = last_message_timestamp.unwrap_or(mtime);
+    let modified = last_message_timestamp.unwrap_or(fallback_modified);
 
-    Ok(Some(SessionInfo {
-        path: path.to_path_buf(),
+    SessionInfo {
+        path,
         id: header.id,
         cwd: header.cwd,
         timestamp: header.timestamp,
@@ -508,7 +527,7 @@ pub fn build_session_info(path: &Path) -> Result<Option<SessionInfo>, CodingAgen
             first_message
         },
         all_messages_text: all_messages.join(" "),
-    }))
+    }
 }
 
 /// List session info for every valid `.jsonl` file directly under
@@ -628,6 +647,66 @@ fn store_addr(path: &Path) -> Result<(PathBuf, String), CodingAgentError> {
     Ok((dir, stem))
 }
 
+/// Storage backend for session persistence, selected via the
+/// `session-backend` setting. `Jsonl` is the historical default: one
+/// `.jsonl` file per session. `Sqlite` keeps every session of a
+/// session directory in a single database file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionBackend {
+    #[default]
+    Jsonl,
+    Sqlite,
+}
+
+/// File name of the per-directory SQLite database used by
+/// [`SessionBackend::Sqlite`]. One database per session directory —
+/// the multiproject layout (flattened-cwd subdirs, `--session-dir` /
+/// base-dir overrides) is unchanged; the db lives in whatever
+/// directory resolves.
+pub const SQLITE_DB_FILENAME: &str = "sessions.db";
+
+fn sqlite_db_path(session_dir: &Path) -> PathBuf {
+    session_dir.join(SQLITE_DB_FILENAME)
+}
+
+/// Open the sqlite store for `session_dir`, adopting any JSONL
+/// sessions already in that directory (idempotent; the source files
+/// are never modified or deleted).
+fn open_sqlite_store(session_dir: &Path) -> Result<SqliteStore, CodingAgentError> {
+    SqliteStore::open_with_import(sqlite_db_path(session_dir), session_dir).map_err(store_err)
+}
+
+/// Resolve an id-or-prefix inside a sqlite store: exact id first, then
+/// a unique id-prefix match over the store listing. Zero matches and
+/// ambiguous prefixes both error, mirroring the jsonl resolver's
+/// user-facing wording.
+fn resolve_sqlite_session_id(
+    store: &SqliteStore,
+    id_or_prefix: &str,
+) -> Result<String, CodingAgentError> {
+    if store.read_header(id_or_prefix).is_ok() {
+        return Ok(id_or_prefix.to_string());
+    }
+    let mut matches: Vec<String> = store
+        .list()
+        .map_err(store_err)?
+        .into_iter()
+        .map(|s| s.header.id)
+        .filter(|id| id.starts_with(id_or_prefix))
+        .collect();
+    matches.sort();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => Err(CodingAgentError::Session(format!(
+            "No session found matching '{id_or_prefix}'"
+        ))),
+        _ => Err(CodingAgentError::Session(format!(
+            "Session '{id_or_prefix}' is ambiguous: matches {}",
+            matches.join(", ")
+        ))),
+    }
+}
+
 /// Manages session logs. Storage is delegated to a
 /// [`hand_agent::session::SessionStore`]: JSONL files for on-disk
 /// sessions, the in-memory backend for ephemeral ones. The manager
@@ -640,8 +719,9 @@ pub struct SessionManager {
     entries: Vec<SessionEntry>,
     store: Box<dyn SessionStore>,
     /// Store key: the session file's stem for on-disk sessions, the
-    /// header id for in-memory ones.
+    /// header id for in-memory and sqlite ones.
     store_key: String,
+    backend: SessionBackend,
 }
 
 impl SessionManager {
@@ -651,10 +731,29 @@ impl SessionManager {
         Self::create_in(cwd, &Self::default_session_dir(cwd))
     }
 
+    /// [`Self::create`] with an explicit storage backend.
+    pub fn create_with_backend(
+        backend: SessionBackend,
+        cwd: &Path,
+    ) -> Result<Self, CodingAgentError> {
+        Self::create_in_with_backend(backend, cwd, &Self::default_session_dir(cwd))
+    }
+
     /// Create a new session file under an explicit session directory.
     /// Used by callers that pass `--session-dir`; the directory is
     /// created if it doesn't exist.
     pub fn create_in(cwd: &Path, session_dir: &Path) -> Result<Self, CodingAgentError> {
+        Self::create_in_with_backend(SessionBackend::Jsonl, cwd, session_dir)
+    }
+
+    /// [`Self::create_in`] with an explicit storage backend. Under
+    /// sqlite the session lands in `<session_dir>/sessions.db`
+    /// (existing JSONL sessions in the directory are adopted first).
+    pub fn create_in_with_backend(
+        backend: SessionBackend,
+        cwd: &Path,
+        session_dir: &Path,
+    ) -> Result<Self, CodingAgentError> {
         let session_dir = session_dir.to_path_buf();
         std::fs::create_dir_all(&session_dir)?;
 
@@ -667,9 +766,16 @@ impl SessionManager {
             parent_session: None,
         };
 
-        let path = session_dir.join(format!("{}.jsonl", id));
-
-        let store: Box<dyn SessionStore> = Box::new(JsonlStore::new(&session_dir));
+        let (store, path): (Box<dyn SessionStore>, PathBuf) = match backend {
+            SessionBackend::Jsonl => (
+                Box::new(JsonlStore::new(&session_dir)),
+                session_dir.join(format!("{}.jsonl", id)),
+            ),
+            SessionBackend::Sqlite => (
+                Box::new(open_sqlite_store(&session_dir)?),
+                sqlite_db_path(&session_dir),
+            ),
+        };
         store.create(&to_store_header(&header)).map_err(store_err)?;
 
         Ok(Self {
@@ -679,6 +785,7 @@ impl SessionManager {
             entries: vec![SessionEntry::Session(header)],
             store,
             store_key: id,
+            backend,
         })
     }
 
@@ -709,6 +816,83 @@ impl SessionManager {
             entries,
             store,
             store_key: stem,
+            backend: SessionBackend::Jsonl,
+        })
+    }
+
+    /// Open a session by id (or unique id prefix) inside
+    /// `session_dir`, using the given backend. Under jsonl this
+    /// resolves `<session_dir>/<id>.jsonl` exactly, then falls back to
+    /// a unique file-stem prefix match; under sqlite ids resolve
+    /// inside the directory's database. Ambiguous prefixes error.
+    pub fn open_by_id_in(
+        backend: SessionBackend,
+        session_dir: &Path,
+        id_or_prefix: &str,
+    ) -> Result<Self, CodingAgentError> {
+        match backend {
+            SessionBackend::Jsonl => {
+                let exact = session_dir.join(format!("{id_or_prefix}.jsonl"));
+                if exact.is_file() {
+                    return Self::open(&exact);
+                }
+                let mut matches: Vec<PathBuf> = std::fs::read_dir(session_dir)
+                    .map(|rd| {
+                        rd.flatten()
+                            .map(|e| e.path())
+                            .filter(|p| {
+                                p.extension().and_then(|s| s.to_str()) == Some("jsonl")
+                                    && p.file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .is_some_and(|stem| stem.starts_with(id_or_prefix))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                matches.sort();
+                match matches.len() {
+                    1 => Self::open(&matches[0]),
+                    0 => Err(CodingAgentError::Session(format!(
+                        "No session found matching '{id_or_prefix}'"
+                    ))),
+                    _ => Err(CodingAgentError::Session(format!(
+                        "Session '{id_or_prefix}' is ambiguous: matches {}",
+                        matches
+                            .iter()
+                            .filter_map(|p| p.file_stem().and_then(|s| s.to_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))),
+                }
+            }
+            SessionBackend::Sqlite => {
+                let store = open_sqlite_store(session_dir)?;
+                let id = resolve_sqlite_session_id(&store, id_or_prefix)?;
+                Self::from_sqlite_store(store, session_dir, &id)
+            }
+        }
+    }
+
+    /// Build a manager over an already-open sqlite store for the
+    /// session `id` (which must exist in the store).
+    fn from_sqlite_store(
+        store: SqliteStore,
+        session_dir: &Path,
+        id: &str,
+    ) -> Result<Self, CodingAgentError> {
+        let (store_header, body) = store.load(id).map_err(store_err)?;
+        let header = to_typed_header(&store_header);
+        let mut entries = Vec::with_capacity(body.len() + 1);
+        entries.push(SessionEntry::Session(header.clone()));
+        entries.extend(body.iter().filter_map(to_typed_entry));
+        Ok(Self {
+            path: sqlite_db_path(session_dir),
+            session_dir: session_dir.to_path_buf(),
+            header,
+            entries,
+            store: Box::new(store),
+            store_key: id.to_string(),
+            backend: SessionBackend::Sqlite,
         })
     }
 
@@ -733,6 +917,7 @@ impl SessionManager {
             entries: vec![SessionEntry::Session(header)],
             store,
             store_key: id,
+            backend: SessionBackend::Jsonl,
         }
     }
 
@@ -767,6 +952,25 @@ impl SessionManager {
         parent_id: Option<&str>,
         body_entries: Vec<SessionEntry>,
     ) -> Result<Self, CodingAgentError> {
+        Self::from_branched_entries_with_backend(
+            SessionBackend::Jsonl,
+            cwd,
+            in_memory,
+            parent_id,
+            body_entries,
+        )
+    }
+
+    /// [`Self::from_branched_entries`] with an explicit storage
+    /// backend for the replacement session (in-memory sessions ignore
+    /// it — they stay in memory).
+    pub fn from_branched_entries_with_backend(
+        backend: SessionBackend,
+        cwd: &Path,
+        in_memory: bool,
+        parent_id: Option<&str>,
+        body_entries: Vec<SessionEntry>,
+    ) -> Result<Self, CodingAgentError> {
         let id = generate_session_id();
         let header = SessionHeader {
             version: CURRENT_SESSION_VERSION,
@@ -785,8 +989,21 @@ impl SessionManager {
         } else {
             let session_dir = Self::default_session_dir(cwd);
             std::fs::create_dir_all(&session_dir)?;
-            let path = session_dir.join(format!("{}.jsonl", id));
-            (Box::new(JsonlStore::new(&session_dir)), path, session_dir)
+            match backend {
+                SessionBackend::Jsonl => {
+                    let path = session_dir.join(format!("{}.jsonl", id));
+                    (
+                        Box::new(JsonlStore::new(&session_dir)) as Box<dyn SessionStore>,
+                        path,
+                        session_dir,
+                    )
+                }
+                SessionBackend::Sqlite => {
+                    let store = open_sqlite_store(&session_dir)?;
+                    let path = sqlite_db_path(&session_dir);
+                    (Box::new(store) as Box<dyn SessionStore>, path, session_dir)
+                }
+            }
         };
 
         store.create(&to_store_header(&header)).map_err(store_err)?;
@@ -807,6 +1024,7 @@ impl SessionManager {
             entries,
             store,
             store_key: id,
+            backend,
         })
     }
 
@@ -820,6 +1038,13 @@ impl SessionManager {
     /// in-memory constructor leaves it empty.
     pub fn is_in_memory(&self) -> bool {
         self.path.as_os_str().is_empty()
+    }
+
+    /// Storage backend this manager was constructed with. Drives
+    /// backend-aware replacement flows (reset / fork) and the picker's
+    /// id-vs-path selection.
+    pub fn backend(&self) -> SessionBackend {
+        self.backend
     }
 
     /// Get the session file path.
@@ -996,6 +1221,33 @@ impl SessionManager {
         find_most_recent_session(&dir)
     }
 
+    /// Backend-aware `--continue` discovery: the most recent session
+    /// as a resume key. Under jsonl this is the session file path
+    /// (unchanged semantics: bounded header scans, mtime ranking);
+    /// under sqlite it is the newest session id by store `updated_ms`.
+    pub fn most_recent_session_key_with_backend(
+        backend: SessionBackend,
+        cwd: &Path,
+        session_dir: Option<&Path>,
+    ) -> Option<String> {
+        match backend {
+            SessionBackend::Jsonl => Self::most_recent_session_path(cwd, session_dir)
+                .map(|p| p.to_string_lossy().into_owned()),
+            SessionBackend::Sqlite => {
+                let dir = match session_dir {
+                    Some(dir) => dir.to_path_buf(),
+                    None => Self::default_session_dir(cwd),
+                };
+                let store = open_sqlite_store(&dir).ok()?;
+                store
+                    .list()
+                    .ok()?
+                    .first()
+                    .map(|summary| summary.header.id.clone())
+            }
+        }
+    }
+
     /// Fork a session from an existing session file: produce a new
     /// session in `cwd`'s session dir whose header points at the source
     /// session as `parent_session`, carrying every non-header entry
@@ -1084,7 +1336,33 @@ impl SessionManager {
             entries,
             store,
             store_key: id,
+            backend: SessionBackend::Jsonl,
         })
+    }
+
+    /// Fork a session by id (or unique id prefix) inside the sqlite
+    /// database of `session_dir` (or `cwd`'s default session dir).
+    /// Store-level fork: body entries keep their ids, the new header
+    /// records the source id as `parent_session`. The forked header
+    /// inherits the source session's stored cwd (the CLI only exposes
+    /// same-cwd forks, where the two agree).
+    pub fn fork_in_sqlite(
+        cwd: &Path,
+        session_dir: Option<&Path>,
+        source: &str,
+    ) -> Result<Self, CodingAgentError> {
+        let dir = match session_dir {
+            Some(dir) => dir.to_path_buf(),
+            None => Self::default_session_dir(cwd),
+        };
+        std::fs::create_dir_all(&dir)?;
+        let store = open_sqlite_store(&dir)?;
+        let source_id = resolve_sqlite_session_id(&store, source)?;
+        let new_id = generate_session_id();
+        store
+            .fork(&source_id, &new_id, Utc::now().timestamp_millis(), None)
+            .map_err(store_err)?;
+        Self::from_sqlite_store(store, &dir, &new_id)
     }
 
     /// Get the session display name or ID.
@@ -1129,6 +1407,46 @@ impl SessionManager {
         let mut sessions = list_sessions_from_dir(&session_dir)?;
         sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
         Ok(sessions)
+    }
+
+    /// Backend-aware listing for the `/resume` picker. Jsonl scans
+    /// `cwd`'s default session dir as before; sqlite reads the
+    /// directory's database (adopting existing JSONL sessions on
+    /// first use) and fills the same [`SessionInfo`] fields.
+    /// `SessionInfo.path` carries the database path under sqlite —
+    /// selection there resolves by `SessionInfo.id`, not path.
+    pub fn list_with_backend(
+        backend: SessionBackend,
+        cwd: &Path,
+    ) -> Result<Vec<SessionInfo>, CodingAgentError> {
+        match backend {
+            SessionBackend::Jsonl => Self::list(cwd),
+            SessionBackend::Sqlite => {
+                let dir = Self::default_session_dir(cwd);
+                let store = open_sqlite_store(&dir)?;
+                let db_path = sqlite_db_path(&dir);
+                let mut sessions = Vec::new();
+                for summary in store.list().map_err(store_err)? {
+                    // Skip sessions that fail to load rather than
+                    // breaking the whole listing (mirrors the jsonl
+                    // scanner's per-file tolerance).
+                    let Ok((store_header, body)) = store.load(&summary.header.id) else {
+                        continue;
+                    };
+                    let header = to_typed_header(&store_header);
+                    let entries: Vec<SessionEntry> =
+                        body.iter().filter_map(to_typed_entry).collect();
+                    sessions.push(session_info_from_parts(
+                        db_path.clone(),
+                        header,
+                        &entries,
+                        summary.updated_ms,
+                    ));
+                }
+                sessions.sort_by_key(|s| std::cmp::Reverse(s.modified));
+                Ok(sessions)
+            }
+        }
     }
 
     /// List sessions across every project directory under `root`.
@@ -2491,5 +2809,234 @@ mod tests {
             !home.path().join(".hand").exists(),
             "in-memory session must not touch the session tree"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // sqlite backend
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn sqlite_create_append_reopen_by_id() {
+        let cwd = TempDir::new().unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let mut mgr = SessionManager::create_in_with_backend(
+            SessionBackend::Sqlite,
+            cwd.path(),
+            session_dir.path(),
+        )
+        .unwrap();
+        assert_eq!(mgr.backend(), SessionBackend::Sqlite);
+        assert!(mgr.path().ends_with(SQLITE_DB_FILENAME));
+        assert!(session_dir.path().join(SQLITE_DB_FILENAME).exists());
+
+        let id = mgr.id().to_string();
+        mgr.append_message(Message::User(UserMessage::new_text("hello")))
+            .unwrap();
+        mgr.append_label("named").unwrap();
+
+        let reopened =
+            SessionManager::open_by_id_in(SessionBackend::Sqlite, session_dir.path(), &id).unwrap();
+        assert_eq!(reopened.id(), id);
+        assert_eq!(reopened.message_count(), 1);
+        assert_eq!(reopened.label(), Some("named"));
+
+        // Storage is the database — no .jsonl file materialises.
+        let jsonl_count = std::fs::read_dir(session_dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("jsonl"))
+            .count();
+        assert_eq!(jsonl_count, 0);
+    }
+
+    #[test]
+    fn sqlite_continue_recent_picks_newest() {
+        let cwd = TempDir::new().unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let mut older = SessionManager::create_in_with_backend(
+            SessionBackend::Sqlite,
+            cwd.path(),
+            session_dir.path(),
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newer = SessionManager::create_in_with_backend(
+            SessionBackend::Sqlite,
+            cwd.path(),
+            session_dir.path(),
+        )
+        .unwrap();
+
+        let key = SessionManager::most_recent_session_key_with_backend(
+            SessionBackend::Sqlite,
+            cwd.path(),
+            Some(session_dir.path()),
+        )
+        .expect("sessions present");
+        assert_eq!(key, newer.id());
+
+        // Appending to the older session (later entry timestamp) makes
+        // it the most recent again.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        older
+            .append_message(Message::User(UserMessage::new_text("bump")))
+            .unwrap();
+        let key = SessionManager::most_recent_session_key_with_backend(
+            SessionBackend::Sqlite,
+            cwd.path(),
+            Some(session_dir.path()),
+        )
+        .expect("sessions present");
+        assert_eq!(key, older.id());
+    }
+
+    #[test]
+    fn sqlite_prefix_resolution_unique_and_ambiguous() {
+        let cwd = TempDir::new().unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let a = SessionManager::create_in_with_backend(
+            SessionBackend::Sqlite,
+            cwd.path(),
+            session_dir.path(),
+        )
+        .unwrap();
+        let _b = SessionManager::create_in_with_backend(
+            SessionBackend::Sqlite,
+            cwd.path(),
+            session_dir.path(),
+        )
+        .unwrap();
+        let a_id = a.id().to_string();
+
+        // Unique prefix (full id minus the random tail's last chars).
+        let prefix = &a_id[..a_id.len() - 2];
+        let opened =
+            SessionManager::open_by_id_in(SessionBackend::Sqlite, session_dir.path(), prefix)
+                .unwrap();
+        assert_eq!(opened.id(), a_id);
+
+        // "s_" matches both sessions — ambiguous.
+        let err =
+            match SessionManager::open_by_id_in(SessionBackend::Sqlite, session_dir.path(), "s_") {
+                Err(e) => e,
+                Ok(_) => panic!("ambiguous prefix must error"),
+            };
+        assert!(err.to_string().contains("ambiguous"), "got: {err}");
+
+        // No match at all.
+        let err = match SessionManager::open_by_id_in(
+            SessionBackend::Sqlite,
+            session_dir.path(),
+            "zzz",
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("unknown id must error"),
+        };
+        assert!(
+            err.to_string().contains("No session found matching"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn sqlite_fork_preserves_entries_and_provenance() {
+        let cwd = TempDir::new().unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let mut source = SessionManager::create_in_with_backend(
+            SessionBackend::Sqlite,
+            cwd.path(),
+            session_dir.path(),
+        )
+        .unwrap();
+        let msg_id = source
+            .append_message(Message::User(UserMessage::new_text("first")))
+            .unwrap();
+        source.append_model_change("acme", "acme-large").unwrap();
+        source.append_label("named").unwrap();
+        let source_id = source.id().to_string();
+
+        let forked =
+            SessionManager::fork_in_sqlite(cwd.path(), Some(session_dir.path()), &source_id)
+                .unwrap();
+        assert_ne!(forked.id(), source_id);
+        assert_eq!(forked.backend(), SessionBackend::Sqlite);
+        assert_eq!(
+            forked.header().parent_session.as_deref(),
+            Some(source_id.as_str())
+        );
+        // Body entries preserved with original ids.
+        assert!(
+            forked
+                .entries()
+                .iter()
+                .any(|e| matches!(e, SessionEntry::Message { id, .. } if id == &msg_id))
+        );
+        assert!(forked.entries().iter().any(
+            |e| matches!(e, SessionEntry::ModelChange { provider, .. } if provider == "acme")
+        ));
+
+        // The fork is durable: reopen by its id.
+        let reopened =
+            SessionManager::open_by_id_in(SessionBackend::Sqlite, session_dir.path(), forked.id())
+                .unwrap();
+        assert_eq!(reopened.message_count(), 1);
+    }
+
+    #[test]
+    fn sqlite_adopts_existing_jsonl_sessions_once_and_leaves_files_alone() {
+        let cwd = TempDir::new().unwrap();
+        let session_dir = TempDir::new().unwrap();
+
+        // Seed a jsonl-backed session with one message.
+        let mut jsonl_mgr = SessionManager::create_in(cwd.path(), session_dir.path()).unwrap();
+        jsonl_mgr
+            .append_message(Message::User(UserMessage::new_text("adopted")))
+            .unwrap();
+        let jsonl_id = jsonl_mgr.id().to_string();
+        let jsonl_path = jsonl_mgr.path().to_path_buf();
+        let bytes_before = std::fs::read(&jsonl_path).unwrap();
+
+        // First sqlite open imports it.
+        let adopted =
+            SessionManager::open_by_id_in(SessionBackend::Sqlite, session_dir.path(), &jsonl_id)
+                .unwrap();
+        assert_eq!(adopted.id(), jsonl_id);
+        assert_eq!(adopted.message_count(), 1);
+
+        // Second open: idempotent — nothing duplicated.
+        let again =
+            SessionManager::open_by_id_in(SessionBackend::Sqlite, session_dir.path(), &jsonl_id)
+                .unwrap();
+        assert_eq!(again.message_count(), 1);
+
+        // The source .jsonl file is byte-for-byte untouched.
+        assert_eq!(std::fs::read(&jsonl_path).unwrap(), bytes_before);
+    }
+
+    #[test]
+    fn sqlite_list_populates_session_info_fields() {
+        let home = TempDir::new().unwrap();
+        let _g = scoped_hand_home(home.path());
+        let cwd = TempDir::new().unwrap();
+
+        let mut mgr =
+            SessionManager::create_with_backend(SessionBackend::Sqlite, cwd.path()).unwrap();
+        mgr.append_message(Message::User(UserMessage::new_text("hello world")))
+            .unwrap();
+        mgr.append_message(Message::User(UserMessage::new_text("second")))
+            .unwrap();
+        mgr.append_label("My Project").unwrap();
+
+        let listed = SessionManager::list_with_backend(SessionBackend::Sqlite, cwd.path()).unwrap();
+        assert_eq!(listed.len(), 1);
+        let info = &listed[0];
+        assert_eq!(info.id, mgr.id());
+        assert_eq!(info.message_count, 2);
+        assert_eq!(info.first_message, "hello world");
+        assert_eq!(info.name.as_deref(), Some("My Project"));
+        assert!(info.all_messages_text.contains("second"));
+        assert_eq!(info.parent_session_path, None);
+        // Under sqlite the path column carries the database path.
+        assert!(info.path.ends_with(SQLITE_DB_FILENAME));
     }
 }

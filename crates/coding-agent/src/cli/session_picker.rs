@@ -89,7 +89,7 @@ async fn select_session_inner(
     // Await the user's choice. Cancellation (or EOF — the run loop closes
     // the channel when it stops) maps to `None`.
     let selection = match rx.recv().await {
-        Some(SessionSelectorEvent::Selected(path)) => Some(path),
+        Some(SessionSelectorEvent::Selected { path, .. }) => Some(path),
         Some(SessionSelectorEvent::Cancelled) | None => None,
     };
 
@@ -164,7 +164,7 @@ mod tests {
 
         let event = rx.recv().await.expect("Enter must emit an event");
         match event {
-            SessionSelectorEvent::Selected(p) => {
+            SessionSelectorEvent::Selected { path: p, .. } => {
                 assert_eq!(p, sessions[0].path);
             }
             other => panic!("expected Selected, got {other:?}"),

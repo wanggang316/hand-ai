@@ -179,6 +179,7 @@ Available settings:
 | `shell-path` | Shell for bash tool | System default |
 | `shell-command-prefix` | Prefix for shell commands | `null` |
 | `theme` | Theme name (`dark`/`light`/`high-contrast`/`system`) | `"dark"` |
+| `session-backend` | Session storage backend (`jsonl`/`sqlite`); `sqlite` keeps sessions in one `sessions.db` per session directory and adopts existing JSONL sessions on first use | `"jsonl"` |
 | `compaction.enabled` | Enable auto-compaction | `true` |
 | `compaction.threshold` | Context % trigger | `0.8` |
 | `retry.max-retries` | Max retries on error | `3` |
