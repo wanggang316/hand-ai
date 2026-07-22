@@ -66,6 +66,20 @@ fn conflicting_user_bindings_surface() {
 }
 
 #[test]
+fn configured_alt_symbol_binding_fires_from_legacy_bytes() {
+    let mut cfg: KeybindingsConfig = HashMap::new();
+    cfg.insert(
+        Keybinding::EditorCursorUp.id().to_string(),
+        Some(vec!["alt+,".into()]),
+    );
+    let mgr = KeybindingsManager::with_config(&cfg);
+    // Legacy (non-Kitty) terminals send alt+, as ESC followed by the symbol.
+    assert!(mgr.matches("\x1b,", Keybinding::EditorCursorUp));
+    // A CSI sequence must not fire an alt+symbol binding.
+    assert!(!mgr.matches("\x1b[A", Keybinding::EditorCursorUp));
+}
+
+#[test]
 fn matches_handles_named_keys() {
     let mgr = KeybindingsManager::new();
     assert!(mgr.matches("\x1b[A", Keybinding::EditorCursorUp));
