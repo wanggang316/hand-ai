@@ -615,6 +615,30 @@ fn split_into_tokens_with_ansi(text: &str) -> Vec<String> {
 // Wrapping
 // ---------------------------------------------------------------------------
 
+/// Split `text` into lines on `\r\n`, `\r`, or `\n`.
+///
+/// Like [`str::split`] with `'\n'`, terminators are not included in the
+/// yielded lines and a trailing terminator yields a final empty line. CRLF
+/// counts as a single break so pasted or file-sourced text never leaks a
+/// stray `\r` into line content.
+fn split_line_endings(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = Some(text);
+    std::iter::from_fn(move || {
+        let s = rest?;
+        match s.find(['\r', '\n']) {
+            Some(idx) => {
+                let skip = if s[idx..].starts_with("\r\n") { 2 } else { 1 };
+                rest = Some(&s[idx + skip..]);
+                Some(&s[..idx])
+            }
+            None => {
+                rest = None;
+                Some(s)
+            }
+        }
+    })
+}
+
 /// Wrap `text` to `width` visible columns, preserving SGR attributes and
 /// OSC 8 hyperlinks across wrapped lines.
 ///
@@ -632,7 +656,7 @@ pub fn wrap_text_with_ansi(text: &str, width: usize) -> Vec<String> {
     let mut result: Vec<String> = Vec::new();
     let mut tracker = AnsiCodeTracker::new();
 
-    for input_line in text.split('\n') {
+    for input_line in split_line_endings(text) {
         let prefix = if !result.is_empty() {
             tracker.active_codes()
         } else {
@@ -1459,10 +1483,14 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
             continue;
         }
         let ch = text[i..].chars().next().expect("non-empty remainder");
-        if ch == '\n' {
+        if ch == '\n' || ch == '\r' {
             lines.push(std::mem::take(&mut current_line));
             current_width = 0;
             i += ch.len_utf8();
+            // CRLF is a single line break.
+            if ch == '\r' && text[i..].starts_with('\n') {
+                i += 1;
+            }
             continue;
         }
         if ch.is_control() {
