@@ -1431,9 +1431,16 @@ impl SettingsManager {
         }
     }
 
-    /// Resolved `shell-path` setting if configured.
-    pub fn shell_path(&self) -> Option<&Path> {
-        self.settings.shell_path.as_deref()
+    /// Resolved `shell-path` setting if configured. A leading `~` / `~/`
+    /// expands to the user's home directory so `shell-path: ~/bin/fish`
+    /// behaves like the equivalent tilde-expanded CLI path flags. Only
+    /// this effective view expands — the raw layer value is stored (and
+    /// written back to YAML) verbatim.
+    pub fn shell_path(&self) -> Option<PathBuf> {
+        self.settings
+            .shell_path
+            .as_deref()
+            .map(crate::utils::paths::expand_tilde_pathbuf)
     }
 
     /// Resolved `shell-command-prefix` setting if configured.
@@ -3737,5 +3744,47 @@ warnings:
             merged.session_dir.as_deref(),
             Some(std::path::Path::new("./sessions"))
         );
+    }
+
+    /// `shell-path` accessor: a leading `~` / `~/` expands to the user's
+    /// home directory; everything else passes through verbatim. The raw
+    /// layer value keeps the tilde so writes round-trip unchanged.
+    #[test]
+    fn shell_path_expands_leading_tilde() {
+        let Some(home) = dirs::home_dir() else { return };
+        let s: Settings = serde_yaml::from_str("shell-path: \"~/bin/fish\"\n").unwrap();
+        let mgr = SettingsManager::from_raw_for_test(s);
+        assert_eq!(mgr.shell_path(), Some(home.join("bin/fish")));
+        // The stored layer value is untouched — only the accessor expands.
+        assert_eq!(
+            mgr.global_layer().shell_path.as_deref(),
+            Some(Path::new("~/bin/fish"))
+        );
+    }
+
+    #[test]
+    fn shell_path_bare_tilde_expands_to_home() {
+        let Some(home) = dirs::home_dir() else { return };
+        // Quoted: an unquoted `~` scalar is YAML null.
+        let s: Settings = serde_yaml::from_str("shell-path: \"~\"\n").unwrap();
+        let mgr = SettingsManager::from_raw_for_test(s);
+        assert_eq!(mgr.shell_path(), Some(home));
+    }
+
+    #[test]
+    fn shell_path_absolute_passes_through() {
+        let s: Settings = serde_yaml::from_str("shell-path: /opt/homebrew/bin/fish\n").unwrap();
+        let mgr = SettingsManager::from_raw_for_test(s);
+        assert_eq!(
+            mgr.shell_path(),
+            Some(PathBuf::from("/opt/homebrew/bin/fish"))
+        );
+    }
+
+    #[test]
+    fn shell_path_relative_passes_through() {
+        let s: Settings = serde_yaml::from_str("shell-path: bin/zsh\n").unwrap();
+        let mgr = SettingsManager::from_raw_for_test(s);
+        assert_eq!(mgr.shell_path(), Some(PathBuf::from("bin/zsh")));
     }
 }

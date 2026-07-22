@@ -1,11 +1,13 @@
 //! Path-related helpers ported from `upstream coding-agent`'s `paths.ts`.
 //!
-//! Two small utilities:
+//! Small utilities:
 //! - [`canonicalize_path`] — best-effort canonicalization that falls back to
 //!   the input when the target does not exist or cannot be resolved.
 //! - [`is_local_path`] — reject known non-local prefixes (`npm:`, `git:`,
 //!   `github:`, `http:`, `https:`, `ssh:`); everything else (bare names,
 //!   absolute paths, relative paths) is treated as local.
+//! - [`expand_tilde`] / [`expand_tilde_pathbuf`] — replace a leading `~` /
+//!   `~/` with the user's home directory, leaving everything else verbatim.
 
 use std::path::{Path, PathBuf};
 
@@ -32,6 +34,39 @@ pub fn is_local_path(value: &str) -> bool {
     !NON_LOCAL_PREFIXES
         .iter()
         .any(|prefix| trimmed.starts_with(prefix))
+}
+
+/// Replace a leading `~` / `~/` with the user's home directory.
+///
+/// Returns the input verbatim when it does not start with a tilde or when
+/// `dirs::home_dir()` fails. Only the bare `~` and the `~/` prefix expand;
+/// `~user` forms pass through untouched. Unlike
+/// [`crate::tools::path_utils::expand_path`], no `@` sigil stripping or
+/// whitespace normalization is applied — the right semantics for CLI flags
+/// and settings-file values, which should round-trip byte-for-byte unless
+/// they start with a tilde.
+pub fn expand_tilde(s: &str) -> String {
+    if s == "~" {
+        return dirs::home_dir()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|| s.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest).to_string_lossy().into_owned();
+    }
+    s.to_string()
+}
+
+/// [`expand_tilde`] for `Path` values.
+pub fn expand_tilde_pathbuf(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if s == "~" || s.starts_with("~/") {
+        PathBuf::from(expand_tilde(&s))
+    } else {
+        p.to_path_buf()
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +179,54 @@ mod tests {
         assert_eq!(
             resolved, link,
             "dangling symlink must fall back to the raw link path"
+        );
+    }
+
+    #[test]
+    fn expand_tilde_bare_tilde_resolves_to_home() {
+        let Some(home) = dirs::home_dir() else { return };
+        assert_eq!(expand_tilde("~"), home.to_string_lossy());
+    }
+
+    #[test]
+    fn expand_tilde_slash_joins_home() {
+        let Some(home) = dirs::home_dir() else { return };
+        assert_eq!(
+            expand_tilde("~/bin/fish"),
+            home.join("bin/fish").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn expand_tilde_leaves_absolute_and_relative_untouched() {
+        assert_eq!(expand_tilde("/usr/bin/zsh"), "/usr/bin/zsh");
+        assert_eq!(expand_tilde("bin/zsh"), "bin/zsh");
+        assert_eq!(expand_tilde(""), "");
+    }
+
+    #[test]
+    fn expand_tilde_leaves_tilde_user_form_untouched() {
+        // `~user` expansion is a shell feature this helper deliberately
+        // does not implement; the value passes through verbatim.
+        assert_eq!(expand_tilde("~root/bin"), "~root/bin");
+    }
+
+    #[test]
+    fn expand_tilde_pathbuf_matches_string_helper() {
+        let Some(home) = dirs::home_dir() else { return };
+        assert_eq!(expand_tilde_pathbuf(Path::new("~")), home);
+        assert_eq!(
+            expand_tilde_pathbuf(Path::new("~/x")),
+            home.join("x"),
+            "`~/x` must expand to a home-joined path"
+        );
+        assert_eq!(
+            expand_tilde_pathbuf(Path::new("/abs/x")),
+            PathBuf::from("/abs/x")
+        );
+        assert_eq!(
+            expand_tilde_pathbuf(Path::new("rel/x")),
+            PathBuf::from("rel/x")
         );
     }
 }
