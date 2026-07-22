@@ -90,6 +90,10 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the previous tag resolves for the
+          # "Full changelog" compare link in the release notes.
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -107,15 +111,36 @@ jobs:
         # without needing to know the repo layout.
         run: cp scripts/install.sh dist/install.sh
 
+      - name: Extract release notes from CHANGELOG
+        # The release body is the CHANGELOG section for this version —
+        # the curated user-facing summary — not an auto-generated PR
+        # list. Extract everything between `## [X.Y.Z]` and the next
+        # version header. An empty section fails the release: a version
+        # without CHANGELOG content is a process error to fix before
+        # tagging, not something to paper over.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" { f = 1; next }
+            /^## \[/ { f = 0 }
+            f
+          ' CHANGELOG.md > release-notes.md
+          PREV_TAG="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -n "$PREV_TAG" ]; then
+            printf '\n**Full changelog**: https://github.com/%s/compare/%s...%s\n' \
+              "$GITHUB_REPOSITORY" "$PREV_TAG" "$GITHUB_REF_NAME" >> release-notes.md
+          fi
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no section for ${VERSION}"
+            exit 1
+          fi
+          cat release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           # The tag itself (`v0.1.0` etc.) is implicit from the trigger.
-          # `generate_release_notes: true` lets GitHub auto-build the
-          # "What's Changed" section from PRs/commits since the previous
-          # tag — works even for the first release (falls back to all
-          # commits on the default branch).
-          generate_release_notes: true
+          body_path: release-notes.md
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |

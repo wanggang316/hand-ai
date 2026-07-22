@@ -64,6 +64,7 @@ git push origin v<version>
 
 - Watch the `Release` workflow run for the tag (`gh run list --workflow release.yml`, then watch the run) until completion.
 - On success, verify the GitHub Release exists with all four assets: two `.tar.gz` (darwin-arm64, linux-x86_64) and their `.sha256` files (`gh release view v<version>`).
+- Verify the release body is the CHANGELOG `[<version>]` section — the workflow extracts it via `body_path` and fails when the section is missing; it must never be an auto-generated PR/commit list. If the body is wrong anyway, fix with `gh release edit v<version> --notes-file <file>` and treat it as a workflow regression to investigate.
 - On failure: report the failing job with its log excerpt and stop. Do NOT delete the tag or the partial release; fixing forward (new commit, new patch version if the tag content itself is wrong) is the recovery path — a pushed tag is public history.
 
 ### 8. Report
