@@ -92,6 +92,7 @@ pub fn spawn_scheduler(
             let snapshot = StateSnapshot {
                 size: guard.size,
                 loader: guard.streaming,
+                loader_message: guard.loader_message.clone(),
                 preview,
             };
             (snapshot, commits, raw)
@@ -100,8 +101,15 @@ pub fn spawn_scheduler(
         // Drive the working-loader from the streaming flag: active only mid-turn,
         // ticked once per frame while active so the spinner animates. An idle
         // loader paints nothing, and the geometry drops its row entirely — the
-        // dismissal leaves no residue.
+        // dismissal leaves no residue. The message is overridable so a
+        // long-running operation (`/compact`) can name itself.
         loader.set_active(snapshot.loader);
+        loader.set_message(
+            snapshot
+                .loader_message
+                .clone()
+                .unwrap_or_else(|| LOADER_MESSAGE.to_string()),
+        );
         if snapshot.loader {
             loader.tick();
         }
@@ -179,6 +187,10 @@ struct StateSnapshot {
     /// Whether the loader row shows (streaming turn in flight). Drives both the
     /// geometry (whether a loader row is reserved) and the loader's active state.
     loader: bool,
+    /// An override for the loader message this frame, or `None` for the default
+    /// `Working…`. Set by a long-running operation (`/compact`) so the loader
+    /// names it.
+    loader_message: Option<String>,
     /// The live streaming-preview lines to paint in the blank band above the
     /// active bottom box, or empty when no turn is streaming. The tail is shown
     /// when the band is shorter than the preview so the most recent tokens are
@@ -427,6 +439,7 @@ mod tests {
         let snapshot = StateSnapshot {
             size: TerminalSize::new(width, height),
             loader: streaming,
+            loader_message: None,
             preview: Vec::new(),
         };
         let footer = FooterViewModel::default();
@@ -475,6 +488,7 @@ mod tests {
         let snapshot = StateSnapshot {
             size: TerminalSize::new(width, height),
             loader: false,
+            loader_message: None,
             preview: Vec::new(),
         };
         let footer = FooterViewModel {

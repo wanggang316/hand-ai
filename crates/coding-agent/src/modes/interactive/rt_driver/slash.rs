@@ -43,6 +43,7 @@ use crate::modes::interactive::slash_commands::{
 use super::chat;
 use super::footer::{TokenUsageSummary, build_footer_view, thinking_level_label};
 use super::state::{DriverState, SharedFooter, lock_footer, lock_state};
+use super::summary::labelled_box_lines;
 
 /// Whether a dispatched slash command asked the driver to exit.
 ///
@@ -77,6 +78,22 @@ pub fn is_slash_command(trimmed: &str) -> bool {
     ParsedSlashCommand::parse(trimmed).is_some()
 }
 
+/// Recognise a `/compact` submission and pull its optional steering text.
+///
+/// Returns `Some(None)` for a bare `/compact`, `Some(Some(steer))` for
+/// `/compact <steer>`, and `None` for anything that is not a `/compact`
+/// command. The driver uses this to intercept `/compact` on the async turn
+/// runner (it calls `session.compact()`), *before* the sync slash dispatch —
+/// the one command in the table that needs to await.
+#[must_use]
+pub fn parse_compact(line: &str) -> Option<Option<String>> {
+    let parsed = ParsedSlashCommand::parse(line)?;
+    if parsed.name != "compact" {
+        return None;
+    }
+    Some((!parsed.args.is_empty()).then(|| parsed.args.clone()))
+}
+
 /// Dispatch a submitted slash line: parse it, resolve the typed action through
 /// the reused [`SlashCommandTable`], and execute it against the session and the
 /// shared driver state. Returns whether the command asked to quit.
@@ -107,10 +124,13 @@ pub fn dispatch_slash(
             apply_slash_action(action, session, cwd, state, footer, requester)
         }
         SlashCommandResult::Unknown => {
+            // The unknown-command prompt (VAL-CHAT-006): name the mistyped
+            // command and point the user at /help. Committed yellow, so a typo is
+            // an obvious, recoverable notice rather than a silent swallow.
             commit_status(
                 state,
                 requester,
-                &format!("[unknown command: /{}]", parsed.name),
+                &format!("Unknown command: /{}. Type /help for a list.", parsed.name),
             );
             SlashOutcome::Continue
         }
@@ -157,17 +177,68 @@ pub fn apply_slash_action(
             apply_name(session, &label, state, footer, requester);
         }
 
+        // --- Info commands (this feature) ---------------------------------
+        // `/help` renders through the ShowText leaf below (the parsing layer
+        // builds its response text). `/copy` + Ctrl+X, `/copy N`, `/skills`,
+        // `/extensions`, `/diagnostics`, and `/changelog` render inline here.
+        SlashCommandAction::CopyLastAssistant => {
+            apply_copy_last_assistant(session, state, requester);
+        }
+        SlashCommandAction::CopyN(n) => {
+            apply_copy_n(session, n, state, requester);
+        }
+        SlashCommandAction::ListSkills => {
+            let body = skills_body(session);
+            commit(
+                state,
+                requester,
+                labelled_box_lines("skills", &body, box_width(state)),
+            );
+        }
+        SlashCommandAction::ListExtensions => {
+            let body = extensions_body(session);
+            commit(
+                state,
+                requester,
+                labelled_box_lines("extensions", &body, box_width(state)),
+            );
+        }
+        SlashCommandAction::ShowDiagnostics => {
+            let body = diagnostics_body();
+            commit(
+                state,
+                requester,
+                labelled_box_lines("diagnostics", &body, box_width(state)),
+            );
+        }
+        SlashCommandAction::Changelog => {
+            let body = changelog_body();
+            commit(
+                state,
+                requester,
+                labelled_box_lines("changelog", &body, box_width(state)),
+            );
+        }
+
         // --- Always-safe leaves -------------------------------------------
         // ShowText carries a usage / error string the parsing layer already
-        // built (e.g. `/import` with no arg, `/export` unknown extension).
+        // built (e.g. `/import` with no arg, `/export` unknown extension, and
+        // the `/help` response text).
         SlashCommandAction::ShowText(text) => commit_status(state, requester, &text),
         SlashCommandAction::Quit => return SlashOutcome::Quit,
         SlashCommandAction::Noop => {}
 
+        // `/compact` runs the async summarizer, so it is intercepted on the
+        // turn-runner task *before* this sync dispatch (see the driver's
+        // `run_turn`). Reaching this arm means a caller dispatched `/compact`
+        // outside that path; surface the seam line rather than silently
+        // dropping it.
+        compact @ SlashCommandAction::Compact(_) => unsupported(&compact, state, requester),
+
         // --- Follow-up feature seam ---------------------------------------
-        // Info commands (/help, /copy, /compact, /skills, …) and selector
-        // commands (/model, /theme, /thinking, …) land here as their features
-        // arrive; each replaces one arm without touching the dispatch wiring.
+        // Selector commands (/model, /theme, /thinking, …) land here as their
+        // features arrive; each replaces one arm without touching the dispatch
+        // wiring.
         other => unsupported(&other, state, requester),
     }
     SlashOutcome::Continue
@@ -443,6 +514,198 @@ fn refresh_footer(
 ) {
     let usage = lock_state(state).usage;
     *lock_footer(footer) = build_footer_view(session, cwd, usage);
+}
+
+/// The render width the info-command tinted boxes wrap to — the tracked
+/// terminal columns.
+fn box_width(state: &Arc<Mutex<DriverState>>) -> u16 {
+    lock_state(state).size.cols
+}
+
+/// `/copy` (and its Ctrl+X shortcut) — copy the last assistant message's text to
+/// the system clipboard and commit a status line describing the outcome
+/// (VAL-CHAT-023). No assistant message yet → the yellow
+/// `[no assistant message to copy]` state; a copy failure → the red
+/// `[copy failed: …]` banner. Shared verbatim by the slash path and the Ctrl+X
+/// key path so both behave identically.
+pub fn apply_copy_last_assistant(
+    session: &AgentSession,
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+) {
+    match last_assistant_text(session) {
+        Some(body) => match crate::utils::clipboard::copy_to_clipboard(&body) {
+            Ok(()) => commit_status(state, requester, "[copied to clipboard]"),
+            Err(e) => commit_error(state, requester, &format!("[copy failed: {e}]")),
+        },
+        None => commit_status(state, requester, "[no assistant message to copy]"),
+    }
+}
+
+/// `/copy N` — concatenate the text of the trailing `n` assistant messages
+/// (chronological order) and copy them to the clipboard (VAL-CHAT-023). No
+/// assistant messages → the yellow `[no assistant messages to copy]` state.
+fn apply_copy_n(
+    session: &AgentSession,
+    n: usize,
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+) {
+    let texts = last_n_assistant_texts(session, n);
+    if texts.is_empty() {
+        commit_status(state, requester, "[no assistant messages to copy]");
+        return;
+    }
+    let body = texts.join("\n\n");
+    match crate::utils::clipboard::copy_to_clipboard(&body) {
+        Ok(()) => commit_status(
+            state,
+            requester,
+            &format!(
+                "[copied last {} assistant message(s) to clipboard]",
+                texts.len()
+            ),
+        ),
+        Err(e) => commit_error(state, requester, &format!("[copy failed: {e}]")),
+    }
+}
+
+/// The trailing assistant message's textual body, joining its text blocks with
+/// newlines. `None` when there is no assistant message, or the last one carries
+/// only non-text content (image-only) — both are "nothing to copy".
+fn last_assistant_text(session: &AgentSession) -> Option<String> {
+    for msg in session.messages().iter().rev() {
+        if let model::Message::Assistant(a) = msg {
+            let parts: Vec<String> = a
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    model::AssistantContentBlock::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            if parts.is_empty() {
+                return None;
+            }
+            return Some(parts.join("\n"));
+        }
+    }
+    None
+}
+
+/// Up to `n` trailing assistant messages' text content, oldest-first so callers
+/// join them chronologically. Image-only messages are skipped (same contract as
+/// [`last_assistant_text`]).
+fn last_n_assistant_texts(session: &AgentSession, n: usize) -> Vec<String> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut collected: Vec<String> = Vec::new();
+    for msg in session.messages().iter().rev() {
+        if collected.len() >= n {
+            break;
+        }
+        if let model::Message::Assistant(a) = msg {
+            let parts: Vec<String> = a
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    model::AssistantContentBlock::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !parts.is_empty() {
+                collected.push(parts.join("\n"));
+            }
+        }
+    }
+    collected.reverse();
+    collected
+}
+
+/// `/skills` body — a markdown bullet list of discovered skills, or a sensible
+/// empty form when none are installed (VAL-CHAT-044 empty-state).
+fn skills_body(session: &AgentSession) -> String {
+    let skills = session.skills();
+    if skills.is_empty() {
+        return "_(no skills discovered)_".to_string();
+    }
+    let mut out = String::new();
+    for skill in skills {
+        out.push_str(&format!("- **{}** — {}\n", skill.name, skill.description));
+    }
+    out.trim_end().to_string()
+}
+
+/// `/extensions` body — a markdown bullet list of loaded extensions, or a
+/// sensible empty form when none are loaded (VAL-CHAT-044 empty-state).
+fn extensions_body(session: &AgentSession) -> String {
+    let exts = session.extensions();
+    if exts.is_empty() {
+        return "_(no extensions loaded)_".to_string();
+    }
+    let mut out = String::new();
+    for ext in exts {
+        let manifest = ext.manifest();
+        let desc = manifest.description.as_deref().unwrap_or("");
+        if desc.is_empty() {
+            out.push_str(&format!("- **{}** ({})\n", manifest.name, manifest.version));
+        } else {
+            out.push_str(&format!(
+                "- **{}** ({}) — {desc}\n",
+                manifest.name, manifest.version
+            ));
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `/diagnostics` body — the diagnostics report rendered as a compact text block
+/// (VAL-CHAT-044). Runs the same checks the RPC diagnostics handler does.
+fn diagnostics_body() -> String {
+    use crate::core::diagnostics::{DiagStatus, run_diagnostics};
+    use std::fmt::Write;
+
+    let report = run_diagnostics();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "ok={} warn={} error={}",
+        report.ok_count(),
+        report.warn_count(),
+        report.error_count()
+    );
+    for check in &report.checks {
+        let (status, detail) = match &check.status {
+            DiagStatus::Ok => ("OK", String::new()),
+            DiagStatus::Warn(msg) => ("WARN", msg.clone()),
+            DiagStatus::Error(msg) => ("ERR", msg.clone()),
+        };
+        if detail.is_empty() {
+            let _ = writeln!(out, "[{status}] {}", check.name);
+        } else {
+            let _ = writeln!(out, "[{status}] {} — {detail}", check.name);
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// `/changelog` body — the parsed CHANGELOG.md (newest-first), or a sensible
+/// empty form when no changelog is found (VAL-CHAT-030).
+fn changelog_body() -> String {
+    use crate::utils::changelog::parse_changelog_file;
+
+    let entries = super::chrome::locate_changelog_file()
+        .and_then(|p| parse_changelog_file(p).ok())
+        .unwrap_or_default();
+    if entries.is_empty() {
+        return "_(no changelog entries found)_".to_string();
+    }
+    entries
+        .iter()
+        .map(|e| e.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The yellow status line for a slash command whose handler is not yet on this
@@ -970,18 +1233,176 @@ mod tests {
         );
 
         assert_eq!(outcome, SlashOutcome::Continue);
+        // The prompt names the mistyped command and points at /help
+        // (VAL-CHAT-006).
+        let out = committed_text(&state);
         assert!(
-            committed_text(&state).contains("unknown command"),
-            "got: {}",
-            committed_text(&state)
+            out.contains("Unknown command: /totally-unknown-xyz"),
+            "must name the mistyped command: {out}"
         );
+        assert!(out.contains("/help"), "must point the user at /help: {out}");
     }
 
     #[tokio::test]
     async fn unimplemented_command_routes_through_the_unsupported_seam() {
         // A recognised command whose handler is not yet on this driver (e.g.
-        // /help → ShowText is implemented, but /skills → ListSkills is not)
-        // commits the "not available yet" seam line rather than panicking.
+        // /model → OpenModelSelector) commits the "not available yet" seam line
+        // rather than panicking.
+        let mut session = test_session();
+        let cwd = Path::new("/tmp");
+        let state = state();
+        let footer = footer_of(&session, cwd);
+        let requester = test_requester();
+
+        dispatch_slash("/settings", &mut session, cwd, &state, &footer, &requester);
+
+        assert!(
+            committed_text(&state).contains("not available on this driver yet"),
+            "got: {}",
+            committed_text(&state)
+        );
+    }
+
+    // --- Test helpers for the info commands -------------------------------
+
+    /// An assistant message carrying `text`.
+    fn assistant_message(text: &str) -> model::Message {
+        use model::types::{
+            Api, AssistantContentBlock, AssistantMessage, Provider, StopReason, TextContent, Usage,
+        };
+        model::Message::Assistant(AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::Text(TextContent::new(text))],
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            model: "test-model".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        })
+    }
+
+    /// Seed the session's context messages with the given assistant texts (in
+    /// order), so the copy commands — which read `session.messages()` — have
+    /// something to read.
+    fn seed_assistants(session: &mut AgentSession, texts: &[&str]) {
+        let msgs: Vec<model::Message> = texts.iter().map(|t| assistant_message(t)).collect();
+        session.set_messages(msgs);
+    }
+
+    // --- /help (VAL-CHAT-006) ---------------------------------------------
+
+    #[tokio::test]
+    async fn help_commits_the_command_list_text() {
+        let mut session = test_session();
+        let cwd = Path::new("/tmp");
+        let state = state();
+        let footer = footer_of(&session, cwd);
+        let requester = test_requester();
+
+        dispatch_slash("/help", &mut session, cwd, &state, &footer, &requester);
+
+        let out = committed_text(&state);
+        assert!(out.contains("/quit"), "help must list /quit: {out}");
+        assert!(out.contains("/help"), "help must list /help: {out}");
+        assert!(out.contains("/copy"), "help must list /copy: {out}");
+        assert!(out.contains("/compact"), "help must list /compact: {out}");
+    }
+
+    // --- /copy + Ctrl+X two-state + /copy N (VAL-CHAT-023) ----------------
+
+    #[tokio::test]
+    async fn copy_with_no_assistant_message_reports_the_empty_state() {
+        // Headless copy contract: with no assistant message, the yellow
+        // "[no assistant message to copy]" state lands regardless of whether a
+        // clipboard exists — the empty-state check runs before any transport.
+        let mut session = test_session();
+        let cwd = Path::new("/tmp");
+        let state = state();
+        let footer = footer_of(&session, cwd);
+        let requester = test_requester();
+
+        dispatch_slash("/copy", &mut session, cwd, &state, &footer, &requester);
+
+        assert!(
+            committed_text(&state).contains("[no assistant message to copy]"),
+            "got: {}",
+            committed_text(&state)
+        );
+    }
+
+    /// With an assistant message present, the copy handler reads its text and
+    /// hands it to the transport — it is *not* the empty state. The actual
+    /// clipboard round-trip (native / OSC 52) is exercised by the tmux validator
+    /// under HOME/HAND_HOME isolation; a unit test must not touch the real
+    /// system clipboard (`arboard` off the main thread is a known macOS flake /
+    /// SIGSEGV risk in the parallel test runner), so we assert the *pre-transport*
+    /// decision through the pure collector instead.
+    #[tokio::test]
+    async fn copy_with_an_assistant_message_is_not_the_empty_state() {
+        let mut session = test_session();
+        seed_assistants(&mut session, &["the answer is 42"]);
+        // The copy handler branches on this: `Some` → copy attempt, `None` →
+        // the yellow empty state. A seeded message resolves to `Some`, so the
+        // empty state is never taken.
+        assert_eq!(
+            last_assistant_text(&session).as_deref(),
+            Some("the answer is 42"),
+            "a seeded assistant message must resolve to copyable text"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_n_with_no_messages_reports_the_empty_state() {
+        let mut session = test_session();
+        let cwd = Path::new("/tmp");
+        let state = state();
+        let footer = footer_of(&session, cwd);
+        let requester = test_requester();
+
+        dispatch_slash("/copy 3", &mut session, cwd, &state, &footer, &requester);
+
+        assert!(
+            committed_text(&state).contains("[no assistant messages to copy]"),
+            "got: {}",
+            committed_text(&state)
+        );
+    }
+
+    /// `/copy N` collects the trailing N assistant texts oldest-first, capped at
+    /// N — the pure decision the copy handler feeds to the clipboard. Unit-tested
+    /// through the collector so no real clipboard is touched (see the note on
+    /// `copy_with_an_assistant_message_is_not_the_empty_state`).
+    #[test]
+    fn copy_n_collects_the_trailing_n_assistant_texts_oldest_first() {
+        let mut session = test_session();
+        seed_assistants(&mut session, &["one", "two", "three"]);
+
+        // /copy 2 → the last two, chronological.
+        assert_eq!(
+            last_n_assistant_texts(&session, 2),
+            vec!["two".to_string(), "three".to_string()]
+        );
+        // /copy N with N larger than the count collects everything available.
+        assert_eq!(
+            last_n_assistant_texts(&session, 10),
+            vec!["one".to_string(), "two".to_string(), "three".to_string()]
+        );
+        // Bare /copy resolves to the last one.
+        assert_eq!(last_assistant_text(&session).as_deref(), Some("three"));
+        // /copy 0 collects nothing (the parsing layer folds it to bare /copy).
+        assert!(last_n_assistant_texts(&session, 0).is_empty());
+    }
+
+    // --- /skills /extensions /diagnostics /changelog (VAL-CHAT-044/030) ---
+
+    #[tokio::test]
+    async fn skills_renders_a_labelled_box_with_an_empty_form() {
+        // The test session discovers no skills, so the box shows the empty form.
         let mut session = test_session();
         let cwd = Path::new("/tmp");
         let state = state();
@@ -990,10 +1411,95 @@ mod tests {
 
         dispatch_slash("/skills", &mut session, cwd, &state, &footer, &requester);
 
+        let out = committed_text(&state);
+        assert!(out.contains("[skills]"), "skills box label: {out}");
         assert!(
-            committed_text(&state).contains("not available on this driver yet"),
-            "got: {}",
+            out.contains("no skills discovered"),
+            "empty-state form: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn extensions_renders_a_labelled_box_with_an_empty_form() {
+        let mut session = test_session();
+        let cwd = Path::new("/tmp");
+        let state = state();
+        let footer = footer_of(&session, cwd);
+        let requester = test_requester();
+
+        dispatch_slash(
+            "/extensions",
+            &mut session,
+            cwd,
+            &state,
+            &footer,
+            &requester,
+        );
+
+        let out = committed_text(&state);
+        assert!(out.contains("[extensions]"), "extensions box label: {out}");
+        assert!(
+            out.contains("no extensions loaded"),
+            "empty-state form: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostics_renders_a_labelled_box_with_the_report() {
+        let mut session = test_session();
+        let cwd = Path::new("/tmp");
+        let state = state();
+        let footer = footer_of(&session, cwd);
+        let requester = test_requester();
+
+        dispatch_slash(
+            "/diagnostics",
+            &mut session,
+            cwd,
+            &state,
+            &footer,
+            &requester,
+        );
+
+        let out = committed_text(&state);
+        assert!(
+            out.contains("[diagnostics]"),
+            "diagnostics box label: {out}"
+        );
+        // The report always carries the ok/warn/error counts line.
+        assert!(out.contains("ok="), "diagnostics counts line: {out}");
+    }
+
+    #[tokio::test]
+    async fn changelog_renders_a_labelled_box() {
+        let mut session = test_session();
+        let cwd = Path::new("/tmp");
+        let state = state();
+        let footer = footer_of(&session, cwd);
+        let requester = test_requester();
+
+        dispatch_slash("/changelog", &mut session, cwd, &state, &footer, &requester);
+
+        // The box label is present regardless of whether a CHANGELOG.md is
+        // found (the empty form still renders a `[changelog]` box).
+        assert!(
+            committed_text(&state).contains("[changelog]"),
+            "changelog box label: {}",
             committed_text(&state)
         );
+    }
+
+    // --- /compact interception (VAL-CHAT-027) -----------------------------
+
+    #[test]
+    fn parse_compact_recognises_the_command_and_its_steering_text() {
+        assert_eq!(parse_compact("/compact"), Some(None));
+        assert_eq!(
+            parse_compact("/compact focus on the schema"),
+            Some(Some("focus on the schema".to_string()))
+        );
+        // Not a compact command.
+        assert_eq!(parse_compact("/help"), None);
+        assert_eq!(parse_compact("compact"), None);
     }
 }

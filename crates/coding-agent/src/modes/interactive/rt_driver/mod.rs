@@ -66,6 +66,7 @@ pub mod input;
 pub mod messages;
 pub mod slash;
 pub mod state;
+pub mod summary;
 pub mod tools;
 pub mod watchdog;
 
@@ -368,6 +369,27 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                     requester.request_frame();
                     continue;
                 }
+                // Ctrl+R expands / collapses the most-recent collapsible summary
+                // (compaction / branch / skill). Scrollback is immutable, so the
+                // toggle re-commits the summary in its new state — this is what
+                // makes the collapsed `(ctrl+r to expand)` hint *real*. Handled
+                // here because the summaries live on the shared state, not the
+                // session. A silent no-op when no summary has landed.
+                if key.key_id.as_deref() == Some("ctrl+r") {
+                    toggle_last_summary(state, requester);
+                    requester.request_frame();
+                    continue;
+                }
+                // Ctrl+X copies the last assistant message — the keyboard twin of
+                // `/copy`. The copy needs the session (which the turn runner owns),
+                // so it is forwarded as a `/copy` submit through the same channel
+                // the turn runner drains; both paths hit the identical handler, so
+                // Ctrl+X and `/copy` behave the same (VAL-CHAT-023).
+                if key.key_id.as_deref() == Some("ctrl+x") {
+                    let _ = submit_tx.send("/copy".to_string());
+                    requester.request_frame();
+                    continue;
+                }
                 // Turn control (VAL-CHAT-013 / VAL-CHAT-014). Esc and Ctrl+C both
                 // cancel an in-flight turn; both are inert when idle. In raw mode
                 // Ctrl+C is an ordinary key (SIGINT is swallowed), so the driver —
@@ -644,6 +666,17 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
         return;
     }
 
+    // `/compact` runs the async summarizer, so it is intercepted *before* the
+    // sync slash dispatch: it shows the compaction loader, calls
+    // `session.compact()` / `compact_with()` (which emits the
+    // `[Compacting context...]` / `[Compaction complete]` status lines through
+    // the event applier), and commits a collapsible compaction summary. It owns
+    // the streaming loader for its duration, so it does not clear it up front.
+    if let Some(steer) = slash::parse_compact(text) {
+        run_compact(runner, steer).await;
+        return;
+    }
+
     // Slash commands are intercepted here — the turn runner is the one place
     // that owns `&mut session`, so the session-lifecycle commands (`/new`,
     // `/clone`, `/import`, `/name`) run against it directly. The `/quit` family
@@ -837,6 +870,63 @@ fn run_slash_command(runner: &mut TurnRunner, text: &str) {
         &runner.footer,
         &runner.requester,
     );
+}
+
+/// Execute `/compact` against the live session (VAL-CHAT-027).
+///
+/// `/compact` is the one slash command that awaits, so it runs here on the turn
+/// runner (which owns `&mut session`) rather than through the sync dispatch. It:
+///
+/// 1. names the working-loader `Compacting context…` and turns it on;
+/// 2. calls `session.compact()` / `compact_with(steer)`, whose `CompactionStart`
+///    / `CompactionEnd` events land the `[Compacting context...]` /
+///    `[Compaction complete]` status lines through the event applier;
+/// 3. on success commits a *collapsible* compaction summary (collapsed, with the
+///    `(ctrl+r to expand)` hint) and remembers it so Ctrl+R can expand it;
+/// 4. on failure (e.g. no credential) commits the red `[compact failed: …]`
+///    banner.
+///
+/// The loader is cleared and its message reset whichever way it ends.
+async fn run_compact(runner: &mut TurnRunner, steer: Option<String>) {
+    // Name the loader for its duration, then turn it on. The input loop marked
+    // streaming on submit; naming the loader makes it read `Compacting context…`.
+    lock_state(&runner.state).loader_message = Some("Compacting context…".to_string());
+    set_streaming(&runner.state, &runner.editor, &runner.requester, true);
+
+    // Snapshot the pre-compaction message count so the summary reports it.
+    let tokens_before = runner.session.message_count() as u64;
+    let result = match steer.as_deref() {
+        Some(s) => runner.session.compact_with(s).await,
+        None => runner.session.compact().await,
+    };
+
+    // Reset the loader message + clear the loader before committing the outcome.
+    lock_state(&runner.state).loader_message = None;
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match result {
+        Ok(summary) => {
+            let entry = summary::CollapsibleSummary::compaction(summary, tokens_before);
+            let lines = {
+                let mut guard = lock_state(&runner.state);
+                let width = guard.size.cols;
+                let lines = summary::summary_lines(&entry, width);
+                guard.remember_summary(entry);
+                lines
+            };
+            commit(&runner.state, &runner.requester, lines);
+        }
+        Err(e) => {
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::error_lines(&format!("[compact failed: {e}]")),
+            );
+        }
+    }
+
+    // Compaction changed the transcript; refresh the footer so context % rebases.
+    refresh_footer(runner);
 }
 
 /// Whether a failed turn commits the red `send failed` banner.
@@ -1176,6 +1266,26 @@ fn toggle_thinking_globally(state: &Arc<Mutex<DriverState>>, requester: &FrameRe
         commit(state, requester, block);
     }
     commit(state, requester, chat::status_lines_for(&status));
+}
+
+/// Flip the most-recent collapsible summary's expansion state (Ctrl+R) and
+/// re-commit it under the new state.
+///
+/// Native scrollback is immutable — a committed collapsed summary cannot be
+/// rewritten in place — so a toggle re-renders the summary in its new state and
+/// commits it as a fresh block (the same discipline the Ctrl+T thinking toggle
+/// uses). This is what makes the collapsed `(ctrl+r to expand)` hint *real*: the
+/// hint promises an expand, and pressing Ctrl+R delivers the expanded block. A
+/// silent no-op when no collapsible summary has landed yet.
+fn toggle_last_summary(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester) {
+    let lines = {
+        let mut guard = lock_state(state);
+        match guard.toggle_last_summary() {
+            Some(entry) => summary::summary_lines(&entry, guard.size.cols),
+            None => return,
+        }
+    };
+    commit(state, requester, lines);
 }
 
 /// Toggle the streaming flag (loader + editor "thinking" tint) and repaint.
@@ -1623,6 +1733,83 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "exactly two were queued, none dropped"
+        );
+    }
+
+    // --- collapsible summary Ctrl+R expand (VAL-CHAT-019) ----------------
+
+    /// A real [`FrameRequester`] over a no-op scheduler, built under the test's
+    /// tokio runtime. `request_frame` only sends on a channel and tolerates a
+    /// dead scheduler, so the summary toggle repaints without a live terminal.
+    fn test_requester() -> FrameRequester {
+        let (requester, _handle) = hand_tui::rt::scheduler::FrameScheduler::spawn(|| Ok(()));
+        requester
+    }
+
+    /// Ctrl+R with no committed summary is a silent no-op: nothing is committed,
+    /// so a stray Ctrl+R before any compaction / branch / skill summary never
+    /// scrolls the screen.
+    #[tokio::test]
+    async fn toggle_last_summary_with_no_summary_commits_nothing() {
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let requester = test_requester();
+
+        toggle_last_summary(&state, &requester);
+
+        assert!(
+            lock_state(&state).pending_commits.is_empty(),
+            "a Ctrl+R with no summary must commit nothing"
+        );
+    }
+
+    /// Ctrl+R on a committed (collapsed) summary re-commits it *expanded*: the
+    /// hint is real. Scrollback is immutable, so the expanded block is appended,
+    /// carrying the summary body that was hidden while collapsed. A second Ctrl+R
+    /// re-commits it collapsed again (the hint returns).
+    #[tokio::test]
+    async fn toggle_last_summary_re_commits_expanded_then_collapsed() {
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let requester = test_requester();
+        // A collapsed compaction summary is on the state (as if /compact just
+        // landed it). Its body is hidden while collapsed.
+        lock_state(&state).remember_summary(summary::CollapsibleSummary::compaction(
+            "the recovered summary body",
+            2_000,
+        ));
+
+        // First Ctrl+R expands: the re-committed block reveals the body.
+        toggle_last_summary(&state, &requester);
+        let expanded: String = lock_state(&state)
+            .pending_commits
+            .iter()
+            .flatten()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            expanded.contains("the recovered summary body"),
+            "Ctrl+R must re-commit the summary expanded: {expanded}"
+        );
+
+        // Second Ctrl+R collapses again: the fresh block carries the hint.
+        lock_state(&state).take_commits();
+        toggle_last_summary(&state, &requester);
+        let collapsed: String = lock_state(&state)
+            .pending_commits
+            .iter()
+            .flatten()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            collapsed.contains("ctrl+r to expand"),
+            "a second Ctrl+R collapses the summary again: {collapsed}"
+        );
+        assert!(
+            !collapsed.contains("the recovered summary body"),
+            "collapsed again hides the body: {collapsed}"
         );
     }
 

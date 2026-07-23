@@ -28,6 +28,7 @@ use ratatui::text::Line;
 use model::AssistantMessage;
 
 use super::footer::{FooterViewModel, TokenUsageSummary};
+use super::summary::CollapsibleSummary;
 
 /// The name + args of an in-flight tool call, remembered from `ToolStart` so the
 /// matching `ToolEnd` can render a complete state-tinted box (name, args, and
@@ -74,6 +75,11 @@ pub struct DriverState {
     pub streaming: bool,
     /// Spinner animation phase, advanced each frame while streaming.
     pub spinner_phase: u64,
+    /// An override for the working-loader's message while streaming, or `None`
+    /// for the default `Working…`. `/compact` sets `Compacting context…` for its
+    /// duration so the loader names the long-running operation; cleared when the
+    /// operation ends.
+    pub loader_message: Option<String>,
     /// Finalized chat blocks awaiting a single `insert_before` into scrollback.
     /// The draw closure drains this (via the [`HistorySink`]) *before* it redraws
     /// the viewport, honouring the "insert_before between draws" ordering.
@@ -120,6 +126,13 @@ pub struct DriverState {
     /// complete state-tinted box (the name + args from the start, the result +
     /// error flag from the end). Cleared per entry when the tool ends.
     pub pending_tools: HashMap<String, PendingTool>,
+    /// Collapsible summaries (compaction / branch / skill) committed to
+    /// scrollback this session, in order. Ctrl+R flips the most-recent one's
+    /// expansion state and re-commits it: native scrollback is immutable, so a
+    /// toggle appends the re-rendered block (the same discipline the Ctrl+T
+    /// thinking toggle uses). The expand hint on a collapsed summary is *real*
+    /// because this list plus the Ctrl+R listener make it so.
+    pub collapsible_summaries: Vec<CollapsibleSummary>,
 }
 
 impl DriverState {
@@ -225,6 +238,26 @@ impl DriverState {
     pub fn take_tool(&mut self, tool_call_id: &str) -> Option<PendingTool> {
         self.pending_tools.remove(tool_call_id)
     }
+
+    /// Record a collapsible summary (compaction / branch / skill) so a later
+    /// Ctrl+R can flip its expansion state and re-commit it. Called when the
+    /// summary first lands in scrollback (collapsed).
+    pub fn remember_summary(&mut self, summary: CollapsibleSummary) {
+        self.collapsible_summaries.push(summary);
+    }
+
+    /// Flip the expansion state of the most-recent collapsible summary and
+    /// return a clone in its new state, or `None` when no summary has landed
+    /// yet. The clone is what the caller re-commits: native scrollback is
+    /// immutable, so the flip appends the re-rendered block rather than
+    /// rewriting the original (the Ctrl+T pattern). Ctrl+R with no summary is a
+    /// silent no-op.
+    #[must_use]
+    pub fn toggle_last_summary(&mut self) -> Option<CollapsibleSummary> {
+        let last = self.collapsible_summaries.last_mut()?;
+        last.toggle();
+        Some(last.clone())
+    }
 }
 
 /// Lock the shared driver state, treating poisoning as fatal — a poisoned lock
@@ -328,6 +361,31 @@ mod tests {
         assert!(state.streaming_preview.is_some());
         state.set_streaming_preview(None);
         assert!(state.streaming_preview.is_none());
+    }
+
+    #[test]
+    fn toggle_last_summary_flips_only_the_most_recent_and_reports_state() {
+        let mut state = DriverState::new(TerminalSize::new(80, 24));
+        // No summary yet → Ctrl+R is a silent no-op.
+        assert!(
+            state.toggle_last_summary().is_none(),
+            "no summary to toggle"
+        );
+
+        state.remember_summary(CollapsibleSummary::compaction("first", 100));
+        state.remember_summary(CollapsibleSummary::compaction("second", 200));
+
+        // Toggling flips the *last* summary, returning its new (expanded) state.
+        let toggled = state.toggle_last_summary().expect("a summary to toggle");
+        assert!(toggled.expanded, "first toggle expands");
+        assert_eq!(toggled.summary, "second", "the most-recent summary flips");
+        // The earlier summary is untouched.
+        assert!(!state.collapsible_summaries[0].expanded);
+        assert!(state.collapsible_summaries[1].expanded);
+
+        // A second Ctrl+R collapses it again.
+        let toggled = state.toggle_last_summary().expect("a summary to toggle");
+        assert!(!toggled.expanded, "second toggle collapses");
     }
 
     #[test]
