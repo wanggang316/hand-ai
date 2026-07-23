@@ -40,7 +40,7 @@ use hand_tui::rt::components::{
     PathProvider, ProgressBar, RawEmissionQueue, ResolvedProtocol, RtImage, SelectItem, SelectList,
     SelectListLayout, SettingEntry, SettingValue, SettingsList, SlashCommand, SlashProvider,
     Spacer, StatusBar, TextBlock, Toast, ToastLevel, TruncatedText, WidgetBox,
-    default_markdown_theme,
+    default_markdown_theme, write_cell_size_query,
 };
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
@@ -86,6 +86,32 @@ fn forced_image_protocol() -> Option<ResolvedProtocol> {
 /// The sample PNG the Image section displays, embedded at build time so the demo
 /// needs no runtime fixture path.
 const SAMPLE_IMAGE_PNG: &[u8] = include_bytes!("../../../tests/fixtures/tui/images/sample.png");
+
+/// A large PNG whose base64 payload exceeds the 4096-char Kitty APC chunk limit,
+/// so the Image section's oversized slot exercises multi-chunk transfer (and,
+/// under the auto-flood env, chunking mid-flood — the flood seam a resize/APC
+/// balance probe drives).
+const HUGE_IMAGE_PNG: &[u8] = include_bytes!("../../../tests/fixtures/tui/images/huge.png");
+
+/// A JPEG whose container magic sniffs but whose payload does not decode, so the
+/// Image section's corrupt slot exercises decode-validation: on *every* persona it
+/// must degrade to the placeholder box, emitting zero graphics bytes.
+const CORRUPT_IMAGE_JPG: &[u8] = include_bytes!("../../../tests/fixtures/tui/images/corrupt.jpg");
+
+/// Environment variable that auto-starts a frame flood at launch (mirrors the
+/// rt_demo flood seam), so a probe can capture a large image's chunked transfer
+/// *while frames are storming* — the flood seam under which the 4096-char APC
+/// chunks must stay balanced (no half-escape at a frame seam). Set to `1`.
+const FLOOD_ENV: &str = "HAND_TUI_GALLERY_FLOOD";
+
+/// How often the flood task requests a frame: far above the scheduler's ~60fps
+/// ceiling so coalescing/rate-limiting (and mid-flood emission) are exercised.
+const FLOOD_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_micros(2_000);
+
+/// Whether the auto-flood is requested by the environment seam.
+fn flood_requested_by_env() -> bool {
+    std::env::var(FLOOD_ENV).map(|v| v == "1").unwrap_or(false)
+}
 
 /// A single gallery section: a title plus a builder that lays its primitives out
 /// into the section's content rect.
@@ -579,13 +605,44 @@ fn main() {
             };
             TruncatedText::new(header).render(rows[0], buf);
 
-            let mut image = RtImage::new(SAMPLE_IMAGE_PNG)
-                .label("sample.png")
-                .emission_queue(image_queue.clone());
-            if let Some(protocol) = mode {
-                image = image.protocol(protocol);
-            }
-            image.render(rows[1], buf);
+            // The body is a stack of safety-scenario slots so a `script -q` probe
+            // can drive each layout/decode/label case from one section:
+            //   1. the plain sample (baseline emission),
+            //   2. a large image whose base64 exceeds the 4096-char APC limit
+            //      (multi-chunk transfer — under the flood seam this chunks
+            //      mid-flood),
+            //   3. a corrupt source (decode-validation → box on every persona),
+            //   4. a CJK-labelled image (display-width label clipping).
+            let slots = Layout::vertical([
+                Constraint::Length(4), // sample
+                Constraint::Length(6), // large / chunked
+                Constraint::Length(4), // corrupt → box
+                Constraint::Length(4), // CJK label box
+                Constraint::Min(0),
+            ])
+            .split(rows[1]);
+
+            let build = |data: &'static [u8], label: &str, area: Rect, buf: &mut Buffer| {
+                let mut image = RtImage::new(data)
+                    .label(label.to_string())
+                    .emission_queue(image_queue.clone());
+                if let Some(protocol) = mode {
+                    image = image.protocol(protocol);
+                }
+                image.render(area, buf);
+            };
+
+            build(SAMPLE_IMAGE_PNG, "sample.png", slots[0], buf);
+            build(HUGE_IMAGE_PNG, "huge.png (chunked)", slots[1], buf);
+            build(CORRUPT_IMAGE_JPG, "broken.jpg", slots[2], buf);
+            // A CJK/emoji label long enough to clip in a narrow box: the label row
+            // must stay inside the frame by display width (border stays aligned).
+            build(
+                SAMPLE_IMAGE_PNG,
+                "你好世界你好世界你好世界🎉 sample",
+                slots[3],
+                buf,
+            );
         }),
     ]
 }
@@ -692,7 +749,12 @@ fn print_help() {
          \x20 BackTab / Left / h / p : previous section\n\
          \x20 1..9 : jump to a section by number\n\
          \x20 d / x : (Toast section) dismiss-newest / tick TTL\n\
-         \x20 Ctrl+C / Ctrl+D / q : quit"
+         \x20 Ctrl+C / Ctrl+D / q : quit\n\
+         \n\
+         Env seams (for byte-capture probes):\n\
+         \x20 HAND_TUI_FORCE_IMAGE_PROTOCOL=kitty|iterm2|fallback : force the image protocol\n\
+         \x20 HAND_TUI_GALLERY_FLOOD=1 : jump to Image and storm frames (chunk-mid-flood)\n\
+         \x20 HAND_TUI_QUERY_CELL_SIZE=1 : issue CSI 16 t once (fire-and-forget, never blocks)"
     );
 }
 
@@ -709,6 +771,27 @@ async fn run() -> Result<(), SessionError> {
 
     let (requester, scheduler) = spawn_scheduler(terminal, state.clone());
     let (mut events, pump) = spawn_event_pump(EVENT_CHANNEL_CAPACITY);
+
+    // Optional auto-flood: jump straight to the Image section and storm frames, so
+    // a probe can capture the large image's chunked APC transfer *while frames are
+    // flooding* (the flood seam) without synthesizing keypresses. The scheduler
+    // coalesces/rate-limits; the point is that a chunked emission at a frame seam
+    // never leaves a half-escape.
+    let flood_handle = if flood_requested_by_env() {
+        if let Some(image_index) = image_section_index(&lock(&state).sections) {
+            lock(&state).jump(image_index);
+        }
+        let flood_requester = requester.clone();
+        Some(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(FLOOD_REQUEST_INTERVAL);
+            loop {
+                ticker.tick().await;
+                flood_requester.request_frame();
+            }
+        }))
+    } else {
+        None
+    };
 
     // Initial paint.
     requester.request_frame();
@@ -735,6 +818,11 @@ async fn run() -> Result<(), SessionError> {
         requester.request_frame();
     }
 
+    // Stop the flood task, if running, before tearing anything down.
+    if let Some(handle) = flood_handle {
+        handle.abort();
+    }
+
     // Drop the requester so the scheduler drains its final frame and stops, then
     // wait for it to release the terminal before restoring.
     drop(requester);
@@ -742,6 +830,12 @@ async fn run() -> Result<(), SessionError> {
     pump.abort();
     guard.restore();
     Ok(())
+}
+
+/// The index of the Image section in the registry, so the auto-flood can jump to
+/// it at launch. Kept in sync with `register_sections`.
+fn image_section_index(sections: &[Section]) -> Option<usize> {
+    sections.iter().position(|s| s.title == "Image")
 }
 
 /// Apply a navigation key to the gallery, returning `true` when it is a quit key.
@@ -790,6 +884,14 @@ fn spawn_scheduler(
         // Image section enqueues into.
         let image_queue = lock(state).image_queue.clone();
         draw_synchronized(&mut stdout, |w| {
+            // Issue the terminal cell-size query once, fire-and-forget: gated by
+            // the `HAND_TUI_QUERY_CELL_SIZE` seam so it is a no-op by default, and
+            // it never waits for a reply, so a silent PTY (which never answers)
+            // cannot stall the render loop. A reply, if any, is read on the input
+            // stream and folded in via `set_cell_dimensions` (see `run`).
+            CELL_SIZE_QUERY_ONCE.call_once(|| {
+                let _ = write_cell_size_query(w);
+            });
             let mut viewport_origin_y = 0u16;
             terminal.draw(|frame| {
                 viewport_origin_y = frame.area().y;
@@ -803,6 +905,10 @@ fn spawn_scheduler(
         })
     })
 }
+
+/// Guards the one-shot cell-size query so it is issued exactly once, on the first
+/// frame, rather than every draw.
+static CELL_SIZE_QUERY_ONCE: std::sync::Once = std::sync::Once::new();
 
 /// Paint one gallery frame: a bordered box holding a tab strip of section titles
 /// and the active section's body.
