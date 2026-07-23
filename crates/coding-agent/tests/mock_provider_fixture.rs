@@ -1,0 +1,365 @@
+//! Verifies the mock-provider test fixture: the canned-SSE HTTP server
+//! (`examples/mock_provider.rs`), the `models.json` that points `hand` at it,
+//! and the `--resume` session fixtures.
+//!
+//! These tests need no API key and make no real network calls. The mock
+//! server is spawned as a subprocess (`cargo run --example mock_provider`)
+//! bound to a per-test high port; each scenario endpoint is curled with
+//! `reqwest` and its SSE shape asserted. The fixtures live at the workspace
+//! root under `tests/fixtures/tui/`.
+
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+use hand_coding_agent::core::auth_storage::AuthStorage;
+use hand_coding_agent::core::model_registry::ModelRegistry;
+use hand_coding_agent::core::session_manager::{SessionEntry, load_entries_from_file};
+use model::Message;
+
+/// Workspace root = two levels up from this crate's manifest dir
+/// (`crates/coding-agent`).
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .to_path_buf()
+}
+
+fn fixtures_dir() -> PathBuf {
+    workspace_root().join("tests/fixtures/tui")
+}
+
+/// Spawned mock server, killed on drop so a failed assertion never leaves an
+/// orphan listening socket.
+struct MockServer {
+    child: Child,
+    base_url: String,
+}
+
+impl Drop for MockServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Start the mock server on `port` and block until it prints its ready line.
+fn start_mock_server(port: u16) -> MockServer {
+    let mut child = Command::new(env!("CARGO"))
+        .args([
+            "run",
+            "--quiet",
+            "--example",
+            "mock_provider",
+            "-p",
+            "hand-coding-agent",
+        ])
+        .env("MOCK_PROVIDER_PORT", port.to_string())
+        // Keep the stall short so the CI run of the stall scenario is quick;
+        // the watchdog wiring lives in the driver (next feature), not here.
+        .env("MOCK_PROVIDER_STALL_MS", "300")
+        .env("MOCK_PROVIDER_SLOW_MS", "10")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn mock_provider example");
+
+    let stdout = child.stdout.take().expect("child stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    // The example prints "mock-provider listening on ..." once the socket is
+    // accepting. Read lines until we see it (cargo may emit build noise on
+    // stderr, which we inherited, not stdout).
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).expect("read ready line");
+        if n == 0 {
+            panic!("mock_provider exited before printing ready line");
+        }
+        if line.contains("listening on") {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for mock_provider ready line");
+        }
+    }
+
+    MockServer {
+        child,
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+    }
+}
+
+/// POST an empty completions request for `scenario` and return the raw SSE
+/// body. The mock ignores the request body; the scenario query param drives
+/// the response.
+async fn fetch_scenario(base_url: &str, scenario: &str) -> String {
+    let client = reqwest::Client::new();
+    let url = format!("{base_url}/chat/completions?scenario={scenario}");
+    let resp = client
+        .post(&url)
+        .bearer_auth("mock-key-no-real-auth")
+        .json(&serde_json::json!({ "model": "mock-model", "stream": true }))
+        .send()
+        .await
+        .expect("request mock server");
+    assert!(resp.status().is_success(), "scenario {scenario} status");
+    resp.text().await.expect("read SSE body")
+}
+
+/// Collect the JSON payloads of every `data:` line except the `[DONE]`
+/// terminator.
+fn sse_chunks(body: &str) -> Vec<serde_json::Value> {
+    body.lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter(|d| *d != "[DONE]")
+        .map(|d| serde_json::from_str(d).expect("chunk is valid json"))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn text_scenario_emits_content_deltas_and_done() {
+    let server = start_mock_server(39301);
+    let body = fetch_scenario(&server.base_url, "text").await;
+
+    assert!(body.trim_end().ends_with("[DONE]"), "must end with [DONE]");
+    let chunks = sse_chunks(&body);
+
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(text, "Hello from the mock provider.");
+
+    let finished = chunks
+        .iter()
+        .any(|c| c["choices"][0]["finish_reason"] == "stop");
+    assert!(finished, "expected a finish_reason: stop chunk");
+
+    let has_usage = chunks.iter().any(|c| c["usage"]["total_tokens"] == 18);
+    assert!(has_usage, "expected terminal usage chunk");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn thinking_scenario_emits_reasoning_then_text() {
+    let server = start_mock_server(39302);
+    let body = fetch_scenario(&server.base_url, "thinking").await;
+    let chunks = sse_chunks(&body);
+
+    let reasoning: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["reasoning"].as_str())
+        .collect();
+    assert_eq!(reasoning, "Let me think about this. ");
+
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(text, "The answer is 42.");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_scenario_streams_multiple_deltas() {
+    let server = start_mock_server(39303);
+    let body = fetch_scenario(&server.base_url, "slow").await;
+    let chunks = sse_chunks(&body);
+    let content_deltas = chunks
+        .iter()
+        .filter(|c| c["choices"][0]["delta"]["content"].is_string())
+        .count();
+    assert!(
+        content_deltas >= 5,
+        "slow scenario should stream several deltas, got {content_deltas}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stall_scenario_completes_after_a_gap() {
+    let server = start_mock_server(39304);
+    // With MOCK_PROVIDER_STALL_MS=300 the stream completes; the point is that
+    // a gap occurs between the first and second content delta. We assert the
+    // stream is well-formed and finishes.
+    let body = fetch_scenario(&server.base_url, "stall").await;
+    assert!(body.trim_end().ends_with("[DONE]"));
+    let chunks = sse_chunks(&body);
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(text, "Working... done.");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tool_call_scenario_emits_a_read_call() {
+    let server = start_mock_server(39305);
+    let body = fetch_scenario(&server.base_url, "tool_call").await;
+    let chunks = sse_chunks(&body);
+
+    // First tool-call chunk carries id + name.
+    let name = chunks
+        .iter()
+        .find_map(|c| c["choices"][0]["delta"]["tool_calls"][0]["function"]["name"].as_str());
+    assert_eq!(name, Some("read"));
+
+    // Reassemble the streamed arguments fragments.
+    let args: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str())
+        .collect();
+    let parsed: serde_json::Value = serde_json::from_str(&args).expect("args json");
+    assert_eq!(parsed["path"], "/tmp/mock.txt");
+
+    let finished = chunks
+        .iter()
+        .any(|c| c["choices"][0]["finish_reason"] == "tool_calls");
+    assert!(finished, "expected finish_reason: tool_calls");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn edit_and_write_tool_scenarios_carry_expected_arguments() {
+    let server = start_mock_server(39306);
+
+    let edit = sse_chunks(&fetch_scenario(&server.base_url, "edit_tool").await);
+    let edit_args: String = edit
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str())
+        .collect();
+    let edit_parsed: serde_json::Value = serde_json::from_str(&edit_args).unwrap();
+    assert_eq!(edit_parsed["oldString"], "foo");
+    assert_eq!(edit_parsed["newString"], "bar");
+
+    let write = sse_chunks(&fetch_scenario(&server.base_url, "write_tool").await);
+    let write_name = write
+        .iter()
+        .find_map(|c| c["choices"][0]["delta"]["tool_calls"][0]["function"]["name"].as_str());
+    assert_eq!(write_name, Some("write"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_result_scenario_requests_an_image_read() {
+    let server = start_mock_server(39307);
+    let chunks = sse_chunks(&fetch_scenario(&server.base_url, "image_result").await);
+    let args: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str())
+        .collect();
+    let parsed: serde_json::Value = serde_json::from_str(&args).unwrap();
+    assert_eq!(parsed["path"], "/tmp/mock-image.png");
+}
+
+#[test]
+fn models_json_registers_the_mock_model() {
+    // Load the fixture models.json through the real registry so we prove
+    // `hand` would resolve a `mock-model` on the `openai` provider pointing
+    // at the local mock server. AuthStorage is an isolated temp so no user
+    // credentials leak in.
+    let tmp = tempfile::tempdir().unwrap();
+    let auth = AuthStorage::at(tmp.path().join("auth.json"));
+    let models_json = fixtures_dir().join("mock-provider/models.json");
+    assert!(models_json.exists(), "fixture models.json missing");
+
+    let registry = ModelRegistry::with_path(auth, Some(models_json));
+    assert!(
+        registry.error().is_none(),
+        "models.json load error: {:?}",
+        registry.error()
+    );
+
+    let mock = registry
+        .all()
+        .iter()
+        .find(|m| m.provider.as_str() == "openai" && m.id == "mock-model")
+        .expect("mock-model should be registered");
+    assert!(
+        mock.base_url.starts_with("http://127.0.0.1:"),
+        "mock-model base_url must point at localhost, got {}",
+        mock.base_url
+    );
+    assert_eq!(mock.api, model::types::Api::OpenAICompletions);
+}
+
+#[test]
+fn thinking_session_fixture_loads_with_a_thinking_block() {
+    let path = fixtures_dir().join("sessions/thinking-blocks.jsonl");
+    let entries = load_entries_from_file(&path).expect("load thinking fixture");
+
+    let header = matches!(entries.first(), Some(SessionEntry::Session(_)));
+    assert!(header, "first entry must be the session header");
+
+    let has_thinking = entries.iter().any(|e| match e {
+        SessionEntry::Message { message, .. } => matches!(
+            message.as_ref(),
+            Message::Assistant(a) if a.content.iter().any(|b|
+                matches!(b, model::AssistantContentBlock::Thinking(_)))
+        ),
+        _ => false,
+    });
+    assert!(has_thinking, "expected an assistant thinking block");
+}
+
+#[test]
+fn error_ended_session_fixture_loads_with_an_error_message() {
+    let path = fixtures_dir().join("sessions/error-ended.jsonl");
+    let entries = load_entries_from_file(&path).expect("load error fixture");
+
+    let has_error = entries.iter().any(|e| match e {
+        SessionEntry::Message { message, .. } => matches!(
+            message.as_ref(),
+            Message::Assistant(a)
+                if a.stop_reason == model::StopReason::Error && a.error_message.is_some()
+        ),
+        _ => false,
+    });
+    assert!(has_error, "expected an error-ended assistant message");
+}
+
+#[test]
+fn multi_message_session_fixture_loads_tool_call_and_image_result() {
+    let path = fixtures_dir().join("sessions/multi-message-resume.jsonl");
+    let entries = load_entries_from_file(&path).expect("load multi fixture");
+
+    // A model_change entry.
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e, SessionEntry::ModelChange { .. })),
+        "expected a model_change entry"
+    );
+
+    // At least one tool call in an assistant message.
+    let has_tool_call = entries.iter().any(|e| match e {
+        SessionEntry::Message { message, .. } => matches!(
+            message.as_ref(),
+            Message::Assistant(a) if a.content.iter().any(|b|
+                matches!(b, model::AssistantContentBlock::ToolCall(_)))
+        ),
+        _ => false,
+    });
+    assert!(has_tool_call, "expected an assistant tool call");
+
+    // A tool result carrying an image block.
+    let has_image_result = entries.iter().any(|e| match e {
+        SessionEntry::Message { message, .. } => matches!(
+            message.as_ref(),
+            Message::ToolResult(tr) if tr.content.iter().any(|c|
+                matches!(c, model::ToolResultContent::Image(_)))
+        ),
+        _ => false,
+    });
+    assert!(has_image_result, "expected an image-block tool result");
+
+    // Several user/assistant messages — a real multi-turn resume.
+    let message_count = entries
+        .iter()
+        .filter(|e| matches!(e, SessionEntry::Message { .. }))
+        .count();
+    assert!(
+        message_count >= 6,
+        "expected a multi-turn conversation, got {message_count} messages"
+    );
+}
