@@ -188,7 +188,10 @@ fn keyid_backtab_is_shift_tab_equivalent() {
 
 #[test]
 fn keyid_none_for_uncanonicalizable_keys() {
-    assert_eq!(key_event_to_key_id(&key(KeyCode::Null, KeyModifiers::NONE)), None);
+    assert_eq!(
+        key_event_to_key_id(&key(KeyCode::Null, KeyModifiers::NONE)),
+        None
+    );
     assert_eq!(
         key_event_to_key_id(&key(KeyCode::CapsLock, KeyModifiers::NONE)),
         None
@@ -272,7 +275,13 @@ fn paste_does_not_emit_key_events() {
 #[test]
 fn resize_maps_cols_then_rows() {
     let ev = translate_event(Event::Resize(120, 40));
-    assert_eq!(ev, Some(RtInputEvent::Resize { cols: 120, rows: 40 }));
+    assert_eq!(
+        ev,
+        Some(RtInputEvent::Resize {
+            cols: 120,
+            rows: 40
+        })
+    );
 }
 
 #[test]

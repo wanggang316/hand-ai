@@ -144,9 +144,7 @@ async fn run() -> Result<(), SessionError> {
             // per-character key actions fire.
             RtInputEvent::Paste(payload) => input.push_str(&payload),
             // Resize / focus: just repaint (handled by the redraw below).
-            RtInputEvent::Resize { .. }
-            | RtInputEvent::FocusGained
-            | RtInputEvent::FocusLost => {}
+            RtInputEvent::Resize { .. } | RtInputEvent::FocusGained | RtInputEvent::FocusLost => {}
         }
 
         if quit {
@@ -189,10 +187,8 @@ fn printable_char(key: &hand_tui::rt::events::RtKey) -> Option<char> {
 }
 
 fn draw(frame: &mut ratatui::Frame, input: &str) {
-    let title = Line::from(format!(
-        " rt_demo — Ctrl+D/Ctrl+C quit · {PANIC_KEY_HELP} "
-    ))
-    .style(Style::default());
+    let title = Line::from(format!(" rt_demo — Ctrl+D/Ctrl+C quit · {PANIC_KEY_HELP} "))
+        .style(Style::default());
     let block = Block::bordered()
         .title(title)
         .title_alignment(Alignment::Left);
