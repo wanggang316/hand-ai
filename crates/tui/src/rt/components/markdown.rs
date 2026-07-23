@@ -353,10 +353,7 @@ impl<'a> RenderState<'a> {
 
     /// The style currently in force (top of the stack, or default).
     fn current_style(&self) -> Style {
-        self.style_stack
-            .last()
-            .map(|s| s.style)
-            .unwrap_or_default()
+        self.style_stack.last().map(|s| s.style).unwrap_or_default()
     }
 
     fn push_style(&mut self, style: Style) {
@@ -398,7 +395,8 @@ impl<'a> RenderState<'a> {
     /// Finish the current line (if it has content) and start a fresh one.
     fn flush_current(&mut self) {
         if !self.current.is_empty() {
-            self.lines.push(Line::from(std::mem::take(&mut self.current)));
+            self.lines
+                .push(Line::from(std::mem::take(&mut self.current)));
         }
     }
 
@@ -419,8 +417,10 @@ impl<'a> RenderState<'a> {
             Event::HardBreak => self.flush_current(),
             Event::Rule => {
                 self.flush_current();
-                self.lines
-                    .push(Line::from(Span::styled("─".repeat(self.width), self.rule_style())));
+                self.lines.push(Line::from(Span::styled(
+                    "─".repeat(self.width),
+                    self.rule_style(),
+                )));
             }
             _ => {}
         }
@@ -450,7 +450,10 @@ impl<'a> RenderState<'a> {
                     style = style.fg(c);
                 }
                 // The `# ` prefix is a self-authored signature that is pinned.
-                self.push_span(Span::styled(format!("{} ", "#".repeat(lvl as usize)), style));
+                self.push_span(Span::styled(
+                    format!("{} ", "#".repeat(lvl as usize)),
+                    style,
+                ));
                 self.push_style(style);
             }
             Tag::Paragraph => {
@@ -480,8 +483,10 @@ impl<'a> RenderState<'a> {
                         self.border_style(),
                     )));
                 }
-                self.lines
-                    .push(Line::from(Span::styled(self.code_border_top(), self.border_style())));
+                self.lines.push(Line::from(Span::styled(
+                    self.code_border_top(),
+                    self.border_style(),
+                )));
             }
             Tag::List(start) => {
                 self.flush_current();
@@ -976,7 +981,10 @@ mod tests {
     #[test]
     fn blockquote_has_bar_gutter() {
         let out = rendered("> hello", 80);
-        assert!(out.iter().any(|l| l.starts_with("│ ") && l.contains("hello")));
+        assert!(
+            out.iter()
+                .any(|l| l.starts_with("│ ") && l.contains("hello"))
+        );
     }
 
     #[test]
@@ -1077,7 +1085,12 @@ mod tests {
         let hook: CodeHighlighter = Arc::new(move |code: &str, lang: Option<&str>| {
             *cap.lock().unwrap() = Some((code.to_string(), lang.map(str::to_string)));
             code.lines()
-                .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::Magenta))))
+                .map(|l| {
+                    Line::from(Span::styled(
+                        l.to_string(),
+                        Style::default().fg(Color::Magenta),
+                    ))
+                })
                 .collect()
         });
         let theme = MarkdownTheme {
@@ -1089,10 +1102,11 @@ mod tests {
         assert_eq!(lang.as_deref(), Some("ts"));
         assert!(body.contains("const x = 1;"));
         // The hook's magenta color reaches a rendered span.
-        assert!(lines.iter().any(|l| l
-            .spans
-            .iter()
-            .any(|s| s.style.fg == Some(Color::Magenta))));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.style.fg == Some(Color::Magenta)))
+        );
     }
 
     #[test]

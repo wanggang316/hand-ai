@@ -176,8 +176,14 @@ fn code_block_has_bordered_frame_and_language_label() {
         rows.iter().any(|r| r.contains("# lang: rust")),
         "language label missing: {rows:?}"
     );
-    assert!(rows.iter().any(|r| r.starts_with('┌')), "top border: {rows:?}");
-    assert!(rows.iter().any(|r| r.starts_with('└')), "bottom border: {rows:?}");
+    assert!(
+        rows.iter().any(|r| r.starts_with('┌')),
+        "top border: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.starts_with('└')),
+        "bottom border: {rows:?}"
+    );
     assert!(rows.iter().any(|r| r.contains("fn main")), "body: {rows:?}");
 }
 
@@ -216,11 +222,7 @@ fn table_columns_align_with_cjk_cells() {
 fn nested_inline_styles_restore_outer_style() {
     // Bold containing italic: after the italic closes, the tail is still bold but
     // no longer italic.
-    let lines = render_markdown(
-        "**bold _inner_ tail**",
-        100,
-        &MarkdownTheme::default(),
-    );
+    let lines = render_markdown("**bold _inner_ tail**", 100, &MarkdownTheme::default());
     let line = &lines[0];
     let tail = line
         .spans
@@ -299,7 +301,10 @@ fn strikethrough_task_list_and_inline_code_are_literal_text() {
     assert!(out.contains("struck"), "strike text missing: {out:?}");
     assert!(out.contains("[ ] pending"), "task marker missing: {out:?}");
     assert!(out.contains("[x] complete"), "task marker missing: {out:?}");
-    assert!(out.contains("`cargo test`"), "inline code backticks missing: {out:?}");
+    assert!(
+        out.contains("`cargo test`"),
+        "inline code backticks missing: {out:?}"
+    );
 }
 
 // --- VAL-WIDGET-014: narrow-width wrapping ----------------------------------
@@ -309,7 +314,10 @@ fn narrow_width_wraps_cleanly_without_overflow() {
     let src = "This is a deliberately long paragraph of body text that must wrap \
                onto several rows when the pane is only forty columns wide.";
     let buf = render(src, 40, 12);
-    let rows: Vec<String> = all_rows(&buf).into_iter().filter(|r| !r.is_empty()).collect();
+    let rows: Vec<String> = all_rows(&buf)
+        .into_iter()
+        .filter(|r| !r.is_empty())
+        .collect();
     assert!(rows.len() >= 2, "narrow text must wrap: {rows:?}");
     for (y, _) in rows.iter().enumerate() {
         // Use the painted-column span so a wide glyph is not double-counted.
@@ -326,7 +334,11 @@ fn narrow_width_code_block_border_does_not_break() {
         .iter()
         .filter(|r| r.starts_with('┌') || r.starts_with('└'))
         .collect();
-    assert_eq!(borders.len(), 2, "expected exactly two border rows: {rows:?}");
+    assert_eq!(
+        borders.len(),
+        2,
+        "expected exactly two border rows: {rows:?}"
+    );
     for border in borders {
         // The border row is a single unbroken run that fills the pane width.
         assert_eq!(
@@ -336,7 +348,9 @@ fn narrow_width_code_block_border_does_not_break() {
         );
         // A border row is only corner + `─` characters (no wrap split it).
         assert!(
-            border.chars().all(|c| matches!(c, '┌' | '┐' | '└' | '┘' | '─')),
+            border
+                .chars()
+                .all(|c| matches!(c, '┌' | '┐' | '└' | '┘' | '─')),
             "border row contains non-border chars (wrap split it): {border:?}"
         );
     }
