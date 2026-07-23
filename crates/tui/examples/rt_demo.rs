@@ -10,9 +10,20 @@
 //! happens in one place — the scheduler's draw closure — wrapped in
 //! synchronized-output markers.
 //!
+//! The bottom area is built from the rt **component/focus/dispatch** model
+//! (`hand_tui::rt::view`): two focusable components — an editable input row and a
+//! read-only status block — live in a `FocusView` with exactly one focused at a
+//! time. Keys route **exclusively** to the focused component, so while a stream
+//! or flood is committing to scrollback, typed characters land only in the input
+//! and never echo into history. Tab switches focus. The **hardware cursor
+//! follows focus**: it sits at the input's insertion point when the input is
+//! focused, and is hidden when the caret-less status block is focused — never
+//! stranded in the output.
+//!
 //! Keys:
-//!   - printable chars / Backspace: edit the input line
+//!   - printable chars / Backspace: edit the input line (when the input is focused)
 //!   - Enter: clear the input line (submit placeholder)
+//!   - Tab: switch focus between the input row and the read-only status block
 //!   - `f`: start/stop the token flood — a background task that calls
 //!     `request_frame()` hundreds of times per second and pushes lines into a
 //!     shared buffer, so the scheduler's coalescing and rate-limiting can be
@@ -72,15 +83,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use hand_tui::rt::events::{RtInputEvent, spawn_event_pump};
+use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::history::HistorySink;
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{SessionError, SessionGuard, SessionTerminal};
-use hand_tui::rt::view::{MAX_INPUT_ROWS, MIN_INPUT_ROWS, TerminalSize, bottom_area_geometry};
-use ratatui::layout::Alignment;
+use hand_tui::rt::view::{
+    FocusView, HandleOutcome, MAX_INPUT_ROWS, MIN_INPUT_ROWS, RtComponent, TerminalSize,
+    bottom_area_geometry,
+};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Paragraph, Widget};
 
 /// The key that intentionally panics, for exercising the panic-restore path.
 const PANIC_KEY_HELP: &str = "F12 = deliberate panic";
@@ -118,6 +133,192 @@ const STREAM_BLOCK_LINES: usize = 6;
 /// (VAL-CORE-033).
 const OVERSIZED_HEIGHT_MULTIPLIER: usize = 2;
 
+/// Shared state of the editable input row, read by the draw path (to show its
+/// text and its streaming progress) and mutated by the [`InputRow`] component
+/// when keys are dispatched to it. Held behind an `Arc<Mutex<…>>` so both the
+/// component (owned by the [`FocusView`]) and the demo's stream driver (which
+/// pushes live progress into it) can reach it.
+#[derive(Debug, Default)]
+struct InputModel {
+    /// The current input-line contents.
+    text: String,
+    /// When set, the row shows this live stream progress instead of echoing
+    /// `text`, and reports no caret (the insertion point is not the user's to
+    /// place mid-stream).
+    streaming: Option<String>,
+}
+
+/// The editable input row: an [`RtComponent`] over a shared [`InputModel`]. It
+/// consumes printable characters, Backspace, Enter, and Space while focused, and
+/// reports its caret at the insertion point so the hardware cursor tracks it.
+///
+/// It is the rt-native replacement for the demo's old free-floating `input`
+/// string: instead of the input loop mutating a field directly, keys are
+/// dispatched to this component through the [`FocusView`], so routing is
+/// exclusive and typing freezes the moment focus leaves it. The concrete text
+/// lives in the shared [`InputModel`] so the draw path can read it back.
+struct InputRow {
+    model: Arc<Mutex<InputModel>>,
+}
+
+impl InputRow {
+    /// The prompt prefix painted before the input text, also the caret's column
+    /// offset within the row.
+    const PROMPT: &'static str = "> ";
+
+    fn new(model: Arc<Mutex<InputModel>>) -> Self {
+        Self { model }
+    }
+}
+
+impl RtComponent for InputRow {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let model = lock_model(&self.model);
+        let line = match &model.streaming {
+            Some(progress) => Line::from(vec!["streaming ".dim(), progress.clone().into()]),
+            None => Line::from(vec![Self::PROMPT.dim(), model.text.clone().into()]),
+        };
+        Paragraph::new(line).render(area, buf);
+    }
+
+    fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
+        let mut model = lock_model(&self.model);
+        match key.key_id.as_deref() {
+            Some("backspace") => {
+                model.text.pop();
+                HandleOutcome::Consumed
+            }
+            Some("enter") => {
+                model.text.clear();
+                HandleOutcome::Consumed
+            }
+            Some("space") => {
+                model.text.push(' ');
+                HandleOutcome::Consumed
+            }
+            _ => match printable_char(key) {
+                Some(ch) => {
+                    model.text.push(ch);
+                    HandleOutcome::Consumed
+                }
+                // Chords and named keys bubble so the view can act on them
+                // (e.g. Tab switches focus).
+                None => HandleOutcome::Ignored,
+            },
+        }
+    }
+
+    fn cursor(&self) -> Option<Position> {
+        let model = lock_model(&self.model);
+        // No caret while a stream owns the body — the insertion point is not the
+        // user's to see mid-stream, so the hardware cursor hides.
+        if model.streaming.is_some() {
+            return None;
+        }
+        // The caret sits after the prompt and the typed text. Widths here are
+        // ASCII-simple for the demo; a real editor would measure display width.
+        let col = Self::PROMPT.len() + model.text.chars().count();
+        Some(Position::new(col as u16, 0))
+    }
+}
+
+/// Shared state of the read-only status block: the text the draw path refreshes
+/// each frame from the demo counters (flood/stream), so a probe sees it is *not*
+/// an input.
+#[derive(Debug, Default)]
+struct StatusModel {
+    text: String,
+}
+
+/// A read-only status block: an [`RtComponent`] with no caret that consumes no
+/// keys. Focusing it demonstrates caret-less focus — the hardware cursor hides —
+/// and exclusive routing — typing into it is impossible because it never
+/// consumes a character.
+struct StatusBlock {
+    model: Arc<Mutex<StatusModel>>,
+}
+
+impl StatusBlock {
+    fn new(model: Arc<Mutex<StatusModel>>) -> Self {
+        Self { model }
+    }
+}
+
+impl RtComponent for StatusBlock {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let text = lock_status(&self.model).text.clone();
+        Paragraph::new(Line::from(text.dim())).render(area, buf);
+    }
+
+    fn handle_key(&mut self, _key: &RtKey) -> HandleOutcome {
+        // Read-only: never consumes, so a key always bubbles.
+        HandleOutcome::Ignored
+    }
+
+    // No caret: default `cursor()` returns None → hardware cursor hidden.
+}
+
+/// Index of the editable input row inside the [`FocusView`] (focus-cycle order:
+/// input row first, read-only status block second).
+const INPUT_INDEX: usize = 0;
+
+/// Shared handles for the interactive bottom area.
+///
+/// The [`FocusView`] itself is not `Send` (its `Box<dyn RtComponent>` trait
+/// objects are `?Send`), and the scheduler's draw closure runs in a spawned
+/// tokio task that requires `Send`. So the view is *not* shared directly.
+/// Instead, the two components' concrete state (`InputModel`, `StatusModel`) and
+/// the focused index are shared through `Send` handles: the input loop owns a
+/// persistent `FocusView` for dispatch and mirrors its focused index into
+/// `focus`; the draw closure rebuilds a throwaway `FocusView` over the same
+/// models each frame, restoring the focused index from `focus`, then renders and
+/// reads its caret. Both views are wafer-thin (two trait-object boxes), so the
+/// per-frame rebuild is cheap.
+#[derive(Clone)]
+struct ViewHandles {
+    input: Arc<Mutex<InputModel>>,
+    status: Arc<Mutex<StatusModel>>,
+    /// The currently focused component index, shared across the loop and draw.
+    focus: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ViewHandles {
+    fn new() -> Self {
+        Self {
+            input: Arc::new(Mutex::new(InputModel::default())),
+            status: Arc::new(Mutex::new(StatusModel::default())),
+            focus: Arc::new(std::sync::atomic::AtomicUsize::new(INPUT_INDEX)),
+        }
+    }
+
+    /// Build a fresh [`FocusView`] over the shared models, with focus restored
+    /// from the shared index. Cheap: two trait-object boxes over shared state.
+    fn build_view(&self) -> FocusView {
+        let mut view = FocusView::new(vec![
+            Box::new(InputRow::new(self.input.clone())),
+            Box::new(StatusBlock::new(self.status.clone())),
+        ]);
+        view.focus(self.focus.load(Ordering::SeqCst));
+        view
+    }
+
+    /// Persist a view's focused index back into the shared handle.
+    fn store_focus(&self, view: &FocusView) {
+        self.focus.store(view.focused(), Ordering::SeqCst);
+    }
+}
+
+/// Lock the shared input model, treating poisoning as fatal (a panic already
+/// tore through the demo).
+fn lock_model(model: &Arc<Mutex<InputModel>>) -> std::sync::MutexGuard<'_, InputModel> {
+    model.lock().expect("input model mutex poisoned")
+}
+
+/// Lock the shared status model, treating poisoning as fatal.
+fn lock_status(model: &Arc<Mutex<StatusModel>>) -> std::sync::MutexGuard<'_, StatusModel> {
+    model.lock().expect("status model mutex poisoned")
+}
+
 /// Mutable demo state, shared between the input loop (which mutates it) and the
 /// scheduler's draw closure (which reads it). A plain `std::sync::Mutex`: the
 /// draw closure the scheduler runs is synchronous, and every critical section
@@ -133,8 +334,6 @@ struct DemoState {
     /// on the next coalesced frame — the input side never re-lays-out
     /// synchronously, it just updates this and requests a frame.
     size: TerminalSize,
-    /// The current input-line contents.
-    input: String,
     /// How many rows the input body currently occupies (auto-grow simulation).
     /// Starts at one, grows one row per `g` up to the 8-row ceiling, and
     /// collapses back to one on `c`. Drives the fixed-viewport bottom-area
@@ -211,8 +410,9 @@ fn print_help() {
          Input events only request frames; all drawing is coalesced + rate-limited.\n\
          \n\
          Keys:\n\
-         \x20 printable / Backspace : edit the input line\n\
+         \x20 printable / Backspace : edit the focused input line\n\
          \x20 Enter                 : clear the input line\n\
+         \x20 Tab                   : switch focus (input row <-> read-only block)\n\
          \x20 f                     : toggle the token flood (probe rate-limiting)\n\
          \x20 s                     : stream a block, then commit it once to scrollback\n\
          \x20 b                     : commit an oversized (~2x height) block to scrollback\n\
@@ -246,10 +446,19 @@ async fn run() -> Result<(), SessionError> {
         ..DemoState::default()
     }));
 
+    // The two focusable bottom-area components share their concrete state so the
+    // stream driver can push live progress into the input row and the draw path
+    // can refresh the status block from the demo counters. The input loop owns a
+    // persistent `FocusView` for exclusive key routing and focus switching; the
+    // draw closure rebuilds a throwaway view over the same shared models.
+    let handles = ViewHandles::new();
+    let input_model = handles.input.clone();
+    let mut view = handles.build_view();
+
     // Spawn the frame scheduler: it owns the terminal and is the *single* place
     // the UI is painted. Every draw is wrapped in synchronized-output markers,
     // so an exit mid-flood can never leave an unterminated `?2026h`.
-    let (requester, scheduler) = spawn_scheduler(terminal, state.clone());
+    let (requester, scheduler) = spawn_scheduler(terminal, state.clone(), handles.clone());
 
     // Spawn the rt input pump: it reads crossterm's EventStream, translates each
     // event, and delivers RtInputEvents over the channel.
@@ -279,6 +488,7 @@ async fn run() -> Result<(), SessionError> {
         continuous_handle = Some(spawn_continuous_stream(
             requester.clone(),
             state.clone(),
+            input_model.clone(),
             continuous_stop.clone(),
         ));
     }
@@ -302,7 +512,7 @@ async fn run() -> Result<(), SessionError> {
                 }
                 // Start a streaming block (ignored if one is already growing).
                 Some("s") => {
-                    start_stream(&requester, &state, &mut stream_handle);
+                    start_stream(&requester, &state, &input_model, &mut stream_handle);
                 }
                 // Queue an oversized (~2× terminal height) block for one commit.
                 Some("b") => {
@@ -330,23 +540,32 @@ async fn run() -> Result<(), SessionError> {
                 // then collapses mid-stream, so the bottom-area height changes
                 // while content is being committed to scrollback (VAL-CORE-035).
                 Some("shift+g") => {
-                    start_stream(&requester, &state, &mut stream_handle);
+                    start_stream(&requester, &state, &input_model, &mut stream_handle);
                     spawn_grow_collapse(&requester, &state);
                 }
-                Some("backspace") => {
-                    lock(&state).input.pop();
-                }
-                Some("enter") => lock(&state).input.clear(),
-                Some("space") => lock(&state).input.push(' '),
-                // A printable character with no ctrl/alt/super modifier.
+                // Everything else is an editing/focus key: dispatch it
+                // *exclusively* to the focused component through the view. A key
+                // the focused component ignores bubbles here; Tab then switches
+                // focus (input row <-> read-only status block), which is exactly
+                // what redirects subsequent keys and freezes the old component.
                 _ => {
-                    if let Some(ch) = printable_char(&key) {
-                        lock(&state).input.push(ch);
+                    let outcome = view.dispatch_key(&key);
+                    if outcome == HandleOutcome::Ignored && key.key_id.as_deref() == Some("tab") {
+                        view.focus_next();
                     }
+                    // Mirror the focused index so the draw side routes the cursor
+                    // to the same component.
+                    handles.store_focus(&view);
                 }
             },
-            // Bracketed paste: insert the whole payload as one action.
-            RtInputEvent::Paste(payload) => lock(&state).input.push_str(&payload),
+            // Bracketed paste: insert the whole payload into the focused input.
+            // A paste is only meaningful for a text component, so it lands in the
+            // shared input model directly (the status block has no text to edit).
+            RtInputEvent::Paste(payload) => {
+                if view.focused() == INPUT_INDEX {
+                    lock_model(&input_model).text.push_str(&payload);
+                }
+            }
             // Resize: fold the whole new geometry into the tracked size. The
             // work stops here — we do *not* re-lay-out synchronously. The shared
             // `request_frame()` below routes through the scheduler, so a resize
@@ -416,6 +635,7 @@ async fn run() -> Result<(), SessionError> {
 fn spawn_scheduler(
     mut terminal: SessionTerminal,
     state: Arc<Mutex<DemoState>>,
+    handles: ViewHandles,
 ) -> (FrameRequester, tokio::task::JoinHandle<io::Result<()>>) {
     // The scheduler task owns the terminal, so it is the only place `insert_before`
     // may be called — and it must be called *between* viewport draws. We drain the
@@ -434,17 +654,19 @@ fn spawn_scheduler(
             }
             let snapshot = StateSnapshot {
                 size: guard.size,
-                input: guard.input.clone(),
                 input_rows: guard.input_rows,
                 loader: guard.loader,
                 spinner_phase: guard.spinner_phase,
                 flood_ticks: guard.flood_ticks,
                 flooding: guard.flooding,
-                stream_block: guard.stream_block.clone(),
                 streaming: guard.streaming,
             };
             (snapshot, commits)
         };
+
+        // Refresh the read-only status block from the demo counters, so a probe
+        // focusing it sees live-updating status text that typing cannot alter.
+        lock_status(&handles.status).text = status_text(&snapshot);
 
         // Commit finished blocks into native scrollback *before* the draw. Each
         // block becomes exactly one `insert_before`; the sink autoresizes then
@@ -459,19 +681,37 @@ fn spawn_scheduler(
         // closing `?2026l` is emitted even if `terminal.draw` errors, so an
         // interrupt mid-draw never leaves an open synchronized block.
         let mut stdout = io::stdout();
+        let handles = &handles;
         draw_synchronized(&mut stdout, |_w| {
-            terminal.draw(|frame| draw(frame, &snapshot))?;
+            terminal.draw(|frame| draw(frame, &snapshot, handles))?;
             Ok(())
         })
     })
 }
 
+/// The read-only status block's text for one frame, derived from the demo
+/// counters so it visibly updates without ever being an input field.
+fn status_text(snapshot: &StateSnapshot) -> String {
+    let flood = if snapshot.flooding {
+        format!("FLOOD #{}", snapshot.flood_ticks)
+    } else {
+        "flood off".to_string()
+    };
+    let stream = if snapshot.streaming {
+        "streaming"
+    } else {
+        "idle"
+    };
+    format!("[status] {flood} · {stream} · Tab to type here (read-only)")
+}
+
 /// An immutable view of [`DemoState`] handed to the draw function, taken under
-/// the lock so the paint itself holds no lock.
+/// the lock so the paint itself holds no lock. The interactive bottom-area text
+/// (input contents, stream progress) lives in the focus view's components, not
+/// here.
 struct StateSnapshot {
     /// The tracked terminal geometry this frame lays out against.
     size: TerminalSize,
-    input: String,
     /// The auto-grow input body height in rows (1..8).
     input_rows: u16,
     /// Whether the loader/spinner row shows this frame.
@@ -480,9 +720,6 @@ struct StateSnapshot {
     spinner_phase: u64,
     flood_ticks: u64,
     flooding: bool,
-    /// The streaming block's lines so far, shown live in the viewport while the
-    /// block grows.
-    stream_block: Vec<Line<'static>>,
     /// Whether a streaming block is currently growing.
     streaming: bool,
 }
@@ -558,6 +795,7 @@ fn set_flooding(state: &Arc<Mutex<DemoState>>, on: bool) {
 fn spawn_continuous_stream(
     requester: FrameRequester,
     state: Arc<Mutex<DemoState>>,
+    input_model: Arc<Mutex<InputModel>>,
     stop: Arc<AtomicBool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -588,13 +826,15 @@ fn spawn_continuous_stream(
             let block = streaming_block_lines(commit_number);
             // Stream the block one line at a time, repainting after each so it is
             // capturable mid-stream in the viewport before it commits.
-            for line in &block {
+            for (i, line) in block.iter().enumerate() {
                 interval.tick().await;
                 if stop.load(Ordering::SeqCst) {
                     lock(&state).streaming = false;
+                    clear_stream_progress(&input_model);
                     return;
                 }
                 lock(&state).stream_block.push(line.clone());
+                set_stream_progress(&input_model, i + 1, block.len(), line);
                 requester.request_frame();
             }
             // Finished: move the block to the commit queue in one shot so it
@@ -605,9 +845,28 @@ fn spawn_continuous_stream(
                 guard.stream_block.clear();
                 guard.streaming = false;
             }
+            clear_stream_progress(&input_model);
             requester.request_frame();
         }
     })
+}
+
+/// Push live stream progress into the input row's shared model so the focused
+/// input body shows the in-flight block (and reports no caret) while it streams.
+fn set_stream_progress(
+    input_model: &Arc<Mutex<InputModel>>,
+    done: usize,
+    total: usize,
+    line: &Line<'static>,
+) {
+    let progress = format!("{done}/{total} {line}");
+    lock_model(input_model).streaming = Some(progress);
+}
+
+/// Clear the input row's stream progress so it returns to echoing typed text
+/// (and reporting its caret) once a block finishes or is cancelled.
+fn clear_stream_progress(input_model: &Arc<Mutex<InputModel>>) {
+    lock_model(input_model).streaming = None;
 }
 
 /// Build one streaming block's worth of lines, with a distinctive commit marker
@@ -639,6 +898,7 @@ fn commit_marker(commit_number: u64) -> Line<'static> {
 fn start_stream(
     requester: &FrameRequester,
     state: &Arc<Mutex<DemoState>>,
+    input_model: &Arc<Mutex<InputModel>>,
     stream_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
     {
@@ -657,21 +917,24 @@ fn start_stream(
 
     let requester = requester.clone();
     let state = state.clone();
+    let input_model = input_model.clone();
     *stream_handle = Some(tokio::spawn(async move {
         let block = streaming_block_lines(commit_number);
         let mut interval = tokio::time::interval(STREAM_LINE_INTERVAL);
         // Grow the block one line at a time, repainting after each so the block
         // is visibly streaming in the viewport (and thus capturable mid-stream).
-        for line in &block {
+        for (i, line) in block.iter().enumerate() {
             interval.tick().await;
             {
                 let mut guard = lock(&state);
                 if !guard.streaming {
                     // Cancelled (e.g. quit): abandon without committing.
+                    clear_stream_progress(&input_model);
                     return;
                 }
                 guard.stream_block.push(line.clone());
             }
+            set_stream_progress(&input_model, i + 1, block.len(), line);
             requester.request_frame();
         }
         // Finished: move the whole block to the commit queue in one shot, clear
@@ -683,6 +946,7 @@ fn start_stream(
             guard.stream_block.clear();
             guard.streaming = false;
         }
+        clear_stream_progress(&input_model);
         requester.request_frame();
     }));
 }
@@ -794,7 +1058,7 @@ fn printable_char(key: &hand_tui::rt::events::RtKey) -> Option<char> {
 /// Spinner glyph frames cycled while the loader shows.
 const SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 
-fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot) {
+fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot, handles: &ViewHandles) {
     let area = frame.area();
 
     // The frame area *is* the fixed inline viewport, already autoresized to the
@@ -808,14 +1072,10 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot) {
     let geometry =
         bottom_area_geometry(state.input_rows, state.loader, area.width, state.size.rows);
 
-    let flood = if state.flooding {
-        format!(" · FLOOD #{}", state.flood_ticks)
-    } else {
-        String::new()
-    };
-    let title = Line::from(format!(
-        " rt_demo — Ctrl+D/Ctrl+C quit · g=grow · c=collapse · l=loader · s=stream{flood} "
-    ))
+    let title = Line::from(
+        " rt_demo — Ctrl+D/Ctrl+C quit · Tab=focus · g=grow · c=collapse · l=loader · s=stream "
+            .to_string(),
+    )
     .style(Style::default());
     let block = Block::bordered()
         .title(title)
@@ -835,28 +1095,39 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot) {
         frame.render_widget(Paragraph::new(spinner), inset(loader_rect));
     }
 
-    // While a block is streaming, show its progress live in the input body — this
-    // is the content a probe captures *before* the block commits into scrollback.
-    // Otherwise echo the (possibly multi-row) input.
-    let body = if state.streaming {
-        let latest = state
-            .stream_block
-            .last()
-            .map(|line| line.to_string())
-            .unwrap_or_default();
-        Line::from(vec![
-            format!(
-                "streaming {}/{} ",
-                state.stream_block.len(),
-                STREAM_BLOCK_LINES + 1
-            )
-            .dim(),
-            latest.into(),
-        ])
-    } else {
-        Line::from(vec!["> ".dim(), state.input.clone().into()])
-    };
-    frame.render_widget(Paragraph::new(body), inset(geometry.input));
+    // Lay the two focusable components out inside the input body: the input row
+    // on top, the read-only status block on the last interior row. Both rects are
+    // in viewport coordinates, so the caret the view reports back is already the
+    // hardware-cursor position.
+    let (input_rect, status_rect) = split_bottom_rows(inset(geometry.input));
+
+    // Rebuild the focus view over the shared models (focus restored from the
+    // shared index), render it (input row + status block), and drive the hardware
+    // cursor from its reported caret. `view.cursor()` is `Some` only for the
+    // focused input at its insertion point; focusing the caret-less status block
+    // returns `None`, and not calling `set_cursor_position` makes ratatui hide
+    // the hardware cursor — never a stray cursor in the read-only region.
+    let mut view = handles.build_view();
+    view.render(&[input_rect, status_rect], frame.buffer_mut());
+    if let Some(pos) = view.cursor() {
+        frame.set_cursor_position(pos);
+    }
+}
+
+/// Split a bottom-area body rect into the input row (all but the last row) and a
+/// one-row status block (the last row).
+///
+/// When the body is a single row the input row keeps it and the status block
+/// collapses to an empty rect on the row below (rendered as nothing), so the
+/// focused caret always has a home and the layout never overlaps.
+fn split_bottom_rows(body: Rect) -> (Rect, Rect) {
+    if body.height <= 1 {
+        let status = Rect::new(body.x, body.y.saturating_add(body.height), body.width, 0);
+        return (body, status);
+    }
+    let input = Rect::new(body.x, body.y, body.width, body.height - 1);
+    let status = Rect::new(body.x, body.y + body.height - 1, body.width, 1);
+    (input, status)
 }
 
 /// Inset a rect by one column on each side so its content sits inside the block's

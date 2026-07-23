@@ -27,7 +27,10 @@
 //! how tall the *active* bottom area is and how it partitions into loader / input
 //! rows. It reads no terminal state, so it is unit-tested without a live backend.
 
-use ratatui::layout::Rect;
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Position, Rect};
+
+use crate::rt::events::RtKey;
 
 /// The maximum number of rows the auto-growing input body may occupy. The input
 /// grows one row per wrapped line of content from 1 up to this ceiling, then
@@ -248,4 +251,253 @@ fn partition_interior(
         let input = Rect::new(x, top, width, interior_height);
         (None, input)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Component / focus / dispatch model
+// ---------------------------------------------------------------------------
+//
+// ratatui is a pure immediate-mode renderer with no event system, no widget
+// identity, and no focus. This is the thin application layer that gives the rt
+// stack the three things an interactive viewport needs and ratatui does not
+// provide:
+//
+// - a **component** abstraction that both paints into a ratatui `Buffer` and
+//   consumes keys (unlike the legacy `Component`, which only renders to
+//   `Vec<String>` and never sees input);
+// - **exclusive focus routing**, so exactly one component receives keys and the
+//   rest are frozen — a background stream can flood the viewport while typed
+//   characters land only in the focused input; and
+// - **hardware-cursor-follows-focus**: the focused component reports where its
+//   caret is, the view surfaces that as an `Option<Position>`, and the draw glue
+//   feeds it to ratatui's `Frame::set_cursor_position` — a caret-less focus
+//   (`None`) hides the real cursor rather than stranding it in the output.
+
+/// Whether a component consumed a key or let it bubble.
+///
+/// Returned by [`RtComponent::handle_key`]. [`FocusView`] routes a key to the
+/// focused component and inspects this to decide whether the key was handled or
+/// should fall through to view-level handling (e.g. a focus-switch key the
+/// focused component ignored). It is the dispatch layer's "stop propagation"
+/// signal, kept deliberately binary — richer routing (capture/overlay) is a
+/// later concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleOutcome {
+    /// The component handled the key; it must not bubble further.
+    Consumed,
+    /// The component did not handle the key; the dispatcher may act on it (e.g.
+    /// a view-level focus switch).
+    Ignored,
+}
+
+impl HandleOutcome {
+    /// Whether the key was consumed (handled) by the component.
+    #[must_use]
+    pub const fn is_consumed(self) -> bool {
+        matches!(self, HandleOutcome::Consumed)
+    }
+}
+
+/// A focusable, key-consuming piece of UI painted into a ratatui [`Buffer`].
+///
+/// The rt-native counterpart to the legacy `Component` (which renders to
+/// `Vec<String>` and never handles input). An `RtComponent`:
+///
+/// - **renders** itself into a sub-rect of the frame buffer ([`render`]) —
+///   immediate mode, called every frame by the draw path;
+/// - **handles keys** ([`handle_key`]) only while it is the focused component,
+///   returning a [`HandleOutcome`] so the dispatcher knows whether the key was
+///   consumed or should bubble; and
+/// - optionally **reports its caret** ([`cursor`]) as a viewport-local
+///   [`Position`], so the view can drive the real hardware cursor to the
+///   insertion point. A component with no caret (a read-only block) returns
+///   `None`, and the view hides the hardware cursor while it is focused.
+///
+/// [`render`]: RtComponent::render
+/// [`handle_key`]: RtComponent::handle_key
+/// [`cursor`]: RtComponent::cursor
+pub trait RtComponent {
+    /// Paint this component into `area` of the frame buffer. Immediate mode:
+    /// called every frame, must not retain the buffer.
+    fn render(&self, area: Rect, buf: &mut Buffer);
+
+    /// Handle a key while focused, reporting whether it was consumed.
+    ///
+    /// Only ever called by [`FocusView`] on the currently focused component, so
+    /// an unfocused component's state is frozen — it never sees a key. Returning
+    /// [`HandleOutcome::Ignored`] lets the key bubble to the view (e.g. so a
+    /// focus-switch key works even while an input is focused).
+    fn handle_key(&mut self, key: &RtKey) -> HandleOutcome;
+
+    /// The component's caret position, if it has one, in the same coordinate
+    /// space its [`render`](RtComponent::render) area was given.
+    ///
+    /// Returns the *content-local* offset within the last rendered area (see
+    /// [`FocusView::cursor`], which translates it to viewport coordinates). A
+    /// component with no caret (a read-only block) returns `None`, which the
+    /// view turns into a hidden hardware cursor.
+    fn cursor(&self) -> Option<Position> {
+        None
+    }
+}
+
+/// A container of focusable [`RtComponent`]s with exactly one focused at a time
+/// and exclusive key routing.
+///
+/// This is the whole focus/dispatch model:
+///
+/// - **Exactly one focus.** [`focused`](FocusView::focused) names the component
+///   that receives keys; it is always a valid index while the view is non-empty.
+/// - **Exclusive routing.** [`dispatch_key`](FocusView::dispatch_key) hands a key
+///   *only* to the focused component. Unfocused components never see a key, so
+///   their state is frozen — the guarantee behind "typed chars land only in the
+///   focused component" even while a background stream floods the viewport.
+/// - **Cursor follows focus.** [`cursor`](FocusView::cursor) reports the focused
+///   component's caret (translated into viewport coordinates via the rect it was
+///   last laid out at), or `None` when the focused component is caret-less — the
+///   signal the draw glue feeds to `Frame::set_cursor_position` so the hardware
+///   cursor tracks focus and is hidden on a caret-less focus.
+///
+/// Focus is switched with [`focus_next`](FocusView::focus_next) /
+/// [`focus`](FocusView::focus). The view stores, per component, the rect it was
+/// last rendered at, so `cursor` can turn a content-local caret into an absolute
+/// viewport position without the caller re-deriving geometry.
+pub struct FocusView {
+    /// The focusable components, in focus-cycle order.
+    components: Vec<Box<dyn RtComponent>>,
+    /// The rect each component was last rendered at, parallel to `components`.
+    /// Used to translate a focused component's content-local caret into an
+    /// absolute viewport position. `None` until the component has been rendered
+    /// at least once.
+    areas: Vec<Option<Rect>>,
+    /// Index of the focused component. Invariant: `< components.len()` whenever
+    /// the view is non-empty.
+    focused: usize,
+}
+
+impl FocusView {
+    /// Build a view over `components`, focusing the first one.
+    ///
+    /// An empty view is legal (it routes nothing and reports no cursor); a
+    /// non-empty view always has a valid focused index.
+    #[must_use]
+    pub fn new(components: Vec<Box<dyn RtComponent>>) -> Self {
+        let areas = vec![None; components.len()];
+        Self {
+            components,
+            areas,
+            focused: 0,
+        }
+    }
+
+    /// Number of components in the view.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Whether the view holds no components.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.components.is_empty()
+    }
+
+    /// Index of the currently focused component (`0` for an empty view, which
+    /// has no component to focus).
+    #[must_use]
+    pub fn focused(&self) -> usize {
+        self.focused
+    }
+
+    /// Focus the component at `index`, if it is in range. A no-op otherwise, so
+    /// an out-of-range request never leaves focus in an invalid state.
+    pub fn focus(&mut self, index: usize) {
+        if index < self.components.len() {
+            self.focused = index;
+        }
+    }
+
+    /// Move focus to the next component, wrapping past the last back to the
+    /// first. A no-op on an empty view.
+    ///
+    /// This is the mechanism a focus-switch key (Tab, F2, …) drives. Because
+    /// routing is exclusive, switching focus is exactly what redirects
+    /// subsequent keys from one component to another — the old component's
+    /// state freezes the instant focus leaves it.
+    pub fn focus_next(&mut self) {
+        if self.components.is_empty() {
+            return;
+        }
+        self.focused = (self.focused + 1) % self.components.len();
+    }
+
+    /// Borrow the focused component immutably, if any.
+    #[must_use]
+    pub fn focused_component(&self) -> Option<&dyn RtComponent> {
+        self.components.get(self.focused).map(Box::as_ref)
+    }
+
+    /// Route a key to the focused component **exclusively**.
+    ///
+    /// Only the focused component's [`handle_key`](RtComponent::handle_key) runs;
+    /// every other component is untouched (frozen). Returns the focused
+    /// component's [`HandleOutcome`] so the caller can act on an ignored key
+    /// (e.g. treat it as a view-level focus switch). An empty view ignores every
+    /// key.
+    pub fn dispatch_key(&mut self, key: &RtKey) -> HandleOutcome {
+        match self.components.get_mut(self.focused) {
+            Some(component) => component.handle_key(key),
+            None => HandleOutcome::Ignored,
+        }
+    }
+
+    /// Render every component into its slice of `layout`, recording each rect so
+    /// [`cursor`](FocusView::cursor) can later place the hardware cursor.
+    ///
+    /// `layout` must yield one rect per component, in component order. Rects are
+    /// in viewport coordinates (the space `Frame::set_cursor_position` expects),
+    /// so the recorded rect plus the focused component's content-local caret give
+    /// the absolute cursor position.
+    pub fn render(&mut self, layout: &[Rect], buf: &mut Buffer) {
+        for (i, component) in self.components.iter().enumerate() {
+            let Some(&area) = layout.get(i) else { break };
+            self.areas[i] = Some(area);
+            component.render(area, buf);
+        }
+    }
+
+    /// The absolute viewport position of the focused component's caret, or `None`
+    /// when there is no caret to show.
+    ///
+    /// Returns `None` — meaning "hide the hardware cursor" — when the view is
+    /// empty, when the focused component has not been rendered yet, or when the
+    /// focused component reports no caret (a read-only block). Otherwise it
+    /// offsets the component's content-local caret by the origin of the rect it
+    /// was last rendered at, clamped inside that rect so a caret can never stray
+    /// outside the component's own area (and thus never into another region's
+    /// output).
+    #[must_use]
+    pub fn cursor(&self) -> Option<Position> {
+        let component = self.components.get(self.focused)?;
+        let area = (*self.areas.get(self.focused)?)?;
+        let caret = component.cursor()?;
+        Some(clamp_cursor_into(area, caret))
+    }
+}
+
+/// Translate a component-local caret into an absolute viewport position, clamped
+/// inside `area`.
+///
+/// The caret is an offset within the component's own render area; adding the
+/// area's origin gives the viewport position, and clamping to the area's last
+/// paintable cell guarantees the hardware cursor can never land outside the
+/// focused component — the "never a stray cursor in the output" guarantee. A
+/// zero-sized area collapses to its origin.
+fn clamp_cursor_into(area: Rect, caret: Position) -> Position {
+    let max_x = area.x.saturating_add(area.width.saturating_sub(1));
+    let max_y = area.y.saturating_add(area.height.saturating_sub(1));
+    Position::new(
+        area.x.saturating_add(caret.x).min(max_x),
+        area.y.saturating_add(caret.y).min(max_y),
+    )
 }

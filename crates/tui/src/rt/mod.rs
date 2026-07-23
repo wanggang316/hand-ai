@@ -30,6 +30,7 @@ pub use scheduler::{
     MIN_FRAME_INTERVAL, close_synchronized, draw_synchronized,
 };
 pub use view::{
-    BORDER_ROWS, BottomGeometry, LOADER_ROWS, MAX_INPUT_ROWS, MAX_VIEWPORT_ROWS, MIN_INPUT_ROWS,
-    TerminalSize, bottom_area_geometry, clamp_input_rows,
+    BORDER_ROWS, BottomGeometry, FocusView, HandleOutcome, LOADER_ROWS, MAX_INPUT_ROWS,
+    MAX_VIEWPORT_ROWS, MIN_INPUT_ROWS, RtComponent, TerminalSize, bottom_area_geometry,
+    clamp_input_rows,
 };
