@@ -31,18 +31,19 @@
 //! On a non-TTY (piped) stdin/stdout it prints a diagnostic and exits non-zero
 //! without ever touching the parent shell's terminal mode.
 
-use std::io;
+use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use hand_tui::rt::components::{
     BorderTint, CancellableLoader, CombinedProvider, Editor, Loader, MarkdownView, PathEntry,
-    PathProvider, ProgressBar, RawEmissionQueue, ResolvedProtocol, RtImage, SelectItem, SelectList,
-    SelectListLayout, SettingEntry, SettingValue, SettingsList, SlashCommand, SlashProvider,
-    Spacer, StatusBar, TextBlock, Toast, ToastLevel, TruncatedText, WidgetBox,
-    default_markdown_theme, write_cell_size_query,
+    PathProvider, ProgressBar, RawEmissionQueue, ResolvedProtocol, RtImage, ScrollbackImageChannel,
+    SelectItem, SelectList, SelectListLayout, SettingEntry, SettingValue, SettingsList,
+    SlashCommand, SlashProvider, Spacer, StatusBar, TextBlock, Toast, ToastLevel, TruncatedText,
+    WidgetBox, default_markdown_theme, osc8_emission, write_cell_size_query,
 };
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
+use hand_tui::rt::history::HistorySink;
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{EraseOnDrop, SessionError, SessionGuard, SessionTerminal};
 use hand_tui::rt::view::{RtComponent, TerminalSize};
@@ -113,6 +114,43 @@ fn flood_requested_by_env() -> bool {
     std::env::var(FLOOD_ENV).map(|v| v == "1").unwrap_or(false)
 }
 
+/// The Markdown section's source. Hoisted to a const so both the section builder
+/// (which paints the styled text) and `draw`'s Markdown special-case (which
+/// computes the OSC 8 link rows for the raw channel) render from the *same* text.
+const MARKDOWN_SOURCE: &str = "\
+# Markdown renderer
+
+Body text with **bold, _nested italic_, back** to bold, `inline code`, \
+a [link](https://example.com) and an ![image alt](diagram.png).
+
+3. third item
+4. fourth item
+
+- outer bullet
+  - nested bullet
+- [ ] pending task
+- [x] done task
+
+> a blockquote line, dimmed and italic
+
+---
+
+```rust
+fn main() {
+    /* a block comment
+       spanning lines */
+    let count: usize = 42; // trailing
+    println!(\"hello\");
+}
+```
+
+| name | 值 |
+|:-----|---:|
+| 你好世界 | 1 |
+| ascii | 22 |
+
+~~struck through~~ text.";
+
 /// A single gallery section: a title plus a builder that lays its primitives out
 /// into the section's content rect.
 ///
@@ -160,6 +198,34 @@ struct GalleryState {
     /// at the viewport origin (see [`spawn_scheduler`]). This is the in-viewport
     /// half of the buffer-bypass mechanism `m2-image-scrollback` extends.
     image_queue: RawEmissionQueue,
+    /// The scrollback image channel: the stable content→id map + committed-id
+    /// registry that keeps a scrolled-into-history image transmitted a bounded
+    /// number of times and protected from any delete (see
+    /// [`ScrollbackImageChannel`]). Shared with the scheduler, which commits and
+    /// deletes on the terminal-owning task.
+    scrollback: ScrollbackImageChannel,
+    /// Images queued to be scrolled into native scrollback on the next frame
+    /// (the `i` gesture). Drained by the scheduler *between* draws — the only
+    /// place `insert_before` is legal — so each is committed once.
+    pending_scrollback: Vec<PendingScrollbackImage>,
+    /// Viewport-only image ids queued for a Kitty delete-by-id on the next frame
+    /// (the `D` drop gesture). A committed (scrollback) id is refused by the
+    /// channel, so this can only ever delete a pure-viewport image and never a
+    /// wide `d=A`/`d=a` form.
+    pending_deletes: Vec<u32>,
+    /// Whether the demonstration overlay is open (the `o` gesture). Toggling it
+    /// must not perturb any image already scrolled into scrollback (no
+    /// re-transmit, no delete) — the VAL-CROSS-004 safety check.
+    overlay_open: bool,
+}
+
+/// An image queued to be committed into native scrollback, carried as its raw
+/// bytes + label + protocol so the terminal-owning scheduler can build the
+/// [`RtImage`] and commit it at the current width between draws.
+struct PendingScrollbackImage {
+    data: &'static [u8],
+    label: String,
+    protocol: ResolvedProtocol,
 }
 
 impl GalleryState {
@@ -171,7 +237,51 @@ impl GalleryState {
             size,
             toast: toast_seam(),
             image_queue,
+            scrollback: ScrollbackImageChannel::new(),
+            pending_scrollback: Vec::new(),
+            pending_deletes: Vec::new(),
+            overlay_open: false,
         }
+    }
+
+    /// Queue the sample image to be scrolled into native scrollback (the `i`
+    /// gesture). Only meaningful in the Image section; a no-op elsewhere.
+    fn scroll_image_into_history(&mut self) {
+        if self.section_title() != Some("Image") {
+            return;
+        }
+        let protocol = forced_image_protocol().unwrap_or(ResolvedProtocol::Kitty);
+        self.pending_scrollback.push(PendingScrollbackImage {
+            data: SAMPLE_IMAGE_PNG,
+            label: "scrollback sample".to_string(),
+            protocol,
+        });
+    }
+
+    /// Drop the current viewport image (the `D` gesture): queue a viewport-only
+    /// delete. The channel refuses to delete a committed (scrollback) id, so this
+    /// only ever removes a pure-viewport image — the safety invariant a probe
+    /// checks by dropping *after* a commit and seeing the committed id survive.
+    fn drop_viewport_image(&mut self) {
+        if self.section_title() != Some("Image") {
+            return;
+        }
+        // A fresh viewport id (never committed) for the plain sample slot: dropping
+        // it is legal. If the same content was already committed to scrollback its
+        // id is protected and the delete is refused by the channel.
+        let id = self.scrollback.image_id(SAMPLE_IMAGE_PNG);
+        self.pending_deletes.push(id);
+    }
+
+    /// Toggle the demonstration overlay (the `o` gesture). Opening/closing it must
+    /// leave any scrollback image untouched.
+    fn toggle_overlay(&mut self) {
+        self.overlay_open = !self.overlay_open;
+    }
+
+    /// The active section's title, or `None` when there are no sections.
+    fn section_title(&self) -> Option<&'static str> {
+        self.sections.get(self.active).map(|s| s.title)
     }
 
     /// Dismiss the newest toast: the host gesture that reveals a hidden overflow
@@ -307,43 +417,15 @@ fn register_sections(image_queue: RawEmissionQueue) -> Vec<Section> {
             // link, an image (degraded to alt), strikethrough and task markers.
             // Resize between 100 and 40 columns to watch it reflow with the
             // code-block frame staying intact.
-            let source = "\
-# Markdown renderer
-
-Body text with **bold, _nested italic_, back** to bold, `inline code`, \
-a [link](https://example.com) and an ![image alt](diagram.png).
-
-3. third item
-4. fourth item
-
-- outer bullet
-  - nested bullet
-- [ ] pending task
-- [x] done task
-
-> a blockquote line, dimmed and italic
-
----
-
-```rust
-fn main() {
-    /* a block comment
-       spanning lines */
-    let count: usize = 42; // trailing
-    println!(\"hello\");
-}
-```
-
-| name | 值 |
-|:-----|---:|
-| 你好世界 | 1 |
-| ascii | 22 |
-
-~~struck through~~ text.";
+            //
+            // The link renders as a real OSC 8 hyperlink out of band on a capable
+            // terminal (see the Markdown special-case in `draw`, which computes the
+            // link rows and hands them to the scheduler's raw flush); on tmux /
+            // fallback the renderer paints the `text (url)` form in the cells.
             // Wire the real keyword-driven highlighter into the fenced code
             // block so keyword/string/number/comment/type render in distinct
             // colors (VAL-WIDGET-004).
-            MarkdownView::new(source)
+            MarkdownView::new(MARKDOWN_SOURCE)
                 .theme(default_markdown_theme())
                 .render(area, buf);
         }),
@@ -749,6 +831,8 @@ fn print_help() {
          \x20 BackTab / Left / h / p : previous section\n\
          \x20 1..9 : jump to a section by number\n\
          \x20 d / x : (Toast section) dismiss-newest / tick TTL\n\
+         \x20 i / D : (Image section) scroll image into scrollback / drop viewport image\n\
+         \x20 o : toggle the demonstration overlay\n\
          \x20 Ctrl+C / Ctrl+D / q : quit\n\
          \n\
          Env seams (for byte-capture probes):\n\
@@ -852,6 +936,14 @@ fn handle_nav_key(state: &Arc<Mutex<GalleryState>>, key: &RtKey) -> bool {
         // reveal a hidden overflow toast, the capturable seam for VAL-WIDGET-012.
         Some("d") => lock(state).dismiss_toast(),
         Some("x") => lock(state).tick_toast(),
+        // Image scrollback gestures (Image section):
+        //   i : scroll the sample image into native scrollback (commit once)
+        //   D : drop the viewport image (viewport-only delete; a committed one
+        //       is refused by the channel)
+        //   o : toggle the demonstration overlay (must not perturb scrollback)
+        Some("i") => lock(state).scroll_image_into_history(),
+        Some("D" | "shift+d") => lock(state).drop_viewport_image(),
+        Some("o") => lock(state).toggle_overlay(),
         Some(digit) if digit.len() == 1 => {
             if let Some(d) = digit.chars().next().and_then(|c| c.to_digit(10))
                 && d >= 1
@@ -876,17 +968,57 @@ fn spawn_scheduler(
     // (quit or panic) before `guard.restore()`, so the shell prompt lands on a
     // fresh line with no ghost gallery box (VAL-CORE-016/036).
     let mut terminal = EraseOnDrop::new(terminal);
+    // The history sink lives on the terminal-owning task (like rt_demo): the only
+    // place `insert_before` — and therefore a scrollback image commit — is legal.
+    let mut history = HistorySink::new();
     FrameScheduler::spawn(move || {
         // Wrap the whole paint in BSU/ESU so an interrupt mid-draw never leaves an
         // open synchronized block.
         let mut stdout = io::stdout();
         let state = &state;
-        // The image queue and the viewport origin captured during this draw, so
-        // graphics escapes are flushed *after* the frame paints (over the rows the
-        // widget reserved) and *inside* the synchronized block (atomic with the
-        // frame). Cloning the queue handle is cheap; it is the same channel the
-        // Image section enqueues into.
-        let image_queue = lock(state).image_queue.clone();
+        // The image queue and the scrollback channel captured once for this frame.
+        // Cloning the handles is cheap; they are the same channels the Image
+        // section enqueues into and the input gestures queue commits/deletes on.
+        let (image_queue, scrollback, commits, deletes) = {
+            let mut guard = lock(state);
+            (
+                guard.image_queue.clone(),
+                guard.scrollback.clone(),
+                std::mem::take(&mut guard.pending_scrollback),
+                std::mem::take(&mut guard.pending_deletes),
+            )
+        };
+
+        // 1. Commit any queued images into native scrollback *before* the draw —
+        //    each becomes one `insert_before` reserving the image's footprint, and
+        //    the returned escape is transmitted once under a stable id. A committed
+        //    id is marked delete-protected by the channel. Repainting the viewport
+        //    afterwards never re-transmits it (bounded transmission, VAL-IMG-005).
+        for pending in commits {
+            let image = RtImage::new(pending.data).label(pending.label);
+            if let Some(emission) =
+                history.commit_image(&mut *terminal, &scrollback, &image, pending.protocol)?
+            {
+                // Write the scrollback image escape once. `insert_before` already
+                // reserved and scrolled the blank footprint above the viewport; the
+                // graphics image is painted over it out of band. The channel has
+                // already marked the id delete-protected.
+                stdout.write_all(emission.escape.as_bytes())?;
+                stdout.flush()?;
+            }
+        }
+
+        // 2. Honour any queued viewport-only delete. The channel refuses a
+        //    committed (scrollback) id, so this can only ever emit a single-id
+        //    `d=I` delete for a pure-viewport image — NEVER a wide `d=A`/`d=a`
+        //    that would wipe the scrollback copies (VAL-IMG-009 safety pin).
+        for id in deletes {
+            if let Some(escape) = scrollback.delete_viewport_image(id) {
+                stdout.write_all(escape.as_bytes())?;
+                stdout.flush()?;
+            }
+        }
+
         draw_synchronized(&mut stdout, |w| {
             // Issue the terminal cell-size query once, fire-and-forget: gated by
             // the `HAND_TUI_QUERY_CELL_SIZE` seam so it is a no-op by default, and
@@ -897,14 +1029,23 @@ fn spawn_scheduler(
                 let _ = write_cell_size_query(w);
             });
             let mut viewport_origin_y = 0u16;
+            let mut osc8: Vec<hand_tui::rt::components::PendingEmission> = Vec::new();
             terminal.draw(|frame| {
                 viewport_origin_y = frame.area().y;
-                draw(frame, state);
+                osc8 = draw(frame, state);
             })?;
             // Emit any queued graphics escape onto its reserved rows. On a plain /
             // tmux frame the queue is empty (fallback enqueues nothing), so this
             // writes zero bytes — the zero-graphics-bytes guarantee.
             image_queue.flush_to(w, viewport_origin_y)?;
+            // Emit real OSC 8 hyperlinks for the Markdown section's links through
+            // the same raw channel (a capable terminal only; on tmux/fallback the
+            // renderer painted `text (url)` and this list is empty).
+            for e in &osc8 {
+                let absolute_row = viewport_origin_y.saturating_add(e.row);
+                write!(w, "\x1b[{};1H", absolute_row.saturating_add(1))?;
+                w.write_all(e.escape.as_bytes())?;
+            }
             Ok(())
         })
     })
@@ -916,12 +1057,21 @@ static CELL_SIZE_QUERY_ONCE: std::sync::Once = std::sync::Once::new();
 
 /// Paint one gallery frame: a bordered box holding a tab strip of section titles
 /// and the active section's body.
-fn draw(frame: &mut Frame, state: &Arc<Mutex<GalleryState>>) {
+///
+/// Returns the OSC 8 hyperlink emissions the Markdown section produced this frame
+/// (viewport-local rows), for the scheduler to flush through the raw channel after
+/// the draw. Empty for every other section and on a non-OSC-8 terminal.
+fn draw(
+    frame: &mut Frame,
+    state: &Arc<Mutex<GalleryState>>,
+) -> Vec<hand_tui::rt::components::PendingEmission> {
     let guard = lock(state);
     let area = frame.area();
+    let overlay_open = guard.overlay_open;
+    let mut osc8 = Vec::new();
     let buf = frame.buffer_mut();
     if area.is_empty() {
-        return;
+        return osc8;
     }
 
     // Outer bordered block titled with the gallery name and section counter.
@@ -935,7 +1085,7 @@ fn draw(frame: &mut Frame, state: &Arc<Mutex<GalleryState>>) {
     let inner = block.inner(area);
     block.render(area, buf);
     if inner.is_empty() {
-        return;
+        return osc8;
     }
 
     // Split the interior into a one-row tab strip and the section body.
@@ -953,6 +1103,61 @@ fn draw(frame: &mut Frame, state: &Arc<Mutex<GalleryState>>) {
     if toast_section_index(&guard.sections) == Some(active) {
         let toast_rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(body);
         guard.toast.render(toast_rows[1], buf);
+    }
+
+    // Markdown special-case: compute the real OSC 8 hyperlinks for the section's
+    // links. The renderer painted the visible link text into the cells; the URL
+    // rides out of band through the raw channel so a capable terminal surfaces a
+    // clickable hyperlink (VAL-WIDGET-006). On tmux / fallback the renderer keeps
+    // the `text (url)` form in the cells and `links()` returns empty.
+    if guard.section_title() == Some("Markdown") {
+        let view = MarkdownView::new(MARKDOWN_SOURCE).theme(default_markdown_theme());
+        for link in view.links(body.width) {
+            // Position at the link's logical row within the body, clamped to the
+            // body band so an over-long source never anchors past the viewport.
+            let row = body
+                .y
+                .saturating_add(link.row.min(body.height.saturating_sub(1)));
+            osc8.push(osc8_emission(&link.text, &link.url, row));
+        }
+    }
+
+    // The demonstration overlay: a small bordered box drawn on top of the base
+    // view. Toggling it (the `o` gesture) must not perturb any image already in
+    // scrollback — it only repaints viewport cells, never re-transmits a committed
+    // image nor emits any delete (VAL-CROSS-004).
+    if overlay_open {
+        render_demo_overlay(inner, buf);
+    }
+
+    osc8
+}
+
+/// Paint the demonstration overlay: a centered bordered box. Deliberately simple
+/// (not the full `OverlayStack`) — its only job in the gallery is to be toggled
+/// on and off so a probe can confirm an overlay open/close does not disturb a
+/// scrollback image.
+fn render_demo_overlay(area: Rect, buf: &mut Buffer) {
+    let w = area.width.clamp(4, 30);
+    let h = area.height.clamp(3, 5);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let rect = Rect::new(x, y, w, h);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" overlay ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(rect);
+    ratatui::widgets::Clear.render(rect, buf);
+    block.render(rect, buf);
+    if !inner.is_empty() {
+        buf.set_stringn(
+            inner.x,
+            inner.y,
+            "overlay open (o toggles)",
+            inner.width as usize,
+            Style::default().fg(Color::Yellow),
+        );
     }
 }
 
