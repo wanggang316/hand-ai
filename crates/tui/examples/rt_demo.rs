@@ -1338,8 +1338,17 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot, handles: &ViewHandles
     // border spans the resized pane exactly); the *height* clamp uses the tracked
     // full-terminal rows, so shrinking the pane below the bottom area's wanted
     // height trims the active area to fit rather than overflowing.
+    //
+    // `bottom_area_geometry` returns rects in *viewport-local* coordinates (y=0 =
+    // the top of the viewport). The inline viewport is not always anchored at the
+    // screen top: `insert_before` moves it down as scrollback fills, so after an
+    // oversized commit the viewport can sit at `area.y > 0`. Translate every
+    // geometry rect by `area.y` so the bottom UI paints at the viewport's actual
+    // rows, not at absolute row 0 (which would render it off-screen once the
+    // viewport has drifted down — the "box vanishes after a big block" bug).
     let geometry =
-        bottom_area_geometry(state.input_rows, state.loader, area.width, state.size.rows);
+        bottom_area_geometry(state.input_rows, state.loader, area.width, state.size.rows)
+            .offset_y(area.y);
 
     let title = Line::from(
         " rt_demo — Ctrl+D/Ctrl+C quit · Tab=focus · g=grow · c=collapse · l=loader · s=stream "

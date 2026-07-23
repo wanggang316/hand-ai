@@ -108,6 +108,50 @@ fn active_area_grows_and_shrinks_with_the_input() {
     );
 }
 
+// --- viewport-origin offset (offset_y) --------------------------------------
+
+#[test]
+fn offset_y_translates_every_rect_by_the_viewport_origin() {
+    // The bottom geometry is viewport-local (y=0 = viewport top). `offset_y(dy)`
+    // maps it into the viewport's absolute rows so the box paints where the
+    // (possibly slid-down) viewport actually is — the fix for the box vanishing
+    // after an oversized commit slides the inline viewport off row 0.
+    let local = bottom_area_geometry(3, true, WIDTH, TALL);
+    let dy = 19; // e.g. a 30-row pane with an 11-row viewport bottom-anchored
+    let shifted = local.offset_y(dy);
+
+    // Every rect moves down by exactly dy; widths, heights, and x are untouched.
+    assert_eq!(shifted.active.y, local.active.y + dy);
+    assert_eq!(shifted.active.x, local.active.x);
+    assert_eq!(shifted.active.width, local.active.width);
+    assert_eq!(shifted.active.height, local.active.height);
+    assert_eq!(shifted.input.y, local.input.y + dy);
+    assert_eq!(shifted.input.height, local.input.height);
+    assert_eq!(
+        shifted.loader.expect("loader present").y,
+        local.loader.expect("loader present").y + dy,
+    );
+    // The fixed viewport height itself is metadata, not a screen rect, so it is
+    // carried through unchanged.
+    assert_eq!(shifted.viewport_height, local.viewport_height);
+}
+
+#[test]
+fn offset_y_zero_is_identity() {
+    // A viewport still at the top (origin 0) needs no shift: offset_y(0) is a
+    // no-op, so the common top-anchored case pays nothing and behaves as before.
+    let g = bottom_area_geometry(4, true, WIDTH, TALL);
+    assert_eq!(g.offset_y(0), g);
+}
+
+#[test]
+fn offset_y_saturates_at_the_u16_ceiling() {
+    // A degenerate origin never panics: the shift saturates rather than wrapping.
+    let g = bottom_area_geometry(2, true, WIDTH, TALL);
+    let shifted = g.offset_y(u16::MAX);
+    assert_eq!(shifted.active.y, u16::MAX);
+}
+
 // --- loader load / unload ---------------------------------------------------
 
 #[test]

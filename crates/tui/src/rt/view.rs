@@ -82,6 +82,33 @@ pub struct BottomGeometry {
     pub input: Rect,
 }
 
+impl BottomGeometry {
+    /// Translate every rect down by `dy` rows, mapping this viewport-local
+    /// geometry into the viewport's absolute screen coordinates.
+    ///
+    /// [`bottom_area_geometry`] lays the bottom area out relative to the top of
+    /// the viewport (`y = 0`). An inline viewport, though, is not pinned to the
+    /// screen top: `insert_before` slides it downward as scrollback fills, so its
+    /// origin (`Frame::area().y`) can be greater than zero — notably after an
+    /// oversized commit re-anchors it near the bottom of the pane. Adding that
+    /// origin here places the box, loader, and input body on the viewport's real
+    /// rows; skipping it would paint the whole bottom UI at absolute row 0, off
+    /// the bottom of a drifted viewport, and the box would appear to vanish.
+    #[must_use]
+    pub fn offset_y(self, dy: u16) -> Self {
+        let shift = |rect: Rect| Rect {
+            y: rect.y.saturating_add(dy),
+            ..rect
+        };
+        Self {
+            viewport_height: self.viewport_height,
+            active: shift(self.active),
+            loader: self.loader.map(shift),
+            input: shift(self.input),
+        }
+    }
+}
+
 /// Clamp the desired input row count into `[MIN_INPUT_ROWS, MAX_INPUT_ROWS]`.
 ///
 /// The input auto-grows with its wrapped content: one row per visual line, from
