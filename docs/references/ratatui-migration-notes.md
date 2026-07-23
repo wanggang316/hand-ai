@@ -51,3 +51,33 @@ The closest production-proven "Claude Code-style inline chat TUI" on ratatui
 
 Immediate mode, one `draw()` per event-loop turn; coalesce high-frequency updates and
 cap around 60fps; use synchronized output to kill flicker. Do not draw per token.
+
+## M1 empirical resolutions (verified 2026-07 against the rt stack)
+
+Two of the "hard constraints" above were resolved with a concrete choice during the
+M1 core-runtime build; recording the outcome so later milestones do not re-litigate them.
+
+- **Inline viewport height (ratatui#984) → fixed-max-height viewport (strategy B).**
+  The inline viewport is reserved once at its tallest (`MAX_VIEWPORT_ROWS` = border 2 +
+  loader 1 + input 8 = 11 rows) and the bottom area is laid out *inside* it, bottom-anchored;
+  a grow never enlarges the viewport (history is never eaten) and a shrink repaints the
+  freed rows blank (no ghost). Rebuild-on-resize (strategy A) was rejected because rebuilding
+  does not clear the old viewport rows (scrollback leak) and entangles with the scheduler's
+  `insert_before` ordering. Pure geometry core: `crates/tui/src/rt/view.rs`
+  (`bottom_area_geometry` / `clamp_input_rows`).
+- **`insert_before` sufficiency → stock ratatui `insert_before` + `scrolling-regions` is
+  enough for M1;** no codex-style raw scroll-region/reverse-index insertion was needed.
+  It works because the caller (`HistorySink`) does the width-aware pre-wrap ratatui#1365
+  requires and passes the exact wrapped row count as the fixed `height`, so committed height
+  and painted rows stay in lock-step. Implementation: `crates/tui/src/rt/history.rs`
+  (stateless `HistorySink`, pure `wrap_lines`). The codex-style raw path remains a documented
+  fallback if M2 image-in-scrollback or M3 real load exposes a gap.
+- **Post-resize commit width correctness.** `HistorySink::commit_lines` calls
+  `terminal.autoresize()` *before* reading the wrap width, because an inline viewport resizes
+  lazily (only on draw/autoresize); without this a block committed between a resize event and
+  the next draw would pre-wrap to the stale width and land clipped. `autoresize()` is a no-op
+  at steady state. Any future history-commit path must preserve this autoresize-before-wrap ordering.
+- **Scheduler owns the terminal.** `insert_before` (history commit) and `terminal.draw`
+  (viewport repaint) must both run on the single terminal-owning task, with commits drained
+  *before* the draw. See the rt_demo scheduler closure for the reference wiring
+  (`crates/tui/examples/rt_demo.rs`, `spawn_scheduler`).
