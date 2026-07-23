@@ -352,21 +352,42 @@ impl SessionGuard {
         .map_err(SessionError::Io)
     }
 
-    /// Restore the terminal to cooked, interactive-shell state. Idempotent;
-    /// [`Drop`] calls this too.
+    /// Restore the terminal to cooked, interactive-shell state.
+    ///
+    /// Idempotent across every teardown path: an explicit call, [`Drop`], and
+    /// the panic hook all compete for the same one-shot `SESSION_ACTIVE` flag,
+    /// so the restore sequences (paste-disable, kitty-pop, show-cursor) are
+    /// emitted **exactly once** even when the panic hook runs and then Drop
+    /// unwinds through this guard. `restored` is a cheap local short-circuit;
+    /// the atomic swap is the shared arbiter that also excludes the panic hook.
     pub fn restore(&mut self) {
         if self.restored {
             return;
         }
         self.restored = true;
-        restore_terminal(self.kitty);
-        SESSION_ACTIVE.store(false, Ordering::SeqCst);
+        let kitty = self.kitty;
+        restore_once(&SESSION_ACTIVE, || restore_terminal(kitty));
     }
 }
 
 impl Drop for SessionGuard {
     fn drop(&mut self) {
         self.restore();
+    }
+}
+
+/// One-shot restore arbiter shared by the guard's `restore`/`Drop` and the
+/// panic hook.
+///
+/// Swaps `active` to `false` and runs `emit` only for the single caller that
+/// observes the flag as still `true`. This is the whole idempotence guarantee:
+/// whichever of {explicit restore, Drop, panic hook} runs first emits the
+/// restore sequences; every subsequent caller is a no-op. Kept as a free
+/// function taking the flag so it can be unit-tested against a local
+/// `AtomicBool` and a counting closure without touching the real terminal.
+fn restore_once(active: &AtomicBool, emit: impl FnOnce()) {
+    if active.swap(false, Ordering::SeqCst) {
+        emit();
     }
 }
 
@@ -384,9 +405,49 @@ fn restore_terminal(kitty: bool) {
 fn install_panic_hook(kitty: bool) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if SESSION_ACTIVE.swap(false, Ordering::SeqCst) {
-            restore_terminal(kitty);
-        }
+        restore_once(&SESSION_ACTIVE, || restore_terminal(kitty));
         previous(info);
     }));
+}
+
+#[cfg(test)]
+mod restore_once_tests {
+    use super::restore_once;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// The panic-hook-then-Drop sequence: the shared flag is armed once, and
+    /// the two competing restore paths emit the restore sequences exactly once
+    /// between them — never twice, never zero.
+    #[test]
+    fn restore_once_emits_exactly_once_across_panic_and_drop() {
+        let active = AtomicBool::new(true);
+        let count = AtomicUsize::new(0);
+
+        // Panic hook fires first.
+        restore_once(&active, || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        // Then Drop unwinds through the guard and calls restore again.
+        restore_once(&active, || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "restore sequences must be emitted exactly once across panic + Drop"
+        );
+        assert!(!active.load(Ordering::SeqCst), "flag must be disarmed");
+    }
+
+    /// A restore when no session is active (flag already `false`) emits nothing.
+    #[test]
+    fn restore_once_noop_when_flag_already_disarmed() {
+        let active = AtomicBool::new(false);
+        let count = AtomicUsize::new(0);
+        restore_once(&active, || {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
 }
