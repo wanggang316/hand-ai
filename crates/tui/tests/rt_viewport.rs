@@ -61,7 +61,10 @@ fn viewport_height_is_fixed_across_the_full_grow_range() {
         heights.iter().all(|&h| h == MAX_VIEWPORT_ROWS),
         "viewport height must stay fixed at {MAX_VIEWPORT_ROWS}, got {heights:?}",
     );
-    assert_eq!(MAX_VIEWPORT_ROWS, BORDER_ROWS + LOADER_ROWS + MAX_INPUT_ROWS);
+    assert_eq!(
+        MAX_VIEWPORT_ROWS,
+        BORDER_ROWS + LOADER_ROWS + MAX_INPUT_ROWS
+    );
 }
 
 #[test]
@@ -174,7 +177,7 @@ fn tiny_pane_clamps_active_area_within_bounds_no_stair_step() {
             );
             // The input body stays within the active area's interior.
             assert!(
-                g.input.y >= g.active.y + 1
+                g.input.y > g.active.y
                     && g.input.y + g.input.height <= g.active.y + g.active.height,
                 "input body must sit inside the border",
             );
