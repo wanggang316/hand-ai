@@ -634,6 +634,15 @@ fn commit(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester, lines: Ve
 /// progress goes indeterminate while the turn runs and clears (or errors) at the
 /// end (VAL-CHAT-018).
 async fn run_turn(runner: &mut TurnRunner, text: &str) {
+    // Inline `!cmd` bash runs locally instead of going to the model: it is
+    // executed through `session.run_bash`, its output committed as a bash box,
+    // and the footer refreshed (a `!cd`-style change reflects on the next turn).
+    // It never touches the OSC-133 turn brackets or the assistant-message path.
+    if let Some(parsed) = bash::parse_inline_bash(text) {
+        run_bash_inline(runner, parsed).await;
+        return;
+    }
+
     // Clear any stale cancel flag from a prior turn so a cancellation only ever
     // suppresses *this* turn's error banner (VAL-CHAT-013 / VAL-CHAT-014).
     lock_state(&runner.state).cancel_requested = false;
@@ -713,6 +722,87 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     // `!git checkout -b tmp` shows on the next turn), and the current
     // thinking-level / context %. The rebuild reads the session, so it lives here
     // in the turn runner (which owns it) rather than in the event applier.
+    refresh_footer(runner);
+}
+
+/// Execute an inline `!cmd` (or `!!cmd`) bash submission.
+///
+/// Echoes the `$ cmd` header live in the active-area preview and shows the
+/// running loader while the command runs, then commits the finalized bash box
+/// (header + output + exit-code footer) to scrollback once the process exits
+/// (VAL-CHAT-009). A `!!cmd` renders the frame dim (excluded from the LLM
+/// context). Context truncation surfaces the yellow `Output truncated. Full
+/// output: <path>` footnote, the path existing on disk (VAL-CHAT-010). A bare
+/// `!` / `!!` commits the yellow `[bash] empty command` notice and runs nothing.
+async fn run_bash_inline(runner: &mut TurnRunner, parsed: bash::ParsedBash) {
+    if parsed.command.is_empty() {
+        commit(
+            &runner.state,
+            &runner.requester,
+            vec![bash::empty_command_notice()],
+        );
+        return;
+    }
+
+    // Live header echo in the preview + running loader while the command runs.
+    let header = bash::ParsedBash {
+        command: parsed.command.clone(),
+        exclude_from_context: parsed.exclude_from_context,
+    };
+    {
+        let mut guard = lock_state(&runner.state);
+        let running = bash::bash_block_lines(
+            &header,
+            "",
+            bash::BashOutcome::Exited(None),
+            None,
+            true,
+            guard.size.cols,
+        );
+        guard.set_streaming_preview(Some(running));
+    }
+    set_streaming(&runner.state, &runner.editor, &runner.requester, true);
+
+    let outcome = runner.session.run_bash(&parsed.command, 0).await;
+
+    // Clear the live preview + loader before committing the finalized box.
+    lock_state(&runner.state).set_streaming_preview(None);
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match outcome {
+        Ok(run) => {
+            let bash_outcome = if run.aborted {
+                bash::BashOutcome::Cancelled
+            } else {
+                bash::BashOutcome::Exited(run.result.exit_code)
+            };
+            let full_output_path = run
+                .result
+                .full_output_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            let width = lock_state(&runner.state).size.cols;
+            let lines = bash::bash_block_lines(
+                &parsed,
+                &run.result.output,
+                bash_outcome,
+                full_output_path.as_deref(),
+                false,
+                width,
+            );
+            commit(&runner.state, &runner.requester, lines);
+        }
+        Err(e) => {
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::error_lines(&format!("bash failed: {e}")),
+            );
+        }
+    }
+
+    // A `!cmd` may change the working tree (branch checkout, file writes); refresh
+    // the footer so the next-turn view reflects it.
     refresh_footer(runner);
 }
 
@@ -846,6 +936,36 @@ fn apply_event(
                 finalize_assistant(state, requester, assistant);
                 return;
             }
+            // A tool call begins: remember its name + args so the matching end
+            // can render a complete state-tinted box. Nothing commits yet — the
+            // box lands finalized on the end (the running loader rides the
+            // streaming flag meanwhile).
+            hand_agent::types::AgentEvent::ToolExecutionStart {
+                tool_call_id,
+                tool_name,
+                args,
+            } => {
+                lock_state(state).remember_tool(
+                    tool_call_id.clone(),
+                    tool_name.clone(),
+                    args.clone(),
+                );
+                return;
+            }
+            // A tool call finished: commit its state-tinted box (name / args /
+            // result), tinting success or failure by the error flag. The result
+            // text is resolved through the image-parity path so a graphics
+            // terminal emits no image bytes and a plain one shows a `[mime WxH]`
+            // indicator (VAL-IMG-019).
+            hand_agent::types::AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                tool_name,
+                result,
+                is_error,
+            } => {
+                finalize_tool(state, requester, tool_call_id, tool_name, result, *is_error);
+                return;
+            }
             _ => {}
         }
     }
@@ -909,6 +1029,66 @@ fn finalize_assistant(
         lines
     };
     commit(state, requester, lines);
+}
+
+/// Commit a finished tool call's state-tinted box to scrollback.
+///
+/// Pairs the finishing tool with the name + args remembered at start (falling
+/// back to the end event's own name when the start was missed — a defensive
+/// path). The result text is resolved through the image-parity pipeline
+/// ([`resolve_tool_result_text`]): a graphics-capable terminal excludes image
+/// blocks entirely (zero graphics bytes reach the chat, per Decision Log ⑤),
+/// while a plain terminal replaces each with a `[mime WxH]` indicator box
+/// (VAL-IMG-019). The box tints success or failure by `is_error`
+/// (VAL-CHAT-011), and `edit` / `write` tools render their diff with `+`/`-`
+/// coloring inside the box (VAL-CHAT-039).
+fn finalize_tool(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    tool_call_id: &str,
+    tool_name: &str,
+    result: &hand_agent::types::ToolResult,
+    is_error: bool,
+) {
+    let result_text = resolve_tool_result_text(result);
+    let lines = {
+        let mut guard = lock_state(state);
+        let pending = guard.take_tool(tool_call_id);
+        let (name, args) = match pending {
+            Some(p) => (p.name, p.args),
+            None => (tool_name.to_string(), serde_json::Value::Null),
+        };
+        let state_tint = tools::ToolState::from_result(Some(is_error));
+        tools::tool_box_lines(&name, &args, &result_text, state_tint, guard.size.cols)
+    };
+    commit(state, requester, lines);
+}
+
+/// Resolve a tool result's content to display text with image parity, using the
+/// terminal's detected image capabilities.
+///
+/// A thin wrapper over [`tool_result_display_text`] that reads the process-global
+/// detected capabilities; the pure inner function takes them explicitly so the
+/// parity behaviour is unit-tested without touching the global cache.
+fn resolve_tool_result_text(result: &hand_agent::types::ToolResult) -> String {
+    let caps = hand_tui::get_capabilities();
+    tool_result_display_text(result, &caps)
+}
+
+/// Resolve a tool result's content to display text with image parity, against an
+/// explicit capability set.
+///
+/// Routes the result blocks through
+/// [`get_text_output`](crate::tools::render_utils::get_text_output) with
+/// `show_images = true`: a graphics terminal (kitty / iTerm2) drops image blocks
+/// from the text (the chat shows no image — Decision Log ⑤ — so the chat emits
+/// zero graphics bytes), while a plain terminal substitutes a `[mime WxH]`
+/// indicator box so the presence of an image is still visible (VAL-IMG-019).
+fn tool_result_display_text(
+    result: &hand_agent::types::ToolResult,
+    caps: &hand_tui::TerminalImageCapabilities,
+) -> String {
+    crate::tools::render_utils::get_text_output(&result.content, true, caps)
 }
 
 /// The concatenated text content of an in-flight assistant partial, joined with
@@ -1410,6 +1590,87 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "exactly two were queued, none dropped"
+        );
+    }
+
+    // --- tool-result image parity (VAL-IMG-019) --------------------------
+
+    fn plain_caps() -> hand_tui::TerminalImageCapabilities {
+        hand_tui::TerminalImageCapabilities {
+            kitty: false,
+            iterm2: false,
+            cell_dimensions: hand_tui::CellDimensions {
+                width: 8,
+                height: 16,
+            },
+        }
+    }
+
+    fn kitty_caps() -> hand_tui::TerminalImageCapabilities {
+        hand_tui::TerminalImageCapabilities {
+            kitty: true,
+            iterm2: false,
+            cell_dimensions: hand_tui::CellDimensions {
+                width: 8,
+                height: 16,
+            },
+        }
+    }
+
+    fn image_result() -> hand_agent::types::ToolResult {
+        use model::types::{ImageContent, TextContent, ToolResultContent};
+        hand_agent::types::ToolResult {
+            content: vec![
+                ToolResultContent::Text(TextContent::new("screenshot")),
+                // A tiny 1x1 PNG so dimension probing has real bytes to read.
+                ToolResultContent::Image(ImageContent::new(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    "image/png",
+                )),
+            ],
+            details: None,
+            terminate: None,
+        }
+    }
+
+    /// On a graphics-capable (kitty) terminal, an image block is excluded from
+    /// the tool-result text entirely — the chat shows the surrounding text and
+    /// no image bytes leak in (Decision Log ⑤ / VAL-IMG-019).
+    #[test]
+    fn tool_result_text_on_kitty_omits_the_image_with_no_indicator() {
+        let text = tool_result_display_text(&image_result(), &kitty_caps());
+        assert!(text.contains("screenshot"), "surrounding text kept: {text:?}");
+        assert!(
+            !text.contains("image/png"),
+            "graphics terminal must not emit an image indicator (image shown out-of-band, and per Decision Log ⑤ not in chat): {text:?}"
+        );
+    }
+
+    /// On a plain terminal, the image block is replaced with a `[mime WxH]`
+    /// indicator box so its presence is still visible (VAL-IMG-019 plain
+    /// persona).
+    #[test]
+    fn tool_result_text_on_plain_shows_a_mime_indicator() {
+        let text = tool_result_display_text(&image_result(), &plain_caps());
+        assert!(text.contains("screenshot"), "surrounding text kept: {text:?}");
+        assert!(
+            text.contains("image/png"),
+            "plain terminal must show a [mime WxH] indicator: {text:?}"
+        );
+    }
+
+    // --- inline bash routing (VAL-CHAT-009) ------------------------------
+
+    /// A `!cmd` submission is recognised as inline bash (so the turn runner runs
+    /// it locally rather than forwarding it to the model), while a plain prompt
+    /// is not.
+    #[test]
+    fn bang_prefixed_submit_is_recognised_as_inline_bash() {
+        assert!(bash::parse_inline_bash("!echo hi").is_some());
+        assert!(bash::parse_inline_bash("!!git status").is_some());
+        assert!(
+            bash::parse_inline_bash("explain this code").is_none(),
+            "a plain prompt is not inline bash"
         );
     }
 

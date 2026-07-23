@@ -18,6 +18,7 @@
 //!   loop, `&mut`) and a renderer (draw closure, `&`). It is a component, not a
 //!   data field, so it is not folded into `DriverState`.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use hand_tui::rt::components::Editor;
@@ -27,6 +28,17 @@ use ratatui::text::Line;
 use model::AssistantMessage;
 
 use super::footer::{FooterViewModel, TokenUsageSummary};
+
+/// The name + args of an in-flight tool call, remembered from `ToolStart` so the
+/// matching `ToolEnd` can render a complete state-tinted box (name, args, and
+/// result together). Keyed by `tool_call_id` in [`DriverState::pending_tools`].
+#[derive(Debug, Clone)]
+pub struct PendingTool {
+    /// The tool's name (e.g. `read`, `edit`, `bash`).
+    pub name: String,
+    /// The tool call's arguments as raw JSON.
+    pub args: serde_json::Value,
+}
 
 /// The editor shared between the input loop (which dispatches keys to it) and the
 /// draw closure (which renders it). Behind a blocking `Mutex`: every critical
@@ -103,6 +115,11 @@ pub struct DriverState {
     /// Reset at the start of every turn so a prior cancel never masks a genuine
     /// error on the next one.
     pub cancel_requested: bool,
+    /// In-flight tool calls, keyed by `tool_call_id`, remembered from
+    /// `ToolExecutionStart` so the matching `ToolExecutionEnd` can render a
+    /// complete state-tinted box (the name + args from the start, the result +
+    /// error flag from the end). Cleared per entry when the tool ends.
+    pub pending_tools: HashMap<String, PendingTool>,
 }
 
 impl DriverState {
@@ -193,6 +210,20 @@ impl DriverState {
     /// line already landed), so no red `send failed` banner is committed.
     pub fn take_cancel_requested(&mut self) -> bool {
         std::mem::take(&mut self.cancel_requested)
+    }
+
+    /// Remember an in-flight tool call's name + args so the matching `ToolEnd`
+    /// can render a complete box. Called on `ToolExecutionStart`.
+    pub fn remember_tool(&mut self, tool_call_id: String, name: String, args: serde_json::Value) {
+        self.pending_tools
+            .insert(tool_call_id, PendingTool { name, args });
+    }
+
+    /// Take (and remove) the remembered name + args for a finishing tool call,
+    /// if it was tracked. Called on `ToolExecutionEnd` to build the final box.
+    #[must_use]
+    pub fn take_tool(&mut self, tool_call_id: &str) -> Option<PendingTool> {
+        self.pending_tools.remove(tool_call_id)
     }
 }
 
