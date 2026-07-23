@@ -34,7 +34,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use hand_tui::rt::components::{
-    ProgressBar, Spacer, StatusBar, TextBlock, TruncatedText, WidgetBox,
+    MarkdownView, ProgressBar, Spacer, StatusBar, TextBlock, TruncatedText, WidgetBox,
 };
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
@@ -211,6 +211,45 @@ fn register_sections() -> Vec<Section> {
                 .label("clamped")
                 .style(Style::default().fg(Color::Magenta))
                 .render(rows[2], buf);
+        }),
+        Section::new("Markdown", |area, buf| {
+            // One source touching every block/inline signature: headings, an
+            // ordered list starting past 1, a nested bullet list, a blockquote,
+            // a rule, a fenced code block, a CJK table, nested inline styles, a
+            // link, an image (degraded to alt), strikethrough and task markers.
+            // Resize between 100 and 40 columns to watch it reflow with the
+            // code-block frame staying intact.
+            let source = "\
+# Markdown renderer
+
+Body text with **bold, _nested italic_, back** to bold, `inline code`, \
+a [link](https://example.com) and an ![image alt](diagram.png).
+
+3. third item
+4. fourth item
+
+- outer bullet
+  - nested bullet
+- [ ] pending task
+- [x] done task
+
+> a blockquote line, dimmed and italic
+
+---
+
+```rust
+fn main() {
+    println!(\"hello\");
+}
+```
+
+| name | 值 |
+|:-----|---:|
+| 你好世界 | 1 |
+| ascii | 22 |
+
+~~struck through~~ text.";
+            MarkdownView::new(source).render(area, buf);
         }),
     ]
 }
