@@ -12,7 +12,10 @@
 //! - [`history`] — finalized output inserted into native scrollback
 //! - [`view`] — view composition for the inline viewport
 //! - [`overlay`] — layered overlays/modals inside the viewport
+//! - [`components`] — primitive display widgets (text, box, spacer, status bar,
+//!   progress bar) painting into a ratatui `Buffer`
 
+pub mod components;
 pub mod events;
 pub mod history;
 pub mod overlay;
@@ -20,6 +23,7 @@ pub mod scheduler;
 pub mod session;
 pub mod view;
 
+pub use components::{ProgressBar, Spacer, StatusBar, TextBlock, TruncatedText, WidgetBox};
 pub use events::{
     RtInputEvent, RtKey, key_event_to_key_id, run_event_loop, should_dispatch, spawn_event_pump,
     translate_event,
