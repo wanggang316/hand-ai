@@ -451,33 +451,69 @@ async fn run_turn(driver: &mut AgentDriver, text: &str) {
     // Streaming: loader on + border tint while the turn runs.
     set_streaming(driver, true);
 
-    let timeout = driver.watchdog.turn_timeout();
+    // Grab the cancel handle before the `&mut` send borrow: `cancel_handle`
+    // borrows `&self`, `send_message` borrows `&mut self`, so they cannot overlap.
+    let cancel = driver.session.cancel_handle();
     let send = driver.session.send_message(text);
-    match tokio::time::timeout(timeout, send).await {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => commit(
+    match run_under_watchdog(driver.watchdog, send, &cancel).await {
+        TurnOutcome::Completed => {}
+        TurnOutcome::Failed(e) => commit(
             &driver.state,
             &driver.requester,
             chat::error_lines(&format!("send failed: {e}")),
         ),
-        Err(_) => {
-            // Watchdog fired: cancel the in-flight turn so the agent loop drops
-            // its future, then surface the banner. The session stays usable.
-            if let Ok(token) = driver.session.cancel_handle().lock() {
-                token.cancel();
-            }
-            commit(
-                &driver.state,
-                &driver.requester,
-                chat::error_lines(&driver.watchdog.timeout_banner()),
-            );
-        }
+        TurnOutcome::TimedOut => commit(
+            &driver.state,
+            &driver.requester,
+            chat::error_lines(&driver.watchdog.timeout_banner()),
+        ),
     }
 
     set_streaming(driver, false);
     // Refresh the footer placeholder (label / model may have changed via a turn).
     // The full view-model refresh is a follow-up; here we keep the line current.
     let _ = &driver.cwd; // cwd retained for the follow-up footer view-model.
+}
+
+/// How a turn ended under the watchdog.
+#[derive(Debug)]
+enum TurnOutcome {
+    /// The turn completed within the ceiling.
+    Completed,
+    /// The turn returned an error within the ceiling.
+    Failed(CodingAgentError),
+    /// The turn exceeded the ceiling; the watchdog cancelled it.
+    TimedOut,
+}
+
+/// Run a turn future under the watchdog ceiling, cancelling the session token on
+/// elapse.
+///
+/// This is the watchdog-integration seam VAL-CHAT-022 probes: on timeout it
+/// cancels the shared [`CancellationToken`](hand_agent::CancellationToken) so the
+/// agent loop drops its in-flight future, then reports [`TurnOutcome::TimedOut`]
+/// so the caller surfaces the banner — while the session (and its refreshed
+/// cancel token) stays usable for the next turn. Kept as a free async fn over the
+/// future + cancel handle so the timeout / cancel wiring is unit-tested with a
+/// `pending()` future and a real token, without the model layer.
+async fn run_under_watchdog<F>(
+    watchdog: Watchdog,
+    turn: F,
+    cancel: &Arc<std::sync::Mutex<hand_agent::CancellationToken>>,
+) -> TurnOutcome
+where
+    F: std::future::Future<Output = Result<Vec<model::Message>, CodingAgentError>>,
+{
+    match tokio::time::timeout(watchdog.turn_timeout(), turn).await {
+        Ok(Ok(_)) => TurnOutcome::Completed,
+        Ok(Err(e)) => TurnOutcome::Failed(e),
+        Err(_) => {
+            if let Ok(token) = cancel.lock() {
+                token.cancel();
+            }
+            TurnOutcome::TimedOut
+        }
+    }
 }
 
 /// Apply a single agent session event: dispatch it to ChatUpdates and commit the
@@ -640,6 +676,50 @@ mod tests {
         assert_eq!(outcome, KeyOutcome::Continue);
         assert_eq!(rx.try_recv().ok(), Some("do a thing".to_string()));
         assert!(lock_state(&state).streaming, "submit marks streaming");
+    }
+
+    /// The watchdog cancels a stalled turn on elapse and reports `TimedOut`,
+    /// leaving the (freshly-cancellable) session token cancelled — the
+    /// VAL-CHAT-022 timeout wiring. Driven with a `pending()` future so it never
+    /// completes on its own, a near-zero ceiling so the test is instant, and a
+    /// real `CancellationToken` so the cancel is observable.
+    #[tokio::test]
+    async fn watchdog_cancels_and_times_out_a_stalled_turn() {
+        use hand_agent::CancellationToken;
+
+        let watchdog = Watchdog::new(std::time::Duration::from_millis(1));
+        let cancel = Arc::new(std::sync::Mutex::new(CancellationToken::new()));
+
+        let stalled = std::future::pending::<Result<Vec<model::Message>, CodingAgentError>>();
+        let outcome = run_under_watchdog(watchdog, stalled, &cancel).await;
+
+        assert!(
+            matches!(outcome, TurnOutcome::TimedOut),
+            "a stalled turn must time out, got {outcome:?}"
+        );
+        assert!(
+            cancel.lock().unwrap().is_cancelled(),
+            "the watchdog must cancel the session token on timeout"
+        );
+    }
+
+    /// A turn that completes within the ceiling reports `Completed` and never
+    /// cancels the token.
+    #[tokio::test]
+    async fn watchdog_lets_a_fast_turn_complete_without_cancelling() {
+        use hand_agent::CancellationToken;
+
+        let watchdog = Watchdog::new(std::time::Duration::from_secs(300));
+        let cancel = Arc::new(std::sync::Mutex::new(CancellationToken::new()));
+
+        let done = std::future::ready(Ok(Vec::<model::Message>::new()));
+        let outcome = run_under_watchdog(watchdog, done, &cancel).await;
+
+        assert!(matches!(outcome, TurnOutcome::Completed), "got {outcome:?}");
+        assert!(
+            !cancel.lock().unwrap().is_cancelled(),
+            "a completed turn must not cancel the token"
+        );
     }
 
     /// A `/quit` submit quits and never forwards to the agent.
