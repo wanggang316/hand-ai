@@ -34,7 +34,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use hand_tui::rt::components::{
-    MarkdownView, ProgressBar, Spacer, StatusBar, TextBlock, TruncatedText, WidgetBox,
+    MarkdownView, ProgressBar, SelectItem, SelectList, SelectListLayout, SettingEntry,
+    SettingValue, SettingsList, Spacer, StatusBar, TextBlock, TruncatedText, WidgetBox,
     default_markdown_theme,
 };
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
@@ -259,6 +260,103 @@ fn main() {
             MarkdownView::new(source)
                 .theme(default_markdown_theme())
                 .render(area, buf);
+        }),
+        Section::new("Select", |area, buf| {
+            // A two-column select list: labels in a padded primary column, dimmed
+            // descriptions in the second, the selected row a reversed highlight
+            // bar with a `▸` indicator. A window of 4 over 6 items shows the
+            // `(n/total)` counter; the description on "sonnet" is deliberately
+            // long so it truncates with an ellipsis on a narrow terminal.
+            let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+            TruncatedText::new(
+                "SelectList — ▸ selected row, dimmed description column, wrap navigation",
+            )
+            .render(rows[0], buf);
+            let mut list = SelectList::new(vec![
+                SelectItem::new("opus", "Claude Opus").with_description("most capable, slowest"),
+                SelectItem::new("sonnet", "Claude Sonnet")
+                    .with_description("balanced quality and speed for most day-to-day coding work"),
+                SelectItem::new("haiku", "Claude Haiku").with_description("fastest, lightest"),
+                SelectItem::new("gpt", "GPT-4o").with_description("multimodal"),
+                SelectItem::new("gemini", "Gemini").with_description("long context"),
+                SelectItem::new("llama", "Llama").with_description("open weights"),
+            ])
+            .visible_count(4)
+            .layout(SelectListLayout {
+                min_primary_column_width: Some(18),
+                max_primary_column_width: Some(18),
+            });
+            // Focus the second item so the highlight bar is not on the first row.
+            list.handle_key(&RtKey {
+                key_id: Some("down".to_string()),
+                raw: crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Down,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            });
+            list.render(rows[1], buf);
+        }),
+        Section::new("Settings", |area, buf| {
+            // A settings list exercising every value type plus the full chrome:
+            // an enum, a bool, a number, and a string, with the focused entry's
+            // description below the list and the footer hint. The number entry is
+            // shown mid-edit (inline caret) to demonstrate edit-in-place.
+            let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+            TruncatedText::new(
+                "SettingsList — Enter/Space edits in place; selection clamps (no wrap)",
+            )
+            .render(rows[0], buf);
+            let mut list = SettingsList::new(vec![
+                SettingEntry::new(
+                    "theme",
+                    SettingValue::Enum {
+                        choices: vec!["dark".into(), "light".into(), "auto".into()],
+                        selected: 0,
+                    },
+                    "Color theme — Enter cycles through the choices",
+                ),
+                SettingEntry::new(
+                    "auto_save",
+                    SettingValue::Bool(true),
+                    "Enter/Space flips this boolean instantly",
+                ),
+                SettingEntry::new(
+                    "max_tokens",
+                    SettingValue::Number(4096.0),
+                    "A number, edited inline; a non-numeric edit is rejected",
+                ),
+                SettingEntry::new(
+                    "model",
+                    SettingValue::String("claude-sonnet".into()),
+                    "A free-text string, edited inline with a visible caret",
+                ),
+            ])
+            .show_description(true)
+            .show_hint(true);
+            // Focus the number entry and open its inline editor so the caret and
+            // edit-in-place value render.
+            list.handle_key(&RtKey {
+                key_id: Some("down".to_string()),
+                raw: crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Down,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            });
+            list.handle_key(&RtKey {
+                key_id: Some("down".to_string()),
+                raw: crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Down,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            });
+            list.handle_key(&RtKey {
+                key_id: Some("enter".to_string()),
+                raw: crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Enter,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            });
+            list.render(rows[1], buf);
         }),
     ]
 }

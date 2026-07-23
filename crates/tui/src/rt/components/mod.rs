@@ -31,6 +31,8 @@
 
 mod markdown;
 mod progress_bar;
+mod select_list;
+mod settings_list;
 mod spacer;
 mod status_bar;
 pub mod syntax_highlight;
@@ -41,6 +43,10 @@ pub use markdown::{
     CodeHighlighter, MarkdownTheme, MarkdownView, plain_code_highlighter, render_markdown,
 };
 pub use progress_bar::ProgressBar;
+pub use select_list::{
+    DEFAULT_PRIMARY_COLUMN_WIDTH, SelectItem, SelectList, SelectListLayout, SelectOutcome,
+};
+pub use settings_list::{SettingEntry, SettingValue, SettingsList};
 pub use spacer::Spacer;
 pub use status_bar::StatusBar;
 pub use syntax_highlight::{default_highlighter, default_markdown_theme, highlight};
