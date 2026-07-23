@@ -26,6 +26,20 @@
 //!   - `b`: commit an **oversized block** — a single block ~2× the terminal
 //!     height, to confirm a tall block lands complete and ordered in scrollback
 //!     (VAL-CORE-033). Also seeded with a `⟦commit N⟧` marker.
+//!   - `g`: **grow** the input body by one line (auto-grow simulation), from 1
+//!     row up to the 8-row ceiling. The inline viewport is *fixed* at its max
+//!     height (ratatui#984 strategy B), so growing only enlarges the active area
+//!     inside the viewport — it never enlarges the viewport and never eats the
+//!     history above it (VAL-CORE-007).
+//!   - `c`: **collapse** the input body back to a single row and hide the loader.
+//!     Because every draw repaints the whole fixed viewport, the freed rows come
+//!     back blank — no border/spinner ghost on screen or in scrollback
+//!     (VAL-CORE-008).
+//!   - `l`: toggle the **loader** row (a spinner above the input). Loading and
+//!     unloading it changes the bottom-area height without moving the viewport.
+//!   - `G`: **grow + collapse during streaming** — start a stream, grow to 8
+//!     rows with the loader on, then collapse mid-stream, so the height changes
+//!     while content is being committed to scrollback (VAL-CORE-035).
 //!   - Ctrl+D or Ctrl+C: quit cleanly (terminal fully restored)
 //!   - Ctrl+Z: ignored (no suspend; the UI does not move)
 //!   - F12: DELIBERATE PANIC — crashes on purpose so you can confirm the panic
@@ -53,6 +67,7 @@ use hand_tui::rt::events::{RtInputEvent, spawn_event_pump};
 use hand_tui::rt::history::HistorySink;
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{SessionError, SessionGuard, SessionTerminal};
+use hand_tui::rt::view::{MAX_INPUT_ROWS, MIN_INPUT_ROWS, bottom_area_geometry};
 use ratatui::layout::Alignment;
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
@@ -96,6 +111,15 @@ const OVERSIZED_HEIGHT_MULTIPLIER: usize = 2;
 struct DemoState {
     /// The current input-line contents.
     input: String,
+    /// How many rows the input body currently occupies (auto-grow simulation).
+    /// Starts at one, grows one row per `g` up to the 8-row ceiling, and
+    /// collapses back to one on `c`. Drives the fixed-viewport bottom-area
+    /// geometry: the viewport never changes, only this interior size does.
+    input_rows: u16,
+    /// Whether the loader/spinner row is showing above the input body.
+    loader: bool,
+    /// Spinner animation phase, advanced each frame while the loader shows.
+    spinner_phase: u64,
     /// A monotonically increasing counter the flood task advances, shown so a
     /// probe can confirm content keeps moving while draws stay rate-limited.
     flood_ticks: u64,
@@ -168,6 +192,10 @@ fn print_help() {
          \x20 f                     : toggle the token flood (probe rate-limiting)\n\
          \x20 s                     : stream a block, then commit it once to scrollback\n\
          \x20 b                     : commit an oversized (~2x height) block to scrollback\n\
+         \x20 g                     : grow the input body by one row (up to 8)\n\
+         \x20 c                     : collapse the input to one row and hide the loader\n\
+         \x20 l                     : toggle the loader/spinner row\n\
+         \x20 G (shift+g)           : grow + collapse during streaming\n\
          \x20 Ctrl+D or Ctrl+C      : quit cleanly\n\
          \x20 Ctrl+Z                : ignored (no suspend)\n\
          \x20 paste                 : multi-line paste inserted as one event\n\
@@ -184,7 +212,10 @@ async fn run() -> Result<(), SessionError> {
     let mut guard = SessionGuard::enter()?;
     let terminal = guard.terminal()?;
 
-    let state = Arc::new(Mutex::new(DemoState::default()));
+    let state = Arc::new(Mutex::new(DemoState {
+        input_rows: MIN_INPUT_ROWS,
+        ..DemoState::default()
+    }));
 
     // Spawn the frame scheduler: it owns the terminal and is the *single* place
     // the UI is painted. Every draw is wrapped in synchronized-output markers,
@@ -234,6 +265,31 @@ async fn run() -> Result<(), SessionError> {
                 // Queue an oversized (~2× terminal height) block for one commit.
                 Some("b") => {
                     queue_oversized_block(&requester, &state);
+                }
+                // Grow the input body by one row (auto-grow simulation), capped
+                // at the 8-row ceiling.
+                Some("g") => {
+                    let mut guard = lock(&state);
+                    guard.input_rows = (guard.input_rows + 1).min(MAX_INPUT_ROWS);
+                }
+                // Collapse the input body back to one row and hide the loader.
+                Some("c") => {
+                    let mut guard = lock(&state);
+                    guard.input_rows = MIN_INPUT_ROWS;
+                    guard.loader = false;
+                }
+                // Toggle the loader/spinner row.
+                Some("l") => {
+                    let mut guard = lock(&state);
+                    guard.loader = !guard.loader;
+                }
+                // Grow + collapse *during* streaming: kick off a stream (if none
+                // is running) and a task that grows to 8 rows with the loader,
+                // then collapses mid-stream, so the bottom-area height changes
+                // while content is being committed to scrollback (VAL-CORE-035).
+                Some("shift+g") => {
+                    start_stream(&requester, &state, &mut stream_handle);
+                    spawn_grow_collapse(&requester, &state);
                 }
                 Some("backspace") => {
                     lock(&state).input.pop();
@@ -313,8 +369,15 @@ fn spawn_scheduler(
         let (snapshot, commits) = {
             let mut guard = state.lock().expect("demo state mutex poisoned");
             let commits = std::mem::take(&mut guard.pending_commits);
+            // Advance the spinner while the loader shows, so a probe sees it move.
+            if guard.loader {
+                guard.spinner_phase = guard.spinner_phase.wrapping_add(1);
+            }
             let snapshot = StateSnapshot {
                 input: guard.input.clone(),
+                input_rows: guard.input_rows,
+                loader: guard.loader,
+                spinner_phase: guard.spinner_phase,
                 flood_ticks: guard.flood_ticks,
                 flooding: guard.flooding,
                 stream_block: guard.stream_block.clone(),
@@ -345,6 +408,12 @@ fn spawn_scheduler(
 /// the lock so the paint itself holds no lock.
 struct StateSnapshot {
     input: String,
+    /// The auto-grow input body height in rows (1..8).
+    input_rows: u16,
+    /// Whether the loader/spinner row shows this frame.
+    loader: bool,
+    /// Spinner animation phase for the loader glyph.
+    spinner_phase: u64,
     flood_ticks: u64,
     flooding: bool,
     /// The streaming block's lines so far, shown live in the viewport while the
@@ -490,6 +559,49 @@ fn start_stream(
     }));
 }
 
+/// Interval between grow steps in the grow+collapse-during-streaming task, tuned
+/// so the whole grow -> collapse sweep overlaps the ~0.5s stream.
+const GROW_STEP_INTERVAL: Duration = Duration::from_millis(60);
+
+/// Drive a grow-to-8-then-collapse sweep of the bottom area *while a stream is in
+/// flight*, so the fixed viewport's active height changes as content is being
+/// committed to scrollback. This is the VAL-CORE-035 stressor: the stream must
+/// keep committing in order with no loss/dup/stall while the height moves.
+///
+/// It turns the loader on, grows the input one row per tick up to the ceiling,
+/// holds briefly, then collapses to a single row and drops the loader — the same
+/// shrink path a real loader-unload takes. It never touches the stream's own
+/// state, so the two proceed independently over the shared `request_frame`.
+fn spawn_grow_collapse(requester: &FrameRequester, state: &Arc<Mutex<DemoState>>) {
+    let requester = requester.clone();
+    let state = state.clone();
+    tokio::spawn(async move {
+        {
+            let mut guard = lock(&state);
+            guard.loader = true;
+        }
+        requester.request_frame();
+
+        let mut interval = tokio::time::interval(GROW_STEP_INTERVAL);
+        // Grow one row per tick up to the ceiling.
+        for rows in (MIN_INPUT_ROWS + 1)..=MAX_INPUT_ROWS {
+            interval.tick().await;
+            lock(&state).input_rows = rows;
+            requester.request_frame();
+        }
+        // Hold at full height for a couple of ticks so a probe can capture the
+        // grown state mid-stream, then collapse.
+        interval.tick().await;
+        interval.tick().await;
+        {
+            let mut guard = lock(&state);
+            guard.input_rows = MIN_INPUT_ROWS;
+            guard.loader = false;
+        }
+        requester.request_frame();
+    });
+}
+
 /// Queue an oversized block — ~`OVERSIZED_HEIGHT_MULTIPLIER`× the terminal height
 /// — for a single commit, so a validator can confirm a block far taller than the
 /// viewport lands complete and ordered in scrollback (VAL-CORE-033).
@@ -546,23 +658,48 @@ fn printable_char(key: &hand_tui::rt::events::RtKey) -> Option<char> {
     }
 }
 
+/// Spinner glyph frames cycled while the loader shows.
+const SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+
 fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot) {
+    let area = frame.area();
+
+    // The frame area *is* the fixed inline viewport. Compute where the (possibly
+    // grown/collapsed) bottom area sits inside it: a grow enlarges `active` but
+    // never the viewport, and a collapse shrinks it and bottom-anchors, leaving
+    // the freed rows above to repaint blank — no ghost.
+    let geometry = bottom_area_geometry(state.input_rows, state.loader, area.width, area.height);
+
     let flood = if state.flooding {
         format!(" · FLOOD #{}", state.flood_ticks)
     } else {
         String::new()
     };
     let title = Line::from(format!(
-        " rt_demo — Ctrl+D/Ctrl+C quit · f=flood · s=stream · b=big · {PANIC_KEY_HELP}{flood} "
+        " rt_demo — Ctrl+D/Ctrl+C quit · g=grow · c=collapse · l=loader · s=stream{flood} "
     ))
     .style(Style::default());
     let block = Block::bordered()
         .title(title)
         .title_alignment(Alignment::Left);
 
-    // While a block is streaming, show its progress live in the viewport body —
-    // this is the content a probe captures *before* the block commits into
-    // scrollback. Otherwise show the input line.
+    // The bordered box occupies only the active area; the rows above it (freed by
+    // a collapse) stay blank and repaint clear each frame.
+    frame.render_widget(block, geometry.active);
+
+    // The loader/spinner row, when showing, sits just below the top border.
+    if let Some(loader_rect) = geometry.loader {
+        let glyph = SPINNER_FRAMES[(state.spinner_phase as usize) % SPINNER_FRAMES.len()];
+        let spinner = Line::from(vec![
+            format!(" {glyph} ").fg(Color::Yellow),
+            "working…".dim(),
+        ]);
+        frame.render_widget(Paragraph::new(spinner), inset(loader_rect));
+    }
+
+    // While a block is streaming, show its progress live in the input body — this
+    // is the content a probe captures *before* the block commits into scrollback.
+    // Otherwise echo the (possibly multi-row) input.
     let body = if state.streaming {
         let latest = state
             .stream_block
@@ -581,6 +718,16 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot) {
     } else {
         Line::from(vec!["> ".dim(), state.input.clone().into()])
     };
-    let paragraph = Paragraph::new(body).block(block);
-    frame.render_widget(paragraph, frame.area());
+    frame.render_widget(Paragraph::new(body), inset(geometry.input));
+}
+
+/// Inset a rect by one column on each side so its content sits inside the block's
+/// left/right border rather than overwriting it. Height is left unchanged.
+fn inset(rect: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    ratatui::layout::Rect::new(
+        rect.x + 1,
+        rect.y,
+        rect.width.saturating_sub(2),
+        rect.height,
+    )
 }
