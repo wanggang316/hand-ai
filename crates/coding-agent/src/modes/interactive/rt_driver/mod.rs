@@ -58,12 +58,14 @@
 //! `.offset_y(frame.area().y)` (the M1 FIX-2 invariant: the viewport origin
 //! drifts down as `insert_before` fills scrollback).
 
+pub mod bash;
 pub mod chat;
 pub mod chrome;
 pub mod footer;
 pub mod input;
 pub mod messages;
 pub mod state;
+pub mod tools;
 pub mod watchdog;
 
 use std::io;
