@@ -70,7 +70,10 @@ impl Recorder {
 }
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
-    haystack.windows(needle.len()).filter(|w| *w == needle).count()
+    haystack
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
 }
 
 // =============================================================================
@@ -136,7 +139,10 @@ async fn saturated_stream_is_rate_limited_over_a_second() {
     );
     // A 1s stream at 16ms spacing should still draw a healthy number of frames,
     // not stall — but nowhere near the 1000 requests.
-    assert!(draws >= 30, "expected a steady stream of draws, got {draws}");
+    assert!(
+        draws >= 30,
+        "expected a steady stream of draws, got {draws}"
+    );
     assert!(draws < 1_000);
 }
 
@@ -154,7 +160,10 @@ async fn idle_scheduler_draws_nothing_and_emits_no_bytes() {
     tokio::task::yield_now().await;
 
     assert_eq!(rec.draw_count(), 0, "idle scheduler must not draw");
-    assert!(rec.bytes().is_empty(), "idle scheduler must emit zero bytes");
+    assert!(
+        rec.bytes().is_empty(),
+        "idle scheduler must emit zero bytes"
+    );
 
     // Cleanly stop.
     drop(requester);

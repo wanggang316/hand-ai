@@ -24,8 +24,8 @@
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
-use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::queue;
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use tokio::sync::mpsc;
 use tokio::time::Instant as TokioInstant;
 
