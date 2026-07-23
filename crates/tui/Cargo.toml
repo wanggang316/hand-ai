@@ -20,4 +20,5 @@ thiserror = "2"
 base64 = "0.22"
 
 [dev-dependencies]
+libc = "0.2"
 tempfile = "3"
