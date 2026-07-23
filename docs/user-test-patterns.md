@@ -155,9 +155,19 @@ is the environment, not credentials):
 - `settings-corrupt.yaml` — syntactically invalid settings for tolerance cases
 - `images/` — sample PNG, large PNG, one each of jpeg/gif/webp, and a corrupt file
 - `sessions/<scenario>.jsonl` — pre-recorded session files for resume/replay cases
-- `mock-provider/` — a minimal local HTTP server script serving canned SSE streams in
-  the provider wire format, plus a models config pointing `hand` at it; this is how
-  streaming/loader/footer-usage probes run without an API key
+- `mock-provider/` — a minimal local HTTP server serving canned SSE streams in the
+  provider wire format, plus a models config pointing `hand` at it; this is how
+  streaming/loader/footer-usage probes run without an API key. Usage (see
+  `tests/fixtures/tui/mock-provider/README.md`): start with
+  `cargo run --example mock_provider -p hand-coding-agent` (default port 39217,
+  override `MOCK_PROVIDER_PORT`); scenarios (text/thinking/slow/stall/tool_call/
+  edit_tool/write_tool/image_result/error) selected by query param / header / env;
+  point `models.json` `baseUrl` at `http://127.0.0.1:<port>/v1`. Note (pre-existing
+  tech-debt): the `hand` CLI synthetic-model path ignores the models.json
+  apiKey/baseUrl, so a CLI smoke needs `OPENAI_API_KEY=<any-dummy>` + `--base-url`.
+- `sessions/*.jsonl` use lowercase content-block `type` tags (`toolcall`, not
+  `toolCall`) and snake_case `mime_type`/`model_id` — the Rust session reader
+  silently skips camelCase tool-call lines (pre-existing).
 
 **Rule:** fixtures are static data; they import no code. Copy into `HAND_HOME`
 per case.
