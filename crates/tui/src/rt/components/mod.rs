@@ -43,7 +43,7 @@ mod toast;
 mod widget_box;
 
 pub use editor::{
-    AutocompleteContext, BorderTint, EditRecord, Editor, EditorBorder, MAX_INPUT_ROWS,
+    AutocompleteContext, BorderTint, EditRecord, Editor, EditorBorder, KillRing, MAX_INPUT_ROWS,
     MIN_INPUT_ROWS,
 };
 pub use loader::{

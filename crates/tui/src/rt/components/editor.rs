@@ -122,6 +122,133 @@ pub struct EditRecord {
     pub inserted: String,
 }
 
+/// A per-editor circular buffer of killed (cut) spans, the rt-native counterpart
+/// to the legacy kill ring. Scoped to a single [`Editor`] — there is no shared,
+/// cross-editor ring (an informed exclusion: the hand UI never cuts from one
+/// editor into another).
+///
+/// A kill pushes the removed span; a [`yank`](KillRing::yank) reads the most
+/// recent; a [`yank_pop`](KillRing::yank_pop) walks to progressively older entries
+/// and wraps around the ring. Empty spans are dropped so an empty kill never
+/// pollutes the ring or shifts the yank cursor.
+#[derive(Debug, Clone)]
+pub struct KillRing {
+    /// Killed spans, oldest first; the most recent kill is at the back.
+    entries: Vec<String>,
+    /// Retained-entry cap; the oldest entry is evicted past this.
+    max_size: usize,
+    /// The index the last yank / yank-pop landed on, or `None` when the caller has
+    /// not yanked since the last kill (so a bare yank-pop is inert).
+    yank_index: Option<usize>,
+}
+
+impl Default for KillRing {
+    fn default() -> Self {
+        Self::new(32)
+    }
+}
+
+impl KillRing {
+    /// A new empty ring retaining at most `max_size` (clamped to `>= 1`) entries.
+    #[must_use]
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_size: max_size.max(1),
+            yank_index: None,
+        }
+    }
+
+    /// Push a killed span onto the ring, evicting the oldest entry past the cap.
+    /// An empty span is ignored. Resets the yank cursor: the next yank starts from
+    /// this newest entry.
+    pub fn push(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.entries.push(text);
+        if self.entries.len() > self.max_size {
+            self.entries.remove(0);
+        }
+        self.yank_index = None;
+    }
+
+    /// Yank the most recent kill, arming the yank cursor for a following yank-pop.
+    /// `None` when the ring is empty.
+    pub fn yank(&mut self) -> Option<&str> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let idx = self.entries.len() - 1;
+        self.yank_index = Some(idx);
+        Some(&self.entries[idx])
+    }
+
+    /// Walk the yank cursor one entry older, wrapping around the ring. Must follow a
+    /// [`yank`](KillRing::yank); `None` when the ring is empty or no yank has armed
+    /// the cursor.
+    pub fn yank_pop(&mut self) -> Option<&str> {
+        let idx = self.yank_index?;
+        if self.entries.is_empty() {
+            return None;
+        }
+        let new_idx = if idx == 0 {
+            self.entries.len() - 1
+        } else {
+            idx - 1
+        };
+        self.yank_index = Some(new_idx);
+        Some(&self.entries[new_idx])
+    }
+
+    /// Reset the yank cursor so a following yank-pop is inert until the next yank.
+    pub fn reset(&mut self) {
+        self.yank_index = None;
+    }
+
+    /// Peek the most recent kill without arming the yank cursor. `None` on an empty
+    /// ring.
+    #[must_use]
+    pub fn newest(&self) -> Option<&str> {
+        self.entries.last().map(String::as_str)
+    }
+
+    /// Whether the ring holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The number of retained entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// One coalescable unit on the undo stack: a reversible edit whose `inserted` may
+/// grow as an open typing burst absorbs adjacent single-grapheme inserts. Carries
+/// the caret positions before and after the edit so undo and redo restore the
+/// caret to where the user expects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UndoUnit {
+    /// Flat byte offset of the edit into `lines.join("\n")`.
+    position: usize,
+    /// Text removed at `position` (empty for a pure insert).
+    removed: String,
+    /// Text inserted at `position` (empty for a pure delete). Grows while the unit
+    /// stays an open typing burst.
+    inserted: String,
+    /// Caret `(line, col)` before the edit — undo restores this.
+    cursor_before: (usize, usize),
+    /// Caret `(line, col)` after the edit — redo restores this.
+    cursor_after: (usize, usize),
+    /// True while this unit is an open typing burst that a following adjacent
+    /// single-grapheme insert may extend. Sealed by a pause, newline, paste,
+    /// delete, undo/redo, or any non-typing edit.
+    open: bool,
+}
+
 /// The token under the caret that an autocomplete provider would query, reported
 /// by [`Editor::context_at_cursor`]. Purely descriptive — the core computes it but
 /// never acts on it, leaving the query/debounce/popup to the autocomplete feature.
@@ -164,9 +291,28 @@ pub struct Editor {
     composing: Option<String>,
     /// Latched submitted text, drained by [`take_submit`](Editor::take_submit).
     submitted: Option<String>,
-    /// Kill-ring seam: the last killed span, set by future kill primitives and
-    /// drained by [`take_killed`](Editor::take_killed). Unused by the core today.
+    /// Kill-ring seam: the last killed span, set by the kill primitives and
+    /// drained by [`take_killed`](Editor::take_killed). Mirrors the newest ring
+    /// entry so the host can observe the last kill without reaching into the ring.
     killed: Option<String>,
+    /// Per-editor kill ring backing yank / yank-pop. Not shared across editors.
+    kill_ring: KillRing,
+    /// Undo stack, oldest first; the most recent unit is at the back and may be an
+    /// open typing burst.
+    undo_stack: Vec<UndoUnit>,
+    /// Redo stack, most-recently-undone first. Discarded when a fresh edit lands
+    /// (typing-after-undo drops the redo branch).
+    redo_stack: Vec<UndoUnit>,
+    /// Caret `(line, col)` captured before the in-flight primitive mutates it, so
+    /// `record_edit` can stamp the unit's `cursor_before`.
+    edit_cursor_before: (usize, usize),
+    /// When set, the next recorded edit is forced to seal into its own unit (never
+    /// coalescing with the previous burst). Used to make a paste one atomic unit
+    /// and to honour an explicit pause.
+    break_coalesce: bool,
+    /// Guards against `record_edit` re-entrancy while undo/redo replay a primitive:
+    /// a replayed edit must not push a fresh unit.
+    replaying: bool,
     /// The caret's viewport-local `(x, y)` within the last render area, recorded on
     /// [`render`](RtComponent::render) (which borrows `&self`) so
     /// [`cursor`](RtComponent::cursor) can report a width-aware position. `None`
@@ -195,6 +341,12 @@ impl Editor {
             composing: None,
             submitted: None,
             killed: None,
+            kill_ring: KillRing::default(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            edit_cursor_before: (0, 0),
+            break_coalesce: false,
+            replaying: false,
             caret_cell: std::cell::Cell::new(None),
         }
     }
@@ -339,33 +491,106 @@ impl Editor {
     // Seams for later features (undo / kill-ring / paste / autocomplete)
     // -----------------------------------------------------------------
 
-    /// Undo seam. Every core mutation calls this with the edit it just applied; the
-    /// undo feature overrides it to build a coalescing stack. A no-op today, but it
-    /// keeps every mutation funnelling through one recording point so the later
-    /// feature does not have to re-thread the primitives.
-    #[allow(clippy::unused_self)]
-    fn record_edit(&mut self, _edit: EditRecord) {
-        // Intentionally empty: the undo feature owns the stack. See module docs.
+    /// Undo seam. Every core mutation funnels its [`EditRecord`] here, and this
+    /// builds the coalescing undo stack from it — the primitives never change.
+    ///
+    /// Coalescing rule, derived from the record shape plus the `break_coalesce`
+    /// latch, pins the unit boundaries the contract requires:
+    /// - A **single-grapheme insert** (empty `removed`, one cluster, no newline)
+    ///   extends the open typing burst at the top of the stack when it sits
+    ///   adjacent to it — one undo unit per burst.
+    /// - A **newline**, a **paste / multi-grapheme insert**, and any **delete** or
+    ///   **replace** seal a unit on their own, so undo peels them off one at a time.
+    /// - An explicit **pause** ([`pause`](Editor::pause)) latches `break_coalesce`,
+    ///   so the next insert starts a fresh burst even though it is a single glyph.
+    ///
+    /// Every recorded edit discards the redo branch: typing-after-undo cannot be
+    /// redone into.
+    fn record_edit(&mut self, edit: EditRecord) {
+        if self.replaying {
+            // An undo/redo replay drives the primitives; it must not record.
+            return;
+        }
+        let cursor_before = self.edit_cursor_before;
+        let cursor_after = (self.cursor_line, self.cursor_col);
+        // A fresh edit always invalidates the redo branch.
+        self.redo_stack.clear();
+
+        let is_insert = edit.removed.is_empty() && !edit.inserted.is_empty();
+        // A single-grapheme insert is typing — it opens (or extends) a burst. A
+        // newline, a multi-grapheme paste, and any delete/replace are never typing.
+        let is_typing =
+            is_insert && edit.inserted != "\n" && edit.inserted.graphemes(true).count() == 1;
+        // The break latch only forbids *merging into the previous unit*; the new
+        // typing unit is still opened so the rest of the burst coalesces into it.
+        let may_merge = is_typing && !self.break_coalesce;
+        self.break_coalesce = false;
+
+        if may_merge
+            && let Some(prev) = self.undo_stack.last_mut()
+            && prev.open
+            && prev.removed.is_empty()
+            && edit.position == prev.position + prev.inserted.len()
+        {
+            // Extend the open typing burst in place.
+            prev.inserted.push_str(&edit.inserted);
+            prev.cursor_after = cursor_after;
+            return;
+        }
+
+        self.undo_stack.push(UndoUnit {
+            position: edit.position,
+            removed: edit.removed,
+            inserted: edit.inserted,
+            cursor_before,
+            cursor_after,
+            open: is_typing,
+        });
     }
 
-    /// Kill-ring seam: take the last killed span, clearing it. Kill primitives
-    /// (added by the kill-ring feature) set it; a yank drains it here.
+    /// Break the current typing burst so the next insert starts a new undo unit.
+    /// The host calls this on an idle pause (mirroring the legacy time-window
+    /// coalescing) and tests call it to pin the pause boundary deterministically.
+    pub fn pause(&mut self) {
+        self.break_coalesce = true;
+        if let Some(unit) = self.undo_stack.last_mut() {
+            unit.open = false;
+        }
+    }
+
+    /// Kill-ring seam: take the last killed span, clearing it. Kill primitives set
+    /// it; the host drains it here to observe the most recent kill.
     pub fn take_killed(&mut self) -> Option<String> {
         self.killed.take()
     }
 
-    /// Kill-ring seam: stash a killed span for a later yank. Exposed so the
-    /// kill-ring feature can seed the ring without reaching into private state.
+    /// Kill-ring seam: stash a killed span for a later yank. Pushes onto the ring
+    /// and mirrors it into the `killed` latch, so seeding the ring and observing the
+    /// last kill both work.
     pub fn set_kill(&mut self, text: impl Into<String>) {
-        self.killed = Some(text.into());
+        let text = text.into();
+        self.killed = Some(text.clone());
+        self.kill_ring.push(text);
     }
 
-    /// Paste seam: the single entry point a paste event routes through. Today it
-    /// inserts inline via [`insert_str`](Editor::insert_str); the paste-marker
-    /// feature diverts a large payload to an out-of-band marker here, and no other
-    /// call site changes.
+    /// A read-only view of the kill ring (for tests and host inspection).
+    #[must_use]
+    pub fn kill_ring(&self) -> &KillRing {
+        &self.kill_ring
+    }
+
+    /// Paste seam: the single entry point a paste event routes through. Inserts
+    /// inline via [`insert_str`](Editor::insert_str) as one atomic undo unit — a
+    /// paste breaks the typing burst on both sides, so it undoes in one step and the
+    /// next keystroke starts fresh.
     pub fn insert_paste(&mut self, text: &str) {
+        // A paste is atomic: break the burst so it is its own unit, and seal it
+        // afterwards so the next single-glyph insert cannot extend it.
+        self.break_coalesce = true;
         self.insert_str(text);
+        if let Some(unit) = self.undo_stack.last_mut() {
+            unit.open = false;
+        }
     }
 
     /// Autocomplete seam: the token under the caret a provider would query, or
@@ -409,6 +634,193 @@ impl Editor {
     }
 
     // -----------------------------------------------------------------
+    // Kill-ring operations (kill / yank / yank-pop)
+    // -----------------------------------------------------------------
+
+    /// Kill the word before the caret onto the ring (Emacs `C-w`). Removes the span
+    /// from the previous word start to the caret; a no-op at column 0.
+    fn kill_word_backward(&mut self) {
+        if self.cursor_col == 0 {
+            return;
+        }
+        let start = self.prev_word_col();
+        self.kill_span(start, self.cursor_col);
+    }
+
+    /// Kill the word after the caret onto the ring (Emacs `M-d`). Removes the span
+    /// from the caret to the next word end; a no-op at end of line.
+    fn kill_word_forward(&mut self) {
+        let end = self.next_word_col();
+        if end <= self.cursor_col {
+            return;
+        }
+        self.kill_span(self.cursor_col, end);
+    }
+
+    /// Kill from the caret back to the line start onto the ring (Emacs `C-u`). A
+    /// no-op at column 0.
+    fn kill_to_line_start(&mut self) {
+        if self.cursor_col == 0 {
+            return;
+        }
+        self.kill_span(0, self.cursor_col);
+    }
+
+    /// Kill from the caret to the line end onto the ring (Emacs `C-k`). A no-op at
+    /// end of line.
+    fn kill_to_line_end(&mut self) {
+        let line_len = self.lines[self.cursor_line].len();
+        if self.cursor_col >= line_len {
+            return;
+        }
+        self.kill_span(self.cursor_col, line_len);
+    }
+
+    /// Remove `[start, end)` on the caret line, push it onto the ring, and record a
+    /// delete so the kill is undoable as one unit. Leaves the caret at `start`.
+    fn kill_span(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        self.edit_cursor_before = (self.cursor_line, self.cursor_col);
+        let removed: String = self.lines[self.cursor_line][start..end].to_string();
+        let position = self.flat_offset(self.cursor_line, start);
+        self.lines[self.cursor_line].drain(start..end);
+        self.cursor_col = start;
+        self.killed = Some(removed.clone());
+        self.kill_ring.push(removed.clone());
+        // A kill seals a fresh unit and breaks any adjacent typing burst.
+        self.break_coalesce = true;
+        self.record_edit(EditRecord {
+            position,
+            removed,
+            inserted: String::new(),
+        });
+    }
+
+    /// Yank the most recent kill at the caret (Emacs `C-y`). A no-op on an empty
+    /// ring. The insert is one atomic undo unit so a following yank-pop can peel it.
+    fn yank(&mut self) {
+        let text = self.kill_ring.yank().map(str::to_string);
+        if let Some(text) = text {
+            self.insert_paste(&text);
+        }
+    }
+
+    /// Yank-pop: replace the just-yanked span with the next-older ring entry,
+    /// wrapping around (Emacs `M-y`). Requires a preceding yank; a no-op otherwise.
+    /// Undoes the last yank's insert, then inserts the older entry as one unit.
+    fn yank_pop(&mut self) {
+        let next = self.kill_ring.yank_pop().map(str::to_string);
+        let Some(next) = next else {
+            return;
+        };
+        // Peel the previous yank's insert, then lay down the older entry. The undo
+        // leaves the ring untouched (undo/redo never touch the ring), so the yank
+        // cursor the pop advanced stays valid.
+        self.undo();
+        self.insert_paste(&next);
+    }
+
+    // -----------------------------------------------------------------
+    // Undo / redo (unit-level, coalescing)
+    // -----------------------------------------------------------------
+
+    /// Undo the most recent unit, restoring the caret to where it sat before that
+    /// edit. A calm no-op when the undo stack is empty. The undone unit moves to the
+    /// redo stack so a redo can replay it.
+    pub fn undo(&mut self) {
+        let Some(unit) = self.undo_stack.pop() else {
+            return;
+        };
+        self.replaying = true;
+        // Invert the edit: remove what was inserted, restore what was removed.
+        if !unit.inserted.is_empty() {
+            self.delete_flat(unit.position, unit.inserted.len());
+        }
+        if !unit.removed.is_empty() {
+            self.insert_flat(unit.position, &unit.removed);
+        }
+        self.replaying = false;
+        let (line, col) = unit.cursor_before;
+        self.cursor_line = line.min(self.lines.len() - 1);
+        self.cursor_col = col.min(self.lines[self.cursor_line].len());
+        self.redo_stack.push(unit);
+        // Any further typing must start a fresh burst, not extend a reopened one.
+        self.break_coalesce = true;
+    }
+
+    /// Redo the most recently undone unit, restoring the caret to where it sat after
+    /// that edit. A calm no-op when the redo stack is empty.
+    ///
+    /// The hand UI binds no key to redo — it is pinned at the unit layer so the
+    /// coalescing contract is fully testable without introducing a new keystroke.
+    pub fn redo(&mut self) {
+        let Some(unit) = self.redo_stack.pop() else {
+            return;
+        };
+        self.replaying = true;
+        // Replay the edit: restore what was removed's counterpart — remove the
+        // original `removed`, then insert the original `inserted`.
+        if !unit.removed.is_empty() {
+            self.delete_flat(unit.position, unit.removed.len());
+        }
+        if !unit.inserted.is_empty() {
+            self.insert_flat(unit.position, &unit.inserted);
+        }
+        self.replaying = false;
+        let (line, col) = unit.cursor_after;
+        self.cursor_line = line.min(self.lines.len() - 1);
+        self.cursor_col = col.min(self.lines[self.cursor_line].len());
+        self.undo_stack.push(unit);
+        self.break_coalesce = true;
+    }
+
+    /// Insert `text` at flat byte offset `position` without recording (undo/redo
+    /// replay). Splits on `\n` into lines and leaves the caret past the insert.
+    fn insert_flat(&mut self, position: usize, text: &str) {
+        let (line, col) = self.unflatten(position);
+        self.cursor_line = line;
+        self.cursor_col = col;
+        self.insert_str(text);
+    }
+
+    /// Delete `len` bytes starting at flat `position` without recording (undo/redo
+    /// replay). Handles a span that crosses logical-line boundaries.
+    fn delete_flat(&mut self, position: usize, len: usize) {
+        if len == 0 {
+            return;
+        }
+        let (start_line, start_col) = self.unflatten(position);
+        let (end_line, end_col) = self.unflatten(position + len);
+        if start_line == end_line {
+            self.lines[start_line].drain(start_col..end_col);
+        } else {
+            let suffix = self.lines[end_line][end_col..].to_string();
+            self.lines[start_line].truncate(start_col);
+            self.lines[start_line].push_str(&suffix);
+            self.lines.drain(start_line + 1..=end_line);
+        }
+        self.cursor_line = start_line;
+        self.cursor_col = start_col;
+    }
+
+    /// Map a flat byte offset over `lines.join("\n")` back to `(line, col)`,
+    /// clamping past-the-end offsets to the buffer end.
+    fn unflatten(&self, position: usize) -> (usize, usize) {
+        let mut remaining = position;
+        for (i, line) in self.lines.iter().enumerate() {
+            let line_len = line.len();
+            if remaining <= line_len {
+                return (i, remaining);
+            }
+            remaining -= line_len + 1; // +1 for the joining newline
+        }
+        let last = self.lines.len() - 1;
+        (last, self.lines[last].len())
+    }
+
+    // -----------------------------------------------------------------
     // Edit primitives (each funnels through `record_edit`)
     // -----------------------------------------------------------------
 
@@ -419,6 +831,7 @@ impl Editor {
         if text.is_empty() {
             return;
         }
+        self.edit_cursor_before = (self.cursor_line, self.cursor_col);
         let position = self.flat_offset(self.cursor_line, self.cursor_col);
         let mut chunks = text.split('\n');
         let first = chunks.next().unwrap_or("");
@@ -441,6 +854,7 @@ impl Editor {
 
     /// Insert a soft line break at the caret (splitting the current line).
     fn insert_newline(&mut self) {
+        self.edit_cursor_before = (self.cursor_line, self.cursor_col);
         let position = self.flat_offset(self.cursor_line, self.cursor_col);
         let rest = self.lines[self.cursor_line][self.cursor_col..].to_string();
         self.lines[self.cursor_line].truncate(self.cursor_col);
@@ -457,6 +871,7 @@ impl Editor {
     /// Delete one grapheme cluster before the caret, or join with the previous line
     /// when at column 0.
     fn delete_back(&mut self) {
+        self.edit_cursor_before = (self.cursor_line, self.cursor_col);
         if self.cursor_col > 0 {
             let line = &self.lines[self.cursor_line];
             let before = &line[..self.cursor_col];
@@ -491,6 +906,7 @@ impl Editor {
     /// Delete one grapheme cluster after the caret, or pull up the next line when
     /// at end of line.
     fn delete_forward(&mut self) {
+        self.edit_cursor_before = (self.cursor_line, self.cursor_col);
         let line_len = self.lines[self.cursor_line].len();
         if self.cursor_col < line_len {
             let line = &self.lines[self.cursor_line];
@@ -667,6 +1083,21 @@ impl Editor {
             return;
         }
         self.add_to_history(&text);
+        // Record the clear as one undoable unit so undo-after-submit restores the
+        // sent text. The buffer is emptied at position 0; undo re-inserts it and
+        // parks the caret at its end (cursor_before). The redo branch is discarded,
+        // matching every other fresh edit.
+        let cursor_before = (self.cursor_line, self.cursor_col);
+        self.redo_stack.clear();
+        self.undo_stack.push(UndoUnit {
+            position: 0,
+            removed: text.clone(),
+            inserted: String::new(),
+            cursor_before,
+            cursor_after: (0, 0),
+            open: false,
+        });
+        self.break_coalesce = true;
         self.submitted = Some(text);
         self.set_text("");
     }
@@ -953,8 +1384,37 @@ impl RtComponent for Editor {
                 self.delete_back();
                 HandleOutcome::Consumed
             }
-            "delete" => {
+            "delete" | "ctrl+d" => {
                 self.delete_forward();
+                HandleOutcome::Consumed
+            }
+            // Kill-ring: kill word / to-line-start / to-line-end, yank, yank-pop.
+            "ctrl+w" | "alt+backspace" => {
+                self.kill_word_backward();
+                HandleOutcome::Consumed
+            }
+            "alt+d" | "alt+delete" => {
+                self.kill_word_forward();
+                HandleOutcome::Consumed
+            }
+            "ctrl+u" => {
+                self.kill_to_line_start();
+                HandleOutcome::Consumed
+            }
+            "ctrl+k" => {
+                self.kill_to_line_end();
+                HandleOutcome::Consumed
+            }
+            "ctrl+y" => {
+                self.yank();
+                HandleOutcome::Consumed
+            }
+            "alt+y" => {
+                self.yank_pop();
+                HandleOutcome::Consumed
+            }
+            "ctrl+z" => {
+                self.undo();
                 HandleOutcome::Consumed
             }
             "space" => {
@@ -1412,5 +1872,222 @@ mod tests {
         ed.set_composition(Some("preedit".to_string()));
         // A composition does not enter the buffer.
         assert_eq!(ed.text(), "pasted");
+    }
+
+    // --- KillRing pure logic -------------------------------------------------
+
+    #[test]
+    fn kill_ring_push_yank_and_yank_pop_wrap() {
+        let mut ring = KillRing::new(10);
+        assert!(ring.is_empty());
+        ring.push("first".to_string());
+        ring.push("second".to_string());
+        ring.push("third".to_string());
+        assert_eq!(ring.len(), 3);
+        // Yank reads the newest, then yank-pop walks older and wraps around.
+        assert_eq!(ring.yank(), Some("third"));
+        assert_eq!(ring.yank_pop(), Some("second"));
+        assert_eq!(ring.yank_pop(), Some("first"));
+        assert_eq!(ring.yank_pop(), Some("third"), "wraps back to newest");
+    }
+
+    #[test]
+    fn kill_ring_empty_push_ignored_and_bare_pop_inert() {
+        let mut ring = KillRing::new(10);
+        ring.push(String::new());
+        assert!(ring.is_empty(), "empty span never enters the ring");
+        assert!(ring.yank().is_none(), "yank on empty ring is None");
+        ring.push("x".to_string());
+        // A push resets the yank cursor, so a bare yank-pop (no preceding yank)
+        // is inert.
+        assert!(ring.yank_pop().is_none(), "pop without yank is inert");
+    }
+
+    #[test]
+    fn kill_ring_evicts_oldest_past_cap() {
+        let mut ring = KillRing::new(2);
+        ring.push("a".to_string());
+        ring.push("b".to_string());
+        ring.push("c".to_string());
+        assert_eq!(ring.len(), 2, "capped");
+        assert_eq!(ring.yank(), Some("c"));
+        assert_eq!(ring.yank_pop(), Some("b"), "oldest 'a' was evicted");
+    }
+
+    // --- Editor kill / yank / yank-pop --------------------------------------
+
+    #[test]
+    fn kill_word_backward_pushes_and_yank_reinserts() {
+        let mut ed = Editor::new();
+        ed.insert_str("alpha beta");
+        ed.handle_key(&key("ctrl+w", KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(ed.text(), "alpha ", "word killed to caret");
+        assert_eq!(
+            ed.kill_ring().newest(),
+            Some("beta"),
+            "kill pushed onto ring"
+        );
+        // Yank re-inserts the killed span at the caret.
+        ed.handle_key(&key("ctrl+y", KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(ed.text(), "alpha beta", "yank restored the killed word");
+    }
+
+    #[test]
+    fn kill_to_line_start_and_end() {
+        let mut ed = Editor::new();
+        ed.insert_str("hello world");
+        // Caret at end; kill to line start removes everything.
+        ed.handle_key(&key("ctrl+u", KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(ed.text(), "");
+        assert_eq!(ed.kill_ring().newest(), Some("hello world"));
+
+        let mut ed2 = Editor::new();
+        ed2.insert_str("hello world");
+        ed2.cursor_col = "hello ".len();
+        ed2.handle_key(&key("ctrl+k", KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(ed2.text(), "hello ", "killed to line end");
+        assert_eq!(ed2.kill_ring().newest(), Some("world"));
+    }
+
+    #[test]
+    fn yank_pop_cycles_through_ring() {
+        let mut ed = Editor::new();
+        // Kill two words so the ring has [beta, gamma] (gamma newest).
+        ed.insert_str("beta");
+        ed.handle_key(&key("ctrl+u", KeyCode::Char('u'), KeyModifiers::CONTROL));
+        ed.insert_str("gamma");
+        ed.handle_key(&key("ctrl+u", KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(ed.text(), "");
+        // Yank newest, then yank-pop replaces it with the older entry.
+        ed.handle_key(&key("ctrl+y", KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(ed.text(), "gamma");
+        ed.handle_key(&key("alt+y", KeyCode::Char('y'), KeyModifiers::ALT));
+        assert_eq!(ed.text(), "beta", "yank-pop swapped in the older kill");
+        ed.handle_key(&key("alt+y", KeyCode::Char('y'), KeyModifiers::ALT));
+        assert_eq!(ed.text(), "gamma", "yank-pop wrapped back to newest");
+    }
+
+    // --- Undo coalescing + boundaries ---------------------------------------
+
+    #[test]
+    fn typing_burst_is_one_undo_unit() {
+        let mut ed = Editor::new();
+        type_str(&mut ed, "hello");
+        assert_eq!(ed.undo_stack.len(), 1, "a typing burst is one unit");
+        ed.undo();
+        assert_eq!(ed.text(), "", "one undo removed the whole burst");
+    }
+
+    #[test]
+    fn pause_starts_a_new_undo_unit() {
+        let mut ed = Editor::new();
+        type_str(&mut ed, "abc");
+        ed.pause();
+        type_str(&mut ed, "def");
+        assert_eq!(ed.undo_stack.len(), 2, "pause split the burst");
+        ed.undo();
+        assert_eq!(ed.text(), "abc", "first undo removed the post-pause burst");
+        ed.undo();
+        assert_eq!(ed.text(), "");
+    }
+
+    #[test]
+    fn newline_paste_delete_each_start_new_units() {
+        // Newline seals a unit.
+        let mut ed = Editor::new();
+        type_str(&mut ed, "ab");
+        ed.handle_key(&key("alt+enter", KeyCode::Enter, KeyModifiers::ALT));
+        type_str(&mut ed, "cd");
+        // Three units: "ab", "\n", "cd".
+        assert_eq!(ed.undo_stack.len(), 3);
+        ed.undo();
+        assert_eq!(ed.text(), "ab\n");
+        ed.undo();
+        assert_eq!(ed.text(), "ab");
+
+        // Paste is its own atomic unit and breaks the burst on both sides.
+        let mut ed2 = Editor::new();
+        type_str(&mut ed2, "x");
+        ed2.insert_paste("PASTED");
+        type_str(&mut ed2, "y");
+        assert_eq!(ed2.undo_stack.len(), 3, "x | PASTED | y");
+        ed2.undo();
+        assert_eq!(ed2.text(), "xPASTED");
+        ed2.undo();
+        assert_eq!(ed2.text(), "x", "paste undoes in one step");
+
+        // Delete starts a new unit (not merged with the preceding typing burst).
+        let mut ed3 = Editor::new();
+        type_str(&mut ed3, "abc");
+        ed3.handle_key(&key("backspace", KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(ed3.text(), "ab");
+        assert_eq!(ed3.undo_stack.len(), 2, "delete is its own unit");
+        ed3.undo();
+        assert_eq!(ed3.text(), "abc", "undo restored the deleted char");
+    }
+
+    #[test]
+    fn undo_after_submit_restores_sent_text() {
+        let mut ed = Editor::new();
+        type_str(&mut ed, "send me");
+        ed.handle_key(&key("enter", KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(ed.take_submit().as_deref(), Some("send me"));
+        assert_eq!(ed.text(), "", "buffer cleared on submit");
+        ed.undo();
+        assert_eq!(ed.text(), "send me", "undo restored the submitted text");
+    }
+
+    #[test]
+    fn undo_redo_are_calm_noops_at_boundaries() {
+        let mut ed = Editor::new();
+        // Undo/redo on an empty stack do nothing and do not panic.
+        ed.undo();
+        ed.redo();
+        assert_eq!(ed.text(), "");
+        type_str(&mut ed, "hi");
+        ed.undo();
+        assert_eq!(ed.text(), "");
+        // Extra undo past the bottom is a no-op.
+        ed.undo();
+        assert_eq!(ed.text(), "");
+        ed.redo();
+        assert_eq!(ed.text(), "hi", "redo replays the undone unit");
+        // Extra redo past the top is a no-op.
+        ed.redo();
+        assert_eq!(ed.text(), "hi");
+    }
+
+    #[test]
+    fn typing_after_undo_discards_redo_branch() {
+        let mut ed = Editor::new();
+        type_str(&mut ed, "abc");
+        ed.pause();
+        type_str(&mut ed, "def");
+        ed.undo(); // drop "def"
+        assert_eq!(ed.text(), "abc");
+        // A fresh edit discards the redo branch.
+        type_str(&mut ed, "X");
+        assert_eq!(ed.text(), "abcX");
+        ed.redo();
+        assert_eq!(
+            ed.text(),
+            "abcX",
+            "redo branch was discarded, redo is inert"
+        );
+    }
+
+    #[test]
+    fn redo_replays_at_unit_granularity() {
+        let mut ed = Editor::new();
+        type_str(&mut ed, "one");
+        ed.pause();
+        type_str(&mut ed, "two");
+        ed.undo();
+        ed.undo();
+        assert_eq!(ed.text(), "");
+        ed.redo();
+        assert_eq!(ed.text(), "one", "redo replays one unit");
+        ed.redo();
+        assert_eq!(ed.text(), "onetwo", "redo replays the next unit");
     }
 }

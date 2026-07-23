@@ -428,7 +428,7 @@ fn main() {
             ])
             .split(area);
             TruncatedText::new(
-                "Editor — grapheme-aware · auto-grow 1..8 · line:col indicator · focus tint",
+                "Editor — grapheme-aware · auto-grow · kill-ring (C-w/C-y) · coalescing undo",
             )
             .render(rows[0], buf);
 
@@ -442,16 +442,17 @@ fn main() {
             for c in "文档".chars() {
                 editor.handle_key(&char_key(c));
             }
-            editor.handle_key(&RtKey {
-                key_id: Some("alt+enter".to_string()),
-                raw: crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Enter,
-                    crossterm::event::KeyModifiers::ALT,
-                ),
-            });
-            for c in "then ship it".chars() {
+            editor.handle_key(&named_key("alt+enter", crossterm::event::KeyCode::Enter));
+            for c in "then ship the draft".chars() {
                 editor.handle_key(&char_key(c));
             }
+            // Kill-ring + coalescing undo demo, all canned:
+            //   Ctrl-W kills the trailing word ("draft") onto the ring,
+            //   Ctrl-Y yanks it back — a full cut/paste round trip,
+            //   Undo peels the yank as one atomic unit, leaving "then ship the ".
+            editor.handle_key(&ctrl_key('w'));
+            editor.handle_key(&ctrl_key('y'));
+            editor.undo();
             // Show the focused border tint (the thinking tint is the host's to drive
             // during streaming in a later milestone).
             editor.set_tint(BorderTint::Focused);
@@ -467,6 +468,26 @@ fn char_key(c: char) -> RtKey {
         raw: crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char(c),
             crossterm::event::KeyModifiers::NONE,
+        ),
+    }
+}
+
+/// Build a named-key `RtKey` (e.g. `alt+enter`) with the given crossterm code and
+/// ALT modifier, for the gallery's canned editor demo.
+fn named_key(id: &str, code: crossterm::event::KeyCode) -> RtKey {
+    RtKey {
+        key_id: Some(id.to_string()),
+        raw: crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::ALT),
+    }
+}
+
+/// Build a Ctrl-chord `RtKey` (e.g. `ctrl+w`) for the gallery's canned editor demo.
+fn ctrl_key(c: char) -> RtKey {
+    RtKey {
+        key_id: Some(format!("ctrl+{c}")),
+        raw: crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::CONTROL,
         ),
     }
 }
