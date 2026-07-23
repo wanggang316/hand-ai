@@ -26,6 +26,7 @@ use model::Model;
 use tokio::sync::mpsc;
 
 use crate::core::agent_session::AgentSession;
+use crate::core::session_manager::{SessionInfo, SessionManager};
 
 use std::sync::atomic::Ordering;
 
@@ -33,6 +34,8 @@ use super::chat;
 use super::footer::{TokenUsageSummary, build_footer_view};
 use super::model_selector::{ModelOutcome, ModelSelector};
 use super::overlay::{self, DoneSignal, SelectorController, SharedOverlay};
+use super::replay::replay_blocks;
+use super::session_picker::{SessionOutcome, SessionPicker};
 use super::state::{DriverState, SharedFooter, lock_footer, lock_state};
 
 /// Open the `/model` selector overlay and apply the user's pick.
@@ -91,6 +94,143 @@ pub async fn open_model_selector(
         // is and make sure any lingering overlay is cleared.
         None => overlay::close(overlay, requester),
     }
+}
+
+/// Open the `/resume` session picker overlay and, on a pick, switch to and replay
+/// the chosen session (VAL-OVERLAY-010 / VAL-CHAT-012 / VAL-CHAT-032).
+///
+/// Lists the resumable sessions in `cwd` (backend-aware), mounts the
+/// [`SessionPicker`] as a centered modal dialog, then awaits its single outcome:
+///
+/// - **Selected** — resolve the session (`switch_session` by path under jsonl,
+///   `switch_session_by_id` under sqlite where every session shares one database
+///   path), clear the screen so the replayed transcript starts clean, replay the
+///   loaded messages into scrollback in order (closed by the `[resumed: …]` marker),
+///   and refresh the footer so the resumed session's context %/label surface.
+/// - **Cancelled** — nothing is resumed; the yellow `[resume cancelled]` status
+///   line lands so the cancel is visible (VAL-CHAT-032).
+///
+/// An empty list still mounts the picker (showing `(no sessions)`); it stays open
+/// until the user presses Esc, which cancels here.
+pub async fn open_resume_picker(
+    session: &mut AgentSession,
+    cwd: &Path,
+    overlay: &SharedOverlay,
+    done: &DoneSignal,
+    state: &Arc<Mutex<DriverState>>,
+    footer: &SharedFooter,
+    requester: &FrameRequester,
+) {
+    let sessions = list_resumable_sessions(session, cwd);
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<SessionOutcome>();
+    // Reset the shared done flag before mounting (the runtime's "overlay finished"
+    // latch, cleared per open so a prior selector's raise never leaks in).
+    done.store(false, Ordering::SeqCst);
+    let picker = SessionPicker::new(sessions, tx, done.clone());
+    let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(picker));
+
+    overlay::mount(overlay, requester, controller, done.clone());
+
+    match rx.recv().await {
+        Some(SessionOutcome::Selected { id, path }) => {
+            resume_selected(session, cwd, &id, &path, state, footer, requester);
+        }
+        Some(SessionOutcome::Cancelled) => {
+            commit_status(state, requester, "[resume cancelled]");
+        }
+        // Channel closed with no outcome (teardown mid-dialog): leave the session
+        // as is and clear any lingering overlay.
+        None => overlay::close(overlay, requester),
+    }
+}
+
+/// Switch to the picked session and replay its transcript into scrollback.
+///
+/// Under sqlite every session shares one database path, so the id is the selector;
+/// under jsonl the path addresses the session file. On success the screen is
+/// cleared, the loaded messages are replayed in order (each as one scrollback
+/// block, closed by the `[resumed: …]` marker), and the footer is rebuilt. A switch
+/// failure takes the red-banner route and nothing is replayed.
+fn resume_selected(
+    session: &mut AgentSession,
+    cwd: &Path,
+    id: &str,
+    path: &Path,
+    state: &Arc<Mutex<DriverState>>,
+    footer: &SharedFooter,
+    requester: &FrameRequester,
+) {
+    use crate::core::session_manager::SessionBackend;
+
+    let result = match session.session_backend() {
+        SessionBackend::Sqlite => session.switch_session_by_id(id),
+        SessionBackend::Jsonl => session.switch_session(path),
+    };
+    match result {
+        Ok(()) => {
+            // Clear the screen so the replayed transcript starts on a fresh screen,
+            // matching the legacy driver's "clear the chat list on resume".
+            lock_state(state).queue_raw("\x1b[3J\x1b[2J\x1b[H");
+            // Reset the running usage accumulator: the resumed session's spend is
+            // rebuilt from its own footer, not the prior session's totals.
+            lock_state(state).usage = TokenUsageSummary::default();
+            replay_into_scrollback(session, id, state, requester);
+            refresh_footer(session, cwd, state, footer, requester);
+        }
+        Err(e) => {
+            commit_status(state, requester, &format!("[resume failed: {e}]"));
+        }
+    }
+}
+
+/// Replay the active session's transcript into scrollback in order, closed by the
+/// `[resumed: <label>]` marker. Each message becomes one queued scrollback block, so
+/// the replayed transcript lands in message order and the marker last. Also seeds
+/// the assistant-history so a later global Ctrl+T re-render includes the resumed
+/// messages.
+fn replay_into_scrollback(
+    session: &AgentSession,
+    fallback_label: &str,
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+) {
+    let label = session
+        .label()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| short_id(fallback_label));
+    let messages = session.messages().to_vec();
+
+    let mut guard = lock_state(state);
+    let width = guard.size.cols;
+    let hide_thinking = guard.hide_thinking;
+    let blocks = replay_blocks(&messages, &label, hide_thinking, width);
+    for block in blocks {
+        guard.queue_commit(block);
+    }
+    // Seed assistant history so Ctrl+T re-renders the resumed assistant messages too.
+    for message in &messages {
+        if let model::Message::Assistant(a) = message {
+            guard.remember_assistant(a.clone());
+        }
+    }
+    drop(guard);
+    requester.request_frame();
+}
+
+/// The first 8 chars of a session id, used as a compact resume label when the
+/// session carries no name.
+fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// List the resumable sessions in `cwd`, backend-aware, tolerating a listing
+/// failure with an empty list (the picker then shows `(no sessions)` rather than
+/// aborting the resume flow).
+#[must_use]
+pub fn list_resumable_sessions(session: &AgentSession, cwd: &Path) -> Vec<SessionInfo> {
+    SessionManager::list_with_backend(session.session_backend(), cwd).unwrap_or_default()
 }
 
 /// Resolve the user's scoped model subset from `settings.enabled_models`, matching

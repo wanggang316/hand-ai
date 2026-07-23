@@ -323,7 +323,7 @@ fn draw(
 /// viewport columns: a centered dialog spans ~60% of the width (bounded to a sane
 /// minimum), minus the two border columns. The scheduler measures the mounted
 /// selector's render lines against this so wrapping matches the box it paints into.
-fn overlay_interior_width(cols: u16) -> u16 {
+pub(crate) fn overlay_interior_width(cols: u16) -> u16 {
     dialog_outer_width(cols).saturating_sub(2).max(1)
 }
 
@@ -349,7 +349,11 @@ fn dialog_outer_width(cols: u16) -> u16 {
 /// private heuristic — the only reason this does not call `OverlayStack::render`
 /// directly. Because the whole viewport repaints each frame, closing the overlay
 /// later leaves no dim residue or ghost border (VAL-OVERLAY-008).
-fn draw_overlay(buf: &mut ratatui::buffer::Buffer, area: Rect, lines: Vec<Line<'static>>) {
+pub(crate) fn draw_overlay(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    lines: Vec<Line<'static>>,
+) {
     use hand_tui::rt::overlay::{OverlayAnchor, OverlayMargin, anchor_rect};
     use ratatui::layout::Size;
     use ratatui::style::Modifier;

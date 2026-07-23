@@ -95,6 +95,19 @@ pub fn is_open_model_selector(line: &str) -> bool {
     matches!(parsed.name.as_str(), "model" | "models") && parsed.args.is_empty()
 }
 
+/// Whether a submission is a `/resume` command — the case that opens the session
+/// picker overlay.
+///
+/// `/resume` takes no argument in the rt driver: it always opens the picker (the
+/// legacy "resume most recent" fallback is `--continue` / `hand --resume`). The
+/// driver uses this to intercept it on the async turn runner (it mounts an overlay,
+/// awaits the pick, then switches + replays), *before* the sync slash dispatch —
+/// mirroring how `/model` is intercepted.
+#[must_use]
+pub fn is_open_resume_picker(line: &str) -> bool {
+    ParsedSlashCommand::parse(line).is_some_and(|parsed| parsed.name == "resume")
+}
+
 /// Recognise a `/compact` submission and pull its optional steering text.
 ///
 /// Returns `Some(None)` for a bare `/compact`, `Some(Some(steer))` for
@@ -259,6 +272,13 @@ pub fn apply_slash_action(
         // the seam line rather than silently dropping it. (`/model <pattern>` is a
         // separate `ModelByPattern` action, handled by the follow-up feature.)
         open @ SlashCommandAction::OpenModelSelector => unsupported(&open, state, requester),
+
+        // `/resume` opens the interactive session picker overlay, which awaits the
+        // user's pick then switches + replays, so it is intercepted on the async
+        // turn runner *before* this sync dispatch (see the driver's `run_turn` +
+        // `run_resume_picker`). Reaching this arm means a caller dispatched it
+        // outside that path; surface the seam line rather than silently dropping it.
+        open @ SlashCommandAction::OpenResumePicker => unsupported(&open, state, requester),
 
         // --- Follow-up feature seam ---------------------------------------
         // Selector commands (/model, /theme, /thinking, …) land here as their
@@ -1532,6 +1552,19 @@ mod tests {
         assert!(!is_open_model_selector("/help"));
         assert!(!is_open_model_selector("model"));
         assert!(!is_open_model_selector("/"));
+    }
+
+    // --- /resume picker interception (VAL-OVERLAY-010) --------------------
+
+    #[test]
+    fn is_open_resume_picker_matches_resume_only() {
+        assert!(is_open_resume_picker("/resume"));
+        assert!(is_open_resume_picker("/resume   "));
+        // Unrelated commands and plain text never open the picker.
+        assert!(!is_open_resume_picker("/help"));
+        assert!(!is_open_resume_picker("/model"));
+        assert!(!is_open_resume_picker("resume"));
+        assert!(!is_open_resume_picker("/"));
     }
 
     #[test]

@@ -66,7 +66,9 @@ pub mod input;
 pub mod messages;
 pub mod model_selector;
 pub mod overlay;
+pub mod replay;
 pub mod selectors;
+pub mod session_picker;
 pub mod slash;
 pub mod state;
 pub mod summary;
@@ -105,6 +107,38 @@ fn thinking_status_line(hidden: bool) -> String {
 /// Bound on the rt input event channel. A small buffer suffices for interactive
 /// typing; backpressure just parks the pump, which is fine.
 const EVENT_CHANNEL_CAPACITY: usize = 64;
+
+/// Queue the resumed session's stored transcript as ordered scrollback blocks, so a
+/// resume (`--continue` / `--resume` / `--fork`, seeding messages from disk) shows
+/// its prior conversation below the startup chrome before the first frame paints.
+///
+/// A fresh session (no messages) is a no-op — nothing is queued, so a brand-new
+/// session starts on a clean transcript with no spurious `[resumed: …]` marker. The
+/// replayed assistant messages are also seeded into the assistant-history so a later
+/// global Ctrl+T re-render includes them.
+fn queue_startup_replay(session: &AgentSession, state: &Arc<Mutex<DriverState>>) {
+    let messages = session.messages();
+    if messages.is_empty() {
+        return;
+    }
+    let label = session
+        .label()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| session.session_id().chars().take(8).collect());
+
+    let mut guard = lock_state(state);
+    let width = guard.size.cols;
+    let hide_thinking = guard.hide_thinking;
+    for block in self::replay::replay_blocks(messages, &label, hide_thinking, width) {
+        guard.queue_commit(block);
+    }
+    for message in messages {
+        if let model::Message::Assistant(a) = message {
+            guard.remember_assistant(a.clone());
+        }
+    }
+}
 
 /// Errors raised by the interactive TUI driver.
 #[derive(Debug, thiserror::Error)]
@@ -211,6 +245,15 @@ impl InteractiveMode {
         for block in startup {
             lock_state(&state).queue_commit(block);
         }
+
+        // Startup replay: when the session was resumed (`--continue` / `--resume` /
+        // `--fork` seed the transcript from disk), render its stored user /
+        // assistant / tool-result messages into scrollback *in order*, closed by the
+        // `[resumed: <label>]` marker — so the resumed conversation reads as one
+        // continuous transcript below the chrome, and a stored `stop_reason=Error`
+        // assistant surfaces its red error footnote live (VAL-CHAT-012 /
+        // VAL-CHAT-029). A fresh session has no messages, so this is a no-op.
+        queue_startup_replay(&session, &state);
 
         // Bridge agent events into the driver through the reused, hand_tui-free
         // ChatUpdate protocol. The listener forwards raw session events over an
@@ -728,6 +771,15 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
         return;
     }
 
+    // `/resume` opens the session picker overlay, which awaits the user's pick and
+    // then switches + replays, so it is intercepted here on the async turn runner
+    // (the one task that owns `&mut session`), *before* the sync slash dispatch —
+    // like `/model`.
+    if slash::is_open_resume_picker(text) {
+        run_resume_picker(runner).await;
+        return;
+    }
+
     // Slash commands are intercepted here — the turn runner is the one place
     // that owns `&mut session`, so the session-lifecycle commands (`/new`,
     // `/clone`, `/import`, `/name`) run against it directly. The `/quit` family
@@ -991,6 +1043,29 @@ async fn run_compact(runner: &mut TurnRunner, steer: Option<String>) {
 async fn run_model_selector(runner: &mut TurnRunner) {
     set_streaming(&runner.state, &runner.editor, &runner.requester, false);
     selectors::open_model_selector(
+        &mut runner.session,
+        &runner.cwd,
+        &runner.overlays,
+        &runner.overlay_done,
+        &runner.state,
+        &runner.footer,
+        &runner.requester,
+    )
+    .await;
+}
+
+/// Open the `/resume` session picker overlay and, on a pick, switch to and replay
+/// the chosen session (VAL-OVERLAY-010 / VAL-CHAT-012 / VAL-CHAT-032).
+///
+/// The input loop optimistically marked the state streaming on submit; a picker is
+/// not a streaming turn, so clear that first. Then hand off to
+/// [`selectors::open_resume_picker`], which lists the resumable sessions, mounts the
+/// modal dialog, awaits the single outcome (fed by the input loop driving the
+/// dialog), switches + replays the pick (or reports the cancel), and returns once
+/// the dialog closes.
+async fn run_resume_picker(runner: &mut TurnRunner) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    selectors::open_resume_picker(
         &mut runner.session,
         &runner.cwd,
         &runner.overlays,
