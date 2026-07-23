@@ -51,6 +51,16 @@
 //!   - `G`: **grow + collapse during streaming** — start a stream, grow to 8
 //!     rows with the loader on, then collapse mid-stream, so the height changes
 //!     while content is being committed to scrollback (VAL-CORE-035).
+//!   - `o`: open a **centered modal overlay** — bordered, background dimmed,
+//!     input captured: while it is open, typing does not reach the input row.
+//!     Esc closes it and the viewport repaints with no dim/border residue
+//!     (VAL-CORE-025/026). The overlay renders over the base view, which keeps
+//!     committing to scrollback underneath it (VAL-CORE-040).
+//!   - `t`: toggle a **non-capturing toast overlay** in the top-right — it renders
+//!     on top but keys pass through to the focused input beneath it
+//!     (VAL-OVERLAY-030 passthrough). Set `HAND_TUI_RT_DEMO_ASYNC_OVERLAY=1` to
+//!     have a background task mount (and later unmount) an overlay with no
+//!     keypress at all (VAL-CORE-027).
 //!   - Ctrl+D or Ctrl+C: quit cleanly (terminal fully restored)
 //!   - Ctrl+Z: ignored (no suspend; the UI does not move)
 //!   - F12: DELIBERATE PANIC — crashes on purpose so you can confirm the panic
@@ -71,6 +81,7 @@
 //!   cargo run -p hand-tui --example rt_demo
 //!   HAND_TUI_RT_DEMO_FLOOD=1 cargo run -p hand-tui --example rt_demo
 //!   HAND_TUI_RT_DEMO_STREAM=1 cargo run -p hand-tui --example rt_demo
+//!   HAND_TUI_RT_DEMO_ASYNC_OVERLAY=1 cargo run -p hand-tui --example rt_demo
 //!   HAND_TUI_FORCE_KITTY_KEYBOARD=1 cargo run -p hand-tui --example rt_demo
 //!
 //! On a non-TTY (piped) stdin/stdout it prints a diagnostic to stderr and
@@ -85,6 +96,7 @@ use std::time::Duration;
 use crossterm::event::{KeyCode, KeyModifiers};
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::history::HistorySink;
+use hand_tui::rt::overlay::{Overlay, OverlayAnchor, OverlayMargin, OverlayOptions, OverlayStack};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{SessionError, SessionGuard, SessionTerminal};
 use hand_tui::rt::view::{
@@ -114,6 +126,13 @@ const FLOOD_ENV: &str = "HAND_TUI_RT_DEMO_FLOOD";
 /// scrollback (mid-stream resize / storm-while-streaming) without synthesizing
 /// `s` keypresses. Set to `1` to enable.
 const STREAM_ENV: &str = "HAND_TUI_RT_DEMO_STREAM";
+
+/// Environment variable that auto-mounts an overlay from a background task at
+/// launch — no keypress — then unmounts it after a delay. It lets a
+/// `capture-pane` probe sample the pane before, during, and after a
+/// background-mounted overlay without synthesizing keys (VAL-CORE-027). Set to
+/// `1` to enable.
+const ASYNC_OVERLAY_ENV: &str = "HAND_TUI_RT_DEMO_ASYNC_OVERLAY";
 
 /// How often the flood task requests a frame: ~500/s, deliberately far above the
 /// scheduler's ~60fps ceiling so coalescing and rate-limiting are exercised.
@@ -258,6 +277,110 @@ impl RtComponent for StatusBlock {
     // No caret: default `cursor()` returns None → hardware cursor hidden.
 }
 
+/// Which demo overlay a descriptor stands for. The demo models its open overlays
+/// as a `Send` list of these so both the input loop (for capture decisions) and
+/// the scheduler's draw closure (which rebuilds the real [`OverlayStack`] each
+/// frame) can read them across the task boundary — the same pattern the focusable
+/// bottom-area components use, since an [`OverlayStack`] holds `?Send` trait
+/// objects and cannot itself cross into the spawned draw task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayKind {
+    /// A centered, bordered, dimmed, **capturing** modal dialog — opened with
+    /// `o`, dismissed with Esc. While it is open, typing is isolated from the
+    /// input row (VAL-CORE-025).
+    Modal,
+    /// A top-right, bordered, **non-capturing** toast — opened with `t`. Keys pass
+    /// through it to the focused input beneath (VAL-OVERLAY-030 passthrough).
+    Toast,
+    /// A centered, bordered, dimmed, capturing overlay mounted by a *background
+    /// task* with no keypress, then unmounted after a delay (VAL-CORE-027).
+    Async,
+}
+
+impl OverlayKind {
+    /// The placement/presentation/capture policy this overlay kind renders with.
+    fn options(self) -> OverlayOptions {
+        match self {
+            OverlayKind::Modal | OverlayKind::Async => OverlayOptions {
+                anchor: OverlayAnchor::Center,
+                margin: OverlayMargin::default(),
+                capture_input: true,
+                dim_background: true,
+                border: true,
+            },
+            OverlayKind::Toast => OverlayOptions {
+                anchor: OverlayAnchor::TopRight,
+                margin: OverlayMargin::uniform(1),
+                capture_input: false,
+                dim_background: false,
+                border: true,
+            },
+        }
+    }
+
+    /// The lines this overlay paints, so a tmux probe has a stable string to find.
+    fn body(self) -> Vec<Line<'static>> {
+        match self {
+            OverlayKind::Modal => vec![
+                Line::from("⟦overlay: modal⟧".bold()),
+                Line::from(""),
+                Line::from("Background is dimmed and input is captured."),
+                Line::from("Typing here does NOT reach the input row."),
+                Line::from(""),
+                Line::from("Press Esc to close (no residue).".dim()),
+            ],
+            OverlayKind::Async => vec![
+                Line::from("⟦overlay: async⟧".bold()),
+                Line::from(""),
+                Line::from("Mounted by a background task — no keypress."),
+                Line::from("It will unmount itself shortly.".dim()),
+            ],
+            OverlayKind::Toast => vec![
+                Line::from("⟦overlay: toast⟧".bold()),
+                Line::from("non-capturing — type through me"),
+            ],
+        }
+    }
+}
+
+/// The content component for a demo overlay: it paints the kind's body text and,
+/// when capturing, swallows every key except Esc (which it lets bubble so the run
+/// loop can pop it). A non-capturing overlay consumes nothing, so keys pass
+/// through to the layer beneath.
+struct OverlayBody {
+    kind: OverlayKind,
+}
+
+impl RtComponent for OverlayBody {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        Paragraph::new(self.kind.body()).render(area, buf);
+    }
+
+    fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
+        // A capturing overlay absorbs everything except Esc; the overlay stack's
+        // capture semantics already block ignored keys from lower layers, so we
+        // only need to *not* consume Esc so the run loop sees it and pops us.
+        if self.kind.options().capture_input && key.key_id.as_deref() != Some("escape") {
+            return HandleOutcome::Consumed;
+        }
+        // Non-capturing (toast) or Esc: ignore, so it bubbles / passes through.
+        HandleOutcome::Ignored
+    }
+}
+
+/// Build a live [`OverlayStack`] from a list of open-overlay descriptors, in
+/// bottom-to-top order. Cheap: one boxed trait object per open overlay. Both the
+/// input loop (for `dispatch_key`) and the draw closure (for `render`) rebuild it
+/// from the shared descriptor list each time, since the stack itself cannot cross
+/// the spawned draw task's `Send` boundary.
+fn build_overlay_stack(kinds: &[OverlayKind]) -> OverlayStack {
+    let mut stack = OverlayStack::new();
+    for &kind in kinds {
+        stack.push(Overlay::new(Box::new(OverlayBody { kind }), kind.options()));
+    }
+    stack
+}
+
 /// Index of the editable input row inside the [`FocusView`] (focus-cycle order:
 /// input row first, read-only status block second).
 const INPUT_INDEX: usize = 0;
@@ -362,6 +485,12 @@ struct DemoState {
     /// draw path drains this (calling the [`HistorySink`]) *before* it redraws
     /// the viewport, honouring the "insert_before between draws" ordering.
     pending_commits: Vec<Vec<Line<'static>>>,
+    /// The overlays currently open, bottom-to-top. The input loop reads this to
+    /// route keys through the overlay stack (so a capturing modal isolates
+    /// typing), and the draw closure rebuilds a live [`OverlayStack`] from it to
+    /// render the layers on top of the base view. Held as plain `Send`
+    /// descriptors so it can cross into the spawned draw task.
+    overlays: Vec<OverlayKind>,
 }
 
 fn main() -> ExitCode {
@@ -420,6 +549,8 @@ fn print_help() {
          \x20 c                     : collapse the input to one row and hide the loader\n\
          \x20 l                     : toggle the loader/spinner row\n\
          \x20 G (shift+g)           : grow + collapse during streaming\n\
+         \x20 o                     : open a centered modal overlay (dim + capture); Esc closes\n\
+         \x20 t                     : toggle a non-capturing toast overlay (type through it)\n\
          \x20 Ctrl+D or Ctrl+C      : quit cleanly\n\
          \x20 Ctrl+Z                : ignored (no suspend)\n\
          \x20 paste                 : multi-line paste inserted as one event\n\
@@ -427,7 +558,8 @@ fn print_help() {
          \n\
          Env:\n\
          \x20 {FLOOD_ENV}=1 : start the flood automatically at launch\n\
-         \x20 {STREAM_ENV}=1 : run a continuous stream (probe resize while committing)"
+         \x20 {STREAM_ENV}=1 : run a continuous stream (probe resize while committing)\n\
+         \x20 {ASYNC_OVERLAY_ENV}=1 : background-mount an overlay (no keypress), then unmount"
     );
 }
 
@@ -493,6 +625,12 @@ async fn run() -> Result<(), SessionError> {
         ));
     }
 
+    // Optional background async-overlay mount so a probe can confirm an overlay
+    // paints (and later disappears) with no keypress at all (VAL-CORE-027).
+    if async_overlay_requested_by_env() {
+        spawn_async_overlay(requester.clone(), state.clone());
+    }
+
     // Initial paint.
     requester.request_frame();
 
@@ -500,12 +638,32 @@ async fn run() -> Result<(), SessionError> {
         let mut quit = false;
         match event {
             RtInputEvent::Key(key) => match key.key_id.as_deref() {
-                // Ctrl+D / Ctrl+C: clean quit (guard restores on Drop).
+                // Ctrl+D / Ctrl+C: clean quit (guard restores on Drop). Always
+                // honoured, even under a modal overlay, so the demo can never wedge.
                 Some("ctrl+d" | "ctrl+c") => quit = true,
-                // Deliberate panic to exercise the panic-restore path.
+                // Deliberate panic to exercise the panic-restore path. Also always
+                // honoured (a modal must never trap the panic-restore probe).
                 Some("f12") => panic!("rt_demo: deliberate panic (F12) for VAL-CORE-018"),
+                // A key arriving while a *capturing* overlay is open is isolated by
+                // the modal: Esc closes the topmost overlay (no residue), and every
+                // other key is absorbed — it never reaches the input row or a demo
+                // hotkey. This is the modal-capture branch (VAL-CORE-025); the full
+                // LIFO/ignore-blocks/passthrough semantics live in `OverlayStack`
+                // and are pinned by the unit tests.
+                _ if modal_open(&state) => {
+                    handle_key_under_modal(&state, &key);
+                }
                 // Ctrl+Z is intentionally a no-op: no SIGTSTP, UI unchanged.
                 Some("ctrl+z") => {}
+                // Open a centered, bordered, dimmed, capturing modal overlay.
+                Some("o") => {
+                    lock(&state).overlays.push(OverlayKind::Modal);
+                }
+                // Toggle a top-right, non-capturing toast overlay. Keys still reach
+                // the input beneath it (passthrough) — only its own presence differs.
+                Some("t") => {
+                    toggle_toast(&state);
+                }
                 // Toggle the token flood.
                 Some("f") => {
                     toggle_flood(&requester, &state, &flood_stop, &mut flood_handle);
@@ -660,6 +818,7 @@ fn spawn_scheduler(
                 flood_ticks: guard.flood_ticks,
                 flooding: guard.flooding,
                 streaming: guard.streaming,
+                overlays: guard.overlays.clone(),
             };
             (snapshot, commits)
         };
@@ -722,6 +881,9 @@ struct StateSnapshot {
     flooding: bool,
     /// Whether a streaming block is currently growing.
     streaming: bool,
+    /// The overlays open this frame, bottom-to-top, rebuilt into a live
+    /// [`OverlayStack`] and rendered on top of the base view.
+    overlays: Vec<OverlayKind>,
 }
 
 /// Toggle the token flood on or off in response to the `f` key.
@@ -1020,6 +1182,66 @@ fn queue_oversized_block(requester: &FrameRequester, state: &Arc<Mutex<DemoState
     requester.request_frame();
 }
 
+/// Delay before the background task auto-mounts the async overlay, then how long
+/// it stays up before auto-unmounting — long enough for a `capture-pane` probe to
+/// sample the pane both without and with the overlay, all with no keypress.
+const ASYNC_OVERLAY_DELAY: Duration = Duration::from_millis(600);
+const ASYNC_OVERLAY_HOLD: Duration = Duration::from_millis(900);
+
+/// Whether a *capturing* overlay is currently the topmost overlay, so the input
+/// loop routes keys through the modal (isolating typing) rather than to the input
+/// row or a demo hotkey.
+fn modal_open(state: &Arc<Mutex<DemoState>>) -> bool {
+    let guard = lock(state);
+    build_overlay_stack(&guard.overlays).top_captures_input()
+}
+
+/// Handle a key while a capturing overlay owns input. Esc pops the topmost
+/// overlay (closing it with no residue on the next repaint); every other key is
+/// absorbed by the modal and reaches neither the input row nor a demo hotkey.
+///
+/// This mirrors the [`OverlayStack::dispatch_key`] contract the unit tests pin:
+/// the modal's [`OverlayBody`] consumes all non-Esc keys, so they never fall
+/// through, while Esc bubbles up here to drive the close.
+fn handle_key_under_modal(state: &Arc<Mutex<DemoState>>, key: &RtKey) {
+    if key.key_id.as_deref() == Some("escape") {
+        lock(state).overlays.pop();
+    }
+    // Any other key is swallowed by the capturing overlay — no effect on the base.
+}
+
+/// Toggle the non-capturing toast overlay: add it if absent, remove it if present.
+fn toggle_toast(state: &Arc<Mutex<DemoState>>) {
+    let mut guard = lock(state);
+    if let Some(pos) = guard.overlays.iter().position(|k| *k == OverlayKind::Toast) {
+        guard.overlays.remove(pos);
+    } else {
+        guard.overlays.push(OverlayKind::Toast);
+    }
+}
+
+/// Spawn a background task that, with no user keypress, mounts a capturing async
+/// overlay after a short delay and unmounts it a while later — the async-mount
+/// self-paint proof (VAL-CORE-027). It pushes/pops the overlay descriptor and
+/// requests a frame, so the scheduler paints the overlay appearing and later
+/// disappearing entirely on its own timeline.
+fn spawn_async_overlay(requester: FrameRequester, state: Arc<Mutex<DemoState>>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(ASYNC_OVERLAY_DELAY).await;
+        lock(&state).overlays.push(OverlayKind::Async);
+        requester.request_frame();
+
+        tokio::time::sleep(ASYNC_OVERLAY_HOLD).await;
+        {
+            let mut guard = lock(&state);
+            if let Some(pos) = guard.overlays.iter().position(|k| *k == OverlayKind::Async) {
+                guard.overlays.remove(pos);
+            }
+        }
+        requester.request_frame();
+    });
+}
+
 /// Lock the shared state, treating poisoning as fatal — a poisoned lock means a
 /// panic already tore through the demo, and continuing would paint garbage.
 fn lock(state: &Arc<Mutex<DemoState>>) -> std::sync::MutexGuard<'_, DemoState> {
@@ -1034,6 +1256,13 @@ fn flood_requested_by_env() -> bool {
 /// Whether the continuous streaming loop should auto-start from the environment.
 fn continuous_stream_requested_by_env() -> bool {
     std::env::var(STREAM_ENV).map(|v| v == "1").unwrap_or(false)
+}
+
+/// Whether the background async-overlay mount should auto-run from the environment.
+fn async_overlay_requested_by_env() -> bool {
+    std::env::var(ASYNC_OVERLAY_ENV)
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 /// Extract a verbatim printable character from a key event, if it is a plain
@@ -1109,7 +1338,22 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot, handles: &ViewHandles
     // the hardware cursor — never a stray cursor in the read-only region.
     let mut view = handles.build_view();
     view.render(&[input_rect, status_rect], frame.buffer_mut());
-    if let Some(pos) = view.cursor() {
+
+    // Rebuild the overlay stack from the snapshot and render it on top of the
+    // whole viewport, so overlays layer over the base view. A `dim_background`
+    // overlay dims the base outside its footprint; a bordered overlay wraps its
+    // body in a box; closing an overlay (popping the descriptor) simply repaints
+    // the base crisp next frame — no dim/border residue (VAL-CORE-025/026).
+    let mut overlays = build_overlay_stack(&state.overlays);
+    overlays.render(area, frame.buffer_mut());
+
+    // The hardware cursor tracks the focused input only while no capturing overlay
+    // owns input: a modal isolates typing, so the caret hides while it is open
+    // (the input row is unreachable). With no capturing overlay, the caret follows
+    // focus exactly as before — including through a non-capturing toast.
+    if !overlays.top_captures_input()
+        && let Some(pos) = view.cursor()
+    {
         frame.set_cursor_position(pos);
     }
 }
