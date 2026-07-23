@@ -94,6 +94,15 @@ pub struct DriverState {
     /// when the footer view-model is rebuilt. It only ever grows within a session,
     /// so the footer's spend segment is monotonic across turns (VAL-CHAT-005).
     pub usage: TokenUsageSummary,
+    /// Whether the in-flight turn was cancelled by the user (Esc / Ctrl+C) rather
+    /// than failing on its own. Set by the input loop when it cancels a streaming
+    /// turn (after committing the yellow `[cancelled …]` line and clearing the
+    /// loader); read by the turn runner so the cancelled turn's `send_message`
+    /// error is *not* re-surfaced as a red `send failed` banner — the cancel is a
+    /// clean, user-initiated stop, not a failure (VAL-CHAT-013 / VAL-CHAT-014).
+    /// Reset at the start of every turn so a prior cancel never masks a genuine
+    /// error on the next one.
+    pub cancel_requested: bool,
 }
 
 impl DriverState {
@@ -160,6 +169,30 @@ impl DriverState {
     pub fn accumulate_usage(&mut self, usage: &model::Usage) -> TokenUsageSummary {
         super::footer::accumulate_usage(&mut self.usage, usage);
         self.usage
+    }
+
+    /// Whether a turn is currently streaming (a loader is shown). The input loop
+    /// gates Esc / Ctrl+C on this: with a turn in flight the key cancels; idle it
+    /// falls through (Esc → editor; Ctrl+C → visible no-op).
+    #[must_use]
+    pub fn is_streaming(&self) -> bool {
+        self.streaming
+    }
+
+    /// Mark the in-flight turn as user-cancelled and clear the loader in one step.
+    /// Called by the input loop after it cancels the session token and commits the
+    /// yellow `[cancelled …]` line, so the loader vanishes immediately and the turn
+    /// runner knows to suppress the cancelled turn's error banner.
+    pub fn mark_cancelled(&mut self) {
+        self.cancel_requested = true;
+        self.streaming = false;
+    }
+
+    /// Take and clear the user-cancel flag. The turn runner calls this when a turn
+    /// ends: a `true` result means the turn's error is a cancellation (the yellow
+    /// line already landed), so no red `send failed` banner is committed.
+    pub fn take_cancel_requested(&mut self) -> bool {
+        std::mem::take(&mut self.cancel_requested)
     }
 }
 

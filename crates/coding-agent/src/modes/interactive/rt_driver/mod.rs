@@ -227,7 +227,19 @@ impl InteractiveMode {
 
         // The channel the input loop uses to hand submitted text to the turn
         // runner. Dropping it on teardown is what tells the runner to stop.
+        // Unbounded so a submit *during* an in-flight turn is queued, not dropped:
+        // the turn runner drains it one turn at a time, so follow-up messages
+        // typed mid-turn are processed in order once the current turn ends
+        // (VAL-CHAT-015).
         let (submit_tx, submit_rx) = mpsc::unbounded_channel::<String>();
+
+        // The cancel handle: a shared handle to the session's cancellation token.
+        // Grabbed here, *before* the session moves into the turn runner, so the
+        // input loop can cancel an in-flight turn (Esc / Ctrl+C) from outside the
+        // task that owns `&mut session`. `send_message` swaps the inner token per
+        // turn but keeps this same `Arc<Mutex<…>>`, so a cancel through this handle
+        // always hits the current turn's token (VAL-CHAT-013 / VAL-CHAT-014).
+        let cancel = session.cancel_handle();
 
         // Spawn the turn runner: it owns the session and runs each submitted turn
         // to completion under the watchdog. It does NOT exit the process.
@@ -268,6 +280,7 @@ impl InteractiveMode {
             state: &state,
             requester: &requester,
             submit_tx: &submit_tx,
+            cancel: &cancel,
         })
         .await;
 
@@ -307,6 +320,9 @@ struct RunInputArgs<'a> {
     state: &'a Arc<Mutex<DriverState>>,
     requester: &'a FrameRequester,
     submit_tx: &'a mpsc::UnboundedSender<String>,
+    /// Shared handle to the in-flight turn's cancellation token, used by Esc /
+    /// Ctrl+C to abort a streaming turn from outside the turn runner.
+    cancel: &'a Arc<Mutex<hand_agent::CancellationToken>>,
 }
 
 /// The interactive input loop.
@@ -322,6 +338,7 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
         state,
         requester,
         submit_tx,
+        cancel,
     } = args;
 
     loop {
@@ -347,6 +364,30 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                     toggle_thinking_globally(state, requester);
                     requester.request_frame();
                     continue;
+                }
+                // Turn control (VAL-CHAT-013 / VAL-CHAT-014). Esc and Ctrl+C both
+                // cancel an in-flight turn; both are inert when idle. In raw mode
+                // Ctrl+C is an ordinary key (SIGINT is swallowed), so the driver —
+                // not the OS — decides its meaning: cancel a turn, or a visible
+                // no-op. It must never exit (only Ctrl+D quits), so the terminal is
+                // never left raw.
+                match key.key_id.as_deref() {
+                    Some("escape") => {
+                        // Cancel a streaming turn; otherwise fall through so the
+                        // editor can use Esc (autocomplete dismiss, etc).
+                        if try_cancel_turn(state, requester, cancel, CancelSource::Esc) {
+                            continue;
+                        }
+                    }
+                    Some("ctrl+c") => {
+                        // Cancel a streaming turn; idle it is a visible no-op — the
+                        // app stays alive, no cancel line lands, the terminal is
+                        // untouched. Either way, consume it (never reaches the
+                        // editor, never quits).
+                        try_cancel_turn(state, requester, cancel, CancelSource::CtrlC);
+                        continue;
+                    }
+                    _ => {}
                 }
                 if handle_key(&key, editor, state, submit_tx) == KeyOutcome::Quit {
                     break;
@@ -379,18 +420,22 @@ enum KeyOutcome {
 /// The exit-priority rule (VAL-COMPAT-013): **Ctrl+D always quits**, even with a
 /// non-empty buffer — the quit wins over the editor's own `ctrl+d`
 /// delete-forward binding, matching the legacy unconditional Ctrl+D listener.
-/// Otherwise the key routes to the editor; after dispatch a latched submit is
-/// drained and, if it is a `/quit`-family command, quits — every other submit is
-/// forwarded to the agent driver.
+/// Ctrl+C is *not* an exit here: it is turn control (cancel / no-op), resolved by
+/// the input loop before this function is reached, so it never quits and the
+/// terminal is never left raw (VAL-CHAT-014). Otherwise the key routes to the
+/// editor; after dispatch a latched submit is drained and, if it is a
+/// `/quit`-family command, quits — every other submit is forwarded to the agent
+/// driver.
 fn handle_key(
     key: &RtKey,
     editor: &SharedEditor,
     state: &Arc<Mutex<DriverState>>,
     submit_tx: &mpsc::UnboundedSender<String>,
 ) -> KeyOutcome {
-    // Ctrl+D / Ctrl+C: unconditional clean quit. Intercepted BEFORE the editor so
-    // Ctrl+D exits rather than deleting a character (exit beats delete-char).
-    if matches!(key.key_id.as_deref(), Some("ctrl+d" | "ctrl+c")) {
+    // Ctrl+D: unconditional clean quit. Intercepted BEFORE the editor so Ctrl+D
+    // exits rather than deleting a character (exit beats delete-char). Ctrl+C is
+    // handled by the input loop (cancel / no-op) and never reaches here.
+    if key.key_id.as_deref() == Some("ctrl+d") {
         return KeyOutcome::Quit;
     }
 
@@ -421,6 +466,86 @@ fn handle_key(
     lock_state(state).streaming = true;
     let _ = submit_tx.send(trimmed.to_string());
     KeyOutcome::Continue
+}
+
+/// Which key requested a turn cancellation, so the yellow status line names the
+/// source the user pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelSource {
+    /// The Escape key.
+    Esc,
+    /// Ctrl+C (an ordinary key in raw mode, not a SIGINT).
+    CtrlC,
+}
+
+impl CancelSource {
+    /// The yellow status line committed to scrollback on cancel, naming the key.
+    fn cancel_line(self) -> &'static str {
+        match self {
+            CancelSource::Esc => "[cancelled by Esc]",
+            CancelSource::CtrlC => "[cancelled by ^C]",
+        }
+    }
+}
+
+/// Cancel the in-flight turn if one is streaming, and report whether it did.
+///
+/// This is the shared Esc / Ctrl+C turn-control path (VAL-CHAT-013 /
+/// VAL-CHAT-014). With a turn in flight it: cancels the session token so the
+/// agent loop drops its request at the next await point, clears the loader and
+/// latches the cancel flag in one step (so the turn runner suppresses the
+/// cancelled turn's error banner), commits the yellow `[cancelled …]` line, and
+/// repaints — the user sees the loader vanish and the cancel line land at once.
+///
+/// Idle (no loader / no streaming turn) it does nothing and returns `false`, so
+/// the caller can fall through: Esc reaches the editor, Ctrl+C is a visible
+/// no-op. Cancellation is committed exactly once even if the key repeats, because
+/// clearing `streaming` immediately makes a second press see no in-flight turn.
+fn try_cancel_turn(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    cancel: &Arc<Mutex<hand_agent::CancellationToken>>,
+    source: CancelSource,
+) -> bool {
+    if !cancel_in_flight_turn(state, cancel) {
+        return false;
+    }
+    commit(
+        state,
+        requester,
+        chat::status_lines_for(source.cancel_line()),
+    );
+    true
+}
+
+/// The side-effecting core of [`try_cancel_turn`], minus the scrollback commit
+/// and repaint: mutate the shared state and cancel the session token, reporting
+/// whether a turn was actually in flight.
+///
+/// Kept as a `FrameRequester`-free function so the cancel decision — idle is a
+/// no-op, streaming clears the loader, latches the cancel flag, and cancels the
+/// token exactly once — is unit-tested with a real `DriverState` and a real
+/// `CancellationToken`, without a running scheduler.
+fn cancel_in_flight_turn(
+    state: &Arc<Mutex<DriverState>>,
+    cancel: &Arc<Mutex<hand_agent::CancellationToken>>,
+) -> bool {
+    {
+        let mut guard = lock_state(state);
+        if !guard.is_streaming() {
+            return false;
+        }
+        // Clear the loader + latch the cancel flag while holding the lock so a
+        // rapid second Esc/Ctrl+C can't race a duplicate cancel line.
+        guard.mark_cancelled();
+    }
+    // Cancel the session token so the in-flight `send_message` unwinds. The token
+    // is behind its own Mutex on the session; a poisoned lock just means the turn
+    // already tore down, so a failed lock is harmless here.
+    if let Ok(token) = cancel.lock() {
+        token.cancel();
+    }
+    true
 }
 
 /// Whether a submitted line is a `/quit`-family command (`/quit`, `/exit`, `/q`,
@@ -507,6 +632,10 @@ fn commit(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester, lines: Ve
 /// progress goes indeterminate while the turn runs and clears (or errors) at the
 /// end (VAL-CHAT-018).
 async fn run_turn(runner: &mut TurnRunner, text: &str) {
+    // Clear any stale cancel flag from a prior turn so a cancellation only ever
+    // suppresses *this* turn's error banner (VAL-CHAT-013 / VAL-CHAT-014).
+    lock_state(&runner.state).cancel_requested = false;
+
     // OSC 133 A — prompt start, before the user echo.
     queue_raw(&runner.state, &runner.requester, PromptMark::PromptStart);
 
@@ -542,12 +671,23 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     let progress_end = match run_under_watchdog(runner.watchdog, send, &cancel).await {
         TurnOutcome::Completed => ProgressState::Clear,
         TurnOutcome::Failed(e) => {
-            commit(
-                &runner.state,
-                &runner.requester,
-                chat::error_lines(&format!("send failed: {e}")),
-            );
-            ProgressState::Error
+            // A turn cancelled by the user (Esc / Ctrl+C) returns an error from
+            // `send_message`, but that is not a failure: the yellow `[cancelled …]`
+            // line already landed from the input loop, so suppress the red banner
+            // and clear (not error) the progress. A genuine failure — a missing
+            // credential, a send error — was not user-cancelled, so it takes the
+            // red-banner route with the loader cleared (VAL-CHAT-016).
+            let cancelled = lock_state(&runner.state).take_cancel_requested();
+            if failed_turn_shows_banner(cancelled) {
+                commit(
+                    &runner.state,
+                    &runner.requester,
+                    chat::error_lines(&format!("send failed: {e}")),
+                );
+                ProgressState::Error
+            } else {
+                ProgressState::Clear
+            }
         }
         TurnOutcome::TimedOut => {
             commit(
@@ -572,6 +712,17 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     // thinking-level / context %. The rebuild reads the session, so it lives here
     // in the turn runner (which owns it) rather than in the event applier.
     refresh_footer(runner);
+}
+
+/// Whether a failed turn commits the red `send failed` banner.
+///
+/// A user cancellation (Esc / Ctrl+C) surfaces as a `send_message` error, but the
+/// yellow `[cancelled …]` line already landed from the input loop, so no red
+/// banner is shown. A genuine failure (a missing credential, a transport error)
+/// was not user-cancelled, so it shows the banner (VAL-CHAT-016). Kept as a free
+/// fn so this either/or decision is unit-tested without a running turn.
+fn failed_turn_shows_banner(cancelled: bool) -> bool {
+    !cancelled
 }
 
 /// Rebuild the footer view-model from current session state and the running usage
@@ -1098,5 +1249,198 @@ mod tests {
 
         assert_eq!(outcome, KeyOutcome::Quit);
         assert!(rx.try_recv().is_err(), "quit must not forward a turn");
+    }
+
+    /// Ctrl+C is no longer a quit at the `handle_key` level: turn control resolves
+    /// it in the input loop (cancel / no-op), so it must never quit and never
+    /// leave the terminal raw (VAL-CHAT-014). With a non-empty buffer it also must
+    /// not delete a character — the input loop consumes it before the editor.
+    #[test]
+    fn ctrl_c_is_not_a_quit_at_handle_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        lock_editor(&editor).set_text("draft");
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+
+        let ctrl_c = RtKey {
+            key_id: Some("ctrl+c".to_string()),
+            raw: KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        };
+        // `handle_key` never sees Ctrl+C in the real loop (the loop consumes it),
+        // but even if it did it must not quit — only Ctrl+D quits.
+        let outcome = handle_key(&ctrl_c, &editor, &state, &tx);
+        assert_eq!(outcome, KeyOutcome::Continue, "Ctrl+C must not quit");
+    }
+
+    /// The cancel core is a no-op when idle: no loader, nothing to cancel. It
+    /// reports `false` (so Esc falls to the editor / Ctrl+C is a visible no-op),
+    /// leaves the state untouched, and never cancels the token (VAL-CHAT-013 /
+    /// VAL-CHAT-014, the idle Ctrl+C no-op parity pin).
+    #[test]
+    fn cancel_is_a_noop_when_no_turn_is_streaming() {
+        use hand_agent::CancellationToken;
+
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let cancel = Arc::new(Mutex::new(CancellationToken::new()));
+
+        let cancelled = cancel_in_flight_turn(&state, &cancel);
+
+        assert!(!cancelled, "idle cancel must report nothing to cancel");
+        assert!(!lock_state(&state).streaming, "state stays idle");
+        assert!(
+            !lock_state(&state).cancel_requested,
+            "no cancel flag latched when idle"
+        );
+        assert!(
+            !cancel.lock().unwrap().is_cancelled(),
+            "the token must not be cancelled by an idle no-op"
+        );
+    }
+
+    /// The cancel core cancels a streaming turn: it clears the loader (streaming
+    /// off), latches the cancel flag (so the turn runner suppresses the error
+    /// banner), cancels the session token (so `send_message` unwinds), and reports
+    /// `true`. This is the Esc / Ctrl+C cancel path (VAL-CHAT-013 / VAL-CHAT-014).
+    #[test]
+    fn cancel_stops_a_streaming_turn_and_clears_the_loader() {
+        use hand_agent::CancellationToken;
+
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        lock_state(&state).streaming = true; // a turn is in flight (loader shown).
+        let cancel = Arc::new(Mutex::new(CancellationToken::new()));
+
+        let cancelled = cancel_in_flight_turn(&state, &cancel);
+
+        assert!(cancelled, "a streaming turn must be cancelled");
+        assert!(
+            !lock_state(&state).streaming,
+            "the loader clears immediately on cancel"
+        );
+        assert!(
+            lock_state(&state).cancel_requested,
+            "the cancel flag is latched so the error banner is suppressed"
+        );
+        assert!(
+            cancel.lock().unwrap().is_cancelled(),
+            "the session token is cancelled so send_message unwinds"
+        );
+    }
+
+    /// A second cancel after the first is inert: the first clears `streaming`, so
+    /// the second sees no in-flight turn and reports `false` — no duplicate
+    /// `[cancelled …]` line lands from a key repeat.
+    #[test]
+    fn a_second_cancel_after_the_first_is_inert() {
+        use hand_agent::CancellationToken;
+
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        lock_state(&state).streaming = true;
+        let cancel = Arc::new(Mutex::new(CancellationToken::new()));
+
+        assert!(
+            cancel_in_flight_turn(&state, &cancel),
+            "first press cancels"
+        );
+        assert!(
+            !cancel_in_flight_turn(&state, &cancel),
+            "second press is a no-op (no duplicate cancel line)"
+        );
+    }
+
+    /// The cancel-source status lines name the key the user pressed, so scrollback
+    /// distinguishes an Esc cancel from a Ctrl+C one.
+    #[test]
+    fn cancel_source_lines_name_the_key() {
+        assert_eq!(CancelSource::Esc.cancel_line(), "[cancelled by Esc]");
+        assert_eq!(CancelSource::CtrlC.cancel_line(), "[cancelled by ^C]");
+    }
+
+    /// `take_cancel_requested` reports and clears the latch exactly once: a
+    /// cancelled turn's error is suppressed on the turn it was cancelled, and a
+    /// later turn (no cancel) sees a cleared flag so its genuine error surfaces.
+    #[test]
+    fn take_cancel_requested_is_a_one_shot_latch() {
+        let mut state = DriverState::new(TerminalSize::new(80, 24));
+        state.mark_cancelled();
+        assert!(state.take_cancel_requested(), "the latched cancel is taken");
+        assert!(
+            !state.take_cancel_requested(),
+            "a second take sees a cleared flag — a later turn's error is not masked"
+        );
+    }
+
+    /// A failed turn shows the red banner only when it was *not* user-cancelled: a
+    /// genuine failure (missing credential, send error) surfaces the red banner
+    /// with the loader cleared (VAL-CHAT-016); a cancellation suppresses it (the
+    /// yellow cancel line already landed).
+    #[test]
+    fn failed_turn_shows_banner_only_when_not_cancelled() {
+        assert!(
+            failed_turn_shows_banner(false),
+            "a genuine failure shows the red banner"
+        );
+        assert!(
+            !failed_turn_shows_banner(true),
+            "a user cancellation suppresses the red banner"
+        );
+    }
+
+    /// Two messages submitted while a turn is in flight are both queued on the
+    /// unbounded submit channel and drained in order — neither is dropped
+    /// (VAL-CHAT-015). The channel *is* the queue: the turn runner drains it one
+    /// turn at a time, so a submit mid-turn parks until the current turn ends and
+    /// then processes in FIFO order.
+    #[test]
+    fn queued_submits_during_a_turn_are_preserved_in_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        // Simulate two follow-up messages submitted while a turn is running: they
+        // are pushed to the channel back to back.
+        tx.send("first follow-up".to_string()).unwrap();
+        tx.send("second follow-up".to_string()).unwrap();
+
+        // The turn runner drains them in FIFO order after the current turn ends;
+        // neither is lost, and the order is preserved.
+        assert_eq!(rx.try_recv().ok(), Some("first follow-up".to_string()));
+        assert_eq!(rx.try_recv().ok(), Some("second follow-up".to_string()));
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly two were queued, none dropped"
+        );
+    }
+
+    /// Two rapid submits through `handle_key` both reach the channel: the second
+    /// does not overwrite the first (the single-slot drop the skeleton warned
+    /// about does not happen — the channel is a queue), and both mark streaming
+    /// (VAL-CHAT-015).
+    #[test]
+    fn rapid_submits_through_handle_key_all_reach_the_queue() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let enter = RtKey {
+            key_id: Some("enter".to_string()),
+            raw: KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        };
+
+        lock_editor(&editor).set_text("msg one");
+        assert_eq!(
+            handle_key(&enter, &editor, &state, &tx),
+            KeyOutcome::Continue
+        );
+        lock_editor(&editor).set_text("msg two");
+        assert_eq!(
+            handle_key(&enter, &editor, &state, &tx),
+            KeyOutcome::Continue
+        );
+
+        assert_eq!(rx.try_recv().ok(), Some("msg one".to_string()));
+        assert_eq!(rx.try_recv().ok(), Some("msg two".to_string()));
+        assert!(rx.try_recv().is_err(), "both submits queued, none dropped");
+        assert!(lock_state(&state).streaming, "submit marks streaming");
     }
 }
