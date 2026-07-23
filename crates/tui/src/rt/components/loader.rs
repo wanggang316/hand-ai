@@ -43,8 +43,7 @@ use crate::rt::view::{HandleOutcome, RtComponent};
 ///
 /// Exposed so a host can drive an animation timer, but the *glyphs* are not part
 /// of any behavioural contract — only the static message text is.
-pub const DEFAULT_SPINNER_FRAMES: &[&str] =
-    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub const DEFAULT_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Default cancel hint shown by [`CancellableLoader`].
 pub const DEFAULT_CANCEL_HINT: &str = "Press Escape to cancel";
@@ -78,7 +77,10 @@ impl Loader {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            frames: DEFAULT_SPINNER_FRAMES.iter().map(|s| s.to_string()).collect(),
+            frames: DEFAULT_SPINNER_FRAMES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             frame: 0,
             active: true,
             style: Style::default().add_modifier(Modifier::DIM),
@@ -434,7 +436,10 @@ mod tests {
         let mut loader = Loader::new("Working…");
         loader.set_active(false);
         let buf = render(&loader, 40, 1);
-        assert!(row(&buf, 0).is_empty(), "inactive loader leaves no ghost row");
+        assert!(
+            row(&buf, 0).is_empty(),
+            "inactive loader leaves no ghost row"
+        );
     }
 
     #[test]
@@ -513,7 +518,10 @@ mod tests {
         for w in 1u16..=8 {
             let buf = render(&loader, w, 2);
             // Confined to the single loader row — nothing spills to row 1.
-            assert!(row(&buf, 1).is_empty(), "width {w}: spilled to a second row");
+            assert!(
+                row(&buf, 1).is_empty(),
+                "width {w}: spilled to a second row"
+            );
             // The truncated line fits the pane (measured at the helper, so a wide
             // glyph is not double-counted by a reserved continuation cell).
             assert!(

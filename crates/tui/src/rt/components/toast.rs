@@ -255,7 +255,7 @@ impl RtComponent for Toast {
             buf.set_stringn(
                 area.x,
                 y,
-                &format!("{icon} "),
+                format!("{icon} "),
                 width,
                 Style::default().fg(entry.level.color()),
             );
@@ -304,7 +304,9 @@ mod tests {
 
     fn all_rows(buf: &Buffer) -> Vec<String> {
         let area = buf.area;
-        (area.y..area.y + area.height).map(|y| row(buf, y)).collect()
+        (area.y..area.y + area.height)
+            .map(|y| row(buf, y))
+            .collect()
     }
 
     #[test]
@@ -441,7 +443,10 @@ mod tests {
             // narrow width (the render path clips the icon via `set_stringn` when
             // even the icon does not fit, so the buffer never overflows).
             let buf = render(&toast, w, 2);
-            assert!(row(&buf, 1).is_empty(), "width {w}: spilled to a second row");
+            assert!(
+                row(&buf, 1).is_empty(),
+                "width {w}: spilled to a second row"
+            );
             // Once the icon fits, icon + truncated message fit the pane in display
             // columns — no overflow, no byte-sliced grapheme.
             if (w as usize) >= icon_cols {
@@ -461,7 +466,10 @@ mod tests {
         let icon_cols = display_width(ToastLevel::Error.icon()) + 1;
         for w in 1u16..=8 {
             let buf = render(&toast, w, 2);
-            assert!(row(&buf, 1).is_empty(), "width {w}: spilled to a second row");
+            assert!(
+                row(&buf, 1).is_empty(),
+                "width {w}: spilled to a second row"
+            );
             if (w as usize) >= icon_cols {
                 assert!(
                     painted_width(ToastLevel::Error.icon(), msg, w) <= w as usize,

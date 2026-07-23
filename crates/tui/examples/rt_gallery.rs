@@ -21,6 +21,8 @@
 //! - `Tab` / `Right` / `l` / `n` : next section (wraps)
 //! - `BackTab` / `Left` / `h` / `p` : previous section (wraps)
 //! - `1`..=`9` : jump directly to a section by number
+//! - `d` : (Toast section) dismiss the newest toast — reveals a hidden overflow
+//! - `x` : (Toast section) advance toast TTLs — an expiring toast reveals the next
 //! - `Ctrl+C` / `Ctrl+D` / `q` : quit cleanly (terminal fully restored)
 //!
 //! Run it:
@@ -34,9 +36,9 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use hand_tui::rt::components::{
-    MarkdownView, ProgressBar, SelectItem, SelectList, SelectListLayout, SettingEntry,
-    SettingValue, SettingsList, Spacer, StatusBar, TextBlock, TruncatedText, WidgetBox,
-    default_markdown_theme,
+    CancellableLoader, Loader, MarkdownView, ProgressBar, SelectItem, SelectList, SelectListLayout,
+    SettingEntry, SettingValue, SettingsList, Spacer, StatusBar, TextBlock, Toast, ToastLevel,
+    TruncatedText, WidgetBox, default_markdown_theme,
 };
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
@@ -93,6 +95,11 @@ struct GalleryState {
     active: usize,
     /// Tracked terminal geometry, overwritten whole on each resize event.
     size: TerminalSize,
+    /// Persistent toast stack for the Toast section. Held in state (not rebuilt
+    /// per frame) so the dismiss-newest / TTL-tick gestures mutate it across
+    /// frames, making the overflow-hidden-then-reappears behaviour observable in a
+    /// capture (VAL-WIDGET-012). See [`toast_seam`].
+    toast: Toast,
 }
 
 impl GalleryState {
@@ -101,7 +108,20 @@ impl GalleryState {
             sections: register_sections(),
             active: 0,
             size,
+            toast: toast_seam(),
         }
+    }
+
+    /// Dismiss the newest toast: the host gesture that reveals a hidden overflow
+    /// toast (the observable half of retain-don't-discard).
+    fn dismiss_toast(&mut self) {
+        self.toast.dismiss_newest();
+    }
+
+    /// Advance the toast TTLs by one tick: an expiring toast dropping out reveals
+    /// the next hidden one, the same way dismiss-newest does.
+    fn tick_toast(&mut self) {
+        self.toast.tick_ttl();
     }
 
     /// Move to the next section, wrapping past the last back to the first.
@@ -358,7 +378,64 @@ fn main() {
             });
             list.render(rows[1], buf);
         }),
+        Section::new("Loader", |area, buf| {
+            // The loader family: a basic Loader (spinner + static message) and a
+            // CancellableLoader (spinner + message + elapsed suffix + a block-glyph
+            // progress bar with a percentage + an Escape-to-cancel hint). The
+            // spinner *glyph* is host-timed and not asserted; the static message
+            // text is what the capture confirms.
+            let rows = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // basic loader
+                Constraint::Length(1), // spacer
+                Constraint::Length(3), // cancellable loader (3 rows)
+                Constraint::Min(0),
+            ])
+            .split(area);
+            TruncatedText::new(
+                "Loader — animated spinner + static message; cancellable variant below",
+            )
+            .render(rows[0], buf);
+            Loader::new("Working on your request…").render(rows[1], buf);
+            let mut cancellable = CancellableLoader::new("Compiling project");
+            cancellable.set_elapsed(Some("3.2s".to_string()));
+            cancellable.set_progress(Some(0.42));
+            cancellable.render(rows[3], buf);
+        }),
+        Section::new("Toast", |area, buf| {
+            // The header lives in the stateless builder; the toast stack itself is
+            // painted from persistent gallery state by `draw` (see the special-case
+            // there) so the dismiss-newest (`d`) and TTL-tick (`x`) gestures reveal
+            // the hidden overflow toast across frames.
+            let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
+            TruncatedText::new(
+                "Toast — newest first, cap hides (not drops) overflow · d: dismiss-newest · x: tick TTL",
+            )
+            .render(rows[0], buf);
+        }),
     ]
+}
+
+/// Build the persistent toast stack for the Toast section: four toasts under a
+/// two-visible cap, so two are shown and two are hidden overflow. The dismiss
+/// (`d`) and TTL-tick (`x`) gestures reveal the hidden ones one at a time — the
+/// capturable seam for the overflow-hidden-then-reappears behaviour.
+fn toast_seam() -> Toast {
+    let mut toast = Toast::new();
+    toast.set_max_visible(2);
+    toast.info("Session started");
+    toast.success("Model connected");
+    toast.warning("Rate limit near");
+    // The newest toast expires on its own after a few TTL ticks, so `x` alone
+    // (no `d`) also drives the overflow re-appearance.
+    toast.push_with_ttl(ToastLevel::Error, "Request failed — retrying", 3);
+    toast
+}
+
+/// The index of the Toast section in the registry, so `draw` can special-case it
+/// to paint the persistent stack. Kept in sync with `register_sections`.
+fn toast_section_index(sections: &[Section]) -> Option<usize> {
+    sections.iter().position(|s| s.title == "Toast")
 }
 
 fn main() -> ExitCode {
@@ -409,6 +486,7 @@ fn print_help() {
          \x20 Tab / Right / l / n : next section\n\
          \x20 BackTab / Left / h / p : previous section\n\
          \x20 1..9 : jump to a section by number\n\
+         \x20 d / x : (Toast section) dismiss-newest / tick TTL\n\
          \x20 Ctrl+C / Ctrl+D / q : quit"
     );
 }
@@ -467,6 +545,10 @@ fn handle_nav_key(state: &Arc<Mutex<GalleryState>>, key: &RtKey) -> bool {
         Some("ctrl+c" | "ctrl+d" | "q") => return true,
         Some("tab" | "right" | "l" | "n") => lock(state).next(),
         Some("shift+tab" | "left" | "h" | "p") => lock(state).prev(),
+        // Toast gestures: dismiss the newest toast, or advance its TTLs — both
+        // reveal a hidden overflow toast, the capturable seam for VAL-WIDGET-012.
+        Some("d") => lock(state).dismiss_toast(),
+        Some("x") => lock(state).tick_toast(),
         Some(digit) if digit.len() == 1 => {
             if let Some(d) = digit.chars().next().and_then(|c| c.to_digit(10))
                 && d >= 1
@@ -531,8 +613,17 @@ fn draw(frame: &mut Frame, state: &Arc<Mutex<GalleryState>>) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(inner);
     render_tab_strip(&guard, rows[0], buf);
 
+    let body = rows[1];
     if let Some(section) = guard.sections.get(active) {
-        (section.build)(rows[1], buf);
+        (section.build)(body, buf);
+    }
+
+    // The Toast section paints its header via the stateless builder above; overlay
+    // the persistent toast stack (from gallery state) just below that header so the
+    // dismiss-newest / TTL-tick gestures show up across frames.
+    if toast_section_index(&guard.sections) == Some(active) {
+        let toast_rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(body);
+        guard.toast.render(toast_rows[1], buf);
     }
 }
 
