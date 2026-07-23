@@ -83,18 +83,17 @@ pub struct ParsedBash {
 #[must_use]
 pub fn parse_inline_bash(raw: &str) -> Option<ParsedBash> {
     let trimmed = raw.trim();
+    // `!!` must be checked before `!`, since `!` is a prefix of `!!`.
     if let Some(rest) = trimmed.strip_prefix("!!") {
         Some(ParsedBash {
             command: rest.trim().to_string(),
             exclude_from_context: true,
         })
-    } else if let Some(rest) = trimmed.strip_prefix('!') {
-        Some(ParsedBash {
+    } else {
+        trimmed.strip_prefix('!').map(|rest| ParsedBash {
             command: rest.trim().to_string(),
             exclude_from_context: false,
         })
-    } else {
-        None
     }
 }
 
@@ -307,7 +306,14 @@ mod tests {
 
     #[test]
     fn header_is_bold_and_cyan_for_single_bang() {
-        let lines = bash_block_lines(&normal("ls"), "", BashOutcome::Exited(Some(0)), None, false, 40);
+        let lines = bash_block_lines(
+            &normal("ls"),
+            "",
+            BashOutcome::Exited(Some(0)),
+            None,
+            false,
+            40,
+        );
         let header = lines
             .iter()
             .find(|l| text_of(l).contains("$ ls"))
@@ -388,17 +394,23 @@ mod tests {
             "!! top rule must be dim: {rule:?}"
         );
         assert!(
-            !lines.iter().any(|l| l
-                .spans
+            !lines
                 .iter()
-                .any(|s| s.style.fg == Some(BASH_ACCENT))),
+                .any(|l| l.spans.iter().any(|s| s.style.fg == Some(BASH_ACCENT))),
             "!! frame must not use the cyan bash accent"
         );
     }
 
     #[test]
     fn single_bang_frame_uses_cyan_accent() {
-        let lines = bash_block_lines(&normal("ls"), "", BashOutcome::Exited(Some(0)), None, false, 40);
+        let lines = bash_block_lines(
+            &normal("ls"),
+            "",
+            BashOutcome::Exited(Some(0)),
+            None,
+            false,
+            40,
+        );
         let rule = &lines[0];
         assert!(rule.spans.iter().all(|s| s.style.fg == Some(BASH_ACCENT)));
     }
@@ -443,8 +455,14 @@ mod tests {
         );
         let out = joined(&lines);
         assert!(out.contains("row 0"), "head present when expanded: {out:?}");
-        assert!(out.contains("row 39"), "tail present when expanded: {out:?}");
-        assert!(!out.contains("more lines"), "no collapse hint when expanded");
+        assert!(
+            out.contains("row 39"),
+            "tail present when expanded: {out:?}"
+        );
+        assert!(
+            !out.contains("more lines"),
+            "no collapse hint when expanded"
+        );
     }
 
     // --- truncation footnote path (VAL-CHAT-010) -------------------------

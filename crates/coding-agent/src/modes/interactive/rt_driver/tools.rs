@@ -105,15 +105,16 @@ pub fn tool_box_lines(
     width: u16,
 ) -> Vec<Line<'static>> {
     let bg = state.background();
-    let box_style = Style::default().bg(bg);
     let title_style = Style::default()
         .bg(bg)
         .fg(TITLE_FG)
         .add_modifier(Modifier::BOLD);
     let body_style = Style::default().bg(bg).fg(BODY_FG);
 
-    let mut rows: Vec<Line<'static>> = Vec::new();
-    rows.push(padded_row(
+    // Frame the tinted rows with a blank tinted row top and bottom so the box
+    // reads as one continuous block (the legacy BoxComponent padding).
+    let mut out: Vec<Line<'static>> = vec![blank_row(bg, width)];
+    out.push(padded_row(
         vec![Span::styled(tool_name.to_string(), title_style)],
         bg,
         width,
@@ -121,9 +122,9 @@ pub fn tool_box_lines(
 
     let args_text = pretty_args(args);
     if !args_text.is_empty() {
-        rows.push(blank_row(bg, width));
+        out.push(blank_row(bg, width));
         for line in args_text.split('\n') {
-            rows.push(padded_row(
+            out.push(padded_row(
                 vec![Span::styled(line.to_string(), body_style)],
                 bg,
                 width,
@@ -132,14 +133,14 @@ pub fn tool_box_lines(
     }
 
     if !result_text.is_empty() {
-        rows.push(blank_row(bg, width));
+        out.push(blank_row(bg, width));
         if is_diff_tool(tool_name) {
             for line in diff_lines(result_text, bg) {
-                rows.push(pad_existing(line, bg, width));
+                out.push(pad_existing(line, bg, width));
             }
         } else {
             for line in result_text.split('\n') {
-                rows.push(padded_row(
+                out.push(padded_row(
                     vec![Span::styled(line.to_string(), body_style)],
                     bg,
                     width,
@@ -148,12 +149,7 @@ pub fn tool_box_lines(
         }
     }
 
-    // Frame the tinted rows with a blank tinted row top and bottom so the box
-    // reads as one continuous block (the legacy BoxComponent padding).
-    let mut out = vec![blank_row(bg, width)];
-    out.extend(rows.into_iter().map(|l| pad_existing(l, bg, width)));
     out.push(blank_row(bg, width));
-    let _ = box_style;
     out
 }
 
@@ -216,7 +212,7 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
     let mut i = 0;
     while i < lines.len() {
         let Some(parsed) = parse_diff_line(lines[i]) else {
-            out.push(styled_row(lines[i], DIFF_CONTEXT, bg, false));
+            out.push(styled_row(lines[i], DIFF_CONTEXT, bg));
             i += 1;
             continue;
         };
@@ -260,7 +256,6 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
                             &format!("-{} {}", p.line_num, replace_tabs(&p.content)),
                             DIFF_REMOVED,
                             bg,
-                            false,
                         ));
                     }
                     for p in &added {
@@ -268,7 +263,6 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
                             &format!("+{} {}", p.line_num, replace_tabs(&p.content)),
                             DIFF_ADDED,
                             bg,
-                            false,
                         ));
                     }
                 }
@@ -278,7 +272,6 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
                     &format!("+{} {}", parsed.line_num, replace_tabs(&parsed.content)),
                     DIFF_ADDED,
                     bg,
-                    false,
                 ));
                 i += 1;
             }
@@ -287,7 +280,6 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
                     &format!(" {} {}", parsed.line_num, replace_tabs(&parsed.content)),
                     DIFF_CONTEXT,
                     bg,
-                    false,
                 ));
                 i += 1;
             }
@@ -297,8 +289,8 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
     out
 }
 
-/// A single styled diff/context row spanning `fg` on the box `bg`.
-fn styled_row(text: &str, fg: Color, bg: Color, _inverse: bool) -> Line<'static> {
+/// A single styled diff/context row: `fg` foreground on the box `bg`.
+fn styled_row(text: &str, fg: Color, bg: Color) -> Line<'static> {
     Line::from(Span::styled(
         text.to_string(),
         Style::default().fg(fg).bg(bg),
@@ -418,7 +410,11 @@ mod tests {
     #[test]
     fn pending_state_uses_pending_tint() {
         let lines = tool_box_lines("read", &json!({"path": "/x"}), "", ToolState::Pending, 60);
-        assert!(has_bg(&lines, PENDING_BG), "pending tint: {:?}", joined(&lines));
+        assert!(
+            has_bg(&lines, PENDING_BG),
+            "pending tint: {:?}",
+            joined(&lines)
+        );
     }
 
     #[test]
@@ -446,7 +442,13 @@ mod tests {
 
     #[test]
     fn renders_tool_name_bold() {
-        let lines = tool_box_lines("bash", &json!({"command": "ls"}), "", ToolState::Pending, 60);
+        let lines = tool_box_lines(
+            "bash",
+            &json!({"command": "ls"}),
+            "",
+            ToolState::Pending,
+            60,
+        );
         let title = lines
             .iter()
             .find(|l| text_of(l).contains("bash"))
@@ -458,7 +460,13 @@ mod tests {
 
     #[test]
     fn renders_args_as_pretty_json() {
-        let lines = tool_box_lines("bash", &json!({"command": "ls"}), "", ToolState::Pending, 60);
+        let lines = tool_box_lines(
+            "bash",
+            &json!({"command": "ls"}),
+            "",
+            ToolState::Pending,
+            60,
+        );
         let out = joined(&lines);
         assert!(out.contains("\"command\""), "args JSON key: {out:?}");
         assert!(out.contains("\"ls\""), "args JSON value: {out:?}");
@@ -474,7 +482,13 @@ mod tests {
 
     #[test]
     fn result_text_renders_below_args() {
-        let lines = tool_box_lines("read", &json!({"path": "/x"}), "file body", ToolState::Success, 60);
+        let lines = tool_box_lines(
+            "read",
+            &json!({"path": "/x"}),
+            "file body",
+            ToolState::Success,
+            60,
+        );
         let out = joined(&lines);
         assert!(out.contains("file body"));
         // args precede the result.
@@ -486,7 +500,13 @@ mod tests {
     #[test]
     fn tint_reaches_both_edges_on_every_row() {
         let width = 40u16;
-        let lines = tool_box_lines("read", &json!({"path": "/x"}), "body", ToolState::Success, width);
+        let lines = tool_box_lines(
+            "read",
+            &json!({"path": "/x"}),
+            "body",
+            ToolState::Success,
+            width,
+        );
         for line in &lines {
             let row_width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
             assert!(
@@ -544,7 +564,10 @@ mod tests {
             .find(|l| text_of(l).contains("old content"))
             .expect("removed row");
         assert!(
-            removed.spans.iter().any(|s| s.style.fg == Some(DIFF_REMOVED)),
+            removed
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(DIFF_REMOVED)),
             "removed line must be red: {removed:?}"
         );
     }
@@ -575,8 +598,16 @@ mod tests {
             60,
         );
         // Both a red and a green row are present.
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.style.fg == Some(DIFF_REMOVED))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.style.fg == Some(DIFF_ADDED))));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.style.fg == Some(DIFF_REMOVED)))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.spans.iter().any(|s| s.style.fg == Some(DIFF_ADDED)))
+        );
         // A changed token carries inverse video.
         assert!(
             lines.iter().any(|l| l

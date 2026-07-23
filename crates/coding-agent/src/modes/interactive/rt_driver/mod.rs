@@ -1639,7 +1639,10 @@ mod tests {
     #[test]
     fn tool_result_text_on_kitty_omits_the_image_with_no_indicator() {
         let text = tool_result_display_text(&image_result(), &kitty_caps());
-        assert!(text.contains("screenshot"), "surrounding text kept: {text:?}");
+        assert!(
+            text.contains("screenshot"),
+            "surrounding text kept: {text:?}"
+        );
         assert!(
             !text.contains("image/png"),
             "graphics terminal must not emit an image indicator (image shown out-of-band, and per Decision Log ⑤ not in chat): {text:?}"
@@ -1652,7 +1655,10 @@ mod tests {
     #[test]
     fn tool_result_text_on_plain_shows_a_mime_indicator() {
         let text = tool_result_display_text(&image_result(), &plain_caps());
-        assert!(text.contains("screenshot"), "surrounding text kept: {text:?}");
+        assert!(
+            text.contains("screenshot"),
+            "surrounding text kept: {text:?}"
+        );
         assert!(
             text.contains("image/png"),
             "plain terminal must show a [mime WxH] indicator: {text:?}"
