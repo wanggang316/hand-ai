@@ -169,7 +169,10 @@ fn build_row(cells: &[Cell], line_style: Style) -> Line<'static> {
 /// grapheme cluster.
 #[must_use]
 pub fn wrap_lines(lines: &[Line<'_>], width: u16) -> Vec<Line<'static>> {
-    lines.iter().flat_map(|line| wrap_line(line, width)).collect()
+    lines
+        .iter()
+        .flat_map(|line| wrap_line(line, width))
+        .collect()
 }
 
 /// Commits finalized content into the terminal's native scrollback, above the

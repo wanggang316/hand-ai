@@ -49,7 +49,10 @@ fn row_display_width(line: &Line<'_>) -> usize {
 
 /// Concatenate the visible text of a row, ignoring style.
 fn row_text(line: &Line<'_>) -> String {
-    line.spans.iter().map(|span| span.content.as_ref()).collect()
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
 }
 
 // --- width bound + height count --------------------------------------------
@@ -195,10 +198,7 @@ fn zwj_emoji_family_stays_one_cluster() {
     let text = format!("ab{family}cd");
     let rows = wrap_lines(&[Line::from(text.clone())], 3);
 
-    let rows_with_family = rows
-        .iter()
-        .filter(|r| row_text(r).contains(family))
-        .count();
+    let rows_with_family = rows.iter().filter(|r| row_text(r).contains(family)).count();
     assert_eq!(rows_with_family, 1, "ZWJ family must stay intact");
 
     let joined: String = rows.iter().map(row_text).collect();
@@ -211,7 +211,9 @@ fn zwj_emoji_family_stays_one_cluster() {
 fn oversized_block_lands_complete_and_ordered() {
     // A single logical line far wider than a small pane wraps into many rows,
     // all in order, none lost — the "2× viewport" case at the wrap level.
-    let text: String = (0..200).map(|i| char::from(b'a' + (i % 26) as u8)).collect();
+    let text: String = (0..200)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
     let width = 8;
     let rows = wrap_lines(&[Line::from(text.clone())], width);
 
@@ -222,7 +224,10 @@ fn oversized_block_lands_complete_and_ordered() {
         assert!(row_display_width(row) <= width as usize);
     }
     let joined: String = rows.iter().map(row_text).collect();
-    assert_eq!(joined, text, "the whole oversized block is preserved in order");
+    assert_eq!(
+        joined, text,
+        "the whole oversized block is preserved in order"
+    );
 }
 
 // --- style continuation across a wrap (VAL-CORE-034) -----------------------
@@ -300,7 +305,10 @@ fn wrap_is_deterministic_for_the_same_input() {
 
     let a_text: Vec<String> = a.iter().map(row_text).collect();
     let b_text: Vec<String> = b.iter().map(row_text).collect();
-    assert_eq!(a_text, b_text, "wrap must be a pure function of (text, width)");
+    assert_eq!(
+        a_text, b_text,
+        "wrap must be a pure function of (text, width)"
+    );
 }
 
 // --- degenerate width -------------------------------------------------------
@@ -375,8 +383,14 @@ fn commit_writes_a_block_into_scrollback_in_order() {
     .expect("commit succeeds");
 
     let stream = committed_stream(&terminal);
-    let alpha = stream.iter().position(|r| r == "alpha").expect("alpha present");
-    let bravo = stream.iter().position(|r| r == "bravo").expect("bravo present");
+    let alpha = stream
+        .iter()
+        .position(|r| r == "alpha")
+        .expect("alpha present");
+    let bravo = stream
+        .iter()
+        .position(|r| r == "bravo")
+        .expect("bravo present");
     let charlie = stream
         .iter()
         .position(|r| r == "charlie")
@@ -393,7 +407,8 @@ fn oversized_block_lands_complete_and_ordered_in_terminal() {
     let mut sink = HistorySink::new();
 
     let lines: Vec<Line> = (0..30).map(|i| Line::from(format!("row-{i:02}"))).collect();
-    sink.commit_lines(&mut terminal, lines).expect("commit succeeds");
+    sink.commit_lines(&mut terminal, lines)
+        .expect("commit succeeds");
 
     let stream = committed_stream(&terminal);
     // Extract just the row markers, in the order they appear in the stream.
