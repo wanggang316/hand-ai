@@ -459,12 +459,6 @@ struct DemoState {
     /// on the next coalesced frame — the input side never re-lays-out
     /// synchronously, it just updates this and requests a frame.
     size: TerminalSize,
-    /// Set by the input side when a resize actually changed the size; consumed by
-    /// the draw closure to wipe the old-width viewport *before* the next draw
-    /// re-anchors it. Without this, ratatui's inline resize recompute scrolls the
-    /// old-width border/overlay into scrollback (the VAL-CORE-010/026 leak); with
-    /// it, only blank rows can spill.
-    pending_resize_erase: bool,
     /// How many rows the input body currently occupies (auto-grow simulation).
     /// Starts at one, grows one row per `g` up to the 8-row ceiling, and
     /// collapses back to one on `c`. Drives the fixed-viewport bottom-area
@@ -738,16 +732,13 @@ async fn run() -> Result<(), SessionError> {
             // storm coalesces into a single re-anchoring draw (VAL-CORE-021),
             // and the draw closure re-derives geometry from the updated size.
             RtInputEvent::Resize { cols, rows } => {
-                // Fold the new geometry into the tracked size. When it actually
-                // changed, arm the resize erase so the next draw wipes the
-                // old-width viewport *before* it re-anchors — otherwise ratatui's
-                // inline resize recompute scrolls the old-width border/overlay into
-                // scrollback (VAL-CORE-010/026). A same-size storm event costs
-                // only one already-coalesced frame and arms nothing.
-                let mut guard = lock(&state);
-                if guard.size.apply_resize(cols, rows) {
-                    guard.pending_resize_erase = true;
-                }
+                // Fold the whole new geometry into the tracked size and request a
+                // frame (below). The old-width viewport wipe is done by the draw
+                // closure, which detects the backend size change directly — so the
+                // input side never re-lays-out synchronously and the erase can't
+                // lose a race with an unrelated frame. A same-size storm event
+                // costs only one already-coalesced frame.
+                let _ = lock(&state).size.apply_resize(cols, rows);
             }
             // Focus changes: just repaint (nothing to track).
             RtInputEvent::FocusGained | RtInputEvent::FocusLost => {}
@@ -820,16 +811,19 @@ fn spawn_scheduler(
     // scheduler frame at shutdown.
     let mut terminal = EraseOnDrop::new(terminal);
     let mut history = HistorySink::new();
+    // The backend size the last draw painted against. Comparing the live backend
+    // size to this at the top of every frame detects a resize *in the draw path
+    // itself*, independent of when the crossterm `Resize` event happens to reach
+    // the input loop — so the erase can never lose a race with an unrelated frame
+    // that would otherwise autoresize (and spill) first.
+    let mut last_size: Option<ratatui::layout::Size> = None;
     FrameScheduler::spawn(move || {
         // Snapshot the state under the lock, then release it before touching the
         // terminal so the critical section stays tiny. Any finished blocks are
-        // taken out (not cloned) so they can only ever be committed once. The
-        // resize-erase flag is taken here too, so exactly one draw performs the
-        // pre-re-anchor wipe.
-        let (snapshot, commits, resize_erase) = {
+        // taken out (not cloned) so they can only ever be committed once.
+        let (snapshot, commits) = {
             let mut guard = state.lock().expect("demo state mutex poisoned");
             let commits = std::mem::take(&mut guard.pending_commits);
-            let resize_erase = std::mem::take(&mut guard.pending_resize_erase);
             // Advance the spinner while the loader shows, so a probe sees it move.
             if guard.loader {
                 guard.spinner_phase = guard.spinner_phase.wrapping_add(1);
@@ -844,20 +838,26 @@ fn spawn_scheduler(
                 streaming: guard.streaming,
                 overlays: guard.overlays.clone(),
             };
-            (snapshot, commits, resize_erase)
+            (snapshot, commits)
         };
 
-        // Resize erase: on the first draw after a real size change, wipe the
-        // old-width viewport *before* anything autoresizes. `commit_lines` and
-        // `terminal.draw` both autoresize, and ratatui's inline resize recompute
-        // scrolls the viewport's current cells (an old-width border box / overlay
-        // rows) into scrollback before it re-anchors. Blanking the viewport first
-        // means only blank rows can spill — the stale old-width fragment never
-        // reaches scrollback (VAL-CORE-010/026). Best-effort: a failed wipe must
-        // not abort the frame.
-        if resize_erase {
+        // Resize erase: detect a backend size change here (not from the input
+        // event) and wipe the old-width viewport *before* anything autoresizes.
+        // `commit_lines` and `terminal.draw` both autoresize, and ratatui's inline
+        // resize recompute scrolls the viewport's current cells (an old-width
+        // border box / overlay rows) into scrollback before it re-anchors. Blanking
+        // the viewport first means only blank rows can spill — the stale old-width
+        // fragment never reaches scrollback (VAL-CORE-010/026). Doing this in the
+        // draw closure guarantees the very first draw after the resize erases first,
+        // even if the `Resize` event has not yet reached the input loop. Best-effort:
+        // a failed wipe must not abort the frame.
+        let current_size = terminal.size().ok();
+        if let Some(current) = current_size
+            && last_size.is_some_and(|prev| prev != current)
+        {
             let _ = clear_viewport_region(&mut *terminal);
         }
+        last_size = current_size;
 
         // Refresh the read-only status block from the demo counters, so a probe
         // focusing it sees live-updating status text that typing cannot alter.
