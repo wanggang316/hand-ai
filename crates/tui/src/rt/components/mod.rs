@@ -29,6 +29,7 @@
 //! formatting (Decision Log: visual-signature tolerance). A primitive is correct
 //! if, at 100 columns and after a resize to 60, its contract still holds.
 
+mod editor;
 mod loader;
 mod markdown;
 mod progress_bar;
@@ -41,6 +42,10 @@ mod text_block;
 mod toast;
 mod widget_box;
 
+pub use editor::{
+    AutocompleteContext, BorderTint, EditRecord, Editor, EditorBorder, MAX_INPUT_ROWS,
+    MIN_INPUT_ROWS,
+};
 pub use loader::{
     CancelOutcome, CancellableLoader, DEFAULT_CANCEL_HINT, DEFAULT_SPINNER_FRAMES, Loader,
 };

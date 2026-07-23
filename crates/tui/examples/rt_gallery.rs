@@ -36,9 +36,9 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use hand_tui::rt::components::{
-    CancellableLoader, Loader, MarkdownView, ProgressBar, SelectItem, SelectList, SelectListLayout,
-    SettingEntry, SettingValue, SettingsList, Spacer, StatusBar, TextBlock, Toast, ToastLevel,
-    TruncatedText, WidgetBox, default_markdown_theme,
+    BorderTint, CancellableLoader, Editor, Loader, MarkdownView, ProgressBar, SelectItem,
+    SelectList, SelectListLayout, SettingEntry, SettingValue, SettingsList, Spacer, StatusBar,
+    TextBlock, Toast, ToastLevel, TruncatedText, WidgetBox, default_markdown_theme,
 };
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
@@ -413,7 +413,62 @@ fn main() {
             )
             .render(rows[0], buf);
         }),
+        Section::new("Editor", |area, buf| {
+            // The multi-line editor core in its box style: grapheme-aware editing,
+            // auto-grow, a `line:col` indicator woven into the bottom rail, and the
+            // focus/thinking border tint. Sections are stateless painters, so this
+            // drives a canned key sequence into a fresh editor each frame to *show*
+            // the core — real interactivity is covered by `tests/rt_editor.rs` and
+            // the lib unit tests. (The chat-input's borderless Horizontal style with
+            // no indicator is a later-milestone concern; the gallery demonstrates the
+            // box variant.)
+            let rows = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Min(0),    // editor box
+            ])
+            .split(area);
+            TruncatedText::new(
+                "Editor — grapheme-aware · auto-grow 1..8 · line:col indicator · focus tint",
+            )
+            .render(rows[0], buf);
+
+            let mut editor = Editor::new();
+            // A multi-line draft with CJK content to show cluster-aware editing and
+            // the auto-grow shape. Each printable key is one press; `alt+enter`
+            // inserts a soft break without submitting.
+            for c in "review the ".chars() {
+                editor.handle_key(&char_key(c));
+            }
+            for c in "文档".chars() {
+                editor.handle_key(&char_key(c));
+            }
+            editor.handle_key(&RtKey {
+                key_id: Some("alt+enter".to_string()),
+                raw: crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Enter,
+                    crossterm::event::KeyModifiers::ALT,
+                ),
+            });
+            for c in "then ship it".chars() {
+                editor.handle_key(&char_key(c));
+            }
+            // Show the focused border tint (the thinking tint is the host's to drive
+            // during streaming in a later milestone).
+            editor.set_tint(BorderTint::Focused);
+            editor.render(rows[1], buf);
+        }),
     ]
+}
+
+/// Build a bare printable-character `RtKey` for the gallery's canned editor demo.
+fn char_key(c: char) -> RtKey {
+    RtKey {
+        key_id: Some(c.to_string()),
+        raw: crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    }
 }
 
 /// Build the persistent toast stack for the Toast section: four toasts under a
