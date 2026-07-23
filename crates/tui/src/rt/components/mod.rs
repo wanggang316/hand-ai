@@ -29,6 +29,7 @@
 //! formatting (Decision Log: visual-signature tolerance). A primitive is correct
 //! if, at 100 columns and after a resize to 60, its contract still holds.
 
+mod loader;
 mod markdown;
 mod progress_bar;
 mod select_list;
@@ -37,8 +38,12 @@ mod spacer;
 mod status_bar;
 pub mod syntax_highlight;
 mod text_block;
+mod toast;
 mod widget_box;
 
+pub use loader::{
+    CancelOutcome, CancellableLoader, DEFAULT_CANCEL_HINT, DEFAULT_SPINNER_FRAMES, Loader,
+};
 pub use markdown::{
     CodeHighlighter, MarkdownTheme, MarkdownView, plain_code_highlighter, render_markdown,
 };
@@ -51,8 +56,10 @@ pub use spacer::Spacer;
 pub use status_bar::StatusBar;
 pub use syntax_highlight::{default_highlighter, default_markdown_theme, highlight};
 pub use text_block::{TextBlock, TruncatedText};
+pub use toast::{DEFAULT_MAX_VISIBLE, Toast, ToastLevel};
 pub use widget_box::WidgetBox;
 
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Display width of a string in terminal columns (CJK/emoji aware).
@@ -94,6 +101,44 @@ pub(crate) fn truncate_with_ellipsis(s: &str, max_cols: usize) -> String {
             break;
         }
         out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// Truncate `s` to at most `max_cols` display columns on a **grapheme cluster**
+/// boundary, appending an ellipsis (`…`, one column) when truncation happens.
+///
+/// The grapheme-aware sibling of [`truncate_with_ellipsis`]: it accumulates whole
+/// *extended grapheme clusters* (via [`UnicodeSegmentation`]) rather than `char`s,
+/// so a multi-codepoint glyph — a ZWJ emoji sequence, a flag, a combining mark —
+/// is kept or dropped as a single visual unit and is never split mid-cluster.
+/// This is what the loader/toast messages use so a `<8`-column CJK/emoji message
+/// clips cleanly instead of byte-slicing a multibyte grapheme (the legacy
+/// `&msg[..n]` panic) or underflowing the width budget.
+///
+/// Semantics otherwise match [`truncate_with_ellipsis`]: an already-fitting string
+/// is returned unchanged (no ellipsis); `max_cols == 0` yields the empty string;
+/// `max_cols == 1` yields just the ellipsis; the ellipsis column is reserved
+/// *before* filling.
+pub(crate) fn truncate_graphemes_with_ellipsis(s: &str, max_cols: usize) -> String {
+    if max_cols == 0 {
+        return String::new();
+    }
+    if display_width(s) <= max_cols {
+        return s.to_string();
+    }
+    // Truncation is required, so reserve one column for the ellipsis marker.
+    let budget = max_cols.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for cluster in s.graphemes(true) {
+        let w = display_width(cluster);
+        if used + w > budget {
+            break;
+        }
+        out.push_str(cluster);
         used += w;
     }
     out.push('…');
