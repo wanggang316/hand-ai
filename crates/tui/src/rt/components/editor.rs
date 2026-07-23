@@ -67,6 +67,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Widget};
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::display_width;
+use super::{Autocomplete, AutocompleteProvider};
 use crate::rt::events::RtKey;
 use crate::rt::view::{HandleOutcome, RtComponent};
 
@@ -403,6 +404,13 @@ pub struct Editor {
     /// The host installs one (e.g. dropped-path → `@mention`); the core only
     /// calls it.
     paste_transform: Option<PasteTransform>,
+    /// The autocomplete provider the editor queries off its
+    /// [`context_at_cursor`](Editor::context_at_cursor) seam. `None` until a
+    /// host installs one — the editor never completes without a data source.
+    autocomplete_provider: Option<Arc<dyn AutocompleteProvider>>,
+    /// The live suggestion popup. Closed (empty) until a completable context
+    /// under the caret yields candidates; refreshed after every buffer mutation.
+    autocomplete: Autocomplete,
 }
 
 impl Default for Editor {
@@ -436,6 +444,8 @@ impl Editor {
             paste_markers: HashMap::new(),
             next_paste_id: 0,
             paste_transform: None,
+            autocomplete_provider: None,
+            autocomplete: Autocomplete::new(),
         }
     }
 
@@ -867,19 +877,17 @@ impl Editor {
     }
 
     /// Autocomplete seam: the token under the caret a provider would query, or
-    /// `None` when the caret is not in a completable context. A `/` at column 0
-    /// opens a slash command; an `@` (preceded by start-of-line or whitespace)
-    /// opens a mention. The core computes this but never queries — the
-    /// autocomplete feature does.
+    /// `None` when the caret is not in a completable context. A `/` at the start
+    /// of any line (per-line start) opens a slash command; an `@` (preceded by
+    /// start-of-line or whitespace) opens a mention. The core computes this but
+    /// never queries — the autocomplete feature does.
     #[must_use]
     pub fn context_at_cursor(&self) -> Option<AutocompleteContext> {
         let line = &self.lines[self.cursor_line];
         let before = &line[..self.cursor_col];
-        // Slash command: only at the very start of the first line.
-        if self.cursor_line == 0
-            && before.starts_with('/')
-            && !before[1..].contains(char::is_whitespace)
-        {
+        // Slash command: at the very start of the caret's line (per-line start).
+        // A `/` mid-line is not a command — only column 0 of a line triggers it.
+        if before.starts_with('/') && !before[1..].contains(char::is_whitespace) {
             return Some(AutocompleteContext {
                 trigger: '/',
                 prefix: before[1..].to_string(),
@@ -904,6 +912,81 @@ impl Editor {
             }
         }
         None
+    }
+
+    // -----------------------------------------------------------------
+    // Autocomplete popup integration
+    // -----------------------------------------------------------------
+
+    /// Install (or replace) the autocomplete provider and refresh the popup for
+    /// the current caret context. Builder form of
+    /// [`set_autocomplete_provider`](Editor::set_autocomplete_provider).
+    #[must_use]
+    pub fn with_autocomplete_provider(mut self, provider: Arc<dyn AutocompleteProvider>) -> Self {
+        self.autocomplete_provider = Some(provider);
+        self.refresh_autocomplete();
+        self
+    }
+
+    /// Install (or replace) the autocomplete provider and refresh the popup.
+    pub fn set_autocomplete_provider(&mut self, provider: Arc<dyn AutocompleteProvider>) {
+        self.autocomplete_provider = Some(provider);
+        self.refresh_autocomplete();
+    }
+
+    /// A read-only view of the live suggestion popup.
+    #[must_use]
+    pub fn autocomplete(&self) -> &Autocomplete {
+        &self.autocomplete
+    }
+
+    /// Whether the suggestion popup is currently open.
+    #[must_use]
+    pub fn autocomplete_visible(&self) -> bool {
+        self.autocomplete.is_visible()
+    }
+
+    /// Re-query the provider off the caret context and repopulate the popup.
+    ///
+    /// Called after every buffer mutation. When the caret is not in a
+    /// completable context (no trigger, or the provider does not claim the
+    /// trigger), or when the query yields no candidates, the popup is closed —
+    /// so a zero-match query never leaves an empty frame, and typing past a
+    /// query (e.g. a space) dismisses it.
+    fn refresh_autocomplete(&mut self) {
+        let Some(provider) = self.autocomplete_provider.as_ref() else {
+            self.autocomplete.close();
+            return;
+        };
+        match self.context_at_cursor() {
+            Some(ctx) if provider.handles(ctx.trigger) => {
+                let items = provider.query(ctx.trigger, &ctx.prefix);
+                // An empty result closes the popup — no empty frame.
+                self.autocomplete.set_items(items);
+            }
+            _ => self.autocomplete.close(),
+        }
+    }
+
+    /// Accept the selected candidate: splice its insertion text over the trigger
+    /// token under the caret as one undo unit, then close the popup.
+    ///
+    /// Tab is the *only* accept gesture (Enter submits the buffer verbatim). A
+    /// no-op when the popup is closed or the caret is no longer in a completable
+    /// context. Returns whether a candidate was accepted.
+    fn accept_autocomplete(&mut self) -> bool {
+        let Some(item) = self.autocomplete.selected().cloned() else {
+            return false;
+        };
+        let Some(ctx) = self.context_at_cursor() else {
+            self.autocomplete.close();
+            return false;
+        };
+        // Replace the trigger token `[start_col, cursor_col)` on the caret line
+        // with the candidate's insertion text, recorded as one atomic unit.
+        self.replace_span(ctx.start_col, self.cursor_col, &item.insert_text);
+        self.autocomplete.close();
+        true
     }
 
     // -----------------------------------------------------------------
@@ -1133,6 +1216,35 @@ impl Editor {
             removed: String::new(),
             inserted: text.to_string(),
         });
+    }
+
+    /// Replace `[start, end)` on the caret line with `text` as one atomic undo
+    /// unit, leaving the caret past the inserted text.
+    ///
+    /// This is the autocomplete-accept primitive: it removes the trigger token
+    /// (`/query` or `@query`) the caret sits in and splices the candidate's
+    /// insertion text in its place. Recording the whole swap as a single
+    /// replace unit is the migration fix — one undo cleanly reverts the accept
+    /// (the legacy accept split it across delete+insert and corrupted the
+    /// buffer). A `break_coalesce` latch on both sides seals it so a following
+    /// keystroke starts a fresh burst.
+    fn replace_span(&mut self, start: usize, end: usize, text: &str) {
+        let line_len = self.lines[self.cursor_line].len();
+        let start = start.min(line_len);
+        let end = end.clamp(start, line_len);
+        self.edit_cursor_before = (self.cursor_line, self.cursor_col);
+        let removed: String = self.lines[self.cursor_line][start..end].to_string();
+        let position = self.flat_offset(self.cursor_line, start);
+        self.lines[self.cursor_line].replace_range(start..end, text);
+        self.cursor_col = start + text.len();
+        // An accept seals its own unit and breaks any adjacent typing burst.
+        self.break_coalesce = true;
+        self.record_edit(EditRecord {
+            position,
+            removed,
+            inserted: text.to_string(),
+        });
+        self.break_coalesce = true;
     }
 
     /// Insert a soft line break at the caret (splitting the current line).
@@ -1631,9 +1743,85 @@ impl RtComponent for Editor {
             let max_x = interior.x + interior.width.saturating_sub(1);
             self.caret_cell.set(Some((x.min(max_x), y)));
         }
+
+        // Paint the suggestion popup in the band below the box, clamped to the
+        // rows `area` actually has. When the box has grown to the cap and `area`
+        // leaves no room below it, the popup gets zero rows and paints nothing —
+        // every painted row stays in bounds and never overwrites a history line.
+        if self.autocomplete.is_visible() {
+            let below_y = box_area.y.saturating_add(box_area.height);
+            let area_bottom = area.y.saturating_add(area.height);
+            let avail = area_bottom.saturating_sub(below_y);
+            if avail > 0 {
+                let rows = (self.autocomplete.visible_rows() as u16).min(avail);
+                let popup_area = Rect {
+                    x: box_area.x,
+                    y: below_y,
+                    width: box_area.width,
+                    height: rows,
+                };
+                self.autocomplete.render(popup_area, buf);
+            }
+        }
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
+        // When the suggestion popup is open, it captures its navigation gestures
+        // before the buffer sees them: Up/Down move the indicator (never the
+        // buffer caret, never recall history), Tab accepts the selection (the
+        // *only* accept gesture — Enter still submits the buffer verbatim), and
+        // Esc closes the popup leaving the buffer untouched. Every other key
+        // falls through to the buffer, then the popup refreshes off the new
+        // context.
+        if let Some(id) = key.key_id.as_deref()
+            && self.autocomplete.is_visible()
+        {
+            match id {
+                "up" => {
+                    self.autocomplete.select_prev();
+                    return HandleOutcome::Consumed;
+                }
+                "down" => {
+                    self.autocomplete.select_next();
+                    return HandleOutcome::Consumed;
+                }
+                "tab" => {
+                    if self.accept_autocomplete() {
+                        return HandleOutcome::Consumed;
+                    }
+                    // Fall through only if there was nothing to accept.
+                }
+                "escape" => {
+                    self.autocomplete.close();
+                    return HandleOutcome::Consumed;
+                }
+                _ => {}
+            }
+        }
+        let outcome = self.handle_key_inner(key);
+        // Refresh the popup off the caret context after any buffer-mutating key.
+        // Pure navigation / non-mutating keys leave the popup as-is unless they
+        // moved the caret out of a completable context, which `refresh` detects.
+        if self.autocomplete_provider.is_some() {
+            self.refresh_autocomplete();
+        }
+        outcome
+    }
+
+    fn cursor(&self) -> Option<Position> {
+        // The caret was recorded on the last `render` (which mirrors the wrap the
+        // renderer painted), in the render area's local coordinate space; the view
+        // translates it into viewport coordinates. Reporting it from the recorded
+        // cell — rather than recomputing without a width — is what keeps the
+        // hardware cursor on the caret's grapheme across a reflow.
+        self.caret_cell.get().map(|(x, y)| Position::new(x, y))
+    }
+}
+
+impl Editor {
+    /// The buffer's own key handling, driven by [`handle_key`](RtComponent::handle_key)
+    /// after the autocomplete popup has had first refusal on its gestures.
+    fn handle_key_inner(&mut self, key: &RtKey) -> HandleOutcome {
         let Some(id) = key.key_id.as_deref() else {
             return HandleOutcome::Ignored;
         };
@@ -1761,15 +1949,6 @@ impl RtComponent for Editor {
                 }
             }
         }
-    }
-
-    fn cursor(&self) -> Option<Position> {
-        // The caret was recorded on the last `render` (which mirrors the wrap the
-        // renderer painted), in the render area's local coordinate space; the view
-        // translates it into viewport coordinates. Reporting it from the recorded
-        // cell — rather than recomputing without a width — is what keeps the
-        // hardware cursor on the caret's grapheme across a reflow.
-        self.caret_cell.get().map(|(x, y)| Position::new(x, y))
     }
 }
 

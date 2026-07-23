@@ -36,9 +36,10 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 
 use hand_tui::rt::components::{
-    BorderTint, CancellableLoader, Editor, Loader, MarkdownView, ProgressBar, SelectItem,
-    SelectList, SelectListLayout, SettingEntry, SettingValue, SettingsList, Spacer, StatusBar,
-    TextBlock, Toast, ToastLevel, TruncatedText, WidgetBox, default_markdown_theme,
+    BorderTint, CancellableLoader, CombinedProvider, Editor, Loader, MarkdownView, PathEntry,
+    PathProvider, ProgressBar, SelectItem, SelectList, SelectListLayout, SettingEntry,
+    SettingValue, SettingsList, SlashCommand, SlashProvider, Spacer, StatusBar, TextBlock, Toast,
+    ToastLevel, TruncatedText, WidgetBox, default_markdown_theme,
 };
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
@@ -466,6 +467,44 @@ fn main() {
             editor.insert_paste(" \x1b[31mESC-defused\x1b[0m");
             // Show the focused border tint (the thinking tint is the host's to drive
             // during streaming in a later milestone).
+            editor.set_tint(BorderTint::Focused);
+            editor.render(rows[1], buf);
+        }),
+        Section::new("Autocomplete", |area, buf| {
+            // The editor with an autocomplete provider installed: a `/` at the
+            // start of the line opens the slash-command popup, an `@` opens the
+            // path popup. Sections are stateless painters, so this drives a canned
+            // `/h` into a fresh editor each frame to *show* the popup — Up/Down
+            // navigate, Tab accepts (the only accept gesture), Esc closes. Real
+            // interactivity is covered by `tests/rt_autocomplete.rs`.
+            let rows = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Min(0),    // editor box + popup
+            ])
+            .split(area);
+            TruncatedText::new(
+                "Autocomplete — `/` slash + `@` path providers · ↑↓ navigate · Tab accept · Esc close",
+            )
+            .render(rows[0], buf);
+
+            let mut editor = Editor::new();
+            editor.set_autocomplete_provider(Arc::new(CombinedProvider::new(vec![
+                Box::new(SlashProvider::new(vec![
+                    SlashCommand::new("help").with_description("show help"),
+                    SlashCommand::new("history").with_description("recall prompts"),
+                    SlashCommand::new("model").with_description("switch model"),
+                ])),
+                Box::new(PathProvider::new(vec![
+                    PathEntry::dir("src"),
+                    PathEntry::file("src/main.rs"),
+                    PathEntry::file("README.md"),
+                ])),
+            ])));
+            // Type `/h` at the line start: the popup opens filtered to `/help`,
+            // `/history`. The first candidate is selected (`▸`).
+            for c in "/h".chars() {
+                editor.handle_key(&char_key(c));
+            }
             editor.set_tint(BorderTint::Focused);
             editor.render(rows[1], buf);
         }),

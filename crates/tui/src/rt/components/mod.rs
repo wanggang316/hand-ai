@@ -29,6 +29,7 @@
 //! formatting (Decision Log: visual-signature tolerance). A primitive is correct
 //! if, at 100 columns and after a resize to 60, its contract still holds.
 
+mod autocomplete;
 mod editor;
 mod loader;
 mod markdown;
@@ -42,6 +43,10 @@ mod text_block;
 mod toast;
 mod widget_box;
 
+pub use autocomplete::{
+    Autocomplete, AutocompleteItem, AutocompleteProvider, CombinedProvider, MAX_VISIBLE, PathEntry,
+    PathProvider, SlashCommand, SlashProvider,
+};
 pub use editor::{
     AutocompleteContext, BorderTint, EditRecord, Editor, EditorBorder, KillRing, MAX_INPUT_ROWS,
     MIN_INPUT_ROWS, PasteContent, PasteTransform, dropped_file_mention_transform,
