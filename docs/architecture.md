@@ -94,3 +94,51 @@ viewport-non-drift assertions, not just pure-function unit tests. Pure geometry/
 tests pass while real terminal-integration defects (viewport de-anchor, scrollback leak,
 exit ghost) slip through — that is exactly how the M1 stage-3 defects escaped unit review
 until runtime probing caught them.
+
+## Raw graphics-emission channel (added at M2; the mechanism M3 image display reuses)
+
+Graphics protocols put a *picture* on screen with escape sequences the terminal interprets
+out of band (Kitty `\x1b_G…\x1b\\` APC, iTerm2 `\x1b]1337;…` OSC), not cell content — they
+cannot be stored in a ratatui `Buffer` cell or diffed like text. M2 introduced a channel
+that lets graphics bypass the `Buffer` **without any widget touching the terminal**, keeping
+invariant #1 (the scheduler owns the terminal). See `crates/tui/src/rt/components/image.rs`.
+
+- **`RawEmissionQueue`** (`Arc<Mutex<Vec<PendingEmission>>>`, cloned to every image widget
+  and the draw task). A graphics-mode `RtImage::render` reserves N blank rows in the buffer
+  (so the frame diff paints/clears the footprint) **and** pushes a `PendingEmission { escape,
+  row (viewport-local), rows }`. After `terminal.draw` and **inside** the BSU/ESU sync block,
+  the draw-owning task calls `flush_to(out, viewport_origin_y)`: sort by row, save cursor
+  (`\x1b7`), CUP to `viewport_origin_y + row` (`viewport_origin_y = frame.area().y`, per
+  invariant #4) and write each escape, then restore cursor (`\x1b8`). The save/restore keeps
+  the raw write from disturbing the caret ratatui positioned.
+- **`ScrollbackImageChannel`** (`Arc<Mutex<{ids: HashMap<content_key,u32>, committed:
+  HashSet<u32>}>>`). `image_id(bytes)` hashes content and returns a **stable** Kitty id
+  (allocated once, reused for identical bytes) so transmission stays **bounded and
+  frame-independent** — a repaint of an already-committed scrollback image transmits nothing
+  (id reuse is legal; the contract is bounded, not exactly-once). `mark_committed(id)`
+  protects a scrolled-into-history image. **The type has no method that can mint a wide
+  `d=A`/`d=a` delete** — the only delete it produces is a single-id `d=I` via
+  `delete_viewport_image(id)`, and only for an *uncommitted* id (a committed id yields
+  `None`). That structural absence is the safety pin: a wide delete would wipe every image
+  including the scrollback ones. `terminal_image::delete_all_kitty_images` (the `d=A` form)
+  exists in the legacy C-class module but the rt channel never calls it.
+- **Decode-validation gates every graphics persona.** `RtImage::encode` runs
+  `decodes(&data)` (`image::load_from_memory`) first and degrades to the bordered placeholder
+  box — on Kitty **and** iTerm2 — for any source the decoder rejects, so an undecodable/
+  truncated blob never reaches the wire as a half graphics escape (the migration fix: iTerm2
+  is no longer exempt). Kitty transmits PNG (`f=100`), so a non-PNG source is transcoded via
+  `transcode_to_png`; iTerm2 carries the source bytes native.
+- **OSC 8 hyperlinks ride the same channel.** A markdown link's URL cannot travel through a
+  `Buffer` cell, so the renderer paints the visible styled span and, on a capable terminal,
+  the host flushes `osc8_emission(text, url, row)` through the raw channel; on tmux/incapable
+  terminals `links` is empty and the pinned `text (url)` in-cell fallback is painted.
+
+`image` 0.25 (`default-features = false`, `features = [jpeg, gif, webp, png]`) was added to
+`crates/tui` solely for the Kitty non-PNG→PNG transcode. It was already in the workspace lock
+via `arboard`, so `Cargo.lock` did not grow.
+
+Known deferred (M3 follow-on, tracked in the M2 handoffs, not defects): the scrollback commit
+writes its escape at the viewport region rather than the exact reserved history row
+(`Terminal::viewport_area` is private — no public accessor for the post-`insert_before`
+absolute row), and a live `CSI 16 t` cell-size reply is not yet routed back through the typed
+event pump (the query is proven non-blocking; the reply→row-scaling path is unit-tested).
