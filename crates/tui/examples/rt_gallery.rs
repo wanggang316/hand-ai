@@ -258,18 +258,19 @@ impl GalleryState {
         });
     }
 
-    /// Drop the current viewport image (the `D` gesture): queue a viewport-only
-    /// delete. The channel refuses to delete a committed (scrollback) id, so this
-    /// only ever removes a pure-viewport image — the safety invariant a probe
-    /// checks by dropping *after* a commit and seeing the committed id survive.
+    /// Drop a pure-viewport image (the `k` gesture): queue a viewport-only delete.
+    ///
+    /// Targets the large image, which the `i` gesture never commits (that commits
+    /// the *sample*), so this is always a genuine viewport-only image and the
+    /// delete fires — a single-id Kitty delete, never a wide `d=A`/`d=a`. The
+    /// committed sample sitting in scrollback is a *different* id and stays
+    /// untouched: the safety invariant a probe checks by dropping after a commit
+    /// and seeing the committed image survive.
     fn drop_viewport_image(&mut self) {
         if self.section_title() != Some("Image") {
             return;
         }
-        // A fresh viewport id (never committed) for the plain sample slot: dropping
-        // it is legal. If the same content was already committed to scrollback its
-        // id is protected and the delete is refused by the channel.
-        let id = self.scrollback.image_id(SAMPLE_IMAGE_PNG);
+        let id = self.scrollback.image_id(HUGE_IMAGE_PNG);
         self.pending_deletes.push(id);
     }
 
@@ -831,7 +832,7 @@ fn print_help() {
          \x20 BackTab / Left / h / p : previous section\n\
          \x20 1..9 : jump to a section by number\n\
          \x20 d / x : (Toast section) dismiss-newest / tick TTL\n\
-         \x20 i / D : (Image section) scroll image into scrollback / drop viewport image\n\
+         \x20 i / k : (Image section) scroll image into scrollback / drop viewport image\n\
          \x20 o : toggle the demonstration overlay\n\
          \x20 Ctrl+C / Ctrl+D / q : quit\n\
          \n\
@@ -938,11 +939,11 @@ fn handle_nav_key(state: &Arc<Mutex<GalleryState>>, key: &RtKey) -> bool {
         Some("x") => lock(state).tick_toast(),
         // Image scrollback gestures (Image section):
         //   i : scroll the sample image into native scrollback (commit once)
-        //   D : drop the viewport image (viewport-only delete; a committed one
-        //       is refused by the channel)
+        //   k : drop a pure-viewport image (viewport-only delete; a committed
+        //       image is a different id and stays protected)
         //   o : toggle the demonstration overlay (must not perturb scrollback)
         Some("i") => lock(state).scroll_image_into_history(),
-        Some("D" | "shift+d") => lock(state).drop_viewport_image(),
+        Some("k") => lock(state).drop_viewport_image(),
         Some("o") => lock(state).toggle_overlay(),
         Some(digit) if digit.len() == 1 => {
             if let Some(d) = digit.chars().next().and_then(|c| c.to_digit(10))
