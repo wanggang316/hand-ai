@@ -98,7 +98,9 @@ use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::history::HistorySink;
 use hand_tui::rt::overlay::{Overlay, OverlayAnchor, OverlayMargin, OverlayOptions, OverlayStack};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
-use hand_tui::rt::session::{SessionError, SessionGuard, SessionTerminal};
+use hand_tui::rt::session::{
+    EraseOnDrop, SessionError, SessionGuard, SessionTerminal, clear_viewport_region,
+};
 use hand_tui::rt::view::{
     FocusView, HandleOutcome, MAX_INPUT_ROWS, MIN_INPUT_ROWS, RtComponent, TerminalSize,
     bottom_area_geometry,
@@ -457,6 +459,12 @@ struct DemoState {
     /// on the next coalesced frame — the input side never re-lays-out
     /// synchronously, it just updates this and requests a frame.
     size: TerminalSize,
+    /// Set by the input side when a resize actually changed the size; consumed by
+    /// the draw closure to wipe the old-width viewport *before* the next draw
+    /// re-anchors it. Without this, ratatui's inline resize recompute scrolls the
+    /// old-width border/overlay into scrollback (the VAL-CORE-010/026 leak); with
+    /// it, only blank rows can spill.
+    pending_resize_erase: bool,
     /// How many rows the input body currently occupies (auto-grow simulation).
     /// Starts at one, grows one row per `g` up to the 8-row ceiling, and
     /// collapses back to one on `c`. Drives the fixed-viewport bottom-area
@@ -730,11 +738,16 @@ async fn run() -> Result<(), SessionError> {
             // storm coalesces into a single re-anchoring draw (VAL-CORE-021),
             // and the draw closure re-derives geometry from the updated size.
             RtInputEvent::Resize { cols, rows } => {
-                // The changed-flag is informational here: the shared
-                // `request_frame()` below runs unconditionally and the scheduler
-                // coalesces, so a redundant same-size event costs only one
-                // already-coalesced frame, not a reflow.
-                let _ = lock(&state).size.apply_resize(cols, rows);
+                // Fold the new geometry into the tracked size. When it actually
+                // changed, arm the resize erase so the next draw wipes the
+                // old-width viewport *before* it re-anchors — otherwise ratatui's
+                // inline resize recompute scrolls the old-width border/overlay into
+                // scrollback (VAL-CORE-010/026). A same-size storm event costs
+                // only one already-coalesced frame and arms nothing.
+                let mut guard = lock(&state);
+                if guard.size.apply_resize(cols, rows) {
+                    guard.pending_resize_erase = true;
+                }
             }
             // Focus changes: just repaint (nothing to track).
             RtInputEvent::FocusGained | RtInputEvent::FocusLost => {}
@@ -791,21 +804,32 @@ async fn run() -> Result<(), SessionError> {
 /// token flood requesting hundreds of frames per second still paints at most
 /// ~60fps.
 fn spawn_scheduler(
-    mut terminal: SessionTerminal,
+    terminal: SessionTerminal,
     state: Arc<Mutex<DemoState>>,
     handles: ViewHandles,
 ) -> (FrameRequester, tokio::task::JoinHandle<io::Result<()>>) {
     // The scheduler task owns the terminal, so it is the only place `insert_before`
     // may be called — and it must be called *between* viewport draws. We drain the
     // finished-block queue here, commit each block once, then draw the viewport.
+    //
+    // Wrap the terminal in `EraseOnDrop`: when the scheduler task ends (all
+    // requesters dropped on quit, or a panic unwinding through it) the terminal
+    // drops and wipes the inline viewport region *before* `guard.restore()` runs,
+    // so the shell prompt lands on a fresh line below the transcript with no ghost
+    // bottom-UI box (VAL-CORE-016/036). Deterministic — no reliance on a final
+    // scheduler frame at shutdown.
+    let mut terminal = EraseOnDrop::new(terminal);
     let mut history = HistorySink::new();
     FrameScheduler::spawn(move || {
         // Snapshot the state under the lock, then release it before touching the
         // terminal so the critical section stays tiny. Any finished blocks are
-        // taken out (not cloned) so they can only ever be committed once.
-        let (snapshot, commits) = {
+        // taken out (not cloned) so they can only ever be committed once. The
+        // resize-erase flag is taken here too, so exactly one draw performs the
+        // pre-re-anchor wipe.
+        let (snapshot, commits, resize_erase) = {
             let mut guard = state.lock().expect("demo state mutex poisoned");
             let commits = std::mem::take(&mut guard.pending_commits);
+            let resize_erase = std::mem::take(&mut guard.pending_resize_erase);
             // Advance the spinner while the loader shows, so a probe sees it move.
             if guard.loader {
                 guard.spinner_phase = guard.spinner_phase.wrapping_add(1);
@@ -820,8 +844,20 @@ fn spawn_scheduler(
                 streaming: guard.streaming,
                 overlays: guard.overlays.clone(),
             };
-            (snapshot, commits)
+            (snapshot, commits, resize_erase)
         };
+
+        // Resize erase: on the first draw after a real size change, wipe the
+        // old-width viewport *before* anything autoresizes. `commit_lines` and
+        // `terminal.draw` both autoresize, and ratatui's inline resize recompute
+        // scrolls the viewport's current cells (an old-width border box / overlay
+        // rows) into scrollback before it re-anchors. Blanking the viewport first
+        // means only blank rows can spill — the stale old-width fragment never
+        // reaches scrollback (VAL-CORE-010/026). Best-effort: a failed wipe must
+        // not abort the frame.
+        if resize_erase {
+            let _ = clear_viewport_region(&mut *terminal);
+        }
 
         // Refresh the read-only status block from the demo counters, so a probe
         // focusing it sees live-updating status text that typing cannot alter.
@@ -833,7 +869,7 @@ fn spawn_scheduler(
         // resize wraps to the new width (VAL-CORE-009/010), and a tall or wide
         // block lands complete and ordered.
         for block in commits {
-            history.commit_lines(&mut terminal, block)?;
+            history.commit_lines(&mut *terminal, block)?;
         }
 
         // Wrap the whole paint in BSU/ESU. `draw_synchronized` guarantees the
@@ -1057,22 +1093,26 @@ fn commit_marker(commit_number: u64) -> Line<'static> {
 /// Start a streaming block: reserve the next commit number, spawn the simulator
 /// task that appends one line at a time and, when done, hands the finished block
 /// to the commit queue exactly once. A no-op if a block is already streaming.
+///
+/// The reserve (check `streaming`, set it, clear the live block, and bump
+/// `commit_count`) is done under a **single** lock, so it is atomic against the
+/// continuous-stream driver, which reserves the same way. A prior two-lock
+/// check-then-set left a window where both drivers could each believe they owned
+/// the stream and enqueue the same commit number twice (the VAL-CORE-010
+/// duplicate-commit sub-symptom); the single critical section closes it.
 fn start_stream(
     requester: &FrameRequester,
     state: &Arc<Mutex<DemoState>>,
     input_model: &Arc<Mutex<InputModel>>,
     stream_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
-    {
+    let commit_number = {
         let mut guard = lock(state);
         if guard.streaming {
             return;
         }
         guard.streaming = true;
         guard.stream_block.clear();
-    }
-    let commit_number = {
-        let mut guard = lock(state);
         guard.commit_count += 1;
         guard.commit_count
     };

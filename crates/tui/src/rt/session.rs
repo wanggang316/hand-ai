@@ -329,6 +329,73 @@ where
     terminal.clear()
 }
 
+/// A [`Terminal`] wrapper that erases the inline viewport region exactly once,
+/// when it is dropped.
+///
+/// This is how the exit erase is made *deterministic without a scheduler-shutdown
+/// hook*. The frame scheduler owns the terminal inside a spawned task, so the
+/// terminal is dropped when that task ends (on a clean quit, all requesters
+/// dropped; or on a panic unwinding through the task). Wrapping it here means the
+/// [`clear_viewport_region`] wipe fires on that drop — while stdout is still
+/// valid and the terminal still knows its viewport origin — so the ghost
+/// bottom-UI box is gone *before* [`SessionGuard::restore`] runs and the shell
+/// prompt lands on a fresh line below the transcript. There is no reliance on the
+/// scheduler drawing one more frame at shutdown.
+///
+/// It [`Deref`](std::ops::Deref)s to the inner terminal, so a holder draws,
+/// commits, and resizes through it exactly as through a bare [`Terminal`]. The
+/// erase is best-effort (a teardown path must not panic): any backend error from
+/// the wipe is swallowed.
+///
+/// M3's hand reuses the same scheduler-owns-the-terminal shape, so wrapping the
+/// terminal here (rather than hacking the erase into the demo's shutdown) is what
+/// makes the exit erase carry over unchanged.
+#[derive(Debug)]
+pub struct EraseOnDrop<B: Backend> {
+    terminal: Terminal<B>,
+}
+
+impl<B: Backend> EraseOnDrop<B> {
+    /// Wrap `terminal` so its inline viewport region is erased on drop.
+    pub const fn new(terminal: Terminal<B>) -> Self {
+        Self { terminal }
+    }
+
+    /// Consume the wrapper and return the inner terminal *without* erasing.
+    ///
+    /// The escape hatch for a caller that wants to keep the terminal alive past
+    /// the wrapper (and take over the erase timing itself).
+    pub fn into_inner(self) -> Terminal<B> {
+        // Move the terminal out without running the erase Drop.
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `this` is a `ManuallyDrop`, so its `Drop` never runs and the
+        // field is not dropped twice; we move the terminal out exactly once.
+        unsafe { std::ptr::read(&this.terminal) }
+    }
+}
+
+impl<B: Backend> std::ops::Deref for EraseOnDrop<B> {
+    type Target = Terminal<B>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.terminal
+    }
+}
+
+impl<B: Backend> std::ops::DerefMut for EraseOnDrop<B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.terminal
+    }
+}
+
+impl<B: Backend> Drop for EraseOnDrop<B> {
+    fn drop(&mut self) {
+        // Best-effort: a teardown path must not panic. If the wipe fails there is
+        // nothing useful to do while tearing down.
+        let _ = clear_viewport_region(&mut self.terminal);
+    }
+}
+
 /// Tracks whether a session guard is currently active, so the panic hook only
 /// restores the terminal when a session actually owns it.
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);

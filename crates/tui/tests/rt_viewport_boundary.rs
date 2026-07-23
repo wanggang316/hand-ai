@@ -25,7 +25,7 @@
 //! runtime's own draw/commit/resize ordering.
 
 use hand_tui::rt::history::HistorySink;
-use hand_tui::rt::session::clear_viewport_region;
+use hand_tui::rt::session::{EraseOnDrop, clear_viewport_region};
 use hand_tui::rt::view::{MAX_VIEWPORT_ROWS, bottom_area_geometry};
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::layout::Position;
@@ -145,7 +145,10 @@ fn exit_erase_wipes_the_viewport_box_and_keeps_transcript() {
     let mut sink = HistorySink::new();
     sink.commit_lines(
         &mut terminal,
-        vec![Line::from("transcript line 1"), Line::from("transcript line 2")],
+        vec![
+            Line::from("transcript line 1"),
+            Line::from("transcript line 2"),
+        ],
     )
     .expect("commit transcript");
     paint_bottom_box(&mut terminal, "BOTTOMUI");
@@ -189,6 +192,42 @@ fn exit_erase_wipes_the_viewport_box_and_keeps_transcript() {
         terminal.get_frame().area(),
         origin_before,
         "the viewport origin must not drift across the exit erase",
+    );
+}
+
+#[test]
+fn erase_on_drop_into_inner_skips_the_erase_and_deref_is_transparent() {
+    // The exit path wraps the scheduler-owned terminal in `EraseOnDrop` so the
+    // wipe fires deterministically when the terminal drops at shutdown (no
+    // reliance on a final scheduler frame). Two properties pin the wrapper:
+    //
+    // - It is a transparent stand-in for the terminal: a holder draws, reads its
+    //   frame area, and commits through `Deref`/`DerefMut` exactly as through a
+    //   bare `Terminal`.
+    // - `into_inner` is the escape hatch that hands the terminal back *without*
+    //   erasing, so a caller can take over the erase timing.
+    //
+    // (The wipe itself — that dropping the wrapper blanks the viewport — is the
+    // exact operation `exit_erase_wipes_the_viewport_box_and_keeps_transcript`
+    // pins, since `Drop` calls the same `clear_viewport_region`.)
+    let terminal = inline_terminal(30, MAX_VIEWPORT_ROWS + 4);
+    let mut wrapper = EraseOnDrop::new(terminal);
+
+    // DerefMut reaches `get_frame`/`draw`.
+    let area = wrapper.get_frame().area();
+    assert_eq!(area.width, 30, "Deref exposes the inner viewport width");
+    let g = bottom_area_geometry(1, true, area.width, wrapper.get_frame().area().height);
+    wrapper
+        .draw(|frame| frame.render_widget(Block::bordered(), g.active))
+        .expect("draw through the wrapper");
+
+    // `into_inner` hands the terminal back without erasing, so the just-drawn box
+    // is still present on the recovered terminal.
+    let inner = wrapper.into_inner();
+    let rows = band_rows(inner.backend().buffer(), 0, MAX_VIEWPORT_ROWS + 4);
+    assert!(
+        rows.iter().any(|r| r.contains('┌') || r.contains('│')),
+        "into_inner skips the erase, so the box survives: {rows:?}",
     );
 }
 
