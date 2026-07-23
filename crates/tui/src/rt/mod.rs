@@ -25,6 +25,10 @@ pub use events::{
     translate_event,
 };
 pub use history::{HistorySink, wrap_lines};
+pub use overlay::{
+    Overlay, OverlayAnchor, OverlayHandle, OverlayId, OverlayMargin, OverlayOptions, OverlayStack,
+    anchor_rect,
+};
 pub use scheduler::{
     BSU, ESU, FrameClock, FrameDecision, FrameRequester, FrameScheduler, MAX_BURSTS_PER_SECOND,
     MIN_FRAME_INTERVAL, close_synchronized, draw_synchronized,
