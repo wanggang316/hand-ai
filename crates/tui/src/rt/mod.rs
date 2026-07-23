@@ -19,3 +19,8 @@ pub mod overlay;
 pub mod scheduler;
 pub mod session;
 pub mod view;
+
+pub use events::{
+    RtInputEvent, RtKey, key_event_to_key_id, run_event_loop, should_dispatch, spawn_event_pump,
+    translate_event,
+};
