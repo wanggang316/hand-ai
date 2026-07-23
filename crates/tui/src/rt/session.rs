@@ -192,6 +192,13 @@ pub enum SessionError {
     /// full-screen session against a pipe or file would corrupt the parent
     /// shell, so we refuse.
     NotATty,
+    /// A session guard is already live in this process. Only one guard may own
+    /// the terminal's raw/interactive state at a time — a second [`enter`]
+    /// would double-install the panic hook and race the shared restore flag, so
+    /// it is refused *before* any terminal state is touched.
+    ///
+    /// [`enter`]: SessionGuard::enter
+    AlreadyActive,
     /// An underlying I/O operation failed (raw mode toggle, escape write, ...).
     Io(io::Error),
 }
@@ -203,6 +210,10 @@ impl std::fmt::Display for SessionError {
                 f,
                 "standard input/output is not a TTY (terminal); run this from an interactive terminal"
             ),
+            SessionError::AlreadyActive => write!(
+                f,
+                "a terminal session is already active in this process; only one may run at a time"
+            ),
             SessionError::Io(err) => write!(f, "terminal I/O error: {err}"),
         }
     }
@@ -211,7 +222,7 @@ impl std::fmt::Display for SessionError {
 impl std::error::Error for SessionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            SessionError::NotATty => None,
+            SessionError::NotATty | SessionError::AlreadyActive => None,
             SessionError::Io(err) => Some(err),
         }
     }
@@ -398,7 +409,27 @@ impl<B: Backend> Drop for EraseOnDrop<B> {
 
 /// Tracks whether a session guard is currently active, so the panic hook only
 /// restores the terminal when a session actually owns it.
+///
+/// It is also the **single-session arbiter**: [`SessionGuard::enter`] claims it
+/// with a `compare_exchange` (false → true) *before* touching any terminal
+/// state, so a second concurrent (or re-entrant) `enter` observes the flag as
+/// already set and is refused with [`SessionError::AlreadyActive`] rather than
+/// double-installing the panic hook or racing the shared restore.
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Installs the terminal-restoring panic hook exactly once for the lifetime of
+/// the process.
+///
+/// A fresh hook is chained onto the previous one only on the first live
+/// session; subsequent sessions reuse it. The hook is keyed on the shared
+/// [`SESSION_ACTIVE`] flag (via [`restore_once`]), so once a session ends and
+/// clears the flag the hook is inert until the next `enter` re-arms it — there
+/// is no need to (and no safe way to) *uninstall* a hook, and re-installing per
+/// session would stack an unbounded chain of hooks across a resumed/re-entered
+/// run. Kitty state is read from the flag-owning guard at restore time via the
+/// captured `kitty` value of whichever session installed the hook; every live
+/// session pushes the same kitty flags, so a single captured value is correct.
+static PANIC_HOOK_INSTALLED: std::sync::Once = std::sync::Once::new();
 
 /// RAII guard that owns the terminal's raw/interactive state.
 ///
@@ -428,20 +459,33 @@ impl SessionGuard {
         check_tty(&io::stdout())?;
         check_tty(&io::stdin())?;
 
+        // Single-session guard: claim the shared flag *before* toggling raw mode
+        // or installing the panic hook. If another guard already owns it the
+        // claim fails and we return without having touched any terminal state,
+        // so a re-entrant `enter` can never double-install the hook or race the
+        // restore.
+        if !claim_session(&SESSION_ACTIVE) {
+            return Err(SessionError::AlreadyActive);
+        }
+
         let kitty = should_use_kitty();
 
-        enable_raw_mode().map_err(SessionError::Io)?;
+        if let Err(err) = enable_raw_mode() {
+            // Release the claim we just took so a later `enter` can retry.
+            SESSION_ACTIVE.store(false, Ordering::SeqCst);
+            return Err(SessionError::Io(err));
+        }
 
         let mut stdout = io::stdout();
         if let Err(err) = write_enter_sequences(&mut stdout, kitty) {
-            // Roll back the raw-mode toggle so a partial failure does not leave
-            // the shell wedged.
+            // Roll back the raw-mode toggle *and* the claim so a partial failure
+            // does not leave the shell wedged or the flag stuck set.
             let _ = disable_raw_mode();
+            SESSION_ACTIVE.store(false, Ordering::SeqCst);
             return Err(SessionError::Io(err));
         }
 
         install_panic_hook(kitty);
-        SESSION_ACTIVE.store(true, Ordering::SeqCst);
 
         Ok(Self {
             kitty,
@@ -494,6 +538,20 @@ impl Drop for SessionGuard {
     }
 }
 
+/// Claim exclusive ownership of `active`, returning whether the claim succeeded.
+///
+/// The single-session arbiter: a `compare_exchange` from `false` to `true`
+/// succeeds for exactly one caller while the flag is clear, and fails for every
+/// caller that observes it already set. Kept as a free function over the flag so
+/// the exclusion can be unit-tested against a local `AtomicBool` without
+/// touching the real terminal — the mirror of [`restore_once`], which releases
+/// the same flag.
+fn claim_session(active: &AtomicBool) -> bool {
+    active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
 /// One-shot restore arbiter shared by the guard's `restore`/`Drop` and the
 /// panic hook.
 ///
@@ -520,12 +578,19 @@ fn restore_terminal(kitty: bool) {
 
 /// Install a panic hook that restores the terminal before the previous hook
 /// prints the panic message, so a crash leaves a readable, usable terminal.
+///
+/// Installed **exactly once** per process via [`PANIC_HOOK_INSTALLED`]: chaining
+/// a fresh hook on every `enter` would stack an unbounded chain across a
+/// resumed / re-entered session. The hook keys on the shared [`SESSION_ACTIVE`]
+/// flag, so it is inert between sessions and re-armed by the next `enter`.
 fn install_panic_hook(kitty: bool) {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore_once(&SESSION_ACTIVE, || restore_terminal(kitty));
-        previous(info);
-    }));
+    PANIC_HOOK_INSTALLED.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_once(&SESSION_ACTIVE, || restore_terminal(kitty));
+            previous(info);
+        }));
+    });
 }
 
 /// A SIGHUP listener for the runtime's main loop.
@@ -587,6 +652,45 @@ impl Hangup {
     /// loses no already-delivered signal.
     pub async fn recv(&mut self) -> Option<()> {
         self.signal.recv().await
+    }
+}
+
+#[cfg(test)]
+mod claim_session_tests {
+    use super::{claim_session, restore_once};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The first claim on a clear flag succeeds and sets it; a second claim,
+    /// while the flag is still held, is refused. This is the single-session
+    /// exclusion: only one guard may own the terminal at a time.
+    #[test]
+    fn claim_session_admits_one_and_refuses_the_second() {
+        let active = AtomicBool::new(false);
+
+        assert!(claim_session(&active), "first claim must succeed");
+        assert!(active.load(Ordering::SeqCst), "flag must be set");
+        assert!(
+            !claim_session(&active),
+            "a second claim while active must be refused"
+        );
+    }
+
+    /// After the flag is released (the guard's restore path clears it via
+    /// `restore_once`), a fresh claim succeeds again — a new session may enter
+    /// once the previous one has torn down.
+    #[test]
+    fn claim_session_succeeds_again_after_release() {
+        let active = AtomicBool::new(false);
+
+        assert!(claim_session(&active));
+        // Release, as the guard's restore / Drop does.
+        restore_once(&active, || {});
+        assert!(!active.load(Ordering::SeqCst), "flag must be cleared");
+
+        assert!(
+            claim_session(&active),
+            "a new session may claim once the previous released"
+        );
     }
 }
 
