@@ -288,6 +288,47 @@ fn force_kitty_requested() -> bool {
 /// The stdout-backed ratatui terminal used by a live session.
 pub type SessionTerminal = Terminal<FallbackSizeBackend<CrosstermBackend<io::Stdout>>>;
 
+/// Erase the inline viewport's rows, leaving the transcript above it untouched.
+///
+/// This is the single "wipe the fixed bottom-UI band clean" primitive shared by
+/// two teardown/reflow paths that both otherwise leak the viewport's current
+/// content:
+///
+/// - **Exit.** The rt runtime reserves a fixed inline viewport
+///   ([`INLINE_VIEWPORT_ROWS`]) for the bottom UI. Neither ratatui's
+///   `Terminal::Drop` (which only shows the cursor) nor [`SessionGuard::restore`]
+///   (paste-disable + kitty-pop + cursor-show) erases those rows, so on quit the
+///   bordered box is left on screen as a ghost and the shell prompt overwrites
+///   *inside* it. Calling this before restoring wipes the band so the prompt
+///   lands on a fresh line directly below the transcript, with no ghost border.
+/// - **Resize.** ratatui recomputes the inline viewport lazily, on the next
+///   `draw`/`autoresize` after a backend size change. That recompute
+///   (`compute_inline_size` → `append_lines`) scrolls the viewport's *current*
+///   cells — an old-width border box, or overlay rows — into native scrollback
+///   *before* it re-anchors and clears. Wiping the viewport to blank *first*
+///   means only blank rows can spill: the stale old-width fragment never reaches
+///   scrollback.
+///
+/// Both uses map to the same terminal operation: for an inline viewport,
+/// [`Terminal::clear`] moves the backend cursor to the viewport's top row and
+/// issues an erase-in-display from there to the end of the screen, leaving every
+/// row *above* the viewport (the committed transcript) intact and resetting the
+/// back buffer so the next draw repaints in full. It preserves the cursor's
+/// pre-clear column/row on backends that report it.
+///
+/// # Errors
+///
+/// Propagates any backend error from the clear (e.g. a failed write to the
+/// underlying terminal). On a teardown path a caller typically ignores it —
+/// there is nothing useful to do while tearing down — but the result is surfaced
+/// so a live caller (the resize path) can react.
+pub fn clear_viewport_region<B>(terminal: &mut Terminal<B>) -> Result<(), B::Error>
+where
+    B: Backend,
+{
+    terminal.clear()
+}
+
 /// Tracks whether a session guard is currently active, so the panic hook only
 /// restores the terminal when a session actually owns it.
 static SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
