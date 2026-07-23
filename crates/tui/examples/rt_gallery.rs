@@ -1041,11 +1041,16 @@ fn spawn_scheduler(
             image_queue.flush_to(w, viewport_origin_y)?;
             // Emit real OSC 8 hyperlinks for the Markdown section's links through
             // the same raw channel (a capable terminal only; on tmux/fallback the
-            // renderer painted `text (url)` and this list is empty).
-            for e in &osc8 {
-                let absolute_row = viewport_origin_y.saturating_add(e.row);
-                write!(w, "\x1b[{};1H", absolute_row.saturating_add(1))?;
-                w.write_all(e.escape.as_bytes())?;
+            // renderer painted `text (url)` and this list is empty). Save/restore
+            // the cursor around the out-of-band writes so the draw's caret survives.
+            if !osc8.is_empty() {
+                w.write_all(b"\x1b7")?;
+                for e in &osc8 {
+                    let absolute_row = viewport_origin_y.saturating_add(e.row);
+                    write!(w, "\x1b[{};1H", absolute_row.saturating_add(1))?;
+                    w.write_all(e.escape.as_bytes())?;
+                }
+                w.write_all(b"\x1b8")?;
             }
             Ok(())
         })
