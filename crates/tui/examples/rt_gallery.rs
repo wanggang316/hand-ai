@@ -16,11 +16,31 @@
 //! pushing onto the same registry — the navigation, layout, and draw path are
 //! written once here and do not change as sections are added.
 //!
-//! # Navigation
+//! # Navigation and interaction routing
 //!
-//! - `Tab` / `Right` / `l` / `n` : next section (wraps)
-//! - `BackTab` / `Left` / `h` / `p` : previous section (wraps)
-//! - `1`..=`9` : jump directly to a section by number
+//! The gallery runs in one of two input regimes depending on the active section:
+//!
+//! - **Display-only sections** (Text/Box/Spacer/Truncated/StatusBar/Progress/
+//!   Markdown/Loader/Toast/Image) are static painters. They keep the full gesture
+//!   set below (`h`/`l`/`n`/`p`, arrows, digits, and the section-specific `d`/`x`/
+//!   `i`/`k`/`o`).
+//! - **Interactive sections** (Select/Settings/Editor/Autocomplete) hold a *live*
+//!   component in gallery state. Every key that is not a reserved gallery gesture
+//!   is routed straight into that component's `handle_key`, so a tmux-driven live
+//!   walk can navigate a select list, edit a setting in place, type into the
+//!   editor, or drive the autocomplete popup and watch it respond in real time.
+//!   Only `Tab` / `BackTab` and the quit chords stay gallery-level here, so the
+//!   tour can always advance out of an interactive section without the component
+//!   swallowing the switch. (Digits route to the component too, so a number can be
+//!   typed into the editor.)
+//!
+//! Reserved gallery gestures (always gallery-level, every section):
+//!
+//! - `Tab` / `Right` / `l` / `n` : next section (wraps) — on an interactive section
+//!   only `Tab` switches; `Right`/`l`/`n` are handed to the component.
+//! - `BackTab` / `Left` / `h` / `p` : previous section (wraps) — on an interactive
+//!   section only `BackTab` switches.
+//! - `1`..=`9` : jump directly to a section by number (display-only sections).
 //! - `d` : (Toast section) dismiss the newest toast — reveals a hidden overflow
 //! - `x` : (Toast section) advance toast TTLs — an expiring toast reveals the next
 //! - `Ctrl+C` / `Ctrl+D` / `q` : quit cleanly (terminal fully restored)
@@ -49,7 +69,7 @@ use hand_tui::rt::session::{EraseOnDrop, SessionError, SessionGuard, SessionTerm
 use hand_tui::rt::view::{RtComponent, TerminalSize};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Widget};
 
@@ -176,6 +196,72 @@ impl Section {
     }
 }
 
+/// The live, key-consuming widget behind an interactive section.
+///
+/// Where the display-only sections are per-frame [`SectionBuilder`] painters,
+/// these four hold a *persistent* [`RtComponent`] in gallery state so a typed key
+/// mutates it across frames — the whole point of interactive routing. Each is
+/// seeded once (in [`build_interactive`]) with the same canned demo gestures the
+/// stateless builders used to drive, so a section that is never touched still
+/// renders its signature shape; from there a live walk drives it further.
+///
+/// The variant names match the section titles routing keys to them keys off
+/// ([`InteractiveKind::from_title`]).
+enum Interactive {
+    /// The `Select` section's scrollable select list (↑/↓ navigate, Enter picks).
+    Select(SelectList),
+    /// The `Settings` section's settings list (↑/↓ move, Enter/Space edits).
+    Settings(SettingsList),
+    /// The `Editor` section's multi-line editor (grapheme-aware typing, kill-ring).
+    Editor(Editor),
+    /// The `Autocomplete` section's editor with slash/path providers installed.
+    Autocomplete(Editor),
+}
+
+impl Interactive {
+    /// Borrow the underlying component as a mutable `RtComponent`, so a routed key
+    /// reaches its `handle_key` regardless of which widget backs the section.
+    fn as_component_mut(&mut self) -> &mut dyn RtComponent {
+        match self {
+            Interactive::Select(c) => c,
+            Interactive::Settings(c) => c,
+            Interactive::Editor(c) | Interactive::Autocomplete(c) => c,
+        }
+    }
+
+    /// Borrow the underlying component immutably, for rendering and cursor.
+    fn as_component(&self) -> &dyn RtComponent {
+        match self {
+            Interactive::Select(c) => c,
+            Interactive::Settings(c) => c,
+            Interactive::Editor(c) | Interactive::Autocomplete(c) => c,
+        }
+    }
+}
+
+/// Which interactive widget a section title maps to, or `None` for a display-only
+/// section. This is the single place the interactive-vs-static split is decided,
+/// so navigation routing and body rendering agree on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InteractiveKind {
+    Select,
+    Settings,
+    Editor,
+    Autocomplete,
+}
+
+impl InteractiveKind {
+    fn from_title(title: &str) -> Option<Self> {
+        match title {
+            "Select" => Some(Self::Select),
+            "Settings" => Some(Self::Settings),
+            "Editor" => Some(Self::Editor),
+            "Autocomplete" => Some(Self::Autocomplete),
+            _ => None,
+        }
+    }
+}
+
 /// The gallery's mutable state, shared between the input loop (which mutates the
 /// active index and tracked size) and the scheduler's draw closure (which reads
 /// them). A plain `std::sync::Mutex`: every critical section is a tiny field
@@ -183,6 +269,11 @@ impl Section {
 struct GalleryState {
     /// The registered sections, in navigation order.
     sections: Vec<Section>,
+    /// The live interactive widget for each section, parallel to `sections`.
+    /// `None` for a display-only section; `Some` for the four interactive ones,
+    /// seeded once so an untouched section still shows its signature shape and a
+    /// routed key mutates it across frames.
+    interactive: Vec<Option<Interactive>>,
     /// Index of the currently shown section.
     active: usize,
     /// Tracked terminal geometry, overwritten whole on each resize event.
@@ -231,8 +322,14 @@ struct PendingScrollbackImage {
 impl GalleryState {
     fn new(size: TerminalSize) -> Self {
         let image_queue = RawEmissionQueue::new();
+        let sections = register_sections(image_queue.clone());
+        let interactive = sections
+            .iter()
+            .map(|s| InteractiveKind::from_title(s.title).map(build_interactive))
+            .collect();
         Self {
-            sections: register_sections(image_queue.clone()),
+            sections,
+            interactive,
             active: 0,
             size,
             toast: toast_seam(),
@@ -315,6 +412,35 @@ impl GalleryState {
     fn jump(&mut self, index: usize) {
         if index < self.sections.len() {
             self.active = index;
+        }
+    }
+
+    /// Whether the active section is one of the interactive four (so non-reserved
+    /// keys should route into its live component rather than drive navigation).
+    fn active_is_interactive(&self) -> bool {
+        self.interactive
+            .get(self.active)
+            .is_some_and(Option::is_some)
+    }
+
+    /// The active section's live interactive component, mutably, if it has one.
+    fn active_interactive_mut(&mut self) -> Option<&mut Interactive> {
+        self.interactive.get_mut(self.active)?.as_mut()
+    }
+
+    /// The active section's live interactive component, immutably, if it has one.
+    fn active_interactive(&self) -> Option<&Interactive> {
+        self.interactive.get(self.active)?.as_ref()
+    }
+
+    /// Route a key into the active section's live interactive component.
+    ///
+    /// Only called when the active section is interactive; the key was already
+    /// filtered of the reserved gallery gestures by the caller, so whatever
+    /// arrives here is genuinely the component's to handle.
+    fn route_to_interactive(&mut self, key: &RtKey) {
+        if let Some(interactive) = self.active_interactive_mut() {
+            let _ = interactive.as_component_mut().handle_key(key);
         }
     }
 }
@@ -436,96 +562,29 @@ fn register_sections(image_queue: RawEmissionQueue) -> Vec<Section> {
             // bar with a `▸` indicator. A window of 4 over 6 items shows the
             // `(n/total)` counter; the description on "sonnet" is deliberately
             // long so it truncates with an ellipsis on a narrow terminal.
+            //
+            // Interactive: the live list lives in gallery state (see
+            // `build_interactive`); this builder paints only the header, and `draw`
+            // renders the persistent list into the body so ↑/↓ navigate it live.
             let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
             TruncatedText::new(
-                "SelectList — ▸ selected row, dimmed description column, wrap navigation",
+                "SelectList — ↑/↓ navigate (live), ▸ selected row, dimmed description column",
             )
             .render(rows[0], buf);
-            let mut list = SelectList::new(vec![
-                SelectItem::new("opus", "Claude Opus").with_description("most capable, slowest"),
-                SelectItem::new("sonnet", "Claude Sonnet")
-                    .with_description("balanced quality and speed for most day-to-day coding work"),
-                SelectItem::new("haiku", "Claude Haiku").with_description("fastest, lightest"),
-                SelectItem::new("gpt", "GPT-4o").with_description("multimodal"),
-                SelectItem::new("gemini", "Gemini").with_description("long context"),
-                SelectItem::new("llama", "Llama").with_description("open weights"),
-            ])
-            .visible_count(4)
-            .layout(SelectListLayout {
-                min_primary_column_width: Some(18),
-                max_primary_column_width: Some(18),
-            });
-            // Focus the second item so the highlight bar is not on the first row.
-            list.handle_key(&RtKey {
-                key_id: Some("down".to_string()),
-                raw: crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Down,
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            });
-            list.render(rows[1], buf);
         }),
         Section::new("Settings", |area, buf| {
             // A settings list exercising every value type plus the full chrome:
             // an enum, a bool, a number, and a string, with the focused entry's
-            // description below the list and the footer hint. The number entry is
-            // shown mid-edit (inline caret) to demonstrate edit-in-place.
+            // description below the list and the footer hint.
+            //
+            // Interactive: the live list lives in gallery state; this builder paints
+            // only the header and `draw` renders the list from state, so ↑/↓ move
+            // the selection and Enter/Space edits in place, live.
             let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(area);
             TruncatedText::new(
-                "SettingsList — Enter/Space edits in place; selection clamps (no wrap)",
+                "SettingsList — ↑/↓ move · Enter/Space edits in place (live); selection clamps",
             )
             .render(rows[0], buf);
-            let mut list = SettingsList::new(vec![
-                SettingEntry::new(
-                    "theme",
-                    SettingValue::Enum {
-                        choices: vec!["dark".into(), "light".into(), "auto".into()],
-                        selected: 0,
-                    },
-                    "Color theme — Enter cycles through the choices",
-                ),
-                SettingEntry::new(
-                    "auto_save",
-                    SettingValue::Bool(true),
-                    "Enter/Space flips this boolean instantly",
-                ),
-                SettingEntry::new(
-                    "max_tokens",
-                    SettingValue::Number(4096.0),
-                    "A number, edited inline; a non-numeric edit is rejected",
-                ),
-                SettingEntry::new(
-                    "model",
-                    SettingValue::String("claude-sonnet".into()),
-                    "A free-text string, edited inline with a visible caret",
-                ),
-            ])
-            .show_description(true)
-            .show_hint(true);
-            // Focus the number entry and open its inline editor so the caret and
-            // edit-in-place value render.
-            list.handle_key(&RtKey {
-                key_id: Some("down".to_string()),
-                raw: crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Down,
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            });
-            list.handle_key(&RtKey {
-                key_id: Some("down".to_string()),
-                raw: crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Down,
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            });
-            list.handle_key(&RtKey {
-                key_id: Some("enter".to_string()),
-                raw: crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Enter,
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            });
-            list.render(rows[1], buf);
         }),
         Section::new("Loader", |area, buf| {
             // The loader family: a basic Loader (spinner + static message) and a
@@ -565,96 +624,41 @@ fn register_sections(image_queue: RawEmissionQueue) -> Vec<Section> {
         Section::new("Editor", |area, buf| {
             // The multi-line editor core in its box style: grapheme-aware editing,
             // auto-grow, a `line:col` indicator woven into the bottom rail, and the
-            // focus/thinking border tint. Sections are stateless painters, so this
-            // drives a canned key sequence into a fresh editor each frame to *show*
-            // the core — real interactivity is covered by `tests/rt_editor.rs` and
-            // the lib unit tests. (The chat-input's borderless Horizontal style with
-            // no indicator is a later-milestone concern; the gallery demonstrates the
-            // box variant.)
+            // focus/thinking border tint.
+            //
+            // Interactive: the editor lives in gallery state, seeded once with the
+            // draft below (see `build_interactive`). This builder paints only the
+            // header; `draw` renders the live editor into the body so typed keys
+            // edit it in real time (a tmux live walk: type, C-w/C-y, undo). The
+            // TestBackend paths in `tests/rt_editor.rs` still pin the fine grain.
             let rows = Layout::vertical([
                 Constraint::Length(1), // header
                 Constraint::Min(0),    // editor box
             ])
             .split(area);
             TruncatedText::new(
-                "Editor — grapheme-aware · auto-grow · kill-ring (C-w/C-y) · undo · paste markers/defuse",
+                "Editor — type to edit (live) · grapheme-aware · kill-ring (C-w/C-y) · undo",
             )
             .render(rows[0], buf);
-
-            let mut editor = Editor::new();
-            // A multi-line draft with CJK content to show cluster-aware editing and
-            // the auto-grow shape. Each printable key is one press; `alt+enter`
-            // inserts a soft break without submitting.
-            for c in "review the ".chars() {
-                editor.handle_key(&char_key(c));
-            }
-            for c in "文档".chars() {
-                editor.handle_key(&char_key(c));
-            }
-            editor.handle_key(&named_key("alt+enter", crossterm::event::KeyCode::Enter));
-            for c in "then ship the draft".chars() {
-                editor.handle_key(&char_key(c));
-            }
-            // Kill-ring + coalescing undo demo, all canned:
-            //   Ctrl-W kills the trailing word ("draft") onto the ring,
-            //   Ctrl-Y yanks it back — a full cut/paste round trip,
-            //   Undo peels the yank as one atomic unit, leaving "then ship the ".
-            editor.handle_key(&ctrl_key('w'));
-            editor.handle_key(&ctrl_key('y'));
-            editor.undo();
-            // Paste pipeline demo: a big bracketed paste folds to a compact
-            // `[paste #1 …]` marker (the full payload lives out-of-band and is
-            // spliced back on submit); a pasted escape sequence lands defused as
-            // inert text rather than re-colouring the box.
-            editor.handle_key(&char_key(' '));
-            let big_paste = (0..40)
-                .map(|i| format!("payload line {i}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            editor.insert_paste(&big_paste);
-            editor.insert_paste(" \x1b[31mESC-defused\x1b[0m");
-            // Show the focused border tint (the thinking tint is the host's to drive
-            // during streaming in a later milestone).
-            editor.set_tint(BorderTint::Focused);
-            editor.render(rows[1], buf);
         }),
         Section::new("Autocomplete", |area, buf| {
             // The editor with an autocomplete provider installed: a `/` at the
             // start of the line opens the slash-command popup, an `@` opens the
-            // path popup. Sections are stateless painters, so this drives a canned
-            // `/h` into a fresh editor each frame to *show* the popup — Up/Down
-            // navigate, Tab accepts (the only accept gesture), Esc closes. Real
-            // interactivity is covered by `tests/rt_autocomplete.rs`.
+            // path popup.
+            //
+            // Interactive: the editor lives in gallery state, seeded with a `/h`
+            // that opens the popup. This builder paints only the header; `draw`
+            // renders the live editor so typing filters the popup, ↑/↓ navigate,
+            // Tab accepts, and Esc closes — all live.
             let rows = Layout::vertical([
                 Constraint::Length(1), // header
                 Constraint::Min(0),    // editor box + popup
             ])
             .split(area);
             TruncatedText::new(
-                "Autocomplete — `/` slash + `@` path providers · ↑↓ navigate · Tab accept · Esc close",
+                "Autocomplete — type `/` or `@` (live) · ↑↓ navigate · Tab accept · Esc close",
             )
             .render(rows[0], buf);
-
-            let mut editor = Editor::new();
-            editor.set_autocomplete_provider(Arc::new(CombinedProvider::new(vec![
-                Box::new(SlashProvider::new(vec![
-                    SlashCommand::new("help").with_description("show help"),
-                    SlashCommand::new("history").with_description("recall prompts"),
-                    SlashCommand::new("model").with_description("switch model"),
-                ])),
-                Box::new(PathProvider::new(vec![
-                    PathEntry::dir("src"),
-                    PathEntry::file("src/main.rs"),
-                    PathEntry::file("README.md"),
-                ])),
-            ])));
-            // Type `/h` at the line start: the popup opens filtered to `/help`,
-            // `/history`. The first candidate is selected (`▸`).
-            for c in "/h".chars() {
-                editor.handle_key(&char_key(c));
-            }
-            editor.set_tint(BorderTint::Focused);
-            editor.render(rows[1], buf);
         }),
         Section::new("Image", move |area, buf| {
             // The image widget + graphics emission. On a graphics terminal the
@@ -730,6 +734,132 @@ fn register_sections(image_queue: RawEmissionQueue) -> Vec<Section> {
     ]
 }
 
+/// Build the live component behind an interactive section, seeded once with the
+/// same canned demo gestures the stateless builders used to drive every frame.
+///
+/// Seeding here (rather than per frame) is what makes the section *interactive*:
+/// the seeded state is the starting point, and routed keys mutate it from there.
+/// An untouched section still renders its signature shape (the seed), so the tour
+/// smoke test sees the same text it did when the builders were stateless.
+fn build_interactive(kind: InteractiveKind) -> Interactive {
+    match kind {
+        InteractiveKind::Select => {
+            let mut list = SelectList::new(vec![
+                SelectItem::new("opus", "Claude Opus").with_description("most capable, slowest"),
+                SelectItem::new("sonnet", "Claude Sonnet")
+                    .with_description("balanced quality and speed for most day-to-day coding work"),
+                SelectItem::new("haiku", "Claude Haiku").with_description("fastest, lightest"),
+                SelectItem::new("gpt", "GPT-4o").with_description("multimodal"),
+                SelectItem::new("gemini", "Gemini").with_description("long context"),
+                SelectItem::new("llama", "Llama").with_description("open weights"),
+            ])
+            .visible_count(4)
+            .layout(SelectListLayout {
+                min_primary_column_width: Some(18),
+                max_primary_column_width: Some(18),
+            });
+            // Focus the second item so the highlight bar is not on the first row.
+            list.handle_key(&named_key_none("down", crossterm::event::KeyCode::Down));
+            Interactive::Select(list)
+        }
+        InteractiveKind::Settings => {
+            let mut list = SettingsList::new(vec![
+                SettingEntry::new(
+                    "theme",
+                    SettingValue::Enum {
+                        choices: vec!["dark".into(), "light".into(), "auto".into()],
+                        selected: 0,
+                    },
+                    "Color theme — Enter cycles through the choices",
+                ),
+                SettingEntry::new(
+                    "auto_save",
+                    SettingValue::Bool(true),
+                    "Enter/Space flips this boolean instantly",
+                ),
+                SettingEntry::new(
+                    "max_tokens",
+                    SettingValue::Number(4096.0),
+                    "A number, edited inline; a non-numeric edit is rejected",
+                ),
+                SettingEntry::new(
+                    "model",
+                    SettingValue::String("claude-sonnet".into()),
+                    "A free-text string, edited inline with a visible caret",
+                ),
+            ])
+            .show_description(true)
+            .show_hint(true);
+            // Focus the number entry and open its inline editor so the caret and
+            // edit-in-place value render out of the box.
+            list.handle_key(&named_key_none("down", crossterm::event::KeyCode::Down));
+            list.handle_key(&named_key_none("down", crossterm::event::KeyCode::Down));
+            list.handle_key(&named_key_none("enter", crossterm::event::KeyCode::Enter));
+            Interactive::Settings(list)
+        }
+        InteractiveKind::Editor => {
+            let mut editor = Editor::new();
+            // A multi-line draft with CJK content to show cluster-aware editing and
+            // the auto-grow shape. Each printable key is one press; `alt+enter`
+            // inserts a soft break without submitting.
+            for c in "review the ".chars() {
+                editor.handle_key(&char_key(c));
+            }
+            for c in "文档".chars() {
+                editor.handle_key(&char_key(c));
+            }
+            editor.handle_key(&named_key("alt+enter", crossterm::event::KeyCode::Enter));
+            for c in "then ship the draft".chars() {
+                editor.handle_key(&char_key(c));
+            }
+            // Kill-ring + coalescing undo demo, all canned:
+            //   Ctrl-W kills the trailing word ("draft") onto the ring,
+            //   Ctrl-Y yanks it back — a full cut/paste round trip,
+            //   Undo peels the yank as one atomic unit, leaving "then ship the ".
+            editor.handle_key(&ctrl_key('w'));
+            editor.handle_key(&ctrl_key('y'));
+            editor.undo();
+            // Paste pipeline demo: a big bracketed paste folds to a compact
+            // `[paste #1 …]` marker (the full payload lives out-of-band and is
+            // spliced back on submit); a pasted escape sequence lands defused as
+            // inert text rather than re-colouring the box.
+            editor.handle_key(&char_key(' '));
+            let big_paste = (0..40)
+                .map(|i| format!("payload line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            editor.insert_paste(&big_paste);
+            editor.insert_paste(" \x1b[31mESC-defused\x1b[0m");
+            // Show the focused border tint (the thinking tint is the host's to drive
+            // during streaming in a later milestone).
+            editor.set_tint(BorderTint::Focused);
+            Interactive::Editor(editor)
+        }
+        InteractiveKind::Autocomplete => {
+            let mut editor = Editor::new();
+            editor.set_autocomplete_provider(Arc::new(CombinedProvider::new(vec![
+                Box::new(SlashProvider::new(vec![
+                    SlashCommand::new("help").with_description("show help"),
+                    SlashCommand::new("history").with_description("recall prompts"),
+                    SlashCommand::new("model").with_description("switch model"),
+                ])),
+                Box::new(PathProvider::new(vec![
+                    PathEntry::dir("src"),
+                    PathEntry::file("src/main.rs"),
+                    PathEntry::file("README.md"),
+                ])),
+            ])));
+            // Type `/h` at the line start: the popup opens filtered to `/help`,
+            // `/history`. The first candidate is selected (`▸`).
+            for c in "/h".chars() {
+                editor.handle_key(&char_key(c));
+            }
+            editor.set_tint(BorderTint::Focused);
+            Interactive::Autocomplete(editor)
+        }
+    }
+}
+
 /// Build a bare printable-character `RtKey` for the gallery's canned editor demo.
 fn char_key(c: char) -> RtKey {
     RtKey {
@@ -747,6 +877,15 @@ fn named_key(id: &str, code: crossterm::event::KeyCode) -> RtKey {
     RtKey {
         key_id: Some(id.to_string()),
         raw: crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::ALT),
+    }
+}
+
+/// Build a named-key `RtKey` (e.g. `down`, `enter`) with no modifier, for seeding
+/// the list widgets' starting selection.
+fn named_key_none(id: &str, code: crossterm::event::KeyCode) -> RtKey {
+    RtKey {
+        key_id: Some(id.to_string()),
+        raw: crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
     }
 }
 
@@ -822,19 +961,29 @@ fn wants_help() -> bool {
 
 fn print_help() {
     println!(
-        "rt_gallery — inline tour of the rt primitive widgets\n\
+        "rt_gallery — inline tour of the rt widgets\n\
          \n\
          Inline viewport (no alternate screen); prior shell content stays visible.\n\
-         Navigate the sections; each shows one primitive's behaviour.\n\
+         Navigate the sections; each shows one widget's behaviour. The four\n\
+         interactive sections (Select/Settings/Editor/Autocomplete) hold a live\n\
+         component: any non-reserved key is routed into it, so you can navigate,\n\
+         filter, and edit for real.\n\
          \n\
-         Keys:\n\
-         \x20 Tab / Right / l / n : next section\n\
-         \x20 BackTab / Left / h / p : previous section\n\
-         \x20 1..9 : jump to a section by number\n\
-         \x20 d / x : (Toast section) dismiss-newest / tick TTL\n\
-         \x20 i / k : (Image section) scroll image into scrollback / drop viewport image\n\
-         \x20 o : toggle the demonstration overlay\n\
+         Always (every section):\n\
+         \x20 Tab : next section     BackTab : previous section\n\
          \x20 Ctrl+C / Ctrl+D / q : quit\n\
+         \n\
+         Display-only sections also accept:\n\
+         \x20 Right / l / n : next     Left / h / p : previous\n\
+         \x20 1..9 : jump to a section by number\n\
+         \x20 d / x : (Toast) dismiss-newest / tick TTL\n\
+         \x20 i / k : (Image) scroll image into scrollback / drop viewport image\n\
+         \x20 o : toggle the demonstration overlay\n\
+         \n\
+         Interactive sections route every other key to the live component:\n\
+         \x20 Select/Settings : ↑/↓ navigate · Enter/Space select or edit-in-place\n\
+         \x20 Editor : type to edit · C-w/C-y kill/yank · alt+enter soft break\n\
+         \x20 Autocomplete : type `/` or `@` · ↑/↓ navigate · Tab accept · Esc close\n\
          \n\
          Env seams (for byte-capture probes):\n\
          \x20 HAND_TUI_FORCE_IMAGE_PROTOCOL=kitty|iterm2|fallback : force the image protocol\n\
@@ -927,12 +1076,45 @@ fn image_section_index(sections: &[Section]) -> Option<usize> {
     sections.iter().position(|s| s.title == "Image")
 }
 
-/// Apply a navigation key to the gallery, returning `true` when it is a quit key.
+/// Apply a key to the gallery, returning `true` when it is a quit key.
+///
+/// Quit (`Ctrl+C`/`Ctrl+D`/`q`) and section-switch (`Tab`/`BackTab`) are always
+/// gallery-level, on every section, so the tour can advance out of any section.
+/// The rest of the routing depends on the active section:
+///
+/// - **Interactive section** (Select/Settings/Editor/Autocomplete): every other
+///   key — arrows, Enter, chars, digits, Esc, Ctrl-chords — is routed straight
+///   into the live component so a live walk drives it in real time. Digits route
+///   to the component too, so a number can be typed into the editor.
+/// - **Display-only section**: the full navigation + section-specific gesture set
+///   (`h`/`l`/`n`/`p`, arrows, digit jump, and `d`/`x`/`i`/`k`/`o`).
 fn handle_nav_key(state: &Arc<Mutex<GalleryState>>, key: &RtKey) -> bool {
     match key.key_id.as_deref() {
+        // Reserved on every section: quit and section switch.
         Some("ctrl+c" | "ctrl+d" | "q") => return true,
-        Some("tab" | "right" | "l" | "n") => lock(state).next(),
-        Some("shift+tab" | "left" | "h" | "p") => lock(state).prev(),
+        Some("tab") => {
+            lock(state).next();
+            return false;
+        }
+        Some("shift+tab") => {
+            lock(state).prev();
+            return false;
+        }
+        _ => {}
+    }
+
+    // On an interactive section, every non-reserved key belongs to the live
+    // component (this is the interactive-routing core: navigation/filter/edit go
+    // to the widget, not the tour). Route it and stop.
+    if lock(state).active_is_interactive() {
+        lock(state).route_to_interactive(key);
+        return false;
+    }
+
+    // Display-only section: the classic gallery gesture set.
+    match key.key_id.as_deref() {
+        Some("right" | "l" | "n") => lock(state).next(),
+        Some("left" | "h" | "p") => lock(state).prev(),
         // Toast gestures: dismiss the newest toast, or advance its TTLs — both
         // reveal a hidden overflow toast, the capturable seam for VAL-WIDGET-012.
         Some("d") => lock(state).dismiss_toast(),
@@ -1075,6 +1257,10 @@ fn draw(
     let area = frame.area();
     let overlay_open = guard.overlay_open;
     let mut osc8 = Vec::new();
+    // The focused interactive component's caret, in viewport coordinates, computed
+    // during the buffer-painting scope and applied to the frame after the buffer
+    // borrow ends so live typing/navigation shows a real hardware cursor.
+    let mut cursor: Option<Position> = None;
     let buf = frame.buffer_mut();
     if area.is_empty() {
         return osc8;
@@ -1101,6 +1287,20 @@ fn draw(
     let body = rows[1];
     if let Some(section) = guard.sections.get(active) {
         (section.build)(body, buf);
+    }
+
+    // Interactive sections: the builder painted only the header on `body`'s first
+    // row; render the *live* component (from gallery state) into the band below it
+    // so a routed key's effect shows this frame. Its caret is translated into
+    // viewport coordinates for the hardware cursor.
+    if let Some(interactive) = guard.active_interactive() {
+        let body_rows = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(body);
+        let component_area = body_rows[1];
+        let component = interactive.as_component();
+        component.render(component_area, buf);
+        cursor = component
+            .cursor()
+            .map(|caret| clamp_cursor_into(component_area, caret));
     }
 
     // The Toast section paints its header via the stateless builder above; overlay
@@ -1134,9 +1334,32 @@ fn draw(
     // image nor emits any delete (VAL-CROSS-004).
     if overlay_open {
         render_demo_overlay(inner, buf);
+        // The overlay owns the surface while open; hide the interactive caret so it
+        // does not stray onto the overlay box.
+        cursor = None;
+    }
+
+    // Release the state guard, then place the hardware cursor (the buffer borrow
+    // ended with the block above). A `None` leaves the cursor hidden.
+    drop(guard);
+    if let Some(pos) = cursor {
+        frame.set_cursor_position(pos);
     }
 
     osc8
+}
+
+/// Translate a component-local caret into an absolute viewport position, clamped
+/// inside `area` so the hardware cursor can never stray outside the component that
+/// owns it. Mirrors `FocusView`'s private clamp: a component reports its caret in
+/// its own render-area coordinates, and this offsets it by the area's origin.
+fn clamp_cursor_into(area: Rect, caret: Position) -> Position {
+    let max_x = area.x.saturating_add(area.width.saturating_sub(1));
+    let max_y = area.y.saturating_add(area.height.saturating_sub(1));
+    Position::new(
+        area.x.saturating_add(caret.x).min(max_x),
+        area.y.saturating_add(caret.y).min(max_y),
+    )
 }
 
 /// Paint the demonstration overlay: a centered bordered box. Deliberately simple
