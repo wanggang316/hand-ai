@@ -63,7 +63,6 @@ pub mod watchdog;
 
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hand_tui::rt::components::{BorderTint, Editor, EditorBorder};
@@ -115,12 +114,13 @@ pub struct InteractiveMode {
 }
 
 impl InteractiveMode {
-    /// Build the driver with the default 5-minute per-turn watchdog.
+    /// Build the driver. The per-turn watchdog defaults to 5 minutes, overridable
+    /// via the `HAND_TURN_TIMEOUT_MS` env (the VAL-CHAT-022 probe seam).
     pub fn new(session: AgentSession, cwd: PathBuf) -> Self {
         Self {
             session,
             cwd,
-            watchdog: Watchdog::default(),
+            watchdog: Watchdog::from_env_or_default(),
         }
     }
 
@@ -195,25 +195,28 @@ impl InteractiveMode {
         // clean-exit path as Ctrl+D instead of terminating the process raw.
         let mut hangup = hangup_listener().map_err(SessionError::Io)?;
 
-        // The channel the input loop uses to hand submitted text to the agent
-        // driver task. A quit signal rides the same task via `agent_quit`.
+        // The channel the input loop uses to hand submitted text to the turn
+        // runner. Dropping it on teardown is what tells the runner to stop.
         let (submit_tx, submit_rx) = mpsc::unbounded_channel::<String>();
-        let agent_quit = Arc::new(AtomicBool::new(false));
 
-        // Spawn the agent driver task: it owns the session, runs each submitted
-        // turn under the watchdog, and converts agent events to scrollback
-        // commits. It does NOT exit the process — it only drives the session.
-        let agent = tokio::spawn(agent_driver(AgentDriver {
+        // Spawn the turn runner: it owns the session and runs each submitted turn
+        // to completion under the watchdog. It does NOT exit the process.
+        let turns = tokio::spawn(turn_runner(TurnRunner {
             session,
             cwd: cwd.clone(),
             watchdog,
             state: state.clone(),
             editor: editor.clone(),
             requester: requester.clone(),
-            events: event_rx,
             submits: submit_rx,
-            quit: agent_quit.clone(),
         }));
+
+        // Spawn the event applier as an INDEPENDENT task. It must not share a
+        // `select!` with the turn runner: `send_message` emits events through
+        // `event_rx`, so multiplexing the two would cancel an in-flight turn the
+        // moment its own event arrived. Kept separate, a turn future is polled to
+        // completion while its events render live.
+        let applier = tokio::spawn(event_applier(event_rx, state.clone(), requester.clone()));
 
         // Initial paint.
         requester.request_frame();
@@ -232,12 +235,13 @@ impl InteractiveMode {
 
         // --- Single teardown for every exit path ---------------------------
 
-        // Signal the agent driver to stop and drop the submit channel so it wakes
-        // and returns; a stalled in-flight turn is abandoned (the watchdog or the
-        // session's own cancellation frees it).
-        agent_quit.store(true, Ordering::SeqCst);
+        // Drop the submit channel so the turn runner wakes and returns; abort it
+        // so a stalled in-flight turn (mid-stream quit) is abandoned without
+        // waiting — the terminal restore below does not depend on the turn
+        // unwinding. The event applier is likewise aborted.
         drop(submit_tx);
-        agent.abort();
+        turns.abort();
+        applier.abort();
 
         // Drop the last requester so the scheduler drains its final frame, closes
         // its synchronized block, and stops; awaiting it releases the terminal
@@ -384,46 +388,54 @@ fn is_quit_command(trimmed: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "quit" | "exit" | "q")
 }
 
-/// State the agent driver task owns.
-struct AgentDriver {
+/// State the turn-runner task owns.
+struct TurnRunner {
     session: AgentSession,
     cwd: PathBuf,
     watchdog: Watchdog,
     state: Arc<Mutex<DriverState>>,
     editor: SharedEditor,
     requester: FrameRequester,
-    events: mpsc::UnboundedReceiver<AgentSessionEvent>,
     submits: mpsc::UnboundedReceiver<String>,
-    quit: Arc<AtomicBool>,
 }
 
-/// The agent driver task: runs turns and drains agent events.
+/// The turn-runner task: drains submitted user turns and runs each to
+/// completion under the watchdog.
 ///
-/// It multiplexes two streams — submitted user turns and streaming agent events —
-/// and never touches the process lifecycle. A submitted turn echoes the user
-/// message into scrollback, then runs `send_message` under the injectable
-/// watchdog; on timeout it cancels the session token and commits the watchdog
-/// banner, leaving the session usable (VAL-CHAT-022). Agent events are dispatched
-/// through the reused `event_dispatch` protocol into scrollback commits.
-async fn agent_driver(mut driver: AgentDriver) {
-    loop {
-        if driver.quit.load(Ordering::SeqCst) {
-            return;
-        }
-        tokio::select! {
-            maybe = driver.submits.recv() => match maybe {
-                Some(text) => run_turn(&mut driver, &text).await,
-                None => return, // submit channel closed — teardown.
-            },
-            maybe = driver.events.recv() => match maybe {
-                Some(event) => apply_event(&driver, &event),
-                None => {
-                    // Event channel closed only if the session (and its listener)
-                    // is gone; nothing more to drain.
-                }
-            },
-        }
+/// It is deliberately **separate** from the event applier. Multiplexing a
+/// running turn against the agent-event stream in one `select!` is a
+/// cancellation trap: `send_message` emits events *through the same channel*, so
+/// an arriving event would make the events arm ready and cancel the in-flight
+/// turn future — dropping it mid-request before it ever completes. Draining
+/// events in their own always-running task means a turn future is polled to
+/// completion and never cancelled, while its events still render live.
+///
+/// The task never touches the process lifecycle. On timeout the watchdog cancels
+/// the session token and the banner is committed, leaving the session usable
+/// (VAL-CHAT-022).
+async fn turn_runner(mut runner: TurnRunner) {
+    while let Some(text) = runner.submits.recv().await {
+        run_turn(&mut runner, &text).await;
     }
+    // Submit channel closed — teardown.
+}
+
+/// The event applier: drains agent session events and commits their scrollback
+/// representation, always running independently of the turn runner.
+///
+/// Because it owns only the `Send` state + requester (not the session or
+/// editor), it can run as its own task without contending for the turn runner's
+/// `&mut session`. It applies events as they stream in, so a turn's output
+/// renders live while `send_message` is still in flight in the turn runner.
+async fn event_applier(
+    mut events: mpsc::UnboundedReceiver<AgentSessionEvent>,
+    state: Arc<Mutex<DriverState>>,
+    requester: FrameRequester,
+) {
+    while let Some(event) = events.recv().await {
+        apply_event(&state, &requester, &event);
+    }
+    // Event channel closed: the session (and its listener) is gone.
 }
 
 /// Queue a finalized scrollback block and request a repaint. Empty blocks are
@@ -437,11 +449,11 @@ fn commit(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester, lines: Ve
 }
 
 /// Run one submitted turn under the watchdog.
-async fn run_turn(driver: &mut AgentDriver, text: &str) {
+async fn run_turn(runner: &mut TurnRunner, text: &str) {
     // Echo the user message into scrollback immediately for input responsiveness.
     commit(
-        &driver.state,
-        &driver.requester,
+        &runner.state,
+        &runner.requester,
         chat::render_update(&ChatUpdate::AppendUser {
             text: text.to_string(),
         })
@@ -449,30 +461,29 @@ async fn run_turn(driver: &mut AgentDriver, text: &str) {
     );
 
     // Streaming: loader on + border tint while the turn runs.
-    set_streaming(driver, true);
+    set_streaming(&runner.state, &runner.editor, &runner.requester, true);
 
     // Grab the cancel handle before the `&mut` send borrow: `cancel_handle`
     // borrows `&self`, `send_message` borrows `&mut self`, so they cannot overlap.
-    let cancel = driver.session.cancel_handle();
-    let send = driver.session.send_message(text);
-    match run_under_watchdog(driver.watchdog, send, &cancel).await {
+    let cancel = runner.session.cancel_handle();
+    let send = runner.session.send_message(text);
+    match run_under_watchdog(runner.watchdog, send, &cancel).await {
         TurnOutcome::Completed => {}
         TurnOutcome::Failed(e) => commit(
-            &driver.state,
-            &driver.requester,
+            &runner.state,
+            &runner.requester,
             chat::error_lines(&format!("send failed: {e}")),
         ),
         TurnOutcome::TimedOut => commit(
-            &driver.state,
-            &driver.requester,
-            chat::error_lines(&driver.watchdog.timeout_banner()),
+            &runner.state,
+            &runner.requester,
+            chat::error_lines(&runner.watchdog.timeout_banner()),
         ),
     }
 
-    set_streaming(driver, false);
-    // Refresh the footer placeholder (label / model may have changed via a turn).
-    // The full view-model refresh is a follow-up; here we keep the line current.
-    let _ = &driver.cwd; // cwd retained for the follow-up footer view-model.
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    // cwd retained for the follow-up footer view-model refresh.
+    let _ = &runner.cwd;
 }
 
 /// How a turn ended under the watchdog.
@@ -516,31 +527,70 @@ where
     }
 }
 
-/// Apply a single agent session event: dispatch it to ChatUpdates and commit the
-/// ones that have a scrollback representation. Errors take the red-banner route.
-fn apply_event(driver: &AgentDriver, event: &AgentSessionEvent) {
+/// Apply a single agent session event, committing its scrollback representation.
+///
+/// The skeleton commits **finalized** blocks into immutable scrollback, so it
+/// keys off message *ends* rather than streaming deltas:
+///
+/// - An assistant message is committed once, on its `MessageEnd`, from the final
+///   snapshot — never per streaming delta (which would spam scrollback with every
+///   partial). The live in-viewport streaming preview is a follow-up feature; the
+///   `ReplaceLastAssistant` deltas the reused `event_dispatch` emits therefore
+///   have no scrollback line here (see [`chat::render_update`]).
+/// - Tool lifecycle, status, and compaction updates flow through the reused
+///   `event_dispatch` → [`chat::render_update`] path; only the ones with a
+///   scrollback representation (tool end, status) commit.
+/// - Errors take the red-banner route.
+fn apply_event(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    event: &AgentSessionEvent,
+) {
     if let AgentSessionEvent::Error(msg) = event {
-        commit(&driver.state, &driver.requester, chat::error_lines(msg));
+        commit(state, requester, chat::error_lines(msg));
         return;
     }
+
+    // Commit a finalized assistant message once, on its end, from the final
+    // snapshot — bypassing the streaming `ReplaceLastAssistant` deltas.
+    if let AgentSessionEvent::Agent(agent_event) = event
+        && let hand_agent::types::AgentEvent::MessageEnd {
+            message: model::Message::Assistant(assistant),
+        } = agent_event.as_ref()
+    {
+        let lines = chat::render_update(&ChatUpdate::AppendAssistant {
+            message: Box::new(assistant.clone()),
+        })
+        .unwrap_or_default();
+        commit(state, requester, lines);
+        return;
+    }
+
+    // Everything else (tool lifecycle, status, compaction) flows through the
+    // reused dispatch → render path; streaming deltas render nothing here.
     let mut lines = Vec::new();
     for update in dispatch_event(event) {
         if let Some(rendered) = chat::render_update(&update) {
             lines.extend(rendered);
         }
     }
-    commit(&driver.state, &driver.requester, lines);
+    commit(state, requester, lines);
 }
 
 /// Toggle the streaming flag (loader + editor "thinking" tint) and repaint.
-fn set_streaming(driver: &AgentDriver, on: bool) {
-    lock_state(&driver.state).streaming = on;
-    lock_editor(&driver.editor).set_tint(if on {
+fn set_streaming(
+    state: &Arc<Mutex<DriverState>>,
+    editor: &SharedEditor,
+    requester: &FrameRequester,
+    on: bool,
+) {
+    lock_state(state).streaming = on;
+    lock_editor(editor).set_tint(if on {
         BorderTint::Thinking
     } else {
         BorderTint::Idle
     });
-    driver.requester.request_frame();
+    requester.request_frame();
 }
 
 /// Seed the editor recall history from the session's prior user turns (newest

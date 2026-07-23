@@ -19,6 +19,13 @@ use std::time::Duration;
 /// The default per-turn ceiling, matching the legacy hard-coded 5 minutes.
 pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Environment variable that overrides the per-turn watchdog ceiling, in
+/// milliseconds. This is the probe seam for VAL-CHAT-022: a validator sets it to
+/// a small value and drives the `stall` mock-provider scenario so the timeout
+/// banner fires in seconds instead of the 5-minute default. Unset / unparseable
+/// leaves the default in force.
+pub const TURN_TIMEOUT_ENV: &str = "HAND_TURN_TIMEOUT_MS";
+
 /// An injectable per-turn timeout policy.
 ///
 /// Cheap and `Copy`: the driver holds one and consults it around every
@@ -37,6 +44,30 @@ impl Watchdog {
     #[must_use]
     pub const fn new(turn_timeout: Duration) -> Self {
         Self { turn_timeout }
+    }
+
+    /// A watchdog whose ceiling comes from [`TURN_TIMEOUT_ENV`] (milliseconds)
+    /// when set to a parseable value, else the [`DEFAULT_TURN_TIMEOUT`].
+    ///
+    /// This is how the driver injects a short ceiling for the VAL-CHAT-022 probe
+    /// without a code change or a five-minute wait: the validator exports
+    /// `HAND_TURN_TIMEOUT_MS=<n>` and drives the `stall` scenario. Production
+    /// runs leave it unset and get the 5-minute default.
+    #[must_use]
+    pub fn from_env_or_default() -> Self {
+        Self::from_env_value(std::env::var(TURN_TIMEOUT_ENV).ok().as_deref())
+    }
+
+    /// The pure core of [`from_env_or_default`]: resolve a watchdog from an
+    /// optional raw env value (the milliseconds string), falling back to the
+    /// default on `None` or an unparseable value. Split out so the override
+    /// policy is unit-tested without mutating process-global env.
+    #[must_use]
+    pub fn from_env_value(raw: Option<&str>) -> Self {
+        match raw.and_then(|v| v.parse::<u64>().ok()) {
+            Some(ms) => Self::new(Duration::from_millis(ms)),
+            None => Self::default(),
+        }
     }
 
     /// The maximum wall-clock time a single turn may run before the watchdog
@@ -95,5 +126,27 @@ mod tests {
     fn a_zero_ceiling_is_preserved_for_immediate_fire() {
         let watchdog = Watchdog::new(Duration::ZERO);
         assert_eq!(watchdog.turn_timeout(), Duration::ZERO);
+    }
+
+    #[test]
+    fn env_value_overrides_the_default_when_parseable() {
+        let watchdog = Watchdog::from_env_value(Some("1500"));
+        assert_eq!(watchdog.turn_timeout(), Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn env_value_falls_back_to_default_when_absent_or_garbage() {
+        assert_eq!(
+            Watchdog::from_env_value(None).turn_timeout(),
+            DEFAULT_TURN_TIMEOUT
+        );
+        assert_eq!(
+            Watchdog::from_env_value(Some("not-a-number")).turn_timeout(),
+            DEFAULT_TURN_TIMEOUT
+        );
+        assert_eq!(
+            Watchdog::from_env_value(Some("")).turn_timeout(),
+            DEFAULT_TURN_TIMEOUT
+        );
     }
 }
