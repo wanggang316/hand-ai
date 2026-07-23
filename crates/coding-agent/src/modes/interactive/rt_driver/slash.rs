@@ -78,6 +78,23 @@ pub fn is_slash_command(trimmed: &str) -> bool {
     ParsedSlashCommand::parse(trimmed).is_some()
 }
 
+/// Whether a submission is a bare `/model` (or its `/models` alias) with no
+/// pattern — the case that opens the interactive model selector overlay.
+///
+/// A `/model <pattern>` submission (a non-interactive switch) is *not* matched: it
+/// carries args and routes through the sync slash dispatch's
+/// [`SlashCommandAction::ModelByPattern`] arm instead. The driver uses this to
+/// intercept the bare form on the async turn runner (it mounts an overlay and
+/// awaits the pick), *before* the sync slash dispatch — mirroring how `/compact` is
+/// intercepted.
+#[must_use]
+pub fn is_open_model_selector(line: &str) -> bool {
+    let Some(parsed) = ParsedSlashCommand::parse(line) else {
+        return false;
+    };
+    matches!(parsed.name.as_str(), "model" | "models") && parsed.args.is_empty()
+}
+
 /// Recognise a `/compact` submission and pull its optional steering text.
 ///
 /// Returns `Some(None)` for a bare `/compact`, `Some(Some(steer))` for
@@ -234,6 +251,14 @@ pub fn apply_slash_action(
         // outside that path; surface the seam line rather than silently
         // dropping it.
         compact @ SlashCommandAction::Compact(_) => unsupported(&compact, state, requester),
+
+        // Bare `/model` opens the interactive selector overlay, which awaits the
+        // user's pick, so it is intercepted on the async turn runner *before* this
+        // sync dispatch (see the driver's `run_turn` + `run_model_selector`).
+        // Reaching this arm means a caller dispatched it outside that path; surface
+        // the seam line rather than silently dropping it. (`/model <pattern>` is a
+        // separate `ModelByPattern` action, handled by the follow-up feature.)
+        open @ SlashCommandAction::OpenModelSelector => unsupported(&open, state, requester),
 
         // --- Follow-up feature seam ---------------------------------------
         // Selector commands (/model, /theme, /thinking, …) land here as their
@@ -1490,6 +1515,24 @@ mod tests {
     }
 
     // --- /compact interception (VAL-CHAT-027) -----------------------------
+
+    // --- /model selector interception (VAL-OVERLAY-*) ---------------------
+
+    #[test]
+    fn is_open_model_selector_matches_bare_model_and_models_only() {
+        // Bare `/model` (and its `/models` alias) opens the selector overlay.
+        assert!(is_open_model_selector("/model"));
+        assert!(is_open_model_selector("/models"));
+        assert!(is_open_model_selector("/model   "));
+        // `/model <pattern>` carries args → a non-interactive switch, not the
+        // selector; it routes through the sync ModelByPattern dispatch instead.
+        assert!(!is_open_model_selector("/model sonnet"));
+        assert!(!is_open_model_selector("/model anthropic/claude"));
+        // Unrelated commands and plain text never open the selector.
+        assert!(!is_open_model_selector("/help"));
+        assert!(!is_open_model_selector("model"));
+        assert!(!is_open_model_selector("/"));
+    }
 
     #[test]
     fn parse_compact_recognises_the_command_and_its_steering_text() {

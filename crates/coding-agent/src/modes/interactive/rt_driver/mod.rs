@@ -64,6 +64,9 @@ pub mod chrome;
 pub mod footer;
 pub mod input;
 pub mod messages;
+pub mod model_selector;
+pub mod overlay;
+pub mod selectors;
 pub mod slash;
 pub mod state;
 pub mod summary;
@@ -87,6 +90,7 @@ use crate::core::error::CodingAgentError;
 
 use self::chrome::{ChangelogStartupAction, ProgressState, PromptMark};
 use self::footer::build_footer_view;
+use self::overlay::{DoneSignal, SharedOverlay, new_done_signal, new_shared_overlay};
 use self::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_footer, lock_state};
 use self::watchdog::Watchdog;
 use super::event_dispatch::{ChatUpdate, dispatch as dispatch_event};
@@ -217,10 +221,23 @@ impl InteractiveMode {
             let _ = forward.send(event);
         });
 
+        // The overlay runtime: a shared stack the scheduler renders over the base
+        // viewport and the input loop routes keys into (modal capture), plus a
+        // single shared "top overlay finished" flag every selector raises on its
+        // terminal key. This is the reusable substrate for the selector family; the
+        // /model selector is the first mounted on it.
+        let overlays: SharedOverlay = new_shared_overlay();
+        let overlay_done: DoneSignal = new_done_signal();
+
         // Spawn the frame scheduler: it owns the terminal and is the single place
         // the UI is painted, wrapped in synchronized-output markers.
-        let (requester, scheduler) =
-            input::spawn_scheduler(terminal, state.clone(), editor.clone(), footer.clone());
+        let (requester, scheduler) = input::spawn_scheduler(
+            terminal,
+            state.clone(),
+            editor.clone(),
+            footer.clone(),
+            overlays.clone(),
+        );
 
         // Spawn the rt input pump (crossterm EventStream → RtInputEvent channel).
         let (mut events, pump) = spawn_event_pump(EVENT_CHANNEL_CAPACITY);
@@ -256,6 +273,8 @@ impl InteractiveMode {
             footer: footer.clone(),
             requester: requester.clone(),
             submits: submit_rx,
+            overlays: overlays.clone(),
+            overlay_done: overlay_done.clone(),
         }));
 
         // Spawn the event applier as an INDEPENDENT task. It must not share a
@@ -285,6 +304,7 @@ impl InteractiveMode {
             requester: &requester,
             submit_tx: &submit_tx,
             cancel: &cancel,
+            overlays: &overlays,
         })
         .await;
 
@@ -327,6 +347,10 @@ struct RunInputArgs<'a> {
     /// Shared handle to the in-flight turn's cancellation token, used by Esc /
     /// Ctrl+C to abort a streaming turn from outside the turn runner.
     cancel: &'a Arc<Mutex<hand_agent::CancellationToken>>,
+    /// The shared overlay: a modal selector, when mounted, captures every key before
+    /// it can reach the editor or the turn-control paths below. The mounted selector
+    /// carries its own done flag, so the input loop needs only the overlay here.
+    overlays: &'a SharedOverlay,
 }
 
 /// The interactive input loop.
@@ -343,6 +367,7 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
         requester,
         submit_tx,
         cancel,
+        overlays,
     } = args;
 
     loop {
@@ -361,6 +386,15 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
 
         match event {
             RtInputEvent::Key(key) => {
+                // A mounted modal selector owns every key first (VAL-OVERLAY-005):
+                // route it through the overlay, and if one was open it consumes the
+                // key — the editor, the global toggles, and the turn-control paths
+                // below never see it. The dialog closes itself once the selector
+                // raises its done flag on Enter/Esc.
+                if overlay::dispatch_key(overlays, requester, &key) {
+                    requester.request_frame();
+                    continue;
+                }
                 // Ctrl+T is a global toggle: it flips thinking-visibility across
                 // every assistant message in the transcript, so it is handled here
                 // (where the requester is in scope) rather than in the editor path.
@@ -595,6 +629,13 @@ struct TurnRunner {
     footer: SharedFooter,
     requester: FrameRequester,
     submits: mpsc::UnboundedReceiver<String>,
+    /// The shared overlay stack the runner mounts a selector on (e.g. `/model`).
+    /// Shared with the input loop, which routes keys into the mounted selector
+    /// while the runner awaits its outcome.
+    overlays: SharedOverlay,
+    /// The shared "top overlay finished" flag handed to a mounted selector so the
+    /// input loop can close the dialog once the selector emits its outcome.
+    overlay_done: DoneSignal,
 }
 
 /// The turn-runner task: drains submitted user turns and runs each to
@@ -674,6 +715,16 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     // the streaming loader for its duration, so it does not clear it up front.
     if let Some(steer) = slash::parse_compact(text) {
         run_compact(runner, steer).await;
+        return;
+    }
+
+    // `/model` (bare) opens the model selector overlay, which awaits the user's
+    // pick, so it is intercepted here on the async turn runner — the one task that
+    // owns `&mut session` and can apply the switch. Like `/compact`, it runs
+    // *before* the sync slash dispatch. `/model <pattern>` still routes through the
+    // sync dispatch (it is a non-interactive switch, not an overlay).
+    if slash::is_open_model_selector(text) {
+        run_model_selector(runner).await;
         return;
     }
 
@@ -927,6 +978,28 @@ async fn run_compact(runner: &mut TurnRunner, steer: Option<String>) {
 
     // Compaction changed the transcript; refresh the footer so context % rebases.
     refresh_footer(runner);
+}
+
+/// Open the `/model` selector overlay and apply the user's pick (VAL-OVERLAY-*).
+///
+/// The input loop optimistically marked the state streaming on submit; a selector
+/// is not a streaming turn, so clear that first. Then hand off to
+/// [`selectors::open_model_selector`], which mounts the modal dialog, awaits the
+/// single outcome (fed by the input loop driving the dialog), applies it
+/// (`session.set_model` + footer refresh + status line) or reports the cancel, and
+/// returns once the dialog closes.
+async fn run_model_selector(runner: &mut TurnRunner) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    selectors::open_model_selector(
+        &mut runner.session,
+        &runner.cwd,
+        &runner.overlays,
+        &runner.overlay_done,
+        &runner.state,
+        &runner.footer,
+        &runner.requester,
+    )
+    .await;
 }
 
 /// Whether a failed turn commits the red `send failed` banner.

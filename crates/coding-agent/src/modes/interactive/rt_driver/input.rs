@@ -34,6 +34,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
 use super::footer::{FooterViewModel, render_footer_lines};
+use super::overlay::SharedOverlay;
 use super::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_footer, lock_state};
 
 /// The static message the working-loader shows while a turn streams.
@@ -57,6 +58,7 @@ pub fn spawn_scheduler(
     state: Arc<Mutex<DriverState>>,
     editor: SharedEditor,
     footer: SharedFooter,
+    overlay: SharedOverlay,
 ) -> (FrameRequester, tokio::task::JoinHandle<io::Result<()>>) {
     let mut terminal = EraseOnDrop::new(terminal);
     let mut history = HistorySink::new();
@@ -89,11 +91,21 @@ pub fn spawn_scheduler(
             let commits = guard.take_commits();
             let raw = guard.take_raw();
             let preview = guard.streaming_preview.clone().unwrap_or_default();
+            // Snapshot the mounted selector's render lines (Send `Vec<Line>`) so the
+            // draw closure can paint the overlay without holding the (?Send) M1
+            // stack across the task boundary — the rt-demo pattern. Measured against
+            // the overlay interior width for the current viewport.
+            let overlay_lines = overlay.render_lines(overlay_interior_width(guard.size.cols));
             let snapshot = StateSnapshot {
                 size: guard.size,
                 loader: guard.streaming,
                 loader_message: guard.loader_message.clone(),
                 preview,
+                // A modal selector owns focus; the editor caret is hidden while an
+                // overlay is up so the hardware cursor does not blink under the
+                // dimmed dialog.
+                overlay_open: overlay_lines.is_some(),
+                overlay_lines,
             };
             (snapshot, commits, raw)
         };
@@ -142,7 +154,20 @@ pub fn spawn_scheduler(
         let editor = &editor;
         let loader = &loader;
         draw_synchronized(&mut stdout, |w| {
-            terminal.draw(|frame| draw(frame, &snapshot, editor, loader, &footer_view))?;
+            terminal.draw(|frame| {
+                draw(frame, &snapshot, editor, loader, &footer_view);
+                // Layer the mounted selector over the base viewport, full-frame, so a
+                // centered modal dialog dims the whole transcript + bottom UI beneath
+                // it. Built as a throwaway local M1 OverlayStack each frame (the
+                // ?Send stack never crosses the task boundary) so the dim + border +
+                // clear + anchor placement is pixel-identical to the M1 contract. The
+                // whole viewport repaints each frame, so closing the overlay leaves no
+                // dim residue or ghost border (VAL-OVERLAY-001 / -008).
+                if let Some(lines) = snapshot.overlay_lines.clone() {
+                    let area = frame.area();
+                    draw_overlay(frame.buffer_mut(), area, lines);
+                }
+            })?;
             // Flush any raw terminal control sequences (OSC 133 prompt marks,
             // OSC 9;4 progress) AFTER the viewport draw but INSIDE the sync
             // block, on this terminal-owning task — the same raw-emission
@@ -196,6 +221,14 @@ struct StateSnapshot {
     /// when the band is shorter than the preview so the most recent tokens are
     /// always visible.
     preview: Vec<Line<'static>>,
+    /// Whether a modal overlay (a selector) is currently mounted. While it is, the
+    /// editor caret is suppressed so the hardware cursor is not stranded under the
+    /// dimmed dialog.
+    overlay_open: bool,
+    /// The mounted selector's interior render lines this frame, or `None` when no
+    /// overlay is open. Captured as a `Send` `Vec<Line>` so the draw closure paints
+    /// the overlay without holding the `?Send` M1 stack across the task boundary.
+    overlay_lines: Option<Vec<Line<'static>>>,
 }
 
 /// Paint one frame: the bordered bottom box, the optional working-loader row, the
@@ -263,13 +296,17 @@ fn draw(
     let (editor_rect, footer_rect) = split_editor_footer(inset(geometry.input));
 
     // Render the editor and drive the hardware cursor from its reported caret.
+    // When a modal overlay is open it owns focus, so the editor caret is suppressed
+    // — the hardware cursor is not placed under the dimmed dialog.
     {
         let ed = lock_editor(editor);
         ed.render(editor_rect, frame.buffer_mut());
         // Disambiguate: the `RtComponent::cursor` (viewport-local `Option<Position>`)
         // over the inherent `Editor::cursor` (the `(line, col)` accessor). The
         // component caret is already anchored at `editor_rect` (its render area).
-        if let Some(caret) = RtComponent::cursor(&*ed) {
+        if !state.overlay_open
+            && let Some(caret) = RtComponent::cursor(&*ed)
+        {
             frame.set_cursor_position(caret);
         }
     }
@@ -280,6 +317,81 @@ fn draw(
         let lines = render_footer_lines(footer, footer_rect.width);
         Paragraph::new(Text::from(lines)).render(footer_rect, frame.buffer_mut());
     }
+}
+
+/// The interior width an overlay dialog gives its content, for the current
+/// viewport columns: a centered dialog spans ~60% of the width (bounded to a sane
+/// minimum), minus the two border columns. The scheduler measures the mounted
+/// selector's render lines against this so wrapping matches the box it paints into.
+fn overlay_interior_width(cols: u16) -> u16 {
+    dialog_outer_width(cols).saturating_sub(2).max(1)
+}
+
+/// The outer width of a centered dialog overlay for `cols` viewport columns: ~60%,
+/// floored at a readable minimum, clamped to the viewport.
+fn dialog_outer_width(cols: u16) -> u16 {
+    let sixty = (cols as u32 * 3 / 5) as u16;
+    sixty.max(40).min(cols.max(1))
+}
+
+/// Paint the mounted selector's `lines` as a centered, dimmed, bordered modal
+/// dialog over the already-drawn base buffer (VAL-OVERLAY-001).
+///
+/// Placement reuses the M1 pure geometry
+/// [`anchor_rect`](hand_tui::rt::overlay::anchor_rect): the dialog is sized to hold
+/// its content (~60% wide, tall enough for the lines plus the two border rows) and
+/// Center-anchored, and `anchor_rect` clamps an oversized box into the viewport — so
+/// a tiny pane (40×10) keeps the border on-frame without wrapping (VAL-OVERLAY-020).
+/// The dim + bordered-clear passes mirror the M1 [`OverlayStack::render`] contract
+/// (dim every base cell outside the box, `Clear` the footprint, draw the border,
+/// paint the content inside). A selector's list can be taller than the M1 stack's
+/// fixed 7-row dialog, so the box is sized here rather than through the stack's
+/// private heuristic — the only reason this does not call `OverlayStack::render`
+/// directly. Because the whole viewport repaints each frame, closing the overlay
+/// later leaves no dim residue or ghost border (VAL-OVERLAY-008).
+fn draw_overlay(buf: &mut ratatui::buffer::Buffer, area: Rect, lines: Vec<Line<'static>>) {
+    use hand_tui::rt::overlay::{OverlayAnchor, OverlayMargin, anchor_rect};
+    use ratatui::layout::Size;
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Block, Clear};
+
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    // Desired outer box: ~60% wide (min 40, clamped), tall enough for the content
+    // plus the two border rows. `anchor_rect` size-clamps both to the viewport.
+    let outer_w = dialog_outer_width(area.width);
+    let outer_h = (lines.len() as u16).saturating_add(2).max(3);
+    let rect = anchor_rect(
+        Size::new(outer_w, outer_h),
+        area,
+        OverlayAnchor::Center,
+        OverlayMargin::uniform(0),
+        true,
+    );
+
+    // Dim every base cell outside the dialog so the background recedes but stays
+    // legible (mirrors the M1 `dim_outside` pass).
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let inside =
+                x >= rect.left() && x < rect.right() && y >= rect.top() && y < rect.bottom();
+            if !inside && let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_style(dim);
+            }
+        }
+    }
+
+    // Clear the footprint so no base content bleeds through, draw the border, and
+    // paint the content into the interior. `Paragraph` clips content wider/taller
+    // than the interior, so the border never overflows.
+    Clear.render(rect, buf);
+    let block = Block::bordered().border_style(Style::default().fg(Color::DarkGray));
+    let interior = block.inner(rect);
+    block.render(rect, buf);
+    Paragraph::new(Text::from(lines)).render(interior, buf);
 }
 
 /// Paint the streaming preview into the blank band above the active box.
@@ -441,6 +553,8 @@ mod tests {
             loader: streaming,
             loader_message: None,
             preview: Vec::new(),
+            overlay_open: false,
+            overlay_lines: None,
         };
         let footer = FooterViewModel::default();
         terminal
@@ -490,6 +604,8 @@ mod tests {
             loader: false,
             loader_message: None,
             preview: Vec::new(),
+            overlay_open: false,
+            overlay_lines: None,
         };
         let footer = FooterViewModel {
             cwd: "/tmp/proj".to_string(),
@@ -507,6 +623,137 @@ mod tests {
         assert!(text.contains("/tmp/proj"), "cwd missing: {text}");
         assert!(text.contains("(tmp)"), "branch missing: {text}");
         assert!(text.contains("test-model"), "model id missing: {text}");
+    }
+
+    // --- Overlay dialog rendering (VAL-OVERLAY-001 / -020) ----------------
+
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Modifier;
+
+    /// Whether any cell of `buf` inside `rect` carries a box-drawing border glyph —
+    /// the crude "is there a bordered box here" probe.
+    fn has_border(buf: &Buffer) -> bool {
+        let area = buf.area;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    let s = cell.symbol();
+                    if s == "─" || s == "│" || s == "┌" || s == "┐" || s == "└" || s == "┘"
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn overlay_renders_a_centered_bordered_dimmed_dialog() {
+        // VAL-OVERLAY-001: the mounted selector paints a bordered box, centered, with
+        // the surrounding base cells dimmed and its own content crisp.
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::filled(area, ratatui::buffer::Cell::new("."));
+        let lines = vec![
+            Line::from("Search: "),
+            Line::from("→ claude-sonnet [anthropic]"),
+            Line::from("  gpt-4o [openai]"),
+        ];
+
+        draw_overlay(&mut buf, area, lines);
+
+        // The dialog drew a border.
+        assert!(has_border(&buf), "a bordered dialog box must be painted");
+
+        // A base cell in the far corner (outside the centered box) is dimmed; the
+        // box interior is not.
+        let corner = buf.cell((0, 0)).unwrap();
+        assert!(
+            corner.modifier.contains(Modifier::DIM),
+            "cells outside the dialog are dimmed"
+        );
+        // The dialog content is present and crisp.
+        let text: String = {
+            let mut s = String::new();
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(c) = buf.cell((x, y)) {
+                        s.push_str(c.symbol());
+                    }
+                }
+                s.push('\n');
+            }
+            s
+        };
+        assert!(text.contains("claude-sonnet"), "content painted: {text}");
+    }
+
+    #[test]
+    fn overlay_clamps_into_a_tiny_40x10_pane_without_overflowing() {
+        // VAL-OVERLAY-020: on a small 40×10 pane the box is size-clamped to the
+        // viewport, so the border stays on-frame and nothing writes past the edges.
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::filled(area, ratatui::buffer::Cell::new(" "));
+        // A tall content list (more rows than the pane) forces the height clamp.
+        let lines: Vec<Line<'static>> = (0..20).map(|i| Line::from(format!("model-{i}"))).collect();
+
+        draw_overlay(&mut buf, area, lines);
+
+        assert!(has_border(&buf), "the clamped dialog still has a border");
+        // The buffer is exactly 40×10 — the render never panicked or wrote out of
+        // bounds (TestBackend/Buffer would panic on an out-of-range cell write).
+        assert_eq!(buf.area, area, "no overflow past the tiny pane");
+    }
+
+    #[test]
+    fn overlay_on_a_zero_sized_area_is_a_silent_noop() {
+        // VAL-OVERLAY-020 (0×0 dialog layer): a degenerate viewport renders nothing
+        // rather than panicking.
+        let area = Rect::new(0, 0, 0, 0);
+        let mut buf = Buffer::empty(area);
+        draw_overlay(&mut buf, area, vec![Line::from("x")]);
+        assert_eq!(buf.area.width, 0);
+    }
+
+    #[test]
+    fn a_full_frame_layers_the_overlay_over_the_base_which_keeps_rendering() {
+        // VAL-OVERLAY-009: an open overlay is layered over the base viewport, and the
+        // base (footer, and any streaming preview) keeps rendering underneath the
+        // dimmed dialog — the overlay is a draw-layer concern only.
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        let loader = Loader::new(LOADER_MESSAGE);
+        let mut terminal = fixed_viewport(80, MAX_VIEWPORT_ROWS);
+
+        let width = terminal.get_frame().area().width;
+        let height = terminal.get_frame().area().height;
+        let snapshot = StateSnapshot {
+            size: TerminalSize::new(width, height),
+            loader: false,
+            loader_message: None,
+            preview: Vec::new(),
+            overlay_open: true,
+            overlay_lines: Some(vec![Line::from("→ claude-sonnet [anthropic]")]),
+        };
+        let footer = FooterViewModel {
+            model_id: "base-model".to_string(),
+            ..FooterViewModel::default()
+        };
+        terminal
+            .draw(|frame| {
+                draw(frame, &snapshot, &editor, &loader, &footer);
+                if let Some(lines) = snapshot.overlay_lines.clone() {
+                    let area = frame.area();
+                    draw_overlay(frame.buffer_mut(), area, lines);
+                }
+            })
+            .expect("draw one frame");
+
+        let text = buffer_text(&terminal);
+        // The overlay content is on top.
+        assert!(text.contains("claude-sonnet"), "overlay content: {text}");
+        // The base footer still rendered underneath (it was drawn before the overlay
+        // and only dimmed, not erased).
+        assert!(text.contains("base-model"), "base keeps rendering: {text}");
     }
 
     #[test]
