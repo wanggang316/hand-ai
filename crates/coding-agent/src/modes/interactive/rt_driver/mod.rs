@@ -59,6 +59,7 @@
 pub mod chat;
 pub mod chrome;
 pub mod input;
+pub mod messages;
 pub mod state;
 pub mod watchdog;
 
@@ -81,6 +82,13 @@ use self::chrome::{ChangelogStartupAction, ProgressState, PromptMark};
 use self::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_state};
 use self::watchdog::Watchdog;
 use super::event_dispatch::{ChatUpdate, dispatch as dispatch_event};
+
+/// The status line committed to scrollback after a Ctrl+T thinking toggle, so a
+/// probe can confirm the flip and its resulting global state.
+fn thinking_status_line(hidden: bool) -> String {
+    let state = if hidden { "hidden" } else { "visible" };
+    format!("[thinking blocks: {state}]")
+}
 
 /// Bound on the rt input event channel. A small buffer suffices for interactive
 /// typing; backpressure just parks the pump, which is fine.
@@ -321,6 +329,14 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
 
         match event {
             RtInputEvent::Key(key) => {
+                // Ctrl+T is a global toggle: it flips thinking-visibility across
+                // every assistant message in the transcript, so it is handled here
+                // (where the requester is in scope) rather than in the editor path.
+                if key.key_id.as_deref() == Some("ctrl+t") {
+                    toggle_thinking_globally(state, requester);
+                    requester.request_frame();
+                    continue;
+                }
                 if handle_key(&key, editor, state, submit_tx) == KeyOutcome::Quit {
                     break;
                 }
@@ -483,14 +499,17 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     queue_raw(&runner.state, &runner.requester, PromptMark::PromptStart);
 
     // Echo the user message into scrollback immediately for input responsiveness.
-    commit(
-        &runner.state,
-        &runner.requester,
-        chat::render_update(&ChatUpdate::AppendUser {
-            text: text.to_string(),
-        })
-        .unwrap_or_default(),
-    );
+    let echo = {
+        let ctx = render_context(&runner.state);
+        chat::render_update(
+            &ChatUpdate::AppendUser {
+                text: text.to_string(),
+            },
+            ctx,
+        )
+        .unwrap_or_default()
+    };
+    commit(&runner.state, &runner.requester, echo);
 
     // OSC 133 B — command start, after the user echo; OSC 9;4 indeterminate while
     // the turn is in flight.
@@ -597,16 +616,19 @@ where
     }
 }
 
-/// Apply a single agent session event, committing its scrollback representation.
+/// Apply a single agent session event.
 ///
-/// The skeleton commits **finalized** blocks into immutable scrollback, so it
-/// keys off message *ends* rather than streaming deltas:
+/// Finalized blocks commit into immutable scrollback; the in-flight assistant
+/// partial renders live in the active-area preview. The event handling keys off
+/// message boundaries:
 ///
-/// - An assistant message is committed once, on its `MessageEnd`, from the final
-///   snapshot — never per streaming delta (which would spam scrollback with every
-///   partial). The live in-viewport streaming preview is a follow-up feature; the
-///   `ReplaceLastAssistant` deltas the reused `event_dispatch` emits therefore
-///   have no scrollback line here (see [`chat::render_update`]).
+/// - A streaming `MessageUpdate` (the reused `event_dispatch`'s
+///   `ReplaceLastAssistant` delta) refreshes the active-area preview via the
+///   scheduler's request-frame — the M1 live-block semantics, throttled by the
+///   scheduler's own frame coalescing, not committed per token.
+/// - `MessageEnd` clears the preview and commits the *final* assistant snapshot
+///   once, from `assistant_lines`, and remembers it so a later Ctrl+T can
+///   re-render the whole transcript under the new thinking state.
 /// - Tool lifecycle, status, and compaction updates flow through the reused
 ///   `event_dispatch` → [`chat::render_update`] path; only the ones with a
 ///   scrollback representation (tool end, status) commit.
@@ -625,30 +647,138 @@ fn apply_event(
         return;
     }
 
-    // Commit a finalized assistant message once, on its end, from the final
-    // snapshot — bypassing the streaming `ReplaceLastAssistant` deltas.
-    if let AgentSessionEvent::Agent(agent_event) = event
-        && let hand_agent::types::AgentEvent::MessageEnd {
-            message: model::Message::Assistant(assistant),
-        } = agent_event.as_ref()
-    {
-        let lines = chat::render_update(&ChatUpdate::AppendAssistant {
-            message: Box::new(assistant.clone()),
-        })
-        .unwrap_or_default();
-        commit(state, requester, lines);
-        return;
+    if let AgentSessionEvent::Agent(agent_event) = event {
+        match agent_event.as_ref() {
+            // Streaming delta → live active-area preview (not scrollback). The
+            // scheduler coalesces the request-frames, so a fast token stream
+            // repaints at the frame rate rather than once per token.
+            hand_agent::types::AgentEvent::MessageUpdate {
+                message: model::Message::Assistant(assistant),
+                ..
+            } => {
+                update_streaming_preview(state, requester, assistant);
+                return;
+            }
+            // Finalize: clear the preview, commit the final snapshot once, and
+            // remember it for a global Ctrl+T re-render.
+            hand_agent::types::AgentEvent::MessageEnd {
+                message: model::Message::Assistant(assistant),
+            } => {
+                finalize_assistant(state, requester, assistant);
+                return;
+            }
+            _ => {}
+        }
     }
 
     // Everything else (tool lifecycle, status, compaction) flows through the
     // reused dispatch → render path; streaming deltas render nothing here.
+    let ctx = render_context(state);
     let mut lines = Vec::new();
     for update in dispatch_event(event) {
-        if let Some(rendered) = chat::render_update(&update) {
+        if let Some(rendered) = chat::render_update(&update, ctx) {
             lines.extend(rendered);
         }
     }
     commit(state, requester, lines);
+}
+
+/// Refresh the active-area streaming preview from an in-flight assistant partial
+/// and request a repaint. The preview renders the concatenated text through the
+/// stream renderer, which defensively closes an unclosed code fence so the code
+/// styling stays contained mid-stream (VAL-CHAT-033).
+fn update_streaming_preview(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    assistant: &model::AssistantMessage,
+) {
+    let (width, partial) = {
+        let guard = lock_state(state);
+        (guard.size.cols, assistant_stream_text(assistant))
+    };
+    let preview = if partial.trim().is_empty() {
+        None
+    } else {
+        Some(messages::stream_preview_lines(&partial, width))
+    };
+    lock_state(state).set_streaming_preview(preview);
+    requester.request_frame();
+}
+
+/// Finalize an assistant message: clear the live preview, commit its rendered
+/// lines to scrollback once, and remember the snapshot so a later global
+/// thinking-toggle (Ctrl+T) can re-render the whole transcript.
+fn finalize_assistant(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    assistant: &model::AssistantMessage,
+) {
+    let lines = {
+        let mut guard = lock_state(state);
+        guard.set_streaming_preview(None);
+        let ctx = chat::RenderContext {
+            width: guard.size.cols,
+            hide_thinking: guard.hide_thinking,
+        };
+        let lines = messages::assistant_lines(assistant, ctx.hide_thinking, ctx.width);
+        guard.remember_assistant(assistant.clone());
+        lines
+    };
+    commit(state, requester, lines);
+}
+
+/// The concatenated text content of an in-flight assistant partial, joined with
+/// newlines — the mid-stream body the preview renders.
+fn assistant_stream_text(message: &model::AssistantMessage) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            model::AssistantContentBlock::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Build the [`chat::RenderContext`] from the current driver state — the render
+/// width and the global thinking-collapse flag — for the arms that render rich
+/// message bodies.
+fn render_context(state: &Arc<Mutex<DriverState>>) -> chat::RenderContext {
+    let guard = lock_state(state);
+    chat::RenderContext {
+        width: guard.size.cols,
+        hide_thinking: guard.hide_thinking,
+    }
+}
+
+/// Flip the global thinking-collapse state (Ctrl+T) and re-commit the whole
+/// assistant transcript under the new state, followed by a status line.
+///
+/// Native scrollback is immutable — already-committed lines cannot be rewritten
+/// in place — so a *global* flip re-renders every remembered assistant message
+/// under the new `hide_thinking` value and commits the re-rendered transcript as
+/// a fresh block, then a `[thinking blocks: hidden/visible]` status line. The
+/// user sees the transcript reflowed with thinking collapsed/expanded and a
+/// clear marker of the current state.
+fn toggle_thinking_globally(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester) {
+    let (blocks, status) = {
+        let mut guard = lock_state(state);
+        let hidden = guard.toggle_thinking();
+        let width = guard.size.cols;
+        let blocks: Vec<Vec<Line<'static>>> = guard
+            .assistant_history
+            .iter()
+            .map(|msg| messages::assistant_lines(msg, hidden, width))
+            .filter(|lines| !lines.is_empty())
+            .collect();
+        (blocks, thinking_status_line(hidden))
+    };
+
+    for block in blocks {
+        commit(state, requester, block);
+    }
+    commit(state, requester, chat::status_lines_for(&status));
 }
 
 /// Toggle the streaming flag (loader + editor "thinking" tint) and repaint.

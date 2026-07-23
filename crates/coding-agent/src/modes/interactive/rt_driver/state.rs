@@ -24,6 +24,8 @@ use hand_tui::rt::components::Editor;
 use hand_tui::rt::view::{MIN_INPUT_ROWS, TerminalSize};
 use ratatui::text::Line;
 
+use model::AssistantMessage;
+
 /// The editor shared between the input loop (which dispatches keys to it) and the
 /// draw closure (which renders it). Behind a blocking `Mutex`: every critical
 /// section is a tiny, non-awaiting call (`handle_key`, `render`, `take_submit`),
@@ -71,6 +73,21 @@ pub struct DriverState {
     /// inside the synchronized-output block, so invariant #1 (the scheduler owns
     /// the terminal) holds. Each entry is a complete, self-contained escape.
     pub pending_raw: Vec<&'static str>,
+    /// Whether thinking blocks render collapsed (the static `Thinking...` label)
+    /// rather than their full dim-italic body. Flipped globally by Ctrl+T; the
+    /// draw closure reads it for the streaming preview and the commit path reads
+    /// it when finalizing an assistant message.
+    pub hide_thinking: bool,
+    /// Raw snapshots of every assistant message committed to scrollback this
+    /// session, in order. Ctrl+T re-renders all of them under the new
+    /// [`hide_thinking`](DriverState::hide_thinking) state and re-commits them so
+    /// the toggle takes effect globally (native scrollback is immutable, so a
+    /// global flip appends the re-rendered transcript rather than rewriting it).
+    pub assistant_history: Vec<AssistantMessage>,
+    /// The in-flight assistant partial rendered live in the active-area preview,
+    /// or `None` when no turn is streaming. Updated per streaming delta and
+    /// cleared when the final snapshot commits to scrollback on `MessageEnd`.
+    pub streaming_preview: Option<Vec<Line<'static>>>,
 }
 
 impl DriverState {
@@ -110,6 +127,25 @@ impl DriverState {
     /// exactly once.
     pub fn take_raw(&mut self) -> Vec<&'static str> {
         std::mem::take(&mut self.pending_raw)
+    }
+
+    /// Record an assistant message snapshot so a later global thinking-toggle
+    /// (Ctrl+T) can re-render it. Called when the message finalizes into
+    /// scrollback.
+    pub fn remember_assistant(&mut self, message: AssistantMessage) {
+        self.assistant_history.push(message);
+    }
+
+    /// Flip the global thinking-collapse state and report the new value, so the
+    /// caller can re-render the transcript and emit the matching status line.
+    pub fn toggle_thinking(&mut self) -> bool {
+        self.hide_thinking = !self.hide_thinking;
+        self.hide_thinking
+    }
+
+    /// Replace the active-area streaming preview (or clear it with `None`).
+    pub fn set_streaming_preview(&mut self, preview: Option<Vec<Line<'static>>>) {
+        self.streaming_preview = preview;
     }
 }
 
@@ -169,5 +205,50 @@ mod tests {
         assert_eq!(state.input_rows, MIN_INPUT_ROWS);
         assert_eq!(state.size, TerminalSize::new(120, 40));
         assert!(!state.streaming);
+    }
+
+    #[test]
+    fn toggle_thinking_flips_and_reports_new_state() {
+        let mut state = DriverState::new(TerminalSize::new(80, 24));
+        assert!(!state.hide_thinking, "thinking starts expanded");
+        assert!(state.toggle_thinking(), "first flip hides");
+        assert!(state.hide_thinking);
+        assert!(!state.toggle_thinking(), "second flip shows");
+        assert!(!state.hide_thinking);
+    }
+
+    #[test]
+    fn remember_assistant_accumulates_snapshots_in_order() {
+        use model::types::{
+            Api, AssistantContentBlock, AssistantMessage, Provider, StopReason, TextContent, Usage,
+        };
+        let make = |t: &str| AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![AssistantContentBlock::Text(TextContent::new(t))],
+            api: Api::AnthropicMessages,
+            provider: Provider::Anthropic,
+            model: "m".to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        };
+        let mut state = DriverState::new(TerminalSize::new(80, 24));
+        state.remember_assistant(make("first"));
+        state.remember_assistant(make("second"));
+        assert_eq!(state.assistant_history.len(), 2);
+    }
+
+    #[test]
+    fn set_streaming_preview_stores_and_clears() {
+        let mut state = DriverState::new(TerminalSize::new(80, 24));
+        assert!(state.streaming_preview.is_none());
+        state.set_streaming_preview(Some(vec![Line::from("live")]));
+        assert!(state.streaming_preview.is_some());
+        state.set_streaming_preview(None);
+        assert!(state.streaming_preview.is_none());
     }
 }

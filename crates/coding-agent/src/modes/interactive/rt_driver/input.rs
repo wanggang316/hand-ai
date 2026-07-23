@@ -23,13 +23,13 @@
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use hand_tui::rt::history::HistorySink;
+use hand_tui::rt::history::{HistorySink, wrap_lines};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{EraseOnDrop, SessionTerminal, clear_viewport_region};
 use hand_tui::rt::view::bottom_area_geometry;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style, Stylize};
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
 use super::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_footer, lock_state};
@@ -70,10 +70,12 @@ pub fn spawn_scheduler(
             if guard.streaming {
                 guard.spinner_phase = guard.spinner_phase.wrapping_add(1);
             }
+            let preview = guard.streaming_preview.clone().unwrap_or_default();
             let snapshot = StateSnapshot {
                 size: guard.size,
                 loader: guard.streaming,
                 spinner_phase: guard.spinner_phase,
+                preview,
             };
             (snapshot, commits, raw)
         };
@@ -151,6 +153,11 @@ struct StateSnapshot {
     loader: bool,
     /// Spinner animation phase for the loader glyph.
     spinner_phase: u64,
+    /// The live streaming-preview lines to paint in the blank band above the
+    /// active bottom box, or empty when no turn is streaming. The tail is shown
+    /// when the band is shorter than the preview so the most recent tokens are
+    /// always visible.
+    preview: Vec<Line<'static>>,
 }
 
 /// Paint one frame: the bordered bottom box, an optional loader row, the editor,
@@ -181,6 +188,12 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot, editor: &SharedEditor
     // FIX-2 offset_y invariant.
     let geometry = bottom_area_geometry(input_rows, state.loader, area.width, state.size.rows)
         .offset_y(area.y);
+
+    // The live streaming preview paints in the blank band ABOVE the active box
+    // (between the viewport origin and the box's top), so the in-flight assistant
+    // partial grows in place without touching scrollback. When the preview is
+    // taller than the band, its tail is shown so the newest tokens stay visible.
+    draw_stream_preview(frame, &state.preview, area, geometry.active);
 
     // The bordered box occupies only the active area; rows above it (freed by a
     // collapse) stay blank and repaint clear each frame.
@@ -219,6 +232,37 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot, editor: &SharedEditor
         Paragraph::new(Line::from(footer.to_string().dim()))
             .render(footer_rect, frame.buffer_mut());
     }
+}
+
+/// Paint the streaming preview into the blank band above the active box.
+///
+/// The band runs from the viewport origin (`area.y`) down to the top of the
+/// active box. The preview is wrapped to the width and, when it is taller than
+/// the band, its **tail** is shown so the newest tokens are always visible (the
+/// preview grows upward off the top of the band, matching how a streamed reply
+/// reads). An empty band or empty preview paints nothing.
+fn draw_stream_preview(
+    frame: &mut ratatui::Frame,
+    preview: &[Line<'static>],
+    area: Rect,
+    active: Rect,
+) {
+    if preview.is_empty() {
+        return;
+    }
+    let band_height = active.y.saturating_sub(area.y);
+    if band_height == 0 || area.width == 0 {
+        return;
+    }
+    let band = Rect::new(area.x, area.y, area.width, band_height);
+
+    // Wrap to the band width, then keep only the last `band_height` visual rows
+    // so the newest content sits flush against the box.
+    let wrapped = wrap_lines(preview, band.width);
+    let start = wrapped.len().saturating_sub(band_height as usize);
+    let visible: Vec<Line<'static>> = wrapped[start..].to_vec();
+
+    Paragraph::new(Text::from(visible)).render(band, frame.buffer_mut());
 }
 
 /// Split a bottom-area body rect into the editor (all but the last row) and a

@@ -1,4 +1,4 @@
-//! Skeleton chat renderer: [`ChatUpdate`] → scrollback [`Line`]s.
+//! Chat renderer: [`ChatUpdate`] → scrollback [`Line`]s.
 //!
 //! The rt driver commits finalized chat output into the terminal's native
 //! scrollback through the rt [`HistorySink`](hand_tui::rt::history::HistorySink).
@@ -8,36 +8,52 @@
 //! unchanged and carries **zero** `hand_tui` dependency) to the styled lines the
 //! sink commits.
 //!
-//! # Scope — skeleton rendering only
-//!
-//! This feature renders the *shapes the skeleton needs to demonstrate a turn*:
-//! a user echo, an assistant text block, tool-result and status lines. It is a
-//! flat, one-block-per-update text rendering — **not** the rich per-message
-//! components (thinking blocks, bash cards, markdown, syntax highlighting) that
-//! land in later M3 features.
-//!
-//! ## Seam for the message components
+//! # The message-component seam
 //!
 //! Every update is funnelled through [`render_update`], which returns the lines
-//! for exactly one [`ChatUpdate`]. A later feature mounts real components by
-//! replacing the body of the arm it owns (e.g. routing `AppendAssistant` through
-//! the rt `MarkdownView`) without touching the driver's commit path or the
-//! `event_dispatch` protocol. Streaming updates
-//! ([`ChatUpdate::ReplaceLastAssistant`], [`ChatUpdate::ToolUpdate`]) render live
-//! in the viewport rather than scrollback and so return `None` here — the
-//! skeleton echoes the *final* snapshot on `MessageEnd`/`AppendAssistant`, which
-//! is enough to prove a streamed turn lands in history.
+//! for exactly one [`ChatUpdate`]. The rich per-message rendering — the tinted
+//! user bubble, markdown assistant bodies, dim-italic thinking blocks, and the
+//! per-message error footnote — lives in [`messages`](super::messages) and is
+//! mounted here: the `AppendUser` and `AppendAssistant` arms delegate to it,
+//! carrying a [`RenderContext`] (render width + the global thinking-collapse
+//! flag) so the body renderers can wrap markdown to the pane and honour the
+//! Ctrl+T toggle. Tool-result, status, and error lines stay flat text — they
+//! have no rich component.
+//!
+//! Streaming deltas ([`ChatUpdate::ReplaceLastAssistant`],
+//! [`ChatUpdate::ToolUpdate`]) render live in the active-area *preview* (see
+//! [`messages::stream_preview_lines`]) rather than scrollback, so they return
+//! `None` here — the driver commits the *final* snapshot on `MessageEnd`, which
+//! is the M1 live-block commit semantics (one commit, no duplication, no jump).
 
-use hand_tui::rt::history::wrap_lines;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 
+use super::messages;
 use crate::modes::interactive::event_dispatch::ChatUpdate;
 
-/// Style for the user-echo prefix — a dim `> ` before the submitted text, the
-/// hand chat convention.
-fn user_style() -> Style {
-    Style::default().fg(Color::Cyan)
+/// Context the rich message renderers need: the pane width markdown bodies wrap
+/// to, and the global thinking-collapse flag (Ctrl+T) applied to every assistant
+/// message.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderContext {
+    /// The render width in columns — markdown bodies and the user bubble wrap /
+    /// tint to this.
+    pub width: u16,
+    /// Whether thinking blocks render collapsed (the static label) rather than
+    /// their full dim-italic body. Flipped globally by Ctrl+T.
+    pub hide_thinking: bool,
+}
+
+impl RenderContext {
+    /// A context for `width` columns with thinking expanded.
+    #[must_use]
+    pub fn new(width: u16) -> Self {
+        Self {
+            width,
+            hide_thinking: false,
+        }
+    }
 }
 
 /// Style for status / notice lines (compaction, `/help`, watchdog banner).
@@ -51,21 +67,23 @@ fn error_style() -> Style {
 }
 
 /// Render one [`ChatUpdate`] into the scrollback lines it commits, or `None` when
-/// the update has no scrollback representation in the skeleton (streaming deltas
-/// that render live in the viewport instead).
+/// the update has no scrollback representation (streaming deltas that render in
+/// the active-area preview instead).
 ///
-/// This is the single seam a later feature extends to mount real message
-/// components: each arm owns the rendering of its update kind, so swapping a flat
-/// text block for a component touches only that arm.
+/// The `AppendUser` / `AppendAssistant` arms delegate to the rich
+/// [`messages`](super::messages) renderers using `ctx`; the remaining arms are
+/// flat text.
 #[must_use]
-pub fn render_update(update: &ChatUpdate) -> Option<Vec<Line<'static>>> {
+pub fn render_update(update: &ChatUpdate, ctx: RenderContext) -> Option<Vec<Line<'static>>> {
     match update {
-        ChatUpdate::AppendUser { text } => Some(user_lines(text)),
-        ChatUpdate::AppendAssistant { message } => Some(assistant_lines(message)),
-        // Streaming deltas: the skeleton renders the final snapshot on
-        // AppendAssistant / (the trailing) ReplaceLastAssistant-as-end. A live
-        // in-viewport preview is a later feature, so a mid-stream replace has no
-        // scrollback line of its own.
+        ChatUpdate::AppendUser { text } => Some(messages::user_bubble_lines(text, ctx.width)),
+        ChatUpdate::AppendAssistant { message } => Some(messages::assistant_lines(
+            message,
+            ctx.hide_thinking,
+            ctx.width,
+        )),
+        // Streaming deltas render in the active-area preview, not scrollback; the
+        // final snapshot commits on MessageEnd through AppendAssistant.
         ChatUpdate::ReplaceLastAssistant { .. } => None,
         ChatUpdate::AppendToolResult { text } => Some(plain_lines(text)),
         ChatUpdate::ToolEnd {
@@ -75,48 +93,15 @@ pub fn render_update(update: &ChatUpdate) -> Option<Vec<Line<'static>>> {
             ..
         } => Some(tool_end_lines(result_text, *is_error, *exit_code)),
         // Tool start / update stream into a live component in a later feature; the
-        // skeleton shows only the finalized result via ToolEnd.
+        // driver shows only the finalized result via ToolEnd.
         ChatUpdate::ToolStart { .. } | ChatUpdate::ToolUpdate { .. } => None,
         ChatUpdate::AppendStatus { text } => Some(status_lines(text)),
         ChatUpdate::ThemeChanged { theme } => Some(status_lines(&format!("[theme: {theme}]"))),
     }
 }
 
-/// The dim-prefixed echo of a submitted user message, one logical line per input
-/// line so a multi-line prompt keeps its shape in scrollback.
-fn user_lines(text: &str) -> Vec<Line<'static>> {
-    text.split('\n')
-        .map(|line| Line::from(format!("> {line}")).style(user_style()))
-        .collect()
-}
-
-/// The concatenated text blocks of an assistant message, split into logical
-/// lines. Thinking and tool-call blocks are skipped — they render through
-/// dedicated components in a later feature.
-fn assistant_lines(message: &model::AssistantMessage) -> Vec<Line<'static>> {
-    let text = assistant_text(message);
-    if text.is_empty() {
-        return Vec::new();
-    }
-    plain_lines(&text)
-}
-
-/// Extract the plain-text content of an assistant message, joining text blocks
-/// with newlines. Mirrors the extraction the legacy driver uses for copy/echo.
-fn assistant_text(message: &model::AssistantMessage) -> String {
-    message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            model::AssistantContentBlock::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// A finalized tool result: a dim body plus an error/exit-code tag so the
-/// skeleton shows a tool ran and how it ended.
+/// A finalized tool result: a dim body plus an error/exit-code tag so the driver
+/// shows a tool ran and how it ended.
 fn tool_end_lines(result_text: &str, is_error: bool, exit_code: Option<i32>) -> Vec<Line<'static>> {
     let tag = match (is_error, exit_code) {
         (true, Some(code)) => format!("[tool error, exit {code}]"),
@@ -148,6 +133,14 @@ fn status_lines(text: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Public entry to the yellow status-line rendering, for a caller (the Ctrl+T
+/// toggle) that commits a status line directly without going through a
+/// [`ChatUpdate`].
+#[must_use]
+pub fn status_lines_for(text: &str) -> Vec<Line<'static>> {
+    status_lines(text)
+}
+
 /// An error banner, styled red, for the driver's error path (the red-banner
 /// route the legacy `push_error` took, kept distinct from dim status lines).
 #[must_use]
@@ -155,15 +148,6 @@ pub fn error_lines(text: &str) -> Vec<Line<'static>> {
     text.split('\n')
         .map(|line| Line::from(line.to_string()).style(error_style()))
         .collect()
-}
-
-/// Pre-wrap a batch of already-rendered logical lines to `width`, matching the
-/// wrap the [`HistorySink`](hand_tui::rt::history::HistorySink) applies on
-/// commit. Exposed so a caller that wants the *visual* row count (e.g. a test)
-/// can measure it without a live terminal.
-#[must_use]
-pub fn wrap_for_width(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
-    wrap_lines(lines, width)
 }
 
 #[cfg(test)]
@@ -194,44 +178,65 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    #[test]
-    fn user_update_echoes_with_prompt_prefix() {
-        let lines = render_update(&ChatUpdate::AppendUser {
-            text: "hello world".to_string(),
-        })
-        .expect("user update renders");
-        assert_eq!(lines.len(), 1);
-        assert_eq!(text_of(&lines[0]), "> hello world");
+    fn ctx() -> RenderContext {
+        RenderContext::new(80)
     }
 
     #[test]
-    fn multiline_user_update_keeps_one_line_each() {
-        let lines = render_update(&ChatUpdate::AppendUser {
-            text: "line one\nline two".to_string(),
-        })
+    fn user_update_renders_a_tinted_bubble_with_the_text() {
+        let lines = render_update(
+            &ChatUpdate::AppendUser {
+                text: "hello world".to_string(),
+            },
+            ctx(),
+        )
         .expect("user update renders");
-        assert_eq!(lines.len(), 2);
-        assert_eq!(text_of(&lines[0]), "> line one");
-        assert_eq!(text_of(&lines[1]), "> line two");
+        let joined: String = lines.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("hello world"));
+    }
+
+    #[test]
+    fn multiline_user_update_keeps_a_row_per_input_line() {
+        let lines = render_update(
+            &ChatUpdate::AppendUser {
+                text: "line one\nline two".to_string(),
+            },
+            ctx(),
+        )
+        .expect("user update renders");
+        let bodies: Vec<String> = lines
+            .iter()
+            .map(text_of)
+            .filter(|t| t.contains("line"))
+            .collect();
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[0].contains("line one"));
+        assert!(bodies[1].contains("line two"));
     }
 
     #[test]
     fn assistant_update_renders_text_blocks() {
-        let lines = render_update(&ChatUpdate::AppendAssistant {
-            message: assistant("hi back"),
-        })
+        let lines = render_update(
+            &ChatUpdate::AppendAssistant {
+                message: assistant("hi back"),
+            },
+            ctx(),
+        )
         .expect("assistant update renders");
-        assert_eq!(lines.len(), 1);
-        assert_eq!(text_of(&lines[0]), "hi back");
+        let joined: String = lines.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("hi back"));
     }
 
     #[test]
     fn empty_assistant_snapshot_renders_no_lines() {
         // MessageStart carries an empty snapshot; it must not commit a blank
         // block to scrollback.
-        let lines = render_update(&ChatUpdate::AppendAssistant {
-            message: assistant(""),
-        })
+        let lines = render_update(
+            &ChatUpdate::AppendAssistant {
+                message: assistant(""),
+            },
+            ctx(),
+        )
         .expect("assistant update renders");
         assert!(lines.is_empty());
     }
@@ -241,36 +246,45 @@ mod tests {
         let update = ChatUpdate::ReplaceLastAssistant {
             message: assistant("partial"),
         };
-        assert!(render_update(&update).is_none());
+        assert!(render_update(&update, ctx()).is_none());
     }
 
     #[test]
     fn tool_start_and_update_have_no_scrollback_line() {
         assert!(
-            render_update(&ChatUpdate::ToolStart {
-                tool_call_id: "c1".into(),
-                tool_name: "read".into(),
-                args: serde_json::json!({}),
-            })
+            render_update(
+                &ChatUpdate::ToolStart {
+                    tool_call_id: "c1".into(),
+                    tool_name: "read".into(),
+                    args: serde_json::json!({}),
+                },
+                ctx()
+            )
             .is_none()
         );
         assert!(
-            render_update(&ChatUpdate::ToolUpdate {
-                tool_call_id: "c1".into(),
-                partial_text: "…".into(),
-            })
+            render_update(
+                &ChatUpdate::ToolUpdate {
+                    tool_call_id: "c1".into(),
+                    partial_text: "…".into(),
+                },
+                ctx()
+            )
             .is_none()
         );
     }
 
     #[test]
     fn tool_end_tags_success_with_exit_code() {
-        let lines = render_update(&ChatUpdate::ToolEnd {
-            tool_call_id: "c1".into(),
-            result_text: "done".into(),
-            is_error: false,
-            exit_code: Some(0),
-        })
+        let lines = render_update(
+            &ChatUpdate::ToolEnd {
+                tool_call_id: "c1".into(),
+                result_text: "done".into(),
+                is_error: false,
+                exit_code: Some(0),
+            },
+            ctx(),
+        )
         .expect("tool end renders");
         assert_eq!(text_of(&lines[0]), "[tool ok, exit 0]");
         assert_eq!(text_of(&lines[1]), "done");
@@ -278,21 +292,27 @@ mod tests {
 
     #[test]
     fn tool_end_tags_error() {
-        let lines = render_update(&ChatUpdate::ToolEnd {
-            tool_call_id: "c1".into(),
-            result_text: "nope".into(),
-            is_error: true,
-            exit_code: None,
-        })
+        let lines = render_update(
+            &ChatUpdate::ToolEnd {
+                tool_call_id: "c1".into(),
+                result_text: "nope".into(),
+                is_error: true,
+                exit_code: None,
+            },
+            ctx(),
+        )
         .expect("tool end renders");
         assert_eq!(text_of(&lines[0]), "[tool error]");
     }
 
     #[test]
     fn status_update_renders_yellow_line() {
-        let lines = render_update(&ChatUpdate::AppendStatus {
-            text: "[Compacting context...]".to_string(),
-        })
+        let lines = render_update(
+            &ChatUpdate::AppendStatus {
+                text: "[Compacting context...]".to_string(),
+            },
+            ctx(),
+        )
         .expect("status renders");
         assert_eq!(text_of(&lines[0]), "[Compacting context...]");
     }
