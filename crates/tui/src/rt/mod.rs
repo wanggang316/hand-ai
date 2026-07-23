@@ -29,3 +29,7 @@ pub use scheduler::{
     BSU, ESU, FrameClock, FrameDecision, FrameRequester, FrameScheduler, MAX_BURSTS_PER_SECOND,
     MIN_FRAME_INTERVAL, close_synchronized, draw_synchronized,
 };
+pub use view::{
+    BORDER_ROWS, BottomGeometry, LOADER_ROWS, MAX_INPUT_ROWS, MAX_VIEWPORT_ROWS, MIN_INPUT_ROWS,
+    bottom_area_geometry, clamp_input_rows,
+};

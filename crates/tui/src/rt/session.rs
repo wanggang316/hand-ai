@@ -30,8 +30,18 @@ pub const FALLBACK_COLS: u16 = 80;
 /// be queried.
 pub const FALLBACK_ROWS: u16 = 24;
 
-/// Height of the inline viewport, in rows (bordered input line: 3 rows).
-pub const INLINE_VIEWPORT_ROWS: u16 = 3;
+/// Height of the inline viewport, in rows.
+///
+/// Under the fixed-max-viewport strategy (ratatui#984 workaround B), the inline
+/// viewport is reserved once at the *tallest* the bottom area can ever be —
+/// [`crate::rt::view::MAX_VIEWPORT_ROWS`] — and the active content (loader +
+/// auto-growing input, from 1 up to 8 rows) is laid out inside it. Fixing it at
+/// the max means a runtime grow never has to enlarge the viewport (which ratatui
+/// cannot do without rebuilding the `Terminal`) and a shrink never moves it: only
+/// the interior layout changes and the freed rows repaint blank, so there is no
+/// scrollback leak or ghost row. See [`crate::rt::view`] for the geometry core
+/// and the rejected alternatives.
+pub const INLINE_VIEWPORT_ROWS: u16 = crate::rt::view::MAX_VIEWPORT_ROWS;
 
 /// Environment variable that forces the kitty keyboard-enhancement push even
 /// when `supports_keyboard_enhancement()` cannot confirm support (e.g. a dumb
