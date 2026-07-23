@@ -26,9 +26,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
 use crossterm::queue;
-use tokio::sync::{Notify, mpsc};
-
-use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::time::Instant as TokioInstant;
 
 /// Target frame rate: at most one draw per this interval (~60fps).
 ///
@@ -105,16 +104,23 @@ impl FrameClock {
     ///   be closer than `min_interval`, the burst rate is bounded.
     #[must_use]
     pub fn decide(&self, last_draw: Option<Instant>, now: Instant) -> FrameDecision {
-        match last_draw {
+        let elapsed = last_draw.map(|last| now.saturating_duration_since(last));
+        self.decide_elapsed(elapsed)
+    }
+
+    /// The clock-agnostic core of [`decide`]: given the time elapsed since the
+    /// last draw (`None` = never drawn yet), decide draw-now vs. wait.
+    ///
+    /// Kept separate so the async actor can feed elapsed time from *any* clock
+    /// source (e.g. `tokio::time::Instant`, which tracks paused/virtual time),
+    /// while [`decide`] offers the ergonomic `std::time::Instant` form the unit
+    /// tests drive.
+    #[must_use]
+    pub fn decide_elapsed(&self, elapsed: Option<Duration>) -> FrameDecision {
+        match elapsed {
             None => FrameDecision::DrawNow,
-            Some(last) => {
-                let elapsed = now.saturating_duration_since(last);
-                if elapsed >= self.min_interval {
-                    FrameDecision::DrawNow
-                } else {
-                    FrameDecision::Wait(self.min_interval - elapsed)
-                }
-            }
+            Some(elapsed) if elapsed >= self.min_interval => FrameDecision::DrawNow,
+            Some(elapsed) => FrameDecision::Wait(self.min_interval - elapsed),
         }
     }
 }
@@ -142,16 +148,14 @@ enum FrameSignal {
 
 /// A cheap, cloneable handle used by any task to ask for a redraw.
 ///
-/// Cloning is trivial (an `mpsc::Sender` plus a `Notify` arc). Handing clones to
-/// concurrent producers is the intended usage: they all funnel requests into the
-/// one scheduler, which coalesces and rate-limits them.
+/// Cloning is trivial (an `mpsc::UnboundedSender`). Handing clones to concurrent
+/// producers is the intended usage: they all funnel requests into the one
+/// scheduler, which coalesces and rate-limits them. The channel doubles as the
+/// wake signal, so the scheduler parks on `recv()` when idle and needs no
+/// separate notifier.
 #[derive(Debug, Clone)]
 pub struct FrameRequester {
     tx: mpsc::UnboundedSender<FrameSignal>,
-    /// Woken on every request so the scheduler's park can return promptly. A
-    /// `Notify` (rather than relying solely on the channel) keeps the wake path
-    /// allocation-free and lets the scheduler `select!` cleanly.
-    notify: Arc<Notify>,
 }
 
 impl FrameRequester {
@@ -165,7 +169,6 @@ impl FrameRequester {
     pub fn request_frame(&self) {
         // Ignore send errors: a closed channel means the scheduler is gone.
         let _ = self.tx.send(FrameSignal::Now);
-        self.notify.notify_one();
     }
 
     /// Request a frame after at least `delay`, without busy-waiting.
@@ -176,7 +179,6 @@ impl FrameRequester {
     /// them).
     pub fn request_frame_in(&self, delay: Duration) {
         let _ = self.tx.send(FrameSignal::After(delay));
-        self.notify.notify_one();
     }
 }
 
@@ -215,6 +217,44 @@ pub fn close_synchronized(out: &mut impl Write) -> io::Result<()> {
     out.flush()
 }
 
+/// Fold a signal into the armed deferral instant.
+///
+/// A [`FrameSignal::Now`] leaves the deferral untouched (draw as soon as the
+/// rate limiter allows); a [`FrameSignal::After`] arms — or tightens — the
+/// earliest instant the scheduler may consider drawing. Uses tokio's clock so
+/// it tracks paused/virtual time in tests identically to real time in
+/// production.
+fn arm_deferral(earliest: &mut Option<TokioInstant>, signal: FrameSignal) {
+    if let FrameSignal::After(delay) = signal {
+        let when = TokioInstant::now() + delay;
+        *earliest = Some(earliest.map_or(when, |cur| cur.min(when)));
+    }
+}
+
+/// Elapsed time since the last draw on tokio's clock, or `None` if never drawn.
+fn elapsed_since(last_draw: Option<TokioInstant>) -> Option<Duration> {
+    last_draw.map(|last| TokioInstant::now().saturating_duration_since(last))
+}
+
+/// Honour a final pending frame once the channel has closed, then finish.
+///
+/// Called on the shutdown path (all requesters dropped) when a request was in
+/// flight: draws once if the rate limiter permits, so the last state is not
+/// lost, then returns `Ok(())` to end the actor.
+fn finish_pending<F>(
+    clock: &FrameClock,
+    last_draw: Option<TokioInstant>,
+    draw: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut() -> io::Result<()>,
+{
+    if let FrameDecision::DrawNow = clock.decide_elapsed(elapsed_since(last_draw)) {
+        draw()?;
+    }
+    Ok(())
+}
+
 /// The draw-side of the runtime: coalesces and rate-limits redraw requests.
 ///
 /// Spawn it with [`FrameScheduler::spawn`], which returns a [`FrameRequester`]
@@ -242,91 +282,88 @@ impl FrameScheduler {
         F: FnMut() -> io::Result<()> + Send + 'static,
     {
         let (tx, mut rx) = mpsc::unbounded_channel::<FrameSignal>();
-        let notify = Arc::new(Notify::new());
-        let requester = FrameRequester {
-            tx,
-            notify: notify.clone(),
-        };
+        let requester = FrameRequester { tx };
 
         let handle = tokio::spawn(async move {
             let clock = FrameClock::new();
-            let mut last_draw: Option<Instant> = None;
+            let mut last_draw: Option<TokioInstant> = None;
             // Whether a request is waiting to be satisfied. Set when a signal
             // arrives, cleared when we actually draw. This flag is the whole of
             // "idle silence": while it is false we never draw and never emit a
-            // byte.
+            // byte, and we park on the channel rather than spinning.
             let mut pending = false;
-            // Earliest instant we are allowed to *consider* a deferred
-            // (`After`) request. `None` means no deferral is armed.
-            let mut earliest: Option<Instant> = None;
+            // Earliest instant we may *consider* a deferred (`After`) request.
+            // `None` means no deferral is armed.
+            let mut earliest: Option<TokioInstant> = None;
 
             loop {
-                // Drain every buffered signal without blocking, so a token
-                // flood collapses into one pending flag rather than N loop
-                // turns.
+                // Idle: park on the channel. This is the "idle silence"
+                // guarantee — a channel-blocked await draws nothing, emits no
+                // byte, and consumes no CPU until a request arrives (or every
+                // requester drops, closing the channel).
+                if !pending {
+                    match rx.recv().await {
+                        Some(signal) => {
+                            pending = true;
+                            arm_deferral(&mut earliest, signal);
+                        }
+                        None => return Ok(()),
+                    }
+                }
+
+                // Drain any further buffered signals without blocking so a token
+                // flood collapses into the one `pending` flag.
                 loop {
                     match rx.try_recv() {
-                        Ok(signal) => {
-                            pending = true;
-                            if let FrameSignal::After(delay) = signal {
-                                let when = Instant::now() + delay;
-                                earliest = Some(earliest.map_or(when, |cur| cur.min(when)));
-                            }
-                        }
+                        Ok(signal) => arm_deferral(&mut earliest, signal),
                         Err(mpsc::error::TryRecvError::Empty) => break,
                         Err(mpsc::error::TryRecvError::Disconnected) => {
-                            // All requesters dropped. Honour a final pending
-                            // frame if one is due, then stop.
-                            if pending {
-                                if let FrameDecision::DrawNow =
-                                    clock.decide(last_draw, Instant::now())
-                                {
-                                    draw()?;
-                                }
-                            }
-                            return Ok(());
+                            // All requesters dropped. Honour the final pending
+                            // frame if the rate limiter allows, then stop.
+                            return finish_pending(&clock, last_draw, &mut draw);
                         }
                     }
                 }
 
-                if !pending {
-                    // Idle: park until a request wakes us. No draw, no bytes.
-                    notify.notified().await;
-                    continue;
-                }
-
-                let now = Instant::now();
+                let now = TokioInstant::now();
 
                 // Respect an armed `After` deferral: if the earliest allowed
                 // instant is still in the future, wait for it (or for a new
-                // request that might supersede it).
+                // request that might supersede it), then re-evaluate.
                 if let Some(when) = earliest
                     && now < when
                 {
-                    let sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(when));
+                    let sleep = tokio::time::sleep_until(when);
                     tokio::select! {
                         () = sleep => {}
-                        () = notify.notified() => {}
+                        maybe = rx.recv() => match maybe {
+                            Some(signal) => arm_deferral(&mut earliest, signal),
+                            None => return finish_pending(&clock, last_draw, &mut draw),
+                        },
                     }
                     continue;
                 }
                 earliest = None;
 
-                match clock.decide(last_draw, now) {
+                match clock.decide_elapsed(elapsed_since(last_draw)) {
                     FrameDecision::DrawNow => {
                         draw()?;
-                        last_draw = Some(Instant::now());
+                        last_draw = Some(TokioInstant::now());
                         pending = false;
                     }
                     FrameDecision::Wait(remaining) => {
-                        // Coalesce: sleep out the remaining frame budget. Any
-                        // request that arrives meanwhile is already folded into
-                        // `pending`, so it costs nothing extra and does not
-                        // advance the draw.
+                        // Coalesce: wait out the remaining frame budget. Any
+                        // request arriving meanwhile is folded into `pending`
+                        // (still true), so it costs nothing and does not advance
+                        // the draw. A channel close during the wait ends the
+                        // loop after honouring the pending frame.
                         let sleep = tokio::time::sleep(remaining);
                         tokio::select! {
                             () = sleep => {}
-                            () = notify.notified() => {}
+                            maybe = rx.recv() => match maybe {
+                                Some(signal) => arm_deferral(&mut earliest, signal),
+                                None => return finish_pending(&clock, last_draw, &mut draw),
+                            },
                         }
                     }
                 }

@@ -23,3 +23,7 @@ base64 = "0.22"
 [dev-dependencies]
 libc = "0.2"
 tempfile = "3"
+# `test-util` (not part of `full`) enables tokio's paused clock so the frame
+# scheduler's coalescing/rate-limit behaviour is tested deterministically
+# without real wall-clock sleeps.
+tokio = { version = "1", features = ["test-util"] }
