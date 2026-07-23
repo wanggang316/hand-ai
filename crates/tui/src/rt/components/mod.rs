@@ -33,6 +33,7 @@ mod markdown;
 mod progress_bar;
 mod spacer;
 mod status_bar;
+pub mod syntax_highlight;
 mod text_block;
 mod widget_box;
 
@@ -42,6 +43,7 @@ pub use markdown::{
 pub use progress_bar::ProgressBar;
 pub use spacer::Spacer;
 pub use status_bar::StatusBar;
+pub use syntax_highlight::{default_highlighter, default_markdown_theme, highlight};
 pub use text_block::{TextBlock, TruncatedText};
 pub use widget_box::WidgetBox;
 

@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex};
 
 use hand_tui::rt::components::{
     MarkdownView, ProgressBar, Spacer, StatusBar, TextBlock, TruncatedText, WidgetBox,
+    default_markdown_theme,
 };
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
@@ -239,6 +240,9 @@ a [link](https://example.com) and an ![image alt](diagram.png).
 
 ```rust
 fn main() {
+    /* a block comment
+       spanning lines */
+    let count: usize = 42; // trailing
     println!(\"hello\");
 }
 ```
@@ -249,7 +253,12 @@ fn main() {
 | ascii | 22 |
 
 ~~struck through~~ text.";
-            MarkdownView::new(source).render(area, buf);
+            // Wire the real keyword-driven highlighter into the fenced code
+            // block so keyword/string/number/comment/type render in distinct
+            // colors (VAL-WIDGET-004).
+            MarkdownView::new(source)
+                .theme(default_markdown_theme())
+                .render(area, buf);
         }),
     ]
 }

@@ -25,7 +25,8 @@ pub mod view;
 
 pub use components::{
     CodeHighlighter, MarkdownTheme, MarkdownView, ProgressBar, Spacer, StatusBar, TextBlock,
-    TruncatedText, WidgetBox, plain_code_highlighter, render_markdown,
+    TruncatedText, WidgetBox, default_highlighter, default_markdown_theme, highlight,
+    plain_code_highlighter, render_markdown,
 };
 pub use events::{
     RtInputEvent, RtKey, key_event_to_key_id, run_event_loop, should_dispatch, spawn_event_pump,
