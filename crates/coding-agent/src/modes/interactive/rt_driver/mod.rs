@@ -29,9 +29,11 @@
 //! # Structure and seams for the follow-up features
 //!
 //! - [`state`] — the shared, `Send` [`DriverState`](state::DriverState) (size,
-//!   input rows, streaming flag, pending scrollback commits) and the shared
-//!   editor. Follow-up features add footer view-model fields and selector state
-//!   here.
+//!   input rows, streaming flag, running usage accumulator, pending scrollback
+//!   commits) and the shared editor + footer view-model. Follow-up features add
+//!   selector state here.
+//! - [`footer`] — the [`FooterViewModel`](footer::FooterViewModel) and its pure
+//!   two-line renderer, rebuilt from session state after each turn.
 //! - [`input`] — the editor component wiring (M2 [`Editor`](hand_tui::rt::components::Editor),
 //!   borderless / no-placeholder hand-chat style) and the bottom-area draw.
 //!   *Seam:* slash-command dispatch and `@`-mention autocomplete mount on the
@@ -51,13 +53,14 @@
 //! The chat scrollback / active-area split mirrors the rt demo
 //! (`hand_tui`'s `rt_demo` example): finalized output goes to native scrollback
 //! via the [`HistorySink`](hand_tui::rt::history::HistorySink), and the live
-//! bottom area (editor + footer placeholder) is laid out inside the fixed inline
+//! bottom area (editor + two-line footer) is laid out inside the fixed inline
 //! viewport with [`bottom_area_geometry`](hand_tui::rt::view::bottom_area_geometry)
 //! `.offset_y(frame.area().y)` (the M1 FIX-2 invariant: the viewport origin
 //! drifts down as `insert_before` fills scrollback).
 
 pub mod chat;
 pub mod chrome;
+pub mod footer;
 pub mod input;
 pub mod messages;
 pub mod state;
@@ -79,7 +82,8 @@ use crate::core::agent_session::{AgentSession, AgentSessionEvent};
 use crate::core::error::CodingAgentError;
 
 use self::chrome::{ChangelogStartupAction, ProgressState, PromptMark};
-use self::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_state};
+use self::footer::build_footer_view;
+use self::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_footer, lock_state};
 use self::watchdog::Watchdog;
 use super::event_dispatch::{ChatUpdate, dispatch as dispatch_event};
 
@@ -180,9 +184,15 @@ impl InteractiveMode {
                 .border(EditorBorder::None)
                 .with_history(recall_history(&session)),
         ));
-        // Footer placeholder — a single status line so the bottom chrome has its
-        // shape. The full footer view-model is a follow-up feature.
-        let footer: SharedFooter = Arc::new(Mutex::new(footer_line(&session, &cwd)));
+        // Footer view-model — built from session state so every field (cwd, git
+        // branch, model id/provider, thinking level, context %, usage) is visible
+        // at startup, before any turn. Rebuilt after each turn by the turn runner
+        // so usage, branch, and thinking-level changes surface.
+        let footer: SharedFooter = Arc::new(Mutex::new(build_footer_view(
+            &session,
+            &cwd,
+            self::footer::TokenUsageSummary::default(),
+        )));
 
         // Startup chrome: welcome header, any tmux keyboard warning, and the
         // changelog banner, committed to the top of scrollback BEFORE the first
@@ -227,6 +237,7 @@ impl InteractiveMode {
             watchdog,
             state: state.clone(),
             editor: editor.clone(),
+            footer: footer.clone(),
             requester: requester.clone(),
             submits: submit_rx,
         }));
@@ -431,6 +442,7 @@ struct TurnRunner {
     watchdog: Watchdog,
     state: Arc<Mutex<DriverState>>,
     editor: SharedEditor,
+    footer: SharedFooter,
     requester: FrameRequester,
     submits: mpsc::UnboundedReceiver<String>,
 }
@@ -553,8 +565,22 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     queue_progress(&runner.state, &runner.requester, progress_end);
 
     set_streaming(&runner.state, &runner.editor, &runner.requester, false);
-    // cwd retained for the follow-up footer view-model refresh.
-    let _ = &runner.cwd;
+
+    // Refresh the footer from post-turn session state: the running usage
+    // accumulator (bumped on each MessageEnd), the re-detected git branch (so a
+    // `!git checkout -b tmp` shows on the next turn), and the current
+    // thinking-level / context %. The rebuild reads the session, so it lives here
+    // in the turn runner (which owns it) rather than in the event applier.
+    refresh_footer(runner);
+}
+
+/// Rebuild the footer view-model from current session state and the running usage
+/// accumulator, then request a repaint so the new fields show.
+fn refresh_footer(runner: &TurnRunner) {
+    let usage = lock_state(&runner.state).usage;
+    let view = build_footer_view(&runner.session, &runner.cwd, usage);
+    *lock_footer(&runner.footer) = view;
+    runner.requester.request_frame();
 }
 
 /// Queue an OSC 133 prompt mark for the draw closure to write, and request a
@@ -716,6 +742,11 @@ fn finalize_assistant(
     let lines = {
         let mut guard = lock_state(state);
         guard.set_streaming_preview(None);
+        // Fold this message's usage into the running total so the footer's spend
+        // segment increases monotonically across the session (VAL-CHAT-005). The
+        // turn runner rebuilds the footer from this accumulator at the turn
+        // boundary.
+        guard.accumulate_usage(&assistant.usage);
         let ctx = chat::RenderContext {
             width: guard.size.cols,
             hide_thinking: guard.hide_thinking,
@@ -826,16 +857,6 @@ fn user_text(message: &model::UserMessage) -> Option<String> {
             .join("\n"),
     };
     (!text.trim().is_empty()).then_some(text)
-}
-
-/// The footer placeholder line: cwd + model, so the bottom chrome has its shape.
-/// The full footer view-model (git branch, token usage, context %, thinking
-/// level) is a follow-up feature.
-fn footer_line(session: &AgentSession, cwd: &std::path::Path) -> String {
-    let model = &session.model().id;
-    let label = session.label().unwrap_or("");
-    let sep = if label.is_empty() { "" } else { " · " };
-    format!("{}{sep}{label} · {model}", cwd.display())
 }
 
 /// Assemble the startup-chrome scrollback blocks in order: the welcome header,

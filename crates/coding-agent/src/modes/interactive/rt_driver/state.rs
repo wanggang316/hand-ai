@@ -26,16 +26,18 @@ use ratatui::text::Line;
 
 use model::AssistantMessage;
 
+use super::footer::{FooterViewModel, TokenUsageSummary};
+
 /// The editor shared between the input loop (which dispatches keys to it) and the
 /// draw closure (which renders it). Behind a blocking `Mutex`: every critical
 /// section is a tiny, non-awaiting call (`handle_key`, `render`, `take_submit`),
 /// so a blocking mutex is correct inside the async runtime and simplest.
 pub type SharedEditor = Arc<Mutex<Editor>>;
 
-/// The footer placeholder text shared into the draw closure. The full footer
-/// view-model is a later feature; the skeleton shows a single status line so the
-/// bottom chrome has its shape.
-pub type SharedFooter = Arc<Mutex<String>>;
+/// The footer view-model shared into the draw closure. Rebuilt from session state
+/// after each turn and session action (branch / usage / thinking-level refresh)
+/// and read every frame to render the two-line bottom summary.
+pub type SharedFooter = Arc<Mutex<FooterViewModel>>;
 
 /// Mutable, `Send` driver state read by the scheduler's draw closure and mutated
 /// by the input and agent tasks.
@@ -88,6 +90,10 @@ pub struct DriverState {
     /// or `None` when no turn is streaming. Updated per streaming delta and
     /// cleared when the final snapshot commits to scrollback on `MessageEnd`.
     pub streaming_preview: Option<Vec<Line<'static>>>,
+    /// The running token/cost accumulator, bumped on every `MessageEnd` and read
+    /// when the footer view-model is rebuilt. It only ever grows within a session,
+    /// so the footer's spend segment is monotonic across turns (VAL-CHAT-005).
+    pub usage: TokenUsageSummary,
 }
 
 impl DriverState {
@@ -147,6 +153,14 @@ impl DriverState {
     pub fn set_streaming_preview(&mut self, preview: Option<Vec<Line<'static>>>) {
         self.streaming_preview = preview;
     }
+
+    /// Fold one assistant message's usage into the running accumulator, returning
+    /// the new total. Because it only adds, the footer's spend segment never
+    /// decreases across a session.
+    pub fn accumulate_usage(&mut self, usage: &model::Usage) -> TokenUsageSummary {
+        super::footer::accumulate_usage(&mut self.usage, usage);
+        self.usage
+    }
 }
 
 /// Lock the shared driver state, treating poisoning as fatal — a poisoned lock
@@ -161,8 +175,8 @@ pub fn lock_editor(editor: &SharedEditor) -> MutexGuard<'_, Editor> {
     editor.lock().expect("editor mutex poisoned")
 }
 
-/// Lock the shared footer text, treating poisoning as fatal.
-pub fn lock_footer(footer: &SharedFooter) -> MutexGuard<'_, String> {
+/// Lock the shared footer view-model, treating poisoning as fatal.
+pub fn lock_footer(footer: &SharedFooter) -> MutexGuard<'_, FooterViewModel> {
     footer.lock().expect("footer mutex poisoned")
 }
 
@@ -250,5 +264,31 @@ mod tests {
         assert!(state.streaming_preview.is_some());
         state.set_streaming_preview(None);
         assert!(state.streaming_preview.is_none());
+    }
+
+    #[test]
+    fn accumulate_usage_grows_monotonically_across_turns() {
+        use model::types::{Usage, UsageCost};
+        let turn = Usage {
+            input: 50,
+            output: 80,
+            cache_read: 5,
+            cache_write: 3,
+            total_tokens: 138,
+            cost: UsageCost {
+                total: 0.25,
+                ..Default::default()
+            },
+        };
+        let mut state = DriverState::new(TerminalSize::new(80, 24));
+        let first = state.accumulate_usage(&turn);
+        assert_eq!(first.input, 50);
+        assert_eq!(first.output, 80);
+        let second = state.accumulate_usage(&turn);
+        // A second turn only adds — the totals never decrease.
+        assert_eq!(second.input, 100);
+        assert_eq!(second.output, 160);
+        assert_eq!(second.cache_read, 10);
+        assert_eq!(state.usage.input, 100, "accumulator persists on the state");
     }
 }

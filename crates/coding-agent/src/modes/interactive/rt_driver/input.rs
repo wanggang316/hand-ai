@@ -10,32 +10,39 @@
 //!    spills a stale-width fragment into scrollback (M1 resize invariant);
 //! 3. lays the fixed-max inline bottom area out with
 //!    [`bottom_area_geometry`]`.offset_y(frame.area().y)` (M1 FIX-2: the viewport
-//!    origin drifts down as scrollback fills), then renders the bordered box, an
-//!    optional loader row, the editor (borderless — the box is the driver's), and
-//!    the footer placeholder line;
+//!    origin drifts down as scrollback fills), then renders the bordered box, the
+//!    optional working-loader row (M2 [`Loader`]), the editor (borderless — the
+//!    box is the driver's), and the two-line footer view-model;
 //! 4. drives the hardware cursor from the editor's reported caret.
 //!
 //! This mirrors the rt demo's scheduler/draw split exactly; the only differences
-//! are the concrete components (M2 [`Editor`] + a footer line instead of the
-//! demo's input row + status block) and the chat commits coming from the agent
-//! driver rather than a synthetic stream.
+//! are the concrete components (M2 [`Editor`] + [`Loader`] + the footer view-model
+//! instead of the demo's input row + status block) and the chat commits coming
+//! from the agent driver rather than a synthetic stream.
 
 use std::io;
 use std::sync::{Arc, Mutex};
 
+use hand_tui::rt::components::{DEFAULT_SPINNER_FRAMES, Loader};
 use hand_tui::rt::history::{HistorySink, wrap_lines};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{EraseOnDrop, SessionTerminal, clear_viewport_region};
-use hand_tui::rt::view::bottom_area_geometry;
+use hand_tui::rt::view::{RtComponent, bottom_area_geometry};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
+use super::footer::{FooterViewModel, render_footer_lines};
 use super::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_footer, lock_state};
 
-/// Spinner glyph frames cycled while a turn streams.
-const SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+/// The static message the working-loader shows while a turn streams.
+const LOADER_MESSAGE: &str = "Working…";
+
+/// Rows the footer view-model occupies inside the bottom box (the cwd line + the
+/// stats line). Reserved from the input body so the editor keeps its full desired
+/// height above the footer.
+const FOOTER_ROWS: u16 = 2;
 
 /// Spawn the frame scheduler over the session terminal.
 ///
@@ -59,6 +66,20 @@ pub fn spawn_scheduler(
     // anything autoresizes and spills.
     let mut last_size: Option<ratatui::layout::Size> = None;
 
+    // The working-loader shown in the bordered slot while a turn streams. Owned by
+    // the draw closure (not shared): it is toggled active/idle from the streaming
+    // flag and ticked once per frame while streaming, so the spinner animates and
+    // the static "Working…" message is present only mid-turn. When the turn ends
+    // the geometry drops the loader row entirely and the fixed-viewport blank
+    // repaint wipes it — no ghost "Working…" or border fragment left in the
+    // active area or in scrollback (M1 shrink-erase invariant).
+    let mut loader = Loader::new(LOADER_MESSAGE).frames(
+        DEFAULT_SPINNER_FRAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
+
     FrameScheduler::spawn(move || {
         // Snapshot state under the lock, then release it before touching the
         // terminal. Finished chat blocks and raw sequences are taken out (not
@@ -67,18 +88,23 @@ pub fn spawn_scheduler(
             let mut guard = lock_state(&state);
             let commits = guard.take_commits();
             let raw = guard.take_raw();
-            if guard.streaming {
-                guard.spinner_phase = guard.spinner_phase.wrapping_add(1);
-            }
             let preview = guard.streaming_preview.clone().unwrap_or_default();
             let snapshot = StateSnapshot {
                 size: guard.size,
                 loader: guard.streaming,
-                spinner_phase: guard.spinner_phase,
                 preview,
             };
             (snapshot, commits, raw)
         };
+
+        // Drive the working-loader from the streaming flag: active only mid-turn,
+        // ticked once per frame while active so the spinner animates. An idle
+        // loader paints nothing, and the geometry drops its row entirely — the
+        // dismissal leaves no residue.
+        loader.set_active(snapshot.loader);
+        if snapshot.loader {
+            loader.tick();
+        }
 
         // Resize erase: detect a backend size change and wipe the old-width
         // viewport *before* any autoresize scrolls its stale cells into
@@ -99,15 +125,16 @@ pub fn spawn_scheduler(
             history.commit_lines(&mut *terminal, block)?;
         }
 
-        let footer_text = lock_footer(&footer).clone();
+        let footer_view = lock_footer(&footer).clone();
 
         // Wrap the whole paint in BSU/ESU: the closing `?2026l` is emitted even
         // if `terminal.draw` errors, so an interrupt mid-draw never leaves an
         // open synchronized block.
         let mut stdout = io::stdout();
         let editor = &editor;
+        let loader = &loader;
         draw_synchronized(&mut stdout, |w| {
-            terminal.draw(|frame| draw(frame, &snapshot, editor, &footer_text))?;
+            terminal.draw(|frame| draw(frame, &snapshot, editor, loader, &footer_view))?;
             // Flush any raw terminal control sequences (OSC 133 prompt marks,
             // OSC 9;4 progress) AFTER the viewport draw but INSIDE the sync
             // block, on this terminal-owning task — the same raw-emission
@@ -149,10 +176,9 @@ fn flush_raw<W: io::Write>(out: &mut W, raw: &[&'static str]) -> io::Result<()> 
 struct StateSnapshot {
     /// The tracked terminal geometry this frame lays out against.
     size: hand_tui::rt::view::TerminalSize,
-    /// Whether the loader/spinner row shows (streaming turn in flight).
+    /// Whether the loader row shows (streaming turn in flight). Drives both the
+    /// geometry (whether a loader row is reserved) and the loader's active state.
     loader: bool,
-    /// Spinner animation phase for the loader glyph.
-    spinner_phase: u64,
     /// The live streaming-preview lines to paint in the blank band above the
     /// active bottom box, or empty when no turn is streaming. The tail is shown
     /// when the band is shorter than the preview so the most recent tokens are
@@ -160,15 +186,21 @@ struct StateSnapshot {
     preview: Vec<Line<'static>>,
 }
 
-/// Paint one frame: the bordered bottom box, an optional loader row, the editor,
-/// and the footer placeholder — laid out inside the fixed inline viewport.
-fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot, editor: &SharedEditor, footer: &str) {
+/// Paint one frame: the bordered bottom box, the optional working-loader row, the
+/// editor, and the two-line footer — laid out inside the fixed inline viewport.
+fn draw(
+    frame: &mut ratatui::Frame,
+    state: &StateSnapshot,
+    editor: &SharedEditor,
+    loader: &Loader,
+    footer: &FooterViewModel,
+) {
     let area = frame.area();
 
     // The editor's desired interior rows drive the auto-grow. Measure it against
     // the interior width the box will give it (2 border columns), clamped to the
     // 1..=8 input-row band by the geometry helper.
-    let input_rows = {
+    let editor_rows = {
         let ed = lock_editor(editor);
         // desired_height on a borderless editor returns interior rows only; probe
         // against a representative interior rect (border insets applied below).
@@ -180,6 +212,12 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot, editor: &SharedEditor
         );
         ed.desired_height(probe).max(1)
     };
+
+    // The geometry's input body must hold the editor's desired rows *plus* the
+    // footer rows, so the footer sits below a full-height editor rather than
+    // stealing from it. (The geometry clamps the total to the 1..=8 band and to
+    // the pane height, so a tiny pane trims the footer/editor gracefully.)
+    let input_rows = editor_rows.saturating_add(FOOTER_ROWS);
 
     // Lay the fixed-max bottom area out inside the viewport, then translate every
     // rect down by `area.y` so the bottom UI paints at the viewport's real rows —
@@ -200,23 +238,20 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot, editor: &SharedEditor
     let block = Block::bordered().border_style(Style::default().fg(Color::DarkGray));
     frame.render_widget(block, geometry.active);
 
-    // The loader/spinner row, when streaming, sits just below the top border.
+    // The working-loader row, when streaming, sits just below the top border,
+    // inside the box. The M2 Loader paints nothing when inactive, and the
+    // geometry reserves this row only while streaming — so the dismissal at
+    // AgentEnd leaves no "Working…" or spinner residue.
     if let Some(loader_rect) = geometry.loader {
-        let glyph = SPINNER_FRAMES[(state.spinner_phase as usize) % SPINNER_FRAMES.len()];
-        let spinner = Line::from(vec![
-            format!(" {glyph} ").fg(Color::Yellow),
-            "working…".dim(),
-        ]);
-        frame.render_widget(Paragraph::new(spinner), inset(loader_rect));
+        loader.render(inset(loader_rect), frame.buffer_mut());
     }
 
-    // Split the input interior into the editor rows (all but the last) and the
-    // one-row footer placeholder (the last interior row).
+    // Split the input interior into the editor rows (the top) and the footer rows
+    // (the bottom `FOOTER_ROWS`).
     let (editor_rect, footer_rect) = split_editor_footer(inset(geometry.input));
 
     // Render the editor and drive the hardware cursor from its reported caret.
     {
-        use hand_tui::rt::view::RtComponent;
         let ed = lock_editor(editor);
         ed.render(editor_rect, frame.buffer_mut());
         // Disambiguate: the `RtComponent::cursor` (viewport-local `Option<Position>`)
@@ -227,10 +262,11 @@ fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot, editor: &SharedEditor
         }
     }
 
-    // The footer placeholder line, dim.
+    // The two-line footer view-model, rendered into the reserved footer rows.
+    // `Paragraph` clips a line wider than the rect, so a narrow pane never spills.
     if footer_rect.height > 0 {
-        Paragraph::new(Line::from(footer.to_string().dim()))
-            .render(footer_rect, frame.buffer_mut());
+        let lines = render_footer_lines(footer, footer_rect.width);
+        Paragraph::new(Text::from(lines)).render(footer_rect, frame.buffer_mut());
     }
 }
 
@@ -265,18 +301,23 @@ fn draw_stream_preview(
     Paragraph::new(Text::from(visible)).render(band, frame.buffer_mut());
 }
 
-/// Split a bottom-area body rect into the editor (all but the last row) and a
-/// one-row footer placeholder (the last row).
+/// Split a bottom-area body rect into the editor (the top rows) and the footer
+/// (the bottom [`FOOTER_ROWS`] rows).
 ///
-/// When the body is a single row the editor keeps it and the footer collapses to
-/// a zero-height rect below, so the caret always has a home and nothing overlaps.
+/// The editor always keeps at least one row for its caret: the footer only claims
+/// the rows left over above a single editor row. On a body of height `h`, the
+/// footer takes `min(FOOTER_ROWS, h - 1)` rows from the bottom (0 when `h <= 1`),
+/// so a tiny pane collapses the footer before it ever starves the editor.
 fn split_editor_footer(body: Rect) -> (Rect, Rect) {
-    if body.height <= 1 {
-        let footer = Rect::new(body.x, body.y.saturating_add(body.height), body.width, 0);
-        return (body, footer);
-    }
-    let editor = Rect::new(body.x, body.y, body.width, body.height - 1);
-    let footer = Rect::new(body.x, body.y + body.height - 1, body.width, 1);
+    let footer_rows = FOOTER_ROWS.min(body.height.saturating_sub(1));
+    let editor_rows = body.height.saturating_sub(footer_rows);
+    let editor = Rect::new(body.x, body.y, body.width, editor_rows);
+    let footer = Rect::new(
+        body.x,
+        body.y.saturating_add(editor_rows),
+        body.width,
+        footer_rows,
+    );
     (editor, footer)
 }
 
@@ -296,19 +337,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_editor_footer_reserves_last_row_for_footer() {
-        let body = Rect::new(1, 5, 40, 4);
+    fn split_editor_footer_reserves_footer_rows_at_the_bottom() {
+        let body = Rect::new(1, 5, 40, 5);
         let (editor, footer) = split_editor_footer(body);
+        // The bottom FOOTER_ROWS go to the footer; the rest to the editor.
         assert_eq!(editor, Rect::new(1, 5, 40, 3));
-        assert_eq!(footer, Rect::new(1, 8, 40, 1));
+        assert_eq!(footer, Rect::new(1, 8, 40, FOOTER_ROWS));
     }
 
     #[test]
     fn split_editor_footer_single_row_gives_editor_all_and_empty_footer() {
         let body = Rect::new(1, 5, 40, 1);
         let (editor, footer) = split_editor_footer(body);
-        assert_eq!(editor, body);
-        assert_eq!(footer.height, 0);
+        assert_eq!(editor, body, "editor keeps its one row");
+        assert_eq!(
+            footer.height, 0,
+            "footer collapses before starving the editor"
+        );
+    }
+
+    #[test]
+    fn split_editor_footer_two_rows_leaves_editor_one_and_footer_one() {
+        // With only two rows, the editor keeps one and the footer gets the other,
+        // never taking both FOOTER_ROWS at the editor's expense.
+        let body = Rect::new(1, 5, 40, 2);
+        let (editor, footer) = split_editor_footer(body);
+        assert_eq!(editor.height, 1, "editor never starved below one row");
+        assert_eq!(footer.height, 1);
     }
 
     #[test]
@@ -321,6 +376,123 @@ mod tests {
     fn inset_narrow_rect_saturates_to_zero_width() {
         let r = Rect::new(0, 0, 1, 1);
         assert_eq!(inset(r).width, 0);
+    }
+
+    // --- Loader slot lifecycle (VAL-CHAT-003 / VAL-COMPAT-008) --------------
+
+    use hand_tui::rt::components::Editor;
+    use hand_tui::rt::view::{MAX_VIEWPORT_ROWS, TerminalSize};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::{TerminalOptions, Viewport};
+
+    /// Build the fixed-max inline viewport terminal over a `TestBackend`, matching
+    /// the runtime's `Viewport::Inline(MAX_VIEWPORT_ROWS)`.
+    fn fixed_viewport(width: u16, height: u16) -> Terminal<TestBackend> {
+        Terminal::with_options(
+            TestBackend::new(width, height),
+            TerminalOptions {
+                viewport: Viewport::Inline(MAX_VIEWPORT_ROWS),
+            },
+        )
+        .expect("build fixed-max inline test terminal")
+    }
+
+    /// Every non-blank cell of the current viewport buffer, joined into one string
+    /// so a residue check is a simple `contains`.
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut out = String::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Drive one real `draw` frame with the given streaming flag and loader state.
+    fn draw_frame(
+        terminal: &mut Terminal<TestBackend>,
+        editor: &SharedEditor,
+        loader: &Loader,
+        streaming: bool,
+    ) {
+        let width = terminal.get_frame().area().width;
+        let height = terminal.get_frame().area().height;
+        let snapshot = StateSnapshot {
+            size: TerminalSize::new(width, height),
+            loader: streaming,
+            preview: Vec::new(),
+        };
+        let footer = FooterViewModel::default();
+        terminal
+            .draw(|frame| draw(frame, &snapshot, editor, loader, &footer))
+            .expect("draw one frame");
+    }
+
+    #[test]
+    fn loader_slot_shows_while_streaming_and_leaves_no_residue_after() {
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        let mut loader = Loader::new(LOADER_MESSAGE);
+        let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
+
+        // While streaming, the loader is active and its static message is painted
+        // inside the bordered slot.
+        loader.set_active(true);
+        draw_frame(&mut terminal, &editor, &loader, true);
+        assert!(
+            buffer_text(&terminal).contains(LOADER_MESSAGE),
+            "loader message must be visible while streaming"
+        );
+
+        // After the turn ends, the loader is dismissed: it paints nothing and the
+        // fixed-viewport blank repaint wipes the shrunk row — no "Working…" or
+        // border fragment is left behind (the shrink-leak regression).
+        loader.set_active(false);
+        draw_frame(&mut terminal, &editor, &loader, false);
+        let after = buffer_text(&terminal);
+        assert!(
+            !after.contains(LOADER_MESSAGE),
+            "loader message must not linger after dismissal, got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn footer_fields_render_in_the_active_box() {
+        // The footer view-model's fields paint into the reserved footer rows so
+        // they are visible from the first frame, before any turn.
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        let loader = Loader::new(LOADER_MESSAGE);
+        let mut terminal = fixed_viewport(80, MAX_VIEWPORT_ROWS);
+
+        let width = terminal.get_frame().area().width;
+        let height = terminal.get_frame().area().height;
+        let snapshot = StateSnapshot {
+            size: TerminalSize::new(width, height),
+            loader: false,
+            preview: Vec::new(),
+        };
+        let footer = FooterViewModel {
+            cwd: "/tmp/proj".to_string(),
+            git_branch: Some("tmp".to_string()),
+            model_id: "test-model".to_string(),
+            context_window: 100_000,
+            context_percent: Some(1.0),
+            ..FooterViewModel::default()
+        };
+        terminal
+            .draw(|frame| draw(frame, &snapshot, &editor, &loader, &footer))
+            .expect("draw one frame");
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("/tmp/proj"), "cwd missing: {text}");
+        assert!(text.contains("(tmp)"), "branch missing: {text}");
+        assert!(text.contains("test-model"), "model id missing: {text}");
     }
 
     #[test]
