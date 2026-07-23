@@ -56,6 +56,10 @@
 //! grapheme rather than drifting — the narrow-resize stability the validator
 //! probes.
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -77,6 +81,19 @@ pub const MAX_INPUT_ROWS: usize = 8;
 /// Maximum number of submitted prompts retained for Up/Down recall. Mirrors the
 /// legacy `HISTORY_CAP`.
 const HISTORY_CAP: usize = 100;
+
+/// A paste with more than this many logical lines is folded to a
+/// `[paste #N +M lines]` marker instead of landing inline. Mirrors the legacy
+/// `PASTE_LINES_THRESHOLD`.
+const PASTE_LINES_THRESHOLD: usize = 10;
+
+/// A single-line paste longer than this many characters is folded to a
+/// `[paste #N M chars]` marker. Mirrors the legacy `PASTE_CHARS_THRESHOLD`.
+const PASTE_CHARS_THRESHOLD: usize = 1000;
+
+/// The literal prefix every fold marker opens with. Marker detection, dense
+/// renumbering, and expansion all key off this.
+const PASTE_MARKER_PREFIX: &str = "[paste #";
 
 /// Border chrome for the editor box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +264,11 @@ struct UndoUnit {
     /// single-grapheme insert may extend. Sealed by a pause, newline, paste,
     /// delete, undo/redo, or any non-typing edit.
     open: bool,
+    /// The paste registry state on the *other* side of this unit's edit, for
+    /// units that mutate the registry (fold-marker creation, marker deletion).
+    /// Undo and redo swap it with the live registry so text and payloads restore
+    /// together. `None` for plain edits that leave the registry untouched.
+    paste_registry: Option<PasteRegistrySnapshot>,
 }
 
 /// The token under the caret that an autocomplete provider would query, reported
@@ -261,6 +283,58 @@ pub struct AutocompleteContext {
     pub prefix: String,
     /// Byte column on the caret's line where the trigger sits.
     pub start_col: usize,
+}
+
+/// The out-of-band payload a fold marker stands in for. A large paste is
+/// diverted here and the buffer shows only the compact `[paste #N …]` token; the
+/// full text is spliced back in on submit / recall so the marker never leaks to
+/// the agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasteContent {
+    /// The marker id (1-based, dense after deletions).
+    pub id: u32,
+    /// The full original paste text.
+    pub text: String,
+    /// Logical line count of the payload (drives the `+M lines` form).
+    pub line_count: usize,
+    /// Character count of the payload (drives the `M chars` form).
+    pub char_count: usize,
+}
+
+/// The paste registry state (markers + next id) captured before an operation
+/// that mutates it, so undo/redo restore text and registry together. Swapped
+/// with the live registry in either direction.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PasteRegistrySnapshot {
+    markers: HashMap<u32, PasteContent>,
+    next_id: u32,
+}
+
+/// A transform applied to a paste payload before the fold/insert decision.
+/// Returning `Some(new)` substitutes the payload; `None` keeps the original
+/// verbatim. The host installs one to rewrite terminal file-drop pastes (quoted
+/// / `file://` paths) into `@mention` form.
+///
+/// Kept `Arc`-wrapped and `Send + Sync` so a host can share one transform across
+/// editors; the core only ever calls it.
+pub type PasteTransform = Arc<dyn Fn(&str) -> Option<String> + Send + Sync + 'static>;
+
+/// Build a paste transform that rewrites a dropped-file path into an `@mention`.
+///
+/// A drop-like paste is a single line, optionally wrapped in matching quotes and
+/// optionally `file://`-prefixed. When the decoded path exists (per the injected
+/// `exists` predicate, resolved against `cwd` for relative paths) it is rewritten
+/// to `@<relative-or-absolute>`; otherwise the transform returns `None` and the
+/// text is inserted verbatim.
+///
+/// Both `cwd` and the existence predicate are injected so a test drives the
+/// transform deterministically without touching the real filesystem.
+#[must_use]
+pub fn dropped_file_mention_transform(
+    cwd: PathBuf,
+    exists: Arc<dyn Fn(&Path) -> bool + Send + Sync + 'static>,
+) -> PasteTransform {
+    Arc::new(move |raw: &str| transform_dropped_file_paste(raw, &cwd, exists.as_ref()))
 }
 
 /// A multi-line, grapheme-aware text editor painted into a ratatui buffer.
@@ -318,6 +392,17 @@ pub struct Editor {
     /// [`cursor`](RtComponent::cursor) can report a width-aware position. `None`
     /// until first rendered or when the caret scrolls out of view.
     caret_cell: std::cell::Cell<Option<(u16, u16)>>,
+    /// Out-of-band payloads for the fold markers currently in the buffer, keyed
+    /// by marker id. Empty until a paste crosses the fold threshold.
+    paste_markers: HashMap<u32, PasteContent>,
+    /// The highest marker id allocated so far; the next fold takes `+ 1`.
+    /// Decremented (and remaining ids densely renumbered) when a marker is
+    /// deleted so ids never gap.
+    next_paste_id: u32,
+    /// Optional paste-payload transform, run before the fold/insert decision.
+    /// The host installs one (e.g. dropped-path → `@mention`); the core only
+    /// calls it.
+    paste_transform: Option<PasteTransform>,
 }
 
 impl Default for Editor {
@@ -348,7 +433,24 @@ impl Editor {
             break_coalesce: false,
             replaying: false,
             caret_cell: std::cell::Cell::new(None),
+            paste_markers: HashMap::new(),
+            next_paste_id: 0,
+            paste_transform: None,
         }
+    }
+
+    /// Install a paste-payload transform, run before the fold/insert decision on
+    /// every [`insert_paste`](Editor::insert_paste). Builder form of
+    /// [`set_paste_transform`](Editor::set_paste_transform).
+    #[must_use]
+    pub fn with_paste_transform(mut self, transform: PasteTransform) -> Self {
+        self.paste_transform = Some(transform);
+        self
+    }
+
+    /// Install (or replace) the paste-payload transform.
+    pub fn set_paste_transform(&mut self, transform: PasteTransform) {
+        self.paste_transform = Some(transform);
     }
 
     /// Set the border chrome.
@@ -545,6 +647,7 @@ impl Editor {
             cursor_before,
             cursor_after,
             open: is_typing,
+            paste_registry: None,
         });
     }
 
@@ -579,18 +682,188 @@ impl Editor {
         &self.kill_ring
     }
 
-    /// Paste seam: the single entry point a paste event routes through. Inserts
-    /// inline via [`insert_str`](Editor::insert_str) as one atomic undo unit — a
-    /// paste breaks the typing burst on both sides, so it undoes in one step and the
+    /// Paste seam: the single entry point a paste event routes through. Runs the
+    /// paste pipeline and lands the result as one atomic undo unit — a paste
+    /// breaks the typing burst on both sides, so it undoes in one step and the
     /// next keystroke starts fresh.
+    ///
+    /// The pipeline, in order:
+    /// 1. **Transform.** An installed [`PasteTransform`] may rewrite the payload
+    ///    (e.g. a dropped-file path → `@mention`); `None` keeps it verbatim.
+    /// 2. **Defuse.** Bare ESC / CSI / other C0 control bytes are stripped so a
+    ///    pasted escape sequence can never re-colour the terminal, move the
+    ///    hardware cursor, or corrupt the buffer — the payload lands as inert
+    ///    text.
+    /// 3. **Fold decision.** A payload over [`PASTE_LINES_THRESHOLD`] lines, or a
+    ///    single line over [`PASTE_CHARS_THRESHOLD`] chars, is diverted to the
+    ///    registry and only a compact `[paste #N …]` marker lands inline; the
+    ///    payload is spliced back on submit / recall. Otherwise the text lands
+    ///    inline unchanged.
     pub fn insert_paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        // 1. Transform (dropped-path → @mention, etc.). A transform sees the raw
+        //    payload; only the *result* is defused/folded.
+        let transformed = self
+            .paste_transform
+            .as_ref()
+            .and_then(|t| t(text))
+            .unwrap_or_else(|| text.to_string());
+        // 2. Defuse escape / control bytes.
+        let payload = defuse_control_bytes(&transformed);
+        if payload.is_empty() {
+            return;
+        }
+
         // A paste is atomic: break the burst so it is its own unit, and seal it
         // afterwards so the next single-glyph insert cannot extend it.
         self.break_coalesce = true;
-        self.insert_str(text);
+
+        let line_count = payload.split('\n').count();
+        let char_count = payload.chars().count();
+        if line_count > PASTE_LINES_THRESHOLD || char_count > PASTE_CHARS_THRESHOLD {
+            self.insert_fold_marker(&payload, line_count, char_count);
+        } else {
+            self.insert_str(&payload);
+        }
         if let Some(unit) = self.undo_stack.last_mut() {
             unit.open = false;
         }
+    }
+
+    /// Divert a large paste to the registry and insert only its compact marker.
+    /// The marker's undo unit is tagged with the pre-fold registry snapshot so a
+    /// single undo removes the marker *and* drops the hidden payload together.
+    fn insert_fold_marker(&mut self, payload: &str, line_count: usize, char_count: usize) {
+        let snapshot = self.paste_registry_snapshot();
+        self.next_paste_id += 1;
+        let id = self.next_paste_id;
+        // Line-count form wins when both thresholds trip, matching legacy.
+        let marker = if line_count > PASTE_LINES_THRESHOLD {
+            format!("{PASTE_MARKER_PREFIX}{id} +{line_count} lines]")
+        } else {
+            format!("{PASTE_MARKER_PREFIX}{id} {char_count} chars]")
+        };
+        self.paste_markers.insert(
+            id,
+            PasteContent {
+                id,
+                text: payload.to_string(),
+                line_count,
+                char_count,
+            },
+        );
+        self.insert_str(&marker);
+        // `insert_str` pushed the marker's undo unit; tag it with the pre-fold
+        // registry so undoing the paste unwinds the payload and the id counter.
+        if let Some(unit) = self.undo_stack.last_mut() {
+            unit.paste_registry = Some(snapshot);
+        }
+    }
+
+    /// A snapshot of the live paste registry (markers + next id).
+    fn paste_registry_snapshot(&self) -> PasteRegistrySnapshot {
+        PasteRegistrySnapshot {
+            markers: self.paste_markers.clone(),
+            next_id: self.next_paste_id,
+        }
+    }
+
+    /// Exchange the live paste registry with `snapshot`. Undo and redo both call
+    /// this: the unit holds the registry state on the *other* side of its edit, so
+    /// a swap moves it in either direction.
+    fn swap_paste_registry(&mut self, snapshot: &mut PasteRegistrySnapshot) {
+        std::mem::swap(&mut self.paste_markers, &mut snapshot.markers);
+        std::mem::swap(&mut self.next_paste_id, &mut snapshot.next_id);
+    }
+
+    /// Substitute every fold marker in `text` with its full payload. Unknown
+    /// markers (no registry entry) pass through literally.
+    fn expand_markers(&self, text: &str) -> String {
+        expand_paste_markers(text, &self.paste_markers)
+    }
+
+    /// Read-only view of the fold-marker registry (tests / host inspection).
+    #[must_use]
+    pub fn paste_markers(&self) -> &HashMap<u32, PasteContent> {
+        &self.paste_markers
+    }
+
+    /// The buffer with fold markers expanded to their full payloads — the form a
+    /// host reads for submission. Plain [`text`](Editor::text) leaves markers
+    /// compact.
+    #[must_use]
+    pub fn expanded_text(&self) -> String {
+        self.expand_markers(&self.text())
+    }
+
+    /// Remove the fold-marker token spanning `start_col..cursor_col` on the caret
+    /// line, drop its registry entry, decrement the id counter, and densely
+    /// renumber the survivors (`#3` → `#2` once `#1` is gone) in both the registry
+    /// and the buffer text. Recorded as one whole-buffer replace so a single undo
+    /// restores text and registry together.
+    fn delete_fold_marker(&mut self, start_col: usize, id: u32) {
+        let removed_text = self.text();
+        let snapshot = self.paste_registry_snapshot();
+        let cursor_before = self.edit_cursor_before;
+
+        // Drop the deleted marker, then shift every higher id down by one in the
+        // registry (ascending order so keys never collide mid-shift).
+        self.paste_markers.remove(&id);
+        self.next_paste_id = self.next_paste_id.saturating_sub(1);
+        let mut higher: Vec<u32> = self
+            .paste_markers
+            .keys()
+            .copied()
+            .filter(|&key| key > id)
+            .collect();
+        higher.sort_unstable();
+        for old_id in higher {
+            if let Some(mut content) = self.paste_markers.remove(&old_id) {
+                content.id = old_id - 1;
+                self.paste_markers.insert(old_id - 1, content);
+            }
+        }
+
+        // Excise the token text, then rewrite marker ids in the buffer to match.
+        self.lines[self.cursor_line].drain(start_col..self.cursor_col);
+        self.cursor_col = start_col;
+        for line in &mut self.lines {
+            *line = renumber_paste_markers(line, id);
+        }
+        self.clamp_col();
+
+        let inserted = self.text();
+        let cursor_after = (self.cursor_line, self.cursor_col);
+        self.redo_stack.clear();
+        self.break_coalesce = true;
+        self.undo_stack.push(UndoUnit {
+            position: 0,
+            removed: removed_text,
+            inserted,
+            cursor_before,
+            cursor_after,
+            open: false,
+            paste_registry: Some(snapshot),
+        });
+    }
+
+    /// The id of the live fold marker whose token the caret sits at the open
+    /// bracket of, or inside of, on the caret line — for the forward-delete
+    /// downgrade. `None` when the caret is not on a marker token.
+    fn fold_marker_covering_forward(&self) -> Option<u32> {
+        let line = &self.lines[self.cursor_line];
+        marker_covering(line, self.cursor_col)
+    }
+
+    /// Downgrade a live fold marker to literal text: drop its payload from the
+    /// registry (so it no longer expands on submit) while leaving the token
+    /// characters in place. The buffer text is untouched, so no undo unit is
+    /// pushed here — the caller's forward-delete records the actual character
+    /// removal.
+    fn downgrade_fold_marker(&mut self, id: u32) {
+        self.paste_markers.remove(&id);
     }
 
     /// Autocomplete seam: the token under the caret a provider would query, or
@@ -730,7 +1003,7 @@ impl Editor {
     /// edit. A calm no-op when the undo stack is empty. The undone unit moves to the
     /// redo stack so a redo can replay it.
     pub fn undo(&mut self) {
-        let Some(unit) = self.undo_stack.pop() else {
+        let Some(mut unit) = self.undo_stack.pop() else {
             return;
         };
         self.replaying = true;
@@ -742,6 +1015,11 @@ impl Editor {
             self.insert_flat(unit.position, &unit.removed);
         }
         self.replaying = false;
+        // Restore the registry that matched the pre-edit text; the swap leaves the
+        // post-edit registry in the unit so a redo can put it back.
+        if let Some(snapshot) = unit.paste_registry.as_mut() {
+            self.swap_paste_registry(snapshot);
+        }
         let (line, col) = unit.cursor_before;
         self.cursor_line = line.min(self.lines.len() - 1);
         self.cursor_col = col.min(self.lines[self.cursor_line].len());
@@ -756,7 +1034,7 @@ impl Editor {
     /// The hand UI binds no key to redo — it is pinned at the unit layer so the
     /// coalescing contract is fully testable without introducing a new keystroke.
     pub fn redo(&mut self) {
-        let Some(unit) = self.redo_stack.pop() else {
+        let Some(mut unit) = self.redo_stack.pop() else {
             return;
         };
         self.replaying = true;
@@ -769,6 +1047,11 @@ impl Editor {
             self.insert_flat(unit.position, &unit.inserted);
         }
         self.replaying = false;
+        // Re-apply the registry that matched the post-edit text; the swap leaves
+        // the pre-edit registry in the unit so a later undo can restore it.
+        if let Some(snapshot) = unit.paste_registry.as_mut() {
+            self.swap_paste_registry(snapshot);
+        }
         let (line, col) = unit.cursor_after;
         self.cursor_line = line.min(self.lines.len() - 1);
         self.cursor_col = col.min(self.lines[self.cursor_line].len());
@@ -870,9 +1153,21 @@ impl Editor {
 
     /// Delete one grapheme cluster before the caret, or join with the previous line
     /// when at column 0.
+    ///
+    /// Backspacing over the **closing bracket** of a live fold marker removes the
+    /// whole token atomically: its payload is dropped, the remaining markers are
+    /// densely renumbered so ids never gap, and a single undo restores the token
+    /// and the hidden payload together.
     fn delete_back(&mut self) {
         self.edit_cursor_before = (self.cursor_line, self.cursor_col);
         if self.cursor_col > 0 {
+            let before = &self.lines[self.cursor_line][..self.cursor_col];
+            if let Some((start_col, id)) = paste_marker_ending_at(before)
+                && self.paste_markers.contains_key(&id)
+            {
+                self.delete_fold_marker(start_col, id);
+                return;
+            }
             let line = &self.lines[self.cursor_line];
             let before = &line[..self.cursor_col];
             let cluster = before
@@ -905,10 +1200,23 @@ impl Editor {
 
     /// Delete one grapheme cluster after the caret, or pull up the next line when
     /// at end of line.
+    ///
+    /// A forward-Delete that lands on the **open bracket** of a live fold marker,
+    /// or anywhere inside its token, *downgrades* the marker to literal text
+    /// rather than deleting it atomically: the payload is dropped from the
+    /// registry and the `[paste #N …]` text stays in the buffer as plain
+    /// characters (it no longer expands on submit). This intentional asymmetry
+    /// with backspace-over-`]` is a Decision Log parity pin — forward-delete is
+    /// "edit the token", not "remove the token".
     fn delete_forward(&mut self) {
         self.edit_cursor_before = (self.cursor_line, self.cursor_col);
         let line_len = self.lines[self.cursor_line].len();
         if self.cursor_col < line_len {
+            if let Some(id) = self.fold_marker_covering_forward()
+                && self.paste_markers.contains_key(&id)
+            {
+                self.downgrade_fold_marker(id);
+            }
             let line = &self.lines[self.cursor_line];
             let after = &line[self.cursor_col..];
             let cluster = after
@@ -1082,13 +1390,19 @@ impl Editor {
             self.set_text("");
             return;
         }
-        self.add_to_history(&text);
+        // Recall must return the *full* payload, never an orphan marker, so the
+        // expanded form is what enters the history ring.
+        let expanded = self.expand_markers(&text);
+        self.add_to_history(&expanded);
         // Record the clear as one undoable unit so undo-after-submit restores the
         // sent text. The buffer is emptied at position 0; undo re-inserts it and
         // parks the caret at its end (cursor_before). The redo branch is discarded,
         // matching every other fresh edit.
         let cursor_before = (self.cursor_line, self.cursor_col);
         self.redo_stack.clear();
+        // Capture the pre-clear registry so undo-after-submit restores the fold
+        // markers *and* their payloads alongside the re-inserted text.
+        let snapshot = self.paste_registry_snapshot();
         self.undo_stack.push(UndoUnit {
             position: 0,
             removed: text.clone(),
@@ -1096,9 +1410,14 @@ impl Editor {
             cursor_before,
             cursor_after: (0, 0),
             open: false,
+            paste_registry: Some(snapshot),
         });
         self.break_coalesce = true;
-        self.submitted = Some(text);
+        // The submitted text is the *expanded* payload — fold markers are
+        // substituted back so the marker token never reaches the host / agent.
+        self.submitted = Some(self.expand_markers(&text));
+        self.paste_markers.clear();
+        self.next_paste_id = 0;
         self.set_text("");
     }
 
@@ -1546,6 +1865,225 @@ fn raw_char(key: &RtKey) -> Option<char> {
         crossterm::event::KeyCode::Char(c) => Some(c),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Paste pipeline free functions (escape defusing, marker parsing/renumber/expand,
+// dropped-file transform). Kept free so the pure logic is unit-testable in
+// isolation from an `Editor`.
+// ---------------------------------------------------------------------------
+
+/// Strip bare escape / control bytes from a pasted payload so a pasted terminal
+/// sequence cannot re-colour the screen, move the hardware cursor, or corrupt the
+/// buffer — it lands as inert text instead.
+///
+/// Dropped: every C0 control (`0x00..=0x1F`) and DEL (`0x7F`) *except* the two
+/// whitespace controls the editor treats as real content — `\n` (line breaks a
+/// multi-line paste keeps) and `\t` (a literal tab). ESC (`0x1B`), the CSI/OSC
+/// introducers built on it, and stray carriage returns all vanish. A lone `\r` is
+/// dropped rather than kept so a CRLF payload does not leave dangling carriage
+/// returns; `\r\n` collapses to `\n`.
+fn defuse_control_bytes(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
+}
+
+/// If the text-before-cursor ends with a complete fold-marker token, return the
+/// token's start byte column on the line and its id. `None` when the char before
+/// the cursor is not a marker's closing bracket.
+fn paste_marker_ending_at(before: &str) -> Option<(usize, u32)> {
+    if !before.ends_with(']') {
+        return None;
+    }
+    let start = before.rfind(PASTE_MARKER_PREFIX)?;
+    let token = &before[start..];
+    // An embedded ']' means the trailing bracket closes something else.
+    if token[..token.len() - 1].contains(']') {
+        return None;
+    }
+    let body = &token[PASTE_MARKER_PREFIX.len()..token.len() - 1];
+    let digit_end = body
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(body.len());
+    body[..digit_end].parse().ok().map(|id| (start, id))
+}
+
+/// The id of the fold-marker token on `line` that the byte column `col` falls
+/// on the open bracket of, or strictly inside of. `None` when `col` is not on a
+/// marker token. Used for the forward-delete downgrade: deleting at `[` or inside
+/// the token turns it literal.
+fn marker_covering(line: &str, col: usize) -> Option<u32> {
+    let mut search_from = 0;
+    while let Some(rel) = line[search_from..].find(PASTE_MARKER_PREFIX) {
+        let start = search_from + rel;
+        let after = &line[start..];
+        let rel_end = after.find(']')?;
+        let end = start + rel_end; // byte index of the ']'
+        // The caret covers the token when it sits at the open bracket or strictly
+        // inside (up to and including the char just before ']'); at or past the
+        // ']' the token is already whole behind the caret.
+        if col >= start && col <= end {
+            let body = &after[PASTE_MARKER_PREFIX.len()..rel_end];
+            let digit_end = body
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(body.len());
+            if let Ok(id) = body[..digit_end].parse::<u32>() {
+                return Some(id);
+            }
+        }
+        search_from = end + 1;
+    }
+    None
+}
+
+/// Rewrite marker tokens in `line`, decrementing every id greater than
+/// `removed_id` by one. Non-marker text and markers at or below `removed_id` pass
+/// through untouched.
+fn renumber_paste_markers(line: &str, removed_id: u32) -> String {
+    if !line.contains(PASTE_MARKER_PREFIX) {
+        return line.to_string();
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find(PASTE_MARKER_PREFIX) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let Some(end) = after.find(']') else {
+            out.push_str(after);
+            return out;
+        };
+        let token = &after[..=end];
+        let body = &token[PASTE_MARKER_PREFIX.len()..];
+        let digit_end = body
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(body.len());
+        match body[..digit_end].parse::<u32>() {
+            Ok(id) if id > removed_id => {
+                out.push_str(PASTE_MARKER_PREFIX);
+                out.push_str(&(id - 1).to_string());
+                out.push_str(&body[digit_end..]);
+            }
+            _ => out.push_str(token),
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Substitute every fold-marker token in `text` with its full payload. An
+/// unknown marker (no registry entry) is emitted literally.
+fn expand_paste_markers(text: &str, markers: &HashMap<u32, PasteContent>) -> String {
+    if markers.is_empty() || !text.contains(PASTE_MARKER_PREFIX) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(PASTE_MARKER_PREFIX) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let Some(end) = after.find(']') else {
+            out.push_str(after);
+            return out;
+        };
+        let token = &after[..=end];
+        let id_str: String = token
+            .chars()
+            .skip(PASTE_MARKER_PREFIX.chars().count())
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(id) = id_str.parse::<u32>()
+            && let Some(content) = markers.get(&id)
+        {
+            out.push_str(&content.text);
+        } else {
+            // Unknown marker — emit it literally.
+            out.push_str(token);
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Rewrite a single-line dropped-file paste into an `@mention`, or `None` to
+/// insert it verbatim.
+///
+/// Mirrors the coding-agent driver's `transform_dropped_file_paste` but takes the
+/// cwd and an existence predicate as parameters so it stays pure and testable. A
+/// drop-like paste is a single non-empty line, optionally in matching outer
+/// quotes and optionally `file://`-prefixed (percent-decoded). When the resolved
+/// path exists, the mention prefers the cwd-relative form, falling back to the
+/// absolute path.
+fn transform_dropped_file_paste(
+    raw: &str,
+    cwd: &Path,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Option<String> {
+    // Drop-like pastes are single-line; multi-line pastes are bracketed and
+    // never come from a drag-drop.
+    if raw.contains('\n') {
+        return None;
+    }
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = strip_matching_quotes(trimmed);
+    let no_scheme = stripped.strip_prefix("file://").unwrap_or(stripped);
+    let decoded = percent_decode(no_scheme);
+    let candidate = PathBuf::from(decoded.as_ref());
+    let resolved = if candidate.is_absolute() {
+        candidate.clone()
+    } else {
+        cwd.join(&candidate)
+    };
+    if !exists(&resolved) {
+        return None;
+    }
+    let mention = if let Ok(rel) = resolved.strip_prefix(cwd) {
+        rel.to_string_lossy().to_string()
+    } else {
+        resolved.to_string_lossy().to_string()
+    };
+    Some(format!("@{mention}"))
+}
+
+/// Strip one layer of matching outer quotes (`"…"` or `'…'`) from `s`.
+fn strip_matching_quotes(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &s[1..s.len() - 1];
+        }
+    }
+    s
+}
+
+/// Best-effort percent-decode (`%20` → space), for `file://`-encoded paths.
+fn percent_decode(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('%') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &s[i + 1..i + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 #[cfg(test)]
@@ -2089,5 +2627,118 @@ mod tests {
         assert_eq!(ed.text(), "one", "redo replays one unit");
         ed.redo();
         assert_eq!(ed.text(), "onetwo", "redo replays the next unit");
+    }
+
+    // --- Paste pipeline pure logic ------------------------------------------
+
+    #[test]
+    fn defuse_strips_escape_and_control_keeps_newline_tab() {
+        // A pasted CSI colour sequence plus a bell — all defused; the visible
+        // text survives, and the real whitespace controls (\n, \t) are kept.
+        let payload = "red\x1b[31mtext\x07\tafter\nline2\r\n";
+        let out = defuse_control_bytes(payload);
+        assert!(!out.contains('\x1b'), "ESC removed");
+        assert!(!out.contains('\x07'), "BEL removed");
+        assert!(!out.contains('\r'), "carriage return removed");
+        assert_eq!(
+            out, "red[31mtext\tafter\nline2\n",
+            "printable + \\n + \\t survive; CRLF collapses to LF"
+        );
+    }
+
+    #[test]
+    fn marker_ending_at_detects_complete_token() {
+        let before = "see [paste #2 +40 lines]";
+        assert_eq!(paste_marker_ending_at(before), Some((4, 2)));
+        // A cursor not on a closing bracket is not a marker end.
+        assert_eq!(paste_marker_ending_at("no marker here"), None);
+        // A nested/incomplete bracket is rejected.
+        assert_eq!(paste_marker_ending_at("[paste #1 [x]]"), None);
+    }
+
+    #[test]
+    fn marker_covering_finds_token_at_open_and_inside_only() {
+        let line = "a [paste #1 +99 lines] b";
+        let open = line.find('[').unwrap();
+        let close = line.find(']').unwrap();
+        assert_eq!(
+            marker_covering(line, open),
+            Some(1),
+            "covers the open bracket"
+        );
+        assert_eq!(
+            marker_covering(line, open + 3),
+            Some(1),
+            "covers strictly inside the token"
+        );
+        assert_eq!(
+            marker_covering(line, close),
+            Some(1),
+            "covers the close bracket"
+        );
+        assert_eq!(
+            marker_covering(line, 0),
+            None,
+            "before the token: not covered"
+        );
+        assert_eq!(
+            marker_covering(line, close + 1),
+            None,
+            "past the close bracket: not covered"
+        );
+    }
+
+    #[test]
+    fn renumber_decrements_only_higher_ids() {
+        let line = "[paste #1 x] mid [paste #3 y] end [paste #2 z]";
+        // Removing id 1 shifts 2→1 and 3→2, leaves any at-or-below untouched.
+        let out = renumber_paste_markers(line, 1);
+        assert_eq!(out, "[paste #1 x] mid [paste #2 y] end [paste #1 z]");
+    }
+
+    #[test]
+    fn expand_substitutes_known_and_passes_unknown() {
+        let mut markers = HashMap::new();
+        markers.insert(
+            1,
+            PasteContent {
+                id: 1,
+                text: "FULL\nPAYLOAD".to_string(),
+                line_count: 2,
+                char_count: 12,
+            },
+        );
+        let expanded = expand_paste_markers("a [paste #1 +2 lines] b [paste #9 x] c", &markers);
+        assert_eq!(
+            expanded, "a FULL\nPAYLOAD b [paste #9 x] c",
+            "known marker expands, unknown passes through literally"
+        );
+    }
+
+    #[test]
+    fn transform_rewrites_existing_path_and_skips_missing() {
+        let cwd = PathBuf::from("/work");
+        // Existence predicate: only /work/src/main.rs "exists".
+        let exists = |p: &Path| p == Path::new("/work/src/main.rs");
+        // Quoted relative path inside cwd → cwd-relative @mention.
+        assert_eq!(
+            transform_dropped_file_paste("'src/main.rs'", &cwd, &exists).as_deref(),
+            Some("@src/main.rs")
+        );
+        // file:// prefix, percent-encoded, absolute inside cwd → still relative.
+        assert_eq!(
+            transform_dropped_file_paste("file:///work/src/main.rs", &cwd, &exists).as_deref(),
+            Some("@src/main.rs")
+        );
+        // A non-existent path is left verbatim (None).
+        assert_eq!(
+            transform_dropped_file_paste("src/missing.rs", &cwd, &exists),
+            None
+        );
+        // A multi-line payload is never a drop.
+        assert_eq!(
+            transform_dropped_file_paste("src/main.rs\nextra", &cwd, &exists),
+            None
+        );
     }
 }

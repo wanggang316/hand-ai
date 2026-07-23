@@ -428,7 +428,7 @@ fn main() {
             ])
             .split(area);
             TruncatedText::new(
-                "Editor — grapheme-aware · auto-grow · kill-ring (C-w/C-y) · coalescing undo",
+                "Editor — grapheme-aware · auto-grow · kill-ring (C-w/C-y) · undo · paste markers/defuse",
             )
             .render(rows[0], buf);
 
@@ -453,6 +453,17 @@ fn main() {
             editor.handle_key(&ctrl_key('w'));
             editor.handle_key(&ctrl_key('y'));
             editor.undo();
+            // Paste pipeline demo: a big bracketed paste folds to a compact
+            // `[paste #1 …]` marker (the full payload lives out-of-band and is
+            // spliced back on submit); a pasted escape sequence lands defused as
+            // inert text rather than re-colouring the box.
+            editor.handle_key(&char_key(' '));
+            let big_paste = (0..40)
+                .map(|i| format!("payload line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            editor.insert_paste(&big_paste);
+            editor.insert_paste(" \x1b[31mESC-defused\x1b[0m");
             // Show the focused border tint (the thinking tint is the host's to drive
             // during streaming in a later milestone).
             editor.set_tint(BorderTint::Focused);
