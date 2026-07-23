@@ -29,13 +29,27 @@
 //! - `stall`: emits an early content delta then withholds the next one for a
 //!   long time (exercises the stream watchdog / stall detection), then
 //!   finishes.
-//! - `tool_call`: a single `read` tool call.
-//! - `edit_tool`: an `edit` tool call with old/new string arguments.
-//! - `write_tool`: a `write` tool call creating a new file.
+//! - `tool_call`: a single `read` tool call; returns terminal text once the
+//!   tool result is back (does not loop).
+//! - `edit_tool`: an `edit` tool call with old/new string arguments; returns
+//!   terminal text on the tool-result round.
+//! - `write_tool`: a `write` tool call creating a new file; returns terminal
+//!   text on the tool-result round.
 //! - `image_result`: a `read` tool call whose downstream result carries an
 //!   image block. The image lands in the tool *result* (which the caller
-//!   synthesises); this scenario emits the tool call that triggers it.
+//!   synthesises); this scenario emits the tool call that triggers it, then
+//!   returns terminal text on the tool-result round.
+//! - `streamed_fence`: a text turn that opens a fenced code block *mid-stream*
+//!   (the opening ``` and body arrive across deltas, the closing fence last), so
+//!   a live probe can observe mid-stream containment and settle-once behaviour.
 //! - `error`: a partial text turn that ends with `finish_reason: "error"`.
+//!
+//! The tool-call scenarios (`tool_call`, `edit_tool`, `write_tool`,
+//! `image_result`) are two-round: the first request emits the tool call, and the
+//! follow-up request — which carries the tool result — returns a terminal text
+//! response. This terminates the agent loop (a stateless single-response mock
+//! would otherwise re-emit the same tool call forever), so the tool-call
+//! streaming and rendering are probable without tripping the turn watchdog.
 //!
 //! ## Run
 //!
@@ -119,7 +133,7 @@ async fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
     stream.write_all(head.as_bytes()).await?;
     stream.flush().await?;
 
-    stream_scenario(&mut stream, &scenario).await?;
+    stream_scenario(&mut stream, &scenario, request.has_tool_result).await?;
 
     stream.write_all(b"data: [DONE]\n\n").await?;
     stream.flush().await?;
@@ -131,6 +145,12 @@ async fn handle_connection(mut stream: TcpStream) -> std::io::Result<()> {
 struct RequestHead {
     path: String,
     scenario_header: Option<String>,
+    /// Whether the request body already carries a tool result (a `"role":"tool"`
+    /// message, or an Anthropic `tool_result` content block). True on the
+    /// *second* round of a tool-call scenario — after the agent ran the tool and
+    /// sent the result back — so the provider can return a terminal text
+    /// response instead of re-emitting the same tool call and looping forever.
+    has_tool_result: bool,
 }
 
 /// Read the request head, then drain the request body.
@@ -184,22 +204,47 @@ async fn read_request_head(stream: &mut TcpStream) -> std::io::Result<RequestHea
         }
     }
 
-    // Drain the body so the client finishes its write cleanly.
+    // Drain the body so the client finishes its write cleanly, accumulating it
+    // so we can detect a tool-result round (see `has_tool_result`).
+    let mut body = Vec::new();
     if let Some(pos) = header_end {
-        let already = buf.len() - (pos + 4);
+        let body_start = pos + 4;
+        body.extend_from_slice(&buf[body_start..]);
+        let already = buf.len() - body_start;
         let mut remaining = content_length.saturating_sub(already);
         while remaining > 0 {
             let n = stream.read(&mut chunk).await?;
             if n == 0 {
                 break;
             }
+            body.extend_from_slice(&chunk[..n]);
             remaining = remaining.saturating_sub(n);
         }
     }
+    let body_text = String::from_utf8_lossy(&body);
+    // A tool-result round is present when the messages carry a `"role":"tool"`
+    // entry (OpenAI shape) or a `tool_result` content block (Anthropic shape).
+    // Whitespace between the key and value is tolerated so a pretty-printed body
+    // still matches.
+    let has_tool_result = contains_role_tool(&body_text) || body_text.contains("tool_result");
 
     Ok(RequestHead {
         path,
         scenario_header,
+        has_tool_result,
+    })
+}
+
+/// Whether the request body carries an OpenAI-shape `"role": "tool"` message,
+/// tolerating optional whitespace after the colon (pretty-printed bodies).
+fn contains_role_tool(body: &str) -> bool {
+    body.match_indices("\"role\"").any(|(idx, _)| {
+        let rest = &body[idx + "\"role\"".len()..];
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix(':') else {
+            return false;
+        };
+        rest.trim_start().starts_with("\"tool\"")
     })
 }
 
@@ -229,7 +274,18 @@ fn resolve_scenario(request: &RequestHead) -> String {
 
 /// Write the canned SSE chunk sequence for a scenario. Each chunk is a
 /// serialized `chat.completion.chunk` JSON object framed as `data: {...}\n`.
-async fn stream_scenario(stream: &mut TcpStream, scenario: &str) -> std::io::Result<()> {
+///
+/// `has_tool_result` is true on the second round of a tool-call scenario (the
+/// agent has run the tool and sent the result back). The tool-call scenarios
+/// key off it to return a terminal text response instead of re-emitting the same
+/// tool call — without it the stateless provider would loop forever, and the
+/// tool-call streaming / rendering could only be probed by tripping the
+/// watchdog.
+async fn stream_scenario(
+    stream: &mut TcpStream,
+    scenario: &str,
+    has_tool_result: bool,
+) -> std::io::Result<()> {
     let slow_ms: u64 = env_u64("MOCK_PROVIDER_SLOW_MS", 60);
     let stall_ms: u64 = env_u64("MOCK_PROVIDER_STALL_MS", 3000);
 
@@ -277,43 +333,84 @@ async fn stream_scenario(stream: &mut TcpStream, scenario: &str) -> std::io::Res
             write_chunk(stream, &usage_chunk(8, 4)).await?;
         }
         "tool_call" => {
-            emit_tool_call(
-                stream,
-                "call_mock_read_0001",
-                "read",
-                r#"{"path":"/tmp/mock.txt"}"#,
-            )
-            .await?;
+            // First round: request the tool. Second round (the tool result is
+            // back): answer with terminal text so the turn ends and does not
+            // loop — the tool-call streaming / rendering is probable without a
+            // watchdog timeout.
+            if has_tool_result {
+                emit_final_text(stream, "The file has been read.").await?;
+            } else {
+                emit_tool_call(
+                    stream,
+                    "call_mock_read_0001",
+                    "read",
+                    r#"{"path":"/tmp/mock.txt"}"#,
+                )
+                .await?;
+            }
         }
         "edit_tool" => {
-            emit_tool_call(
-                stream,
-                "call_mock_edit_0001",
-                "edit",
-                r#"{"path":"/tmp/mock.txt","oldString":"foo","newString":"bar"}"#,
-            )
-            .await?;
+            if has_tool_result {
+                emit_final_text(stream, "The edit has been applied.").await?;
+            } else {
+                emit_tool_call(
+                    stream,
+                    "call_mock_edit_0001",
+                    "edit",
+                    r#"{"path":"/tmp/mock.txt","oldString":"foo","newString":"bar"}"#,
+                )
+                .await?;
+            }
         }
         "write_tool" => {
-            emit_tool_call(
-                stream,
-                "call_mock_write_0001",
-                "write",
-                r#"{"path":"/tmp/mock-new.txt","content":"created by mock\n"}"#,
-            )
-            .await?;
+            if has_tool_result {
+                emit_final_text(stream, "The file has been written.").await?;
+            } else {
+                emit_tool_call(
+                    stream,
+                    "call_mock_write_0001",
+                    "write",
+                    r#"{"path":"/tmp/mock-new.txt","content":"created by mock\n"}"#,
+                )
+                .await?;
+            }
         }
         "image_result" => {
             // The image itself lands in the *tool result* the caller
             // synthesises; the assistant turn only needs to request a tool
             // whose result is an image block (e.g. a screenshot reader).
-            emit_tool_call(
-                stream,
-                "call_mock_image_0001",
-                "read",
-                r#"{"path":"/tmp/mock-image.png"}"#,
-            )
-            .await?;
+            if has_tool_result {
+                emit_final_text(stream, "Here is what the screenshot shows.").await?;
+            } else {
+                emit_tool_call(
+                    stream,
+                    "call_mock_image_0001",
+                    "read",
+                    r#"{"path":"/tmp/mock-image.png"}"#,
+                )
+                .await?;
+            }
+        }
+        "streamed_fence" => {
+            // A code fence that OPENS mid-stream: intro text, the opening ```rust
+            // and body arrive across several deltas while the closing fence lands
+            // only at the end. This lets a live probe observe the mid-stream
+            // containment (the open fence is closed defensively in the preview)
+            // and the settle-once behaviour when the final closed snapshot
+            // commits (VAL-CHAT-033).
+            for piece in [
+                "Here is the code:\n\n",
+                "```rust\n",
+                "fn main() {\n",
+                "    println!(\"hi\");\n",
+                "}\n",
+                "```\n",
+            ] {
+                write_chunk(stream, &text_delta_chunk(piece)).await?;
+                tokio::time::sleep(Duration::from_millis(slow_ms)).await;
+            }
+            write_chunk(stream, &finish_chunk("stop")).await?;
+            write_chunk(stream, &usage_chunk(16, 24)).await?;
         }
         "error" => {
             write_chunk(stream, &text_delta_chunk("partial before error")).await?;
@@ -352,6 +449,17 @@ async fn emit_tool_call(
     write_chunk(stream, &tool_call_args_chunk(tail)).await?;
     write_chunk(stream, &finish_chunk("tool_calls")).await?;
     write_chunk(stream, &usage_chunk(30, 15)).await?;
+    Ok(())
+}
+
+/// Emit a terminal, single-delta text turn: one content delta, a `stop` finish,
+/// and a usage chunk. Used by the tool-call scenarios on the second round (once
+/// the tool result is back) so the turn ends with a real answer instead of
+/// re-requesting the same tool and looping.
+async fn emit_final_text(stream: &mut TcpStream, text: &str) -> std::io::Result<()> {
+    write_chunk(stream, &text_delta_chunk(text)).await?;
+    write_chunk(stream, &finish_chunk("stop")).await?;
+    write_chunk(stream, &usage_chunk(40, 12)).await?;
     Ok(())
 }
 

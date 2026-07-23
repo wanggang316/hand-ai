@@ -45,7 +45,13 @@ Endpoint: `POST {base_url}/chat/completions` (the `openai-rust` client appends
 | `edit_tool`    | an `edit` tool call (`oldString`/`newString`)                  |
 | `write_tool`   | a `write` tool call (new file)                                 |
 | `image_result` | a `read` tool call whose result is an image block              |
+| `streamed_fence`| text that opens a code fence mid-stream, closes it at the end |
 | `error`        | partial text then `finish_reason: error`                       |
+
+The tool-call scenarios (`tool_call`, `edit_tool`, `write_tool`, `image_result`)
+are two-round: the first request emits the tool call; the follow-up request
+(which carries the tool result) returns terminal text so the agent loop
+terminates instead of re-emitting the same call forever.
 
 Timing knobs: `MOCK_PROVIDER_SLOW_MS` (default 60), `MOCK_PROVIDER_STALL_MS`
 (default 3000).
