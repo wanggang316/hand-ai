@@ -1,27 +1,32 @@
 //! Interactive TUI mode for the coding agent.
 //!
-//! Components live in `components/` and the theme system in `theme/`.
-//! This module wires them together via [`InteractiveMode`], covering
-//! the happy path: chat scrollback, editor input, agent dispatch, a
-//! small slash-command table, and a model-selector overlay. Features
-//! still in flight are marked with `// TODO` notes.
+//! The interactive driver runs on the **ratatui runtime** (`hand_tui::rt`) — see
+//! [`rt_driver`], the M3 strangler cutover. It wires the rt session guard, frame
+//! scheduler, input pump, and fixed-max inline viewport into a run loop that
+//! starts, types, submits, streams a turn into scrollback, and exits cleanly on
+//! every path (no `process::exit`, no raw-pointer stop handle).
 //!
-//! # Theming
+//! The [`event_dispatch`] protocol (`AgentSessionEvent` → `ChatUpdate`) is reused
+//! unchanged — it carries zero `hand_tui` dependency and is the bridge the rt
+//! driver commits agent output through.
 //!
-//! Interactive components are styled through semantic color slots
-//! (`user_message_bg`, `custom_message_label`, etc.) provided by
-//! [`theme`]. The driver currently uses the components' built-in
-//! defaults rather than reading the theme directly — the
-//! theme-to-component wiring is a follow-up task.
+//! # Follow-up features build on this skeleton
+//!
+//! Full startup chrome, the rich message components (markdown / thinking / bash /
+//! tool cards), the complete slash-command table, the selectors, and the full
+//! footer view-model land in later M3 features on the seams the [`rt_driver`]
+//! documents. The legacy `hand_tui::Tui` components (`components/`, `theme/`) are
+//! retained as migration source for those features.
 
 pub mod components;
-pub mod driver;
 pub mod event_dispatch;
+pub mod rt_driver;
 pub mod slash_commands;
 pub mod syntax_highlight;
 pub mod theme;
 
-pub use driver::{InteractiveError, InteractiveMode};
+pub use rt_driver::watchdog::{DEFAULT_TURN_TIMEOUT, Watchdog};
+pub use rt_driver::{InteractiveError, InteractiveMode};
 pub use slash_commands::{
     ExportFormat, ParsedSlashCommand, SlashCommandAction, SlashCommandContext, SlashCommandResult,
     SlashCommandTable,
