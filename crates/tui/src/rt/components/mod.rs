@@ -29,12 +29,16 @@
 //! formatting (Decision Log: visual-signature tolerance). A primitive is correct
 //! if, at 100 columns and after a resize to 60, its contract still holds.
 
+mod markdown;
 mod progress_bar;
 mod spacer;
 mod status_bar;
 mod text_block;
 mod widget_box;
 
+pub use markdown::{
+    CodeHighlighter, MarkdownTheme, MarkdownView, plain_code_highlighter, render_markdown,
+};
 pub use progress_bar::ProgressBar;
 pub use spacer::Spacer;
 pub use status_bar::StatusBar;
