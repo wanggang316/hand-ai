@@ -144,6 +144,47 @@ fn toml_section_pair_string_number_and_comment() {
     assert!(has_token(&lines[3], NUMBER, "2"));
 }
 
+// --- VAL-WIDGET-004: non-ASCII round-trip -----------------------------------
+
+#[test]
+fn non_ascii_identifier_round_trips_without_mojibake() {
+    // An unquoted non-ASCII identifier is unclassified, so it lands in the flat
+    // fallback run. The tokenizer must advance one whole char at a time — never
+    // reinterpret a multi-byte UTF-8 sequence byte-by-byte as Latin-1 — or the
+    // CJK name renders as mojibake.
+    let src = "let 名前 = 1;";
+    let lines = highlight(src, Some("rust"));
+    assert_eq!(lines.len(), 1);
+    assert_eq!(
+        text(&lines[0]),
+        src,
+        "the non-ASCII identifier must round-trip losslessly"
+    );
+    assert!(
+        has_token(&lines[0], KEYWORD, "let"),
+        "keyword still classified"
+    );
+    assert!(has_token(&lines[0], NUMBER, "1"), "number still classified");
+}
+
+#[test]
+fn non_ascii_round_trips_across_byte_tokenized_languages() {
+    // Python, JSON, and Bash share the same byte-cursor unclassified tail as
+    // Rust; each must carry a multi-byte identifier through intact.
+    for (src, lang) in [
+        ("値 = 1", "python"),
+        ("{ 鍵: 1 }", "json"),
+        ("echo 変数", "bash"),
+    ] {
+        let lines = highlight(src, Some(lang));
+        assert_eq!(
+            text(&lines[0]),
+            src,
+            "{lang}: non-ASCII must round-trip losslessly"
+        );
+    }
+}
+
 // --- VAL-WIDGET-004: aliases ------------------------------------------------
 
 #[test]

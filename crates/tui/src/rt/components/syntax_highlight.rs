@@ -389,8 +389,12 @@ fn highlight_clike_line(
             }
             continue;
         }
-        pending.push(c);
-        i += 1;
+        // Unclassified char: advance by the whole UTF-8 char so multi-byte
+        // sequences (e.g. CJK identifiers) round-trip instead of being
+        // reinterpreted byte-by-byte as Latin-1.
+        let ch = line[i..].chars().next().unwrap_or('\u{FFFD}');
+        pending.push(ch);
+        i += ch.len_utf8();
     }
     flush(&mut spans, &mut pending);
     spans
@@ -536,8 +540,12 @@ fn highlight_python_line(line: &str) -> Vec<Span<'static>> {
             }
             continue;
         }
-        pending.push(c);
-        i += 1;
+        // Unclassified char: advance by the whole UTF-8 char so multi-byte
+        // sequences (e.g. CJK identifiers) round-trip instead of being
+        // reinterpreted byte-by-byte as Latin-1.
+        let ch = line[i..].chars().next().unwrap_or('\u{FFFD}');
+        pending.push(ch);
+        i += ch.len_utf8();
     }
     flush(&mut spans, &mut pending);
     spans
@@ -619,8 +627,12 @@ fn highlight_json_line(line: &str) -> Vec<Span<'static>> {
             }
             continue;
         }
-        pending.push(c);
-        i += 1;
+        // Unclassified char: advance by the whole UTF-8 char so multi-byte
+        // sequences (e.g. CJK identifiers) round-trip instead of being
+        // reinterpreted byte-by-byte as Latin-1.
+        let ch = line[i..].chars().next().unwrap_or('\u{FFFD}');
+        pending.push(ch);
+        i += ch.len_utf8();
     }
     flush(&mut spans, &mut pending);
     spans
@@ -725,8 +737,12 @@ fn highlight_bash_line(line: &str) -> Vec<Span<'static>> {
             spans.push(painted(NUMBER, &line[start..i]));
             continue;
         }
-        pending.push(c);
-        i += 1;
+        // Unclassified char: advance by the whole UTF-8 char so multi-byte
+        // sequences (e.g. CJK identifiers) round-trip instead of being
+        // reinterpreted byte-by-byte as Latin-1.
+        let ch = line[i..].chars().next().unwrap_or('\u{FFFD}');
+        pending.push(ch);
+        i += ch.len_utf8();
     }
     flush(&mut spans, &mut pending);
     spans

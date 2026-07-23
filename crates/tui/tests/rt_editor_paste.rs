@@ -375,6 +375,49 @@ fn recall_returns_full_expanded_payload_no_orphan_marker() {
     assert_eq!(ed.text(), "", "Down past newest restores empty buffer");
 }
 
+#[test]
+fn undo_after_submit_restores_marker_and_payload() {
+    // submit() snapshots the paste registry *before* clearing it, so an
+    // undo-after-submit brings the buffer back with the fold marker token AND its
+    // out-of-band payload intact — not an orphaned marker pointing at nothing.
+    let mut ed = Editor::new();
+    let payload = many_lines(30); // > 10 lines → folds to a +M lines marker
+    ed.insert_paste(&payload);
+    assert_eq!(
+        ed.text(),
+        "[paste #1 +30 lines]",
+        "the paste folds to a marker before submit"
+    );
+
+    ed.handle_key(&enter()); // submit
+    let submitted = ed.take_submit().expect("submitted");
+    assert_eq!(
+        submitted, payload,
+        "submit expands the marker to the full payload"
+    );
+    assert_eq!(ed.text(), "", "the buffer clears after submit");
+    assert!(
+        ed.paste_markers().is_empty(),
+        "the registry resets after submit"
+    );
+
+    ed.undo();
+    assert_eq!(
+        ed.text(),
+        "[paste #1 +30 lines]",
+        "one undo brings the marker token back"
+    );
+    assert!(
+        ed.paste_markers().contains_key(&1),
+        "the registry entry is restored alongside the token"
+    );
+    assert_eq!(
+        ed.expanded_text(),
+        payload,
+        "the hidden payload restores with the marker, not an orphan"
+    );
+}
+
 // --- test-only cursor helper -------------------------------------------------
 
 /// Drive the caret to byte column `col` on the current line by walking Right
