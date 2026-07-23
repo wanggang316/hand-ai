@@ -64,6 +64,13 @@ pub struct DriverState {
     ///
     /// [`HistorySink`]: hand_tui::rt::history::HistorySink
     pub pending_commits: Vec<Vec<Line<'static>>>,
+    /// Raw terminal control sequences awaiting a write — the OSC 133 prompt
+    /// marks and OSC 9;4 progress updates that cannot ride a ratatui `Buffer`
+    /// cell (they are out-of-band escapes, like the M2 image / OSC 8 channel).
+    /// The draw closure drains and writes these on the terminal-owning task,
+    /// inside the synchronized-output block, so invariant #1 (the scheduler owns
+    /// the terminal) holds. Each entry is a complete, self-contained escape.
+    pub pending_raw: Vec<&'static str>,
 }
 
 impl DriverState {
@@ -90,6 +97,19 @@ impl DriverState {
     /// once.
     pub fn take_commits(&mut self) -> Vec<Vec<Line<'static>>> {
         std::mem::take(&mut self.pending_commits)
+    }
+
+    /// Queue a raw terminal control sequence (an OSC 133 mark or OSC 9;4 progress
+    /// update) for a single write by the draw closure. The draw path drains it
+    /// exactly once.
+    pub fn queue_raw(&mut self, sequence: &'static str) {
+        self.pending_raw.push(sequence);
+    }
+
+    /// Take every queued raw sequence, clearing the queue, so each is written
+    /// exactly once.
+    pub fn take_raw(&mut self) -> Vec<&'static str> {
+        std::mem::take(&mut self.pending_raw)
     }
 }
 
@@ -131,6 +151,16 @@ mod tests {
         let taken = state.take_commits();
         assert_eq!(taken.len(), 2);
         assert!(state.pending_commits.is_empty());
+    }
+
+    #[test]
+    fn queue_and_take_raw_sequences_drain_once() {
+        let mut state = DriverState::new(TerminalSize::new(80, 24));
+        state.queue_raw("\x1b]133;A\x07");
+        state.queue_raw("\x1b]9;4;3;0\x07");
+        let taken = state.take_raw();
+        assert_eq!(taken, vec!["\x1b]133;A\x07", "\x1b]9;4;3;0\x07"]);
+        assert!(state.pending_raw.is_empty(), "queue drained after take");
     }
 
     #[test]

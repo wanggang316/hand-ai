@@ -61,11 +61,12 @@ pub fn spawn_scheduler(
 
     FrameScheduler::spawn(move || {
         // Snapshot state under the lock, then release it before touching the
-        // terminal. Finished chat blocks are taken out (not cloned) so they can
-        // only ever be committed once.
-        let (snapshot, commits) = {
+        // terminal. Finished chat blocks and raw sequences are taken out (not
+        // cloned) so they can only ever be committed / written once.
+        let (snapshot, commits, raw) = {
             let mut guard = lock_state(&state);
             let commits = guard.take_commits();
+            let raw = guard.take_raw();
             if guard.streaming {
                 guard.spinner_phase = guard.spinner_phase.wrapping_add(1);
             }
@@ -74,7 +75,7 @@ pub fn spawn_scheduler(
                 loader: guard.streaming,
                 spinner_phase: guard.spinner_phase,
             };
-            (snapshot, commits)
+            (snapshot, commits, raw)
         };
 
         // Resize erase: detect a backend size change and wipe the old-width
@@ -103,11 +104,43 @@ pub fn spawn_scheduler(
         // open synchronized block.
         let mut stdout = io::stdout();
         let editor = &editor;
-        draw_synchronized(&mut stdout, |_w| {
+        draw_synchronized(&mut stdout, |w| {
             terminal.draw(|frame| draw(frame, &snapshot, editor, &footer_text))?;
+            // Flush any raw terminal control sequences (OSC 133 prompt marks,
+            // OSC 9;4 progress) AFTER the viewport draw but INSIDE the sync
+            // block, on this terminal-owning task — the same raw-emission
+            // discipline the M2 image / OSC 8 channel uses. These are
+            // terminal-global escapes (not cell content), so they are written
+            // between a cursor save/restore so they never disturb the caret
+            // ratatui just positioned.
+            flush_raw(w, &raw)?;
             Ok(())
         })
     })
+}
+
+/// Save-cursor escape (`ESC 7`) — parks the caret before a raw OSC write.
+const SAVE_CURSOR: &[u8] = b"\x1b7";
+/// Restore-cursor escape (`ESC 8`) — returns the caret after a raw OSC write.
+const RESTORE_CURSOR: &[u8] = b"\x1b8";
+
+/// Write queued raw control sequences to the terminal, bracketed by a cursor
+/// save/restore so the escapes never disturb the caret ratatui positioned.
+///
+/// A no-op for an empty queue: it emits nothing, not even the save/restore, so a
+/// steady-state repaint pays no bytes. The OSC 133 / OSC 9;4 escapes are
+/// terminal-global (they carry no position), so this is a plain sequential write
+/// rather than the row-addressed flush the image channel needs.
+fn flush_raw<W: io::Write>(out: &mut W, raw: &[&'static str]) -> io::Result<()> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    out.write_all(SAVE_CURSOR)?;
+    for sequence in raw {
+        out.write_all(sequence.as_bytes())?;
+    }
+    out.write_all(RESTORE_CURSOR)?;
+    Ok(())
 }
 
 /// An immutable per-frame view of the state the draw path reads.
@@ -244,5 +277,28 @@ mod tests {
     fn inset_narrow_rect_saturates_to_zero_width() {
         let r = Rect::new(0, 0, 1, 1);
         assert_eq!(inset(r).width, 0);
+    }
+
+    #[test]
+    fn flush_raw_empty_writes_nothing() {
+        let mut buf: Vec<u8> = Vec::new();
+        flush_raw(&mut buf, &[]).unwrap();
+        assert!(buf.is_empty(), "empty queue emits no bytes");
+    }
+
+    #[test]
+    fn flush_raw_brackets_sequences_in_cursor_save_restore() {
+        let mut buf: Vec<u8> = Vec::new();
+        flush_raw(&mut buf, &["\x1b]133;A\x07", "\x1b]133;B\x07"]).unwrap();
+        // Save first, both escapes in order, restore last — the caret is parked
+        // around the raw writes so it is not disturbed.
+        let expected = [
+            SAVE_CURSOR,
+            b"\x1b]133;A\x07",
+            b"\x1b]133;B\x07",
+            RESTORE_CURSOR,
+        ]
+        .concat();
+        assert_eq!(buf, expected);
     }
 }

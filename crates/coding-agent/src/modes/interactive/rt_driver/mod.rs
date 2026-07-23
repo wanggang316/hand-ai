@@ -57,6 +57,7 @@
 //! drifts down as `insert_before` fills scrollback).
 
 pub mod chat;
+pub mod chrome;
 pub mod input;
 pub mod state;
 pub mod watchdog;
@@ -76,6 +77,7 @@ use tokio::sync::mpsc;
 use crate::core::agent_session::{AgentSession, AgentSessionEvent};
 use crate::core::error::CodingAgentError;
 
+use self::chrome::{ChangelogStartupAction, ProgressState, PromptMark};
 use self::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_state};
 use self::watchdog::Watchdog;
 use super::event_dispatch::{ChatUpdate, dispatch as dispatch_event};
@@ -174,6 +176,16 @@ impl InteractiveMode {
         // shape. The full footer view-model is a follow-up feature.
         let footer: SharedFooter = Arc::new(Mutex::new(footer_line(&session, &cwd)));
 
+        // Startup chrome: welcome header, any tmux keyboard warning, and the
+        // changelog banner, committed to the top of scrollback BEFORE the first
+        // frame paints. The changelog decision reads (and may write) settings, so
+        // it runs while we still hold `&mut session`, before it moves into the
+        // turn runner.
+        let startup = collect_startup_chrome(&mut session);
+        for block in startup {
+            lock_state(&state).queue_commit(block);
+        }
+
         // Bridge agent events into the driver through the reused, hand_tui-free
         // ChatUpdate protocol. The listener forwards raw session events over an
         // unbounded channel to the agent driver task, which dispatches them.
@@ -218,6 +230,13 @@ impl InteractiveMode {
         // completion while its events render live.
         let applier = tokio::spawn(event_applier(event_rx, state.clone(), requester.clone()));
 
+        // Best-effort async version probe: when crates.io reports a newer
+        // published version, commit an "update available" banner. Offline
+        // (`HAND_OFFLINE`) the fetcher returns `None` so the banner never appears,
+        // and the probe never blocks startup — it runs in its own task and the
+        // run loop paints immediately below regardless of when it finishes.
+        let version_task = tokio::spawn(version_probe(state.clone(), requester.clone()));
+
         // Initial paint.
         requester.request_frame();
 
@@ -242,6 +261,7 @@ impl InteractiveMode {
         drop(submit_tx);
         turns.abort();
         applier.abort();
+        version_task.abort();
 
         // Drop the last requester so the scheduler drains its final frame, closes
         // its synchronized block, and stops; awaiting it releases the terminal
@@ -449,7 +469,19 @@ fn commit(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester, lines: Ve
 }
 
 /// Run one submitted turn under the watchdog.
+///
+/// The turn is bracketed with a single, balanced OSC 133 A/B/C sequence
+/// (VAL-CHAT-017 / VAL-CHAT-034): `A` (prompt start) before the user echo, `B`
+/// (command start) after it, and `C` (command end) once the whole assistant
+/// response — including any interleaved tool calls — has landed. The count stays
+/// balanced regardless of how many tool calls the turn made, because the marks
+/// live here on the turn boundary, not in the per-event apply path. OSC 9;4
+/// progress goes indeterminate while the turn runs and clears (or errors) at the
+/// end (VAL-CHAT-018).
 async fn run_turn(runner: &mut TurnRunner, text: &str) {
+    // OSC 133 A — prompt start, before the user echo.
+    queue_raw(&runner.state, &runner.requester, PromptMark::PromptStart);
+
     // Echo the user message into scrollback immediately for input responsiveness.
     commit(
         &runner.state,
@@ -460,6 +492,15 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
         .unwrap_or_default(),
     );
 
+    // OSC 133 B — command start, after the user echo; OSC 9;4 indeterminate while
+    // the turn is in flight.
+    queue_raw(&runner.state, &runner.requester, PromptMark::CommandStart);
+    queue_progress(
+        &runner.state,
+        &runner.requester,
+        ProgressState::Indeterminate,
+    );
+
     // Streaming: loader on + border tint while the turn runs.
     set_streaming(&runner.state, &runner.editor, &runner.requester, true);
 
@@ -467,23 +508,52 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     // borrows `&self`, `send_message` borrows `&mut self`, so they cannot overlap.
     let cancel = runner.session.cancel_handle();
     let send = runner.session.send_message(text);
-    match run_under_watchdog(runner.watchdog, send, &cancel).await {
-        TurnOutcome::Completed => {}
-        TurnOutcome::Failed(e) => commit(
-            &runner.state,
-            &runner.requester,
-            chat::error_lines(&format!("send failed: {e}")),
-        ),
-        TurnOutcome::TimedOut => commit(
-            &runner.state,
-            &runner.requester,
-            chat::error_lines(&runner.watchdog.timeout_banner()),
-        ),
-    }
+    let progress_end = match run_under_watchdog(runner.watchdog, send, &cancel).await {
+        TurnOutcome::Completed => ProgressState::Clear,
+        TurnOutcome::Failed(e) => {
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::error_lines(&format!("send failed: {e}")),
+            );
+            ProgressState::Error
+        }
+        TurnOutcome::TimedOut => {
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::error_lines(&runner.watchdog.timeout_banner()),
+            );
+            ProgressState::Error
+        }
+    };
+
+    // OSC 133 C — command end, closing the balanced A/B/C region; then the
+    // progress terminal state (clear on success, error otherwise).
+    queue_raw(&runner.state, &runner.requester, PromptMark::CommandEnd);
+    queue_progress(&runner.state, &runner.requester, progress_end);
 
     set_streaming(&runner.state, &runner.editor, &runner.requester, false);
     // cwd retained for the follow-up footer view-model refresh.
     let _ = &runner.cwd;
+}
+
+/// Queue an OSC 133 prompt mark for the draw closure to write, and request a
+/// frame so it is flushed promptly.
+fn queue_raw(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester, mark: PromptMark) {
+    lock_state(state).queue_raw(mark.sequence());
+    requester.request_frame();
+}
+
+/// Queue an OSC 9;4 progress update for the draw closure to write, and request a
+/// frame so it is flushed promptly.
+fn queue_progress(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    progress: ProgressState,
+) {
+    lock_state(state).queue_raw(progress.sequence());
+    requester.request_frame();
 }
 
 /// How a turn ended under the watchdog.
@@ -547,6 +617,10 @@ fn apply_event(
     event: &AgentSessionEvent,
 ) {
     if let AgentSessionEvent::Error(msg) = event {
+        // Surface the failure to the terminal's progress indicator (OSC 9;4
+        // error) alongside the red banner. The turn runner clears it at the turn
+        // boundary; here it marks the in-flight error immediately.
+        queue_progress(state, requester, ProgressState::Error);
         commit(state, requester, chat::error_lines(msg));
         return;
     }
@@ -632,6 +706,89 @@ fn footer_line(session: &AgentSession, cwd: &std::path::Path) -> String {
     let label = session.label().unwrap_or("");
     let sep = if label.is_empty() { "" } else { " · " };
     format!("{}{sep}{label} · {model}", cwd.display())
+}
+
+/// Assemble the startup-chrome scrollback blocks in order: the welcome header,
+/// any tmux keyboard warning, and the changelog banner (when the session is a
+/// fresh, empty one that has fallen behind the recorded version).
+///
+/// Each returned `Vec<Line>` is committed as a single `insert_before` block. The
+/// changelog decision reads `last_changelog_version` from settings and, on
+/// display or a fresh install, records the current version back — so this takes
+/// `&mut session`. Empty blocks are skipped so no phantom scrollback lands.
+fn collect_startup_chrome(session: &mut AgentSession) -> Vec<Vec<Line<'static>>> {
+    let mut blocks: Vec<Vec<Line<'static>>> = Vec::new();
+
+    // 1. Welcome header — always first at the top of scrollback.
+    let model = session.model();
+    blocks.push(chrome::welcome_header_lines(
+        model.provider.as_str(),
+        &model.id,
+        chrome::version(),
+    ));
+
+    // 2. tmux keyboard warning — only inside a misconfigured tmux.
+    if let Some(warning) = chrome::check_tmux_keyboard_setup() {
+        blocks.push(chrome::warning_lines(warning));
+    }
+
+    // 3. Changelog banner — three-state, gated on an empty (non-resumed) session.
+    if let Some(block) = changelog_startup_block(session) {
+        blocks.push(block);
+    }
+
+    blocks.into_iter().filter(|b| !b.is_empty()).collect()
+}
+
+/// Resolve the changelog three-state and return the scrollback block to display,
+/// or `None` when the action is skip / record-only. On display or a fresh
+/// install it records the current version back into settings (best-effort — any
+/// save failure is swallowed so startup never blocks).
+fn changelog_startup_block(session: &mut AgentSession) -> Option<Vec<Line<'static>>> {
+    let current_version = chrome::version();
+    let messages_empty = session.messages().is_empty();
+    let last_version = session.settings().current().last_changelog_version.clone();
+
+    let path = chrome::locate_changelog_file()?;
+    let entries = crate::utils::changelog::parse_changelog_file(&path).ok()?;
+
+    let action =
+        chrome::decide_changelog_startup(messages_empty, last_version.as_deref(), &entries);
+    let scope = crate::core::settings::SettingsScope::Global;
+    match action {
+        ChangelogStartupAction::Skip => None,
+        ChangelogStartupAction::RecordOnly => {
+            session
+                .settings_mut()
+                .set_last_changelog_version(scope, Some(current_version.to_string()));
+            let _ = session.settings().save(scope);
+            None
+        }
+        ChangelogStartupAction::Display(body) => {
+            session
+                .settings_mut()
+                .set_last_changelog_version(scope, Some(current_version.to_string()));
+            let _ = session.settings().save(scope);
+            Some(chrome::changelog_lines(&body))
+        }
+    }
+}
+
+/// Best-effort async version probe. Hits crates.io through the default fetcher
+/// and, on a newer published version, commits an "update available" banner and
+/// requests a repaint. Offline (`HAND_OFFLINE`) or on any fetch failure the
+/// fetcher returns `None`, so nothing is committed — and because it runs in its
+/// own task, an offline start never blocks the run loop (the poll budget is the
+/// fetcher's own timeout, not the startup path's).
+async fn version_probe(state: Arc<Mutex<DriverState>>, requester: FrameRequester) {
+    let fetcher = crate::utils::version_check::HttpVersionFetcher::new();
+    let current = chrome::version();
+    if let Some(latest) =
+        crate::utils::version_check::check_for_new_version(&fetcher, current).await
+    {
+        let banner = chrome::update_available_banner(current, &latest);
+        commit(&state, &requester, chrome::warning_lines(&banner));
+    }
 }
 
 #[cfg(test)]
