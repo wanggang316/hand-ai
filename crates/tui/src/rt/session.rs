@@ -528,6 +528,68 @@ fn install_panic_hook(kitty: bool) {
     }));
 }
 
+/// A SIGHUP listener for the runtime's main loop.
+///
+/// The only way a TTY's stdin can *close* under us is the controlling PTY
+/// master going away, which the kernel signals with **SIGHUP**. Under the
+/// default disposition SIGHUP terminates the process outright (exit-by-signal
+/// 1), so neither [`SessionGuard::Drop`] nor [`SessionGuard::restore`] ever
+/// runs and the terminal is left in raw mode — the stdin-close gap.
+///
+/// Rather than install a bare signal handler and touch the terminal from inside
+/// it (escape writes and `disable_raw_mode` are **not** async-signal-safe), the
+/// runtime registers this listener and `select!`s on it in its normal event
+/// loop. Delivery of a SIGHUP wakes [`Hangup::recv`]; the loop then takes the
+/// *same* clean-exit path a Ctrl+D takes, so [`SessionGuard`]'s ordinary
+/// teardown restores cooked mode, shows the cursor, pops kitty flags, and
+/// disables paste — all from safe, ordinary control flow.
+///
+/// Registering a listener also installs tokio's process-wide handler, which
+/// supersedes the default terminate-on-SIGHUP disposition: the signal no longer
+/// kills the process before the loop can react.
+///
+/// This is also the probe seam for the stdin-close assertion: a probe closes
+/// the PTY master (or sends `kill -HUP <pid>`) and observes the terminal come
+/// back cooked with the kitty-pop / `?2004l` restore tail, then a clean exit.
+///
+/// # Errors
+///
+/// Propagates the [`io::Error`] from tokio's signal registration (e.g. the
+/// signal handler slot is already taken by foreign code). Must be called from
+/// within a tokio runtime.
+#[cfg(unix)]
+pub fn hangup_listener() -> io::Result<Hangup> {
+    use tokio::signal::unix::{SignalKind, signal};
+    Ok(Hangup {
+        signal: signal(SignalKind::hangup())?,
+    })
+}
+
+/// A registered SIGHUP listener; see [`hangup_listener`].
+///
+/// Holding one keeps tokio's SIGHUP handler installed, so the default
+/// terminate-on-hangup disposition stays superseded for the lifetime of the
+/// listener. Awaiting [`recv`](Hangup::recv) resolves when a SIGHUP is
+/// delivered.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct Hangup {
+    signal: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl Hangup {
+    /// Wait for the next SIGHUP.
+    ///
+    /// Resolves to `Some(())` when a hangup is delivered, or `None` if the
+    /// signal stream is closed (which does not happen for a live listener).
+    /// Cancellation-safe: dropping the returned future without completing it
+    /// loses no already-delivered signal.
+    pub async fn recv(&mut self) -> Option<()> {
+        self.signal.recv().await
+    }
+}
+
 #[cfg(test)]
 mod restore_once_tests {
     use super::restore_once;

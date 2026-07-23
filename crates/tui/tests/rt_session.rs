@@ -316,3 +316,61 @@ fn check_tty_accepts_a_pty_slave() {
     drop(slave);
     drop(master);
 }
+
+// --- SIGHUP listener (stdin-close clean exit, VAL-CORE-022) ------------------
+
+/// The SIGHUP listener resolves when a hangup is delivered, so the run loop can
+/// route a closing PTY master (stdin close) to the same clean-exit-and-restore
+/// path a Ctrl+D takes — instead of the default disposition killing the process
+/// raw before `SessionGuard` restores the terminal.
+///
+/// Registering the listener is what supersedes the terminate-on-hangup default
+/// (tokio installs a process-wide handler): the self-sent SIGHUP below does not
+/// kill the test binary, it is delivered to the listeners. This is a single
+/// test — not two — precisely because it `raise`s a real SIGHUP into this
+/// process: splitting it would let two tests `raise` concurrently, and a SIGHUP
+/// landing in the window before a listener is registered would terminate the
+/// whole test binary under the default disposition.
+#[cfg(unix)]
+#[test]
+fn hangup_listener_wakes_on_delivered_sighup() {
+    use hand_tui::rt::session::hangup_listener;
+    use std::time::Duration;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    runtime.block_on(async {
+        // Two coexisting listeners confirm the handler is installed process-wide
+        // (a hangup wakes both) rather than consumed by a single waiter.
+        let mut first = hangup_listener().expect("register first SIGHUP listener");
+        let mut second = hangup_listener().expect("register second SIGHUP listener");
+
+        // Self-send a SIGHUP only after both listeners are registered, so the
+        // default terminate disposition is already superseded and the process
+        // survives to observe the signal.
+        let rc = unsafe { libc::raise(libc::SIGHUP) };
+        assert_eq!(rc, 0, "raise(SIGHUP) failed");
+
+        // Reaching either recv proves the default disposition was superseded;
+        // both waking proves the handler is shared, not single-consumer.
+        let first_woke = tokio::time::timeout(Duration::from_secs(5), first.recv())
+            .await
+            .expect("first listener must wake within the timeout");
+        let second_woke = tokio::time::timeout(Duration::from_secs(5), second.recv())
+            .await
+            .expect("second listener must wake within the timeout");
+        assert_eq!(
+            first_woke,
+            Some(()),
+            "a delivered SIGHUP resolves to Some(())"
+        );
+        assert_eq!(
+            second_woke,
+            Some(()),
+            "both listeners observe the same hangup"
+        );
+    });
+}

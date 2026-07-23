@@ -62,6 +62,12 @@
 //!     have a background task mount (and later unmount) an overlay with no
 //!     keypress at all (VAL-CORE-027).
 //!   - Ctrl+D or Ctrl+C: quit cleanly (terminal fully restored)
+//!   - SIGHUP / stdin close: a closing PTY master (the only way a TTY's stdin
+//!     closes) delivers SIGHUP; the run loop `select!`s on it and takes the same
+//!     clean-exit path as Ctrl+D, so the terminal is restored (cooked, cursor
+//!     shown, kitty flags popped, paste disabled) rather than left raw by the
+//!     default terminate-on-hangup disposition (VAL-CORE-022). Probe with
+//!     `kill -HUP <pid>` or by closing the PTY master.
 //!   - Ctrl+Z: ignored (no suspend; the UI does not move)
 //!   - F12: DELIBERATE PANIC — crashes on purpose so you can confirm the panic
 //!     path still leaves a readable, usable terminal (VAL-CORE-018)
@@ -100,6 +106,7 @@ use hand_tui::rt::overlay::{Overlay, OverlayAnchor, OverlayMargin, OverlayOption
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{
     EraseOnDrop, SessionError, SessionGuard, SessionTerminal, clear_viewport_region,
+    hangup_listener,
 };
 use hand_tui::rt::view::{
     FocusView, HandleOutcome, MAX_INPUT_ROWS, MIN_INPUT_ROWS, RtComponent, TerminalSize,
@@ -598,6 +605,16 @@ async fn run() -> Result<(), SessionError> {
     // event, and delivers RtInputEvents over the channel.
     let (mut events, pump) = spawn_event_pump(EVENT_CHANNEL_CAPACITY);
 
+    // Register the SIGHUP listener. A closing PTY master (stdin close) delivers
+    // SIGHUP, whose default disposition would terminate the process *before*
+    // `SessionGuard` could restore the terminal — leaving it in raw mode. By
+    // listening here and `select!`ing on it below, a hangup instead takes the
+    // same clean-exit path a Ctrl+D takes, so the guard's ordinary teardown
+    // restores cooked mode, shows the cursor, and pops kitty flags / disables
+    // paste (VAL-CORE-022). This is also the probe seam: `kill -HUP <pid>` (or
+    // closing the PTY master) drives the exit and the terminal restore.
+    let mut hangup = hangup_listener().map_err(SessionError::Io)?;
+
     // The streaming-block simulator task, when one is running.
     let mut stream_handle: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -636,7 +653,23 @@ async fn run() -> Result<(), SessionError> {
     // Initial paint.
     requester.request_frame();
 
-    while let Some(event) = events.recv().await {
+    loop {
+        // The loop wakes on either an input event or a SIGHUP. Two clean-exit
+        // paths converge on the teardown below:
+        //   - the event channel closing (`None`): the event pump reached
+        //     EventStream EOF — i.e. stdin closed — dropped its sender, and the
+        //     channel is now empty; this is the plain Ctrl+D / EOF exit.
+        //   - a SIGHUP: a closing PTY master (stdin close) that the kernel
+        //     reports as a hangup, routed here so it exits cleanly with the
+        //     terminal restored instead of terminating the process raw.
+        let event = tokio::select! {
+            maybe_event = events.recv() => match maybe_event {
+                Some(event) => event,
+                None => break,
+            },
+            _ = hangup.recv() => break,
+        };
+
         let mut quit = false;
         match event {
             RtInputEvent::Key(key) => match key.key_id.as_deref() {
