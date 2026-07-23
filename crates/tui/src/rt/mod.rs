@@ -24,3 +24,7 @@ pub use events::{
     RtInputEvent, RtKey, key_event_to_key_id, run_event_loop, should_dispatch, spawn_event_pump,
     translate_event,
 };
+pub use scheduler::{
+    BSU, ESU, FrameClock, FrameDecision, FrameRequester, FrameScheduler, MAX_BURSTS_PER_SECOND,
+    MIN_FRAME_INTERVAL, close_synchronized, draw_synchronized,
+};
