@@ -228,6 +228,16 @@ impl HistorySink {
     where
         B: ratatui::backend::Backend,
     {
+        // Pick up any pending backend resize *before* reading the wrap width, so
+        // a commit that lands right after a resize wraps to the *new* width, not
+        // the width the last draw saw. `get_frame().area().width` reflects the
+        // viewport area, which only moves when the terminal resizes — and an
+        // inline viewport resizes lazily, on `draw`/`autoresize`, never on its
+        // own. Without this, the first block committed after a narrow/widen would
+        // pre-wrap to the stale width and land clipped or short in scrollback
+        // (the VAL-CORE-009/010 failure). `autoresize` is a no-op when the size
+        // is unchanged, so the steady-state commit path pays nothing.
+        terminal.autoresize()?;
         let width = terminal.get_frame().area().width;
         let rows = wrap_lines(&lines, width);
         self.commit_rows(terminal, rows)

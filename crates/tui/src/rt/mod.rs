@@ -31,5 +31,5 @@ pub use scheduler::{
 };
 pub use view::{
     BORDER_ROWS, BottomGeometry, LOADER_ROWS, MAX_INPUT_ROWS, MAX_VIEWPORT_ROWS, MIN_INPUT_ROWS,
-    bottom_area_geometry, clamp_input_rows,
+    TerminalSize, bottom_area_geometry, clamp_input_rows,
 };

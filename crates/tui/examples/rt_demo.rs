@@ -48,9 +48,18 @@
 //! Paste (bracketed paste): a multi-line paste lands as a single event and is
 //! inserted whole — it never fires per-character key actions.
 //!
+//! Resize: a `RtInputEvent::Resize` only folds the new `(cols, rows)` into the
+//! tracked size and requests a frame — it never re-lays-out synchronously. The
+//! scheduler coalesces a resize storm into one re-anchoring draw, and the next
+//! draw autoresizes the terminal so the bottom area re-wraps to the new width and
+//! any block committed afterwards wraps to the new width too (VAL-CORE-009/010/
+//! 011/021). Set `HAND_TUI_RT_DEMO_STREAM=1` to auto-run a continuous stream so a
+//! probe can resize while content is perpetually committing to scrollback.
+//!
 //! Run it:
 //!   cargo run -p hand-tui --example rt_demo
 //!   HAND_TUI_RT_DEMO_FLOOD=1 cargo run -p hand-tui --example rt_demo
+//!   HAND_TUI_RT_DEMO_STREAM=1 cargo run -p hand-tui --example rt_demo
 //!   HAND_TUI_FORCE_KITTY_KEYBOARD=1 cargo run -p hand-tui --example rt_demo
 //!
 //! On a non-TTY (piped) stdin/stdout it prints a diagnostic to stderr and
@@ -67,7 +76,7 @@ use hand_tui::rt::events::{RtInputEvent, spawn_event_pump};
 use hand_tui::rt::history::HistorySink;
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{SessionError, SessionGuard, SessionTerminal};
-use hand_tui::rt::view::{MAX_INPUT_ROWS, MIN_INPUT_ROWS, bottom_area_geometry};
+use hand_tui::rt::view::{MAX_INPUT_ROWS, MIN_INPUT_ROWS, TerminalSize, bottom_area_geometry};
 use ratatui::layout::Alignment;
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::Line;
@@ -83,6 +92,13 @@ const EVENT_CHANNEL_CAPACITY: usize = 64;
 /// Environment variable that auto-starts the token flood at launch, so a probe
 /// harness need not synthesize an `f` keypress.
 const FLOOD_ENV: &str = "HAND_TUI_RT_DEMO_FLOOD";
+
+/// Environment variable that auto-runs a *continuous* streaming loop at launch:
+/// stream a block, commit it, immediately start the next. It lets a resize probe
+/// drive `tmux resize-window` while content is perpetually committing to
+/// scrollback (mid-stream resize / storm-while-streaming) without synthesizing
+/// `s` keypresses. Set to `1` to enable.
+const STREAM_ENV: &str = "HAND_TUI_RT_DEMO_STREAM";
 
 /// How often the flood task requests a frame: ~500/s, deliberately far above the
 /// scheduler's ~60fps ceiling so coalescing and rate-limiting are exercised.
@@ -109,6 +125,14 @@ const OVERSIZED_HEIGHT_MULTIPLIER: usize = 2;
 /// correct (no `blocking_lock` inside the async runtime) and simplest.
 #[derive(Debug, Default)]
 struct DemoState {
+    /// The current terminal geometry, tracked from `RtInputEvent::Resize`.
+    ///
+    /// Seeded at launch from the real terminal size and overwritten whole on
+    /// every resize event. The draw closure lays the fixed bottom-area viewport
+    /// out against it, so a narrow/widen re-anchors and re-wraps to the new size
+    /// on the next coalesced frame — the input side never re-lays-out
+    /// synchronously, it just updates this and requests a frame.
+    size: TerminalSize,
     /// The current input-line contents.
     input: String,
     /// How many rows the input body currently occupies (auto-grow simulation).
@@ -202,7 +226,8 @@ fn print_help() {
          \x20 {PANIC_KEY_HELP} (crashes on purpose; terminal stays readable)\n\
          \n\
          Env:\n\
-         \x20 {FLOOD_ENV}=1 : start the flood automatically at launch"
+         \x20 {FLOOD_ENV}=1 : start the flood automatically at launch\n\
+         \x20 {STREAM_ENV}=1 : run a continuous stream (probe resize while committing)"
     );
 }
 
@@ -212,8 +237,12 @@ async fn run() -> Result<(), SessionError> {
     let mut guard = SessionGuard::enter()?;
     let terminal = guard.terminal()?;
 
+    // Seed the tracked size from the real terminal so the first frame lays out
+    // against the actual geometry; resize events overwrite it thereafter.
+    let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
     let state = Arc::new(Mutex::new(DemoState {
         input_rows: MIN_INPUT_ROWS,
+        size: TerminalSize::new(init_cols, init_rows),
         ..DemoState::default()
     }));
 
@@ -238,6 +267,19 @@ async fn run() -> Result<(), SessionError> {
             requester.clone(),
             state.clone(),
             flood_stop.clone(),
+        ));
+    }
+
+    // Optional continuous streaming loop so a resize probe can drive
+    // `tmux resize-window` while content is perpetually committing to scrollback
+    // (mid-stream resize / storm-while-streaming) without synthesizing keys.
+    let continuous_stop = Arc::new(AtomicBool::new(false));
+    let mut continuous_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if continuous_stream_requested_by_env() {
+        continuous_handle = Some(spawn_continuous_stream(
+            requester.clone(),
+            state.clone(),
+            continuous_stop.clone(),
         ));
     }
 
@@ -305,8 +347,20 @@ async fn run() -> Result<(), SessionError> {
             },
             // Bracketed paste: insert the whole payload as one action.
             RtInputEvent::Paste(payload) => lock(&state).input.push_str(&payload),
-            // Resize / focus: just repaint.
-            RtInputEvent::Resize { .. } | RtInputEvent::FocusGained | RtInputEvent::FocusLost => {}
+            // Resize: fold the whole new geometry into the tracked size. The
+            // work stops here — we do *not* re-lay-out synchronously. The shared
+            // `request_frame()` below routes through the scheduler, so a resize
+            // storm coalesces into a single re-anchoring draw (VAL-CORE-021),
+            // and the draw closure re-derives geometry from the updated size.
+            RtInputEvent::Resize { cols, rows } => {
+                // The changed-flag is informational here: the shared
+                // `request_frame()` below runs unconditionally and the scheduler
+                // coalesces, so a redundant same-size event costs only one
+                // already-coalesced frame, not a reflow.
+                let _ = lock(&state).size.apply_resize(cols, rows);
+            }
+            // Focus changes: just repaint (nothing to track).
+            RtInputEvent::FocusGained | RtInputEvent::FocusLost => {}
         }
 
         // Input side never draws directly: it mutates state and requests a
@@ -323,6 +377,11 @@ async fn run() -> Result<(), SessionError> {
     // Stop the flood task, if running, before tearing anything down.
     flood_stop.store(true, Ordering::SeqCst);
     if let Some(handle) = flood_handle.take() {
+        handle.abort();
+    }
+    // Stop the continuous-stream driver, if running.
+    continuous_stop.store(true, Ordering::SeqCst);
+    if let Some(handle) = continuous_handle.take() {
         handle.abort();
     }
     // Stop the streaming-block task, if running: clear the flag so a task racing
@@ -374,6 +433,7 @@ fn spawn_scheduler(
                 guard.spinner_phase = guard.spinner_phase.wrapping_add(1);
             }
             let snapshot = StateSnapshot {
+                size: guard.size,
                 input: guard.input.clone(),
                 input_rows: guard.input_rows,
                 loader: guard.loader,
@@ -387,8 +447,10 @@ fn spawn_scheduler(
         };
 
         // Commit finished blocks into native scrollback *before* the draw. Each
-        // block becomes exactly one `insert_before`; the sink pre-wraps to the
-        // current width so a tall or wide block lands complete and ordered.
+        // block becomes exactly one `insert_before`; the sink autoresizes then
+        // pre-wraps to the *current* width, so a block committed right after a
+        // resize wraps to the new width (VAL-CORE-009/010), and a tall or wide
+        // block lands complete and ordered.
         for block in commits {
             history.commit_lines(&mut terminal, block)?;
         }
@@ -407,6 +469,8 @@ fn spawn_scheduler(
 /// An immutable view of [`DemoState`] handed to the draw function, taken under
 /// the lock so the paint itself holds no lock.
 struct StateSnapshot {
+    /// The tracked terminal geometry this frame lays out against.
+    size: TerminalSize,
     input: String,
     /// The auto-grow input body height in rows (1..8).
     input_rows: u16,
@@ -480,6 +544,70 @@ fn spawn_flood(
 /// Set the `flooding` flag under the lock.
 fn set_flooding(state: &Arc<Mutex<DemoState>>, on: bool) {
     lock(state).flooding = on;
+}
+
+/// Drive a *continuous* streaming loop: stream one block line-by-line, commit it
+/// once to scrollback, then immediately start the next. It never stalls, so a
+/// resize probe can drive `tmux resize-window` at any moment and observe both
+/// the in-flight viewport block and the ordered, new-width-wrapped scrollback
+/// commits (VAL-CORE-010 mid-stream resize, VAL-CORE-021 storm-while-streaming).
+///
+/// Each block reuses the same seed/commit/queue path a single `s` stream takes,
+/// so the exactly-once commit and `⟦commit N⟧` ordering guarantees hold
+/// unchanged; only the driver differs (a loop instead of one shot).
+fn spawn_continuous_stream(
+    requester: FrameRequester,
+    state: Arc<Mutex<DemoState>>,
+    stop: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(STREAM_LINE_INTERVAL);
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            // Reserve this block's commit number and mark streaming. If a manual
+            // `s` stream is already running, back off a tick and retry so the two
+            // never interleave into one block.
+            let commit_number = {
+                let mut guard = lock(&state);
+                if guard.streaming {
+                    None
+                } else {
+                    guard.streaming = true;
+                    guard.stream_block.clear();
+                    guard.commit_count += 1;
+                    Some(guard.commit_count)
+                }
+            };
+            let Some(commit_number) = commit_number else {
+                interval.tick().await;
+                continue;
+            };
+
+            let block = streaming_block_lines(commit_number);
+            // Stream the block one line at a time, repainting after each so it is
+            // capturable mid-stream in the viewport before it commits.
+            for line in &block {
+                interval.tick().await;
+                if stop.load(Ordering::SeqCst) {
+                    lock(&state).streaming = false;
+                    return;
+                }
+                lock(&state).stream_block.push(line.clone());
+                requester.request_frame();
+            }
+            // Finished: move the block to the commit queue in one shot so it
+            // commits exactly once, clear the live block, drop the flag.
+            {
+                let mut guard = lock(&state);
+                guard.pending_commits.push(block);
+                guard.stream_block.clear();
+                guard.streaming = false;
+            }
+            requester.request_frame();
+        }
+    })
 }
 
 /// Build one streaming block's worth of lines, with a distinctive commit marker
@@ -639,6 +767,11 @@ fn flood_requested_by_env() -> bool {
     std::env::var(FLOOD_ENV).map(|v| v == "1").unwrap_or(false)
 }
 
+/// Whether the continuous streaming loop should auto-start from the environment.
+fn continuous_stream_requested_by_env() -> bool {
+    std::env::var(STREAM_ENV).map(|v| v == "1").unwrap_or(false)
+}
+
 /// Extract a verbatim printable character from a key event, if it is a plain
 /// character press with no ctrl/alt/super modifier. Returns `None` for chords
 /// and named keys, so those never leak into the echoed text.
@@ -664,11 +797,16 @@ const SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 fn draw(frame: &mut ratatui::Frame, state: &StateSnapshot) {
     let area = frame.area();
 
-    // The frame area *is* the fixed inline viewport. Compute where the (possibly
-    // grown/collapsed) bottom area sits inside it: a grow enlarges `active` but
-    // never the viewport, and a collapse shrinks it and bottom-anchors, leaving
-    // the freed rows above to repaint blank — no ghost.
-    let geometry = bottom_area_geometry(state.input_rows, state.loader, area.width, area.height);
+    // The frame area *is* the fixed inline viewport, already autoresized to the
+    // current terminal width on this draw. Lay the (possibly grown/collapsed)
+    // bottom area out inside it: a grow enlarges `active` but never the viewport,
+    // and a collapse shrinks it and bottom-anchors, leaving the freed rows above
+    // to repaint blank — no ghost. Width comes from the live viewport (so the
+    // border spans the resized pane exactly); the *height* clamp uses the tracked
+    // full-terminal rows, so shrinking the pane below the bottom area's wanted
+    // height trims the active area to fit rather than overflowing.
+    let geometry =
+        bottom_area_geometry(state.input_rows, state.loader, area.width, state.size.rows);
 
     let flood = if state.flooding {
         format!(" · FLOOD #{}", state.flood_ticks)

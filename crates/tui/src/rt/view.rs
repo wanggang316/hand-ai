@@ -157,6 +157,70 @@ pub fn bottom_area_geometry(
     }
 }
 
+/// The current terminal geometry the runtime lays the bottom area out against.
+///
+/// A [`RtInputEvent::Resize { cols, rows }`](crate::rt::events::RtInputEvent)
+/// carries the *whole* new size, so tracking is a plain overwrite — there is no
+/// accumulation to get wrong. Holding it in one small value keeps the resize
+/// hot path pure and cheap: a resize event folds into this via
+/// [`TerminalSize::apply_resize`], which reports whether the size *actually*
+/// changed so a resize storm that ends where it started (or a burst of
+/// same-size events) drives no geometry churn — the scheduler still coalesces
+/// the redraw, but the state update itself is a no-op when nothing moved.
+///
+/// It is deliberately just the two dimensions: the bottom-area layout is
+/// recomputed from it (plus the input/loader state) by [`bottom_area_geometry`],
+/// so there is a single source of truth for "how big is the terminal right now"
+/// and re-anchoring after a resize is nothing more than laying the fixed
+/// viewport out again against the new numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalSize {
+    /// Terminal width in columns. Drives the history pre-wrap width and the
+    /// bottom-area rect width.
+    pub cols: u16,
+    /// Terminal height in rows. Bounds the fixed viewport and clamps the active
+    /// bottom area on a short pane.
+    pub rows: u16,
+}
+
+impl TerminalSize {
+    /// A size with the given dimensions.
+    #[must_use]
+    pub const fn new(cols: u16, rows: u16) -> Self {
+        Self { cols, rows }
+    }
+
+    /// Fold a resize event's `(cols, rows)` into this size, returning `true`
+    /// when the size actually changed.
+    ///
+    /// A resize event carries the complete new geometry, so applying it is an
+    /// overwrite. The returned flag is the whole "avoid redundant reflow" story:
+    /// a duplicate or storm-settling event whose numbers match the current size
+    /// changes nothing and returns `false`, so a caller can skip re-deriving
+    /// geometry (the scheduler's frame coalescing already collapses the redraws;
+    /// this collapses the *state* churn behind them).
+    #[must_use]
+    pub fn apply_resize(&mut self, cols: u16, rows: u16) -> bool {
+        let next = Self { cols, rows };
+        if *self == next {
+            return false;
+        }
+        *self = next;
+        true
+    }
+
+    /// Recompute the bottom-area geometry against this size.
+    ///
+    /// Thin convenience over [`bottom_area_geometry`] that pairs the tracked
+    /// size with the current input/loader state, so a resize handler reads as
+    /// "fold the event, then re-lay-out": exactly the two steps re-anchoring the
+    /// fixed viewport after a resize takes.
+    #[must_use]
+    pub fn bottom_geometry(&self, input_rows: u16, loader_visible: bool) -> BottomGeometry {
+        bottom_area_geometry(input_rows, loader_visible, self.cols, self.rows)
+    }
+}
+
 /// Split the bordered interior into an optional loader row on top and the input
 /// body beneath it, given the interior's origin, width, and total height.
 ///
