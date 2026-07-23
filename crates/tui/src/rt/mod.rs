@@ -25,11 +25,12 @@ pub mod view;
 
 pub use components::{
     CancelOutcome, CancellableLoader, CodeHighlighter, DEFAULT_CANCEL_HINT, DEFAULT_MAX_VISIBLE,
-    DEFAULT_PRIMARY_COLUMN_WIDTH, DEFAULT_SPINNER_FRAMES, Loader, MarkdownTheme, MarkdownView,
-    ProgressBar, SelectItem, SelectList, SelectListLayout, SelectOutcome, SettingEntry,
-    SettingValue, SettingsList, Spacer, StatusBar, TextBlock, Toast, ToastLevel, TruncatedText,
-    WidgetBox, default_highlighter, default_markdown_theme, highlight, plain_code_highlighter,
-    render_markdown,
+    DEFAULT_PRIMARY_COLUMN_WIDTH, DEFAULT_SPINNER_FRAMES, ImageFormat, Loader, MarkdownTheme,
+    MarkdownView, PendingEmission, ProgressBar, RawEmissionQueue, ResolvedProtocol, RtImage,
+    SelectItem, SelectList, SelectListLayout, SelectOutcome, SettingEntry, SettingValue,
+    SettingsList, Spacer, StatusBar, TextBlock, Toast, ToastLevel, TruncatedText, WidgetBox,
+    base64_encode, default_highlighter, default_markdown_theme, highlight, plain_code_highlighter,
+    render_markdown, resolve, resolve_protocol, sniff_label, transcode_to_png,
 };
 pub use events::{
     RtInputEvent, RtKey, key_event_to_key_id, run_event_loop, should_dispatch, spawn_event_pump,

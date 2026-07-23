@@ -31,6 +31,7 @@
 
 mod autocomplete;
 mod editor;
+mod image;
 mod loader;
 mod markdown;
 mod progress_bar;
@@ -50,6 +51,10 @@ pub use autocomplete::{
 pub use editor::{
     AutocompleteContext, BorderTint, EditRecord, Editor, EditorBorder, KillRing, MAX_INPUT_ROWS,
     MIN_INPUT_ROWS, PasteContent, PasteTransform, dropped_file_mention_transform,
+};
+pub use image::{
+    ImageFormat, PendingEmission, RawEmissionQueue, ResolvedProtocol, RtImage, base64_encode,
+    resolve, resolve_protocol, sniff_label, transcode_to_png,
 };
 pub use loader::{
     CancelOutcome, CancellableLoader, DEFAULT_CANCEL_HINT, DEFAULT_SPINNER_FRAMES, Loader,

@@ -37,9 +37,10 @@ use std::sync::{Arc, Mutex};
 
 use hand_tui::rt::components::{
     BorderTint, CancellableLoader, CombinedProvider, Editor, Loader, MarkdownView, PathEntry,
-    PathProvider, ProgressBar, SelectItem, SelectList, SelectListLayout, SettingEntry,
-    SettingValue, SettingsList, SlashCommand, SlashProvider, Spacer, StatusBar, TextBlock, Toast,
-    ToastLevel, TruncatedText, WidgetBox, default_markdown_theme,
+    PathProvider, ProgressBar, RawEmissionQueue, ResolvedProtocol, RtImage, SelectItem, SelectList,
+    SelectListLayout, SettingEntry, SettingValue, SettingsList, SlashCommand, SlashProvider,
+    Spacer, StatusBar, TextBlock, Toast, ToastLevel, TruncatedText, WidgetBox,
+    default_markdown_theme,
 };
 use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
@@ -59,6 +60,32 @@ const EVENT_CHANNEL_CAPACITY: usize = 64;
 /// it lays out that section's widgets. Boxed and `Send` so it can live in the
 /// shared [`GalleryState`] the scheduler's draw task reads.
 type SectionBuilder = Box<dyn Fn(Rect, &mut Buffer) + Send>;
+
+/// Environment variable that forces the image section's graphics protocol,
+/// bypassing capability detection so a `script -q` byte capture is deterministic
+/// even inside tmux (whose own capabilities would otherwise apply). Values:
+/// `kitty`, `iterm2`, `fallback`. Unset resolves from the live terminal.
+///
+/// This is the protocol-emission test seam the image probes drive (mirrors the
+/// M1 demo's force-kitty-keyboard flag): a probe runs the gallery with this env
+/// set, navigates to the Image section, captures the raw bytes, and greps for the
+/// forced protocol's prefix (`\x1b_G` for Kitty, `\x1b]1337;File=` for iTerm2, or
+/// zero graphics bytes for fallback / tmux).
+const FORCE_IMAGE_PROTOCOL_ENV: &str = "HAND_TUI_FORCE_IMAGE_PROTOCOL";
+
+/// Resolve the forced image protocol from the environment seam, if set.
+fn forced_image_protocol() -> Option<ResolvedProtocol> {
+    match std::env::var(FORCE_IMAGE_PROTOCOL_ENV).ok()?.as_str() {
+        "kitty" => Some(ResolvedProtocol::Kitty),
+        "iterm2" => Some(ResolvedProtocol::ITerm2),
+        "fallback" => Some(ResolvedProtocol::Fallback),
+        _ => None,
+    }
+}
+
+/// The sample PNG the Image section displays, embedded at build time so the demo
+/// needs no runtime fixture path.
+const SAMPLE_IMAGE_PNG: &[u8] = include_bytes!("../../../tests/fixtures/tui/images/sample.png");
 
 /// A single gallery section: a title plus a builder that lays its primitives out
 /// into the section's content rect.
@@ -101,15 +128,23 @@ struct GalleryState {
     /// frames, making the overflow-hidden-then-reappears behaviour observable in a
     /// capture (VAL-WIDGET-012). See [`toast_seam`].
     toast: Toast,
+    /// The raw graphics-emission channel shared with the Image section: the
+    /// section's builder enqueues the encoded escape into it during `draw`, and
+    /// the scheduler drains it to stdout right after `terminal.draw`, positioned
+    /// at the viewport origin (see [`spawn_scheduler`]). This is the in-viewport
+    /// half of the buffer-bypass mechanism `m2-image-scrollback` extends.
+    image_queue: RawEmissionQueue,
 }
 
 impl GalleryState {
     fn new(size: TerminalSize) -> Self {
+        let image_queue = RawEmissionQueue::new();
         Self {
-            sections: register_sections(),
+            sections: register_sections(image_queue.clone()),
             active: 0,
             size,
             toast: toast_seam(),
+            image_queue,
         }
     }
 
@@ -150,7 +185,11 @@ impl GalleryState {
 /// Register the sections for this milestone: the six primitive widgets. Later M2
 /// features append their own sections here (or via a follow-on registration
 /// function) without touching navigation or draw.
-fn register_sections() -> Vec<Section> {
+///
+/// `image_queue` is threaded into the Image section so its builder can enqueue a
+/// graphics-protocol emission during `draw`; the scheduler flushes the queue to
+/// the terminal right after the frame draws.
+fn register_sections(image_queue: RawEmissionQueue) -> Vec<Section> {
     vec![
         Section::new("Text", |area, buf| {
             let text = TextBlock::new(
@@ -508,6 +547,46 @@ fn main() {
             editor.set_tint(BorderTint::Focused);
             editor.render(rows[1], buf);
         }),
+        Section::new("Image", move |area, buf| {
+            // The image widget + graphics emission. On a graphics terminal the
+            // widget reserves N rows (blank cells) here and *enqueues* the encoded
+            // escape into the shared queue; the scheduler emits it out of band
+            // right after this draw, positioned onto those rows. On a plain
+            // terminal / inside tmux it paints a bordered placeholder box with the
+            // filename and the sniffed `[<mime> WxH]` tag, and enqueues nothing —
+            // zero graphics bytes reach the wire.
+            //
+            // The protocol is forced by the `HAND_TUI_FORCE_IMAGE_PROTOCOL` env
+            // seam so a `script -q` capture is deterministic regardless of the
+            // host terminal (an unset env resolves from the live capabilities).
+            let rows = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Min(0),    // image body
+            ])
+            .split(area);
+            let mode = forced_image_protocol();
+            let header = match mode {
+                Some(ResolvedProtocol::Kitty) => {
+                    "Image — Kitty APC (forced) · reserves rows, emits \\x1b_G out of band"
+                }
+                Some(ResolvedProtocol::ITerm2) => {
+                    "Image — iTerm2 OSC 1337 (forced) · native passthrough"
+                }
+                Some(ResolvedProtocol::Fallback) => {
+                    "Image — fallback (forced) · bordered box, zero graphics bytes"
+                }
+                None => "Image — protocol resolved from the live terminal capabilities",
+            };
+            TruncatedText::new(header).render(rows[0], buf);
+
+            let mut image = RtImage::new(SAMPLE_IMAGE_PNG)
+                .label("sample.png")
+                .emission_queue(image_queue.clone());
+            if let Some(protocol) = mode {
+                image = image.protocol(protocol);
+            }
+            image.render(rows[1], buf);
+        }),
     ]
 }
 
@@ -704,8 +783,22 @@ fn spawn_scheduler(
         // open synchronized block.
         let mut stdout = io::stdout();
         let state = &state;
-        draw_synchronized(&mut stdout, |_w| {
-            terminal.draw(|frame| draw(frame, state))?;
+        // The image queue and the viewport origin captured during this draw, so
+        // graphics escapes are flushed *after* the frame paints (over the rows the
+        // widget reserved) and *inside* the synchronized block (atomic with the
+        // frame). Cloning the queue handle is cheap; it is the same channel the
+        // Image section enqueues into.
+        let image_queue = lock(state).image_queue.clone();
+        draw_synchronized(&mut stdout, |w| {
+            let mut viewport_origin_y = 0u16;
+            terminal.draw(|frame| {
+                viewport_origin_y = frame.area().y;
+                draw(frame, state);
+            })?;
+            // Emit any queued graphics escape onto its reserved rows. On a plain /
+            // tmux frame the queue is empty (fallback enqueues nothing), so this
+            // writes zero bytes — the zero-graphics-bytes guarantee.
+            image_queue.flush_to(w, viewport_origin_y)?;
             Ok(())
         })
     })

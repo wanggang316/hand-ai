@@ -19,6 +19,12 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 base64 = "0.22"
+# Decode/re-encode only: the Kitty graphics path transmits PNG (`f=100`), so a
+# non-PNG source (jpeg/gif/webp) is transcoded to PNG before emission. Scoped to
+# the four source formats we accept plus PNG output — no rayon, no avif, none of
+# the heavy default-formats set. `image` 0.25 is already in the workspace lock
+# (via arboard), so this pins to it without growing the dependency tree.
+image = { version = "0.25", default-features = false, features = ["jpeg", "gif", "webp", "png"] }
 
 [dev-dependencies]
 libc = "0.2"
