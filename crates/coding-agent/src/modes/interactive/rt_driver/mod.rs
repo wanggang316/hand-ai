@@ -64,6 +64,7 @@ pub mod chrome;
 pub mod footer;
 pub mod input;
 pub mod messages;
+pub mod slash;
 pub mod state;
 pub mod tools;
 pub mod watchdog;
@@ -643,6 +644,18 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
         return;
     }
 
+    // Slash commands are intercepted here — the turn runner is the one place
+    // that owns `&mut session`, so the session-lifecycle commands (`/new`,
+    // `/clone`, `/import`, `/name`) run against it directly. The `/quit` family
+    // never reaches the runner (the input loop breaks on it), and a slash
+    // command never touches the model, the OSC-133 turn brackets, or the
+    // streaming loader — so clear the streaming flag the input loop optimistically
+    // set on submit and run the action synchronously.
+    if slash::is_slash_command(text) {
+        run_slash_command(runner, text);
+        return;
+    }
+
     // Clear any stale cancel flag from a prior turn so a cancellation only ever
     // suppresses *this* turn's error banner (VAL-CHAT-013 / VAL-CHAT-014).
     lock_state(&runner.state).cancel_requested = false;
@@ -804,6 +817,26 @@ async fn run_bash_inline(runner: &mut TurnRunner, parsed: bash::ParsedBash) {
     // A `!cmd` may change the working tree (branch checkout, file writes); refresh
     // the footer so the next-turn view reflects it.
     refresh_footer(runner);
+}
+
+/// Execute a submitted slash command against the live session.
+///
+/// The input loop optimistically marks the state streaming on every submit
+/// (so the loader shows the instant Enter is pressed, before the first event).
+/// A slash command has no streaming turn, so clear that flag first, then
+/// dispatch the action through the reused parsing layer. Session-lifecycle
+/// commands mutate `&mut session`; the footer is rebuilt inside the handlers
+/// that change session state, so no post-dispatch refresh is needed here.
+fn run_slash_command(runner: &mut TurnRunner, text: &str) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    let _ = slash::dispatch_slash(
+        text,
+        &mut runner.session,
+        &runner.cwd,
+        &runner.state,
+        &runner.footer,
+        &runner.requester,
+    );
 }
 
 /// Whether a failed turn commits the red `send failed` banner.

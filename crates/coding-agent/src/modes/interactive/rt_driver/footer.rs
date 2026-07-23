@@ -171,8 +171,9 @@ fn detect_git_branch(cwd: &Path) -> Option<String> {
 
 /// The label for a thinking level, matching the thinking-selector's `level_label`
 /// (`off` / `minimal` / `low` / …). Kept local so the footer does not reach into
-/// a sibling component's private helper.
-fn thinking_level_label(level: Option<model::ThinkingLevel>) -> &'static str {
+/// a sibling component's private helper; shared with the slash-command
+/// session-info renderer so both surfaces agree on the label text.
+pub(crate) fn thinking_level_label(level: Option<model::ThinkingLevel>) -> &'static str {
     match level {
         None => "off",
         Some(model::ThinkingLevel::Minimal) => "minimal",
