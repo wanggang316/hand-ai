@@ -18,6 +18,7 @@ pub mod kill_ring;
 pub mod overlay;
 pub mod render;
 pub mod resize;
+pub mod rt;
 pub mod stdin_buffer;
 pub mod terminal;
 pub mod terminal_image;
