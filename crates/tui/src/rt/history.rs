@@ -32,9 +32,12 @@
 //! into the rows below it — the buffer cells past the block are simply never
 //! written by this block.
 
+use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
+
+use crate::rt::components::{PendingEmission, ResolvedProtocol, RtImage, ScrollbackImageChannel};
 
 /// Minimum width we will ever wrap to. A zero or absurdly small width would make
 /// wrapping ill-defined (a single wide grapheme cannot fit), so we clamp up: at
@@ -282,5 +285,70 @@ impl HistorySink {
                 buf.set_line(area.x, y, row, area.width);
             }
         })
+    }
+
+    /// Commit an [`RtImage`] into native scrollback, reserving its footprint above
+    /// the viewport and returning the raw graphics escape to be flushed once.
+    ///
+    /// This is the scrollback path for an image that has scrolled out of the live
+    /// viewport into history. It:
+    ///
+    /// 1. reserves the image's `rows`-tall footprint in scrollback via a single
+    ///    `insert_before` of blank rows — so the terminal's history owns exactly
+    ///    those rows (the frame diff never repaints them, a later `insert_before`
+    ///    slides them up, a resize reflows the text around them);
+    /// 2. resolves the image's **stable** content-keyed id through `channel`,
+    ///    encodes the graphics escape under that id, and **marks the id
+    ///    committed** — so no later frame re-transmits it and the drop gesture can
+    ///    never delete it.
+    ///
+    /// The returned [`PendingEmission`] carries the escape and a **viewport-local**
+    /// `row` of `0` (the top of the reserved block, which the flush resolves
+    /// against wherever the block now sits). The caller writes it once, on the
+    /// same terminal-owning task, right after this call — a plain repaint never
+    /// re-invokes this, which is what keeps the transmission count bounded and
+    /// independent of the frame count.
+    ///
+    /// Returns `Ok(None)` for the fallback persona or an undecodable source (no
+    /// graphics bytes enter scrollback), and for an empty footprint. On the
+    /// non-Kitty (iTerm2) persona the image is committed without an id-addressable
+    /// delete-protection entry, since iTerm2 inline images carry no protocol id.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any backend error from the `insert_before` footprint reservation.
+    pub fn commit_image<B>(
+        &mut self,
+        terminal: &mut ratatui::Terminal<B>,
+        channel: &ScrollbackImageChannel,
+        image: &RtImage,
+        protocol: ResolvedProtocol,
+    ) -> Result<Option<PendingEmission>, B::Error>
+    where
+        B: ratatui::backend::Backend,
+    {
+        terminal.autoresize()?;
+        let width = terminal.get_frame().area().width;
+        // The footprint the image reserves at the committed width. Anchor at row 0
+        // of a full-width area so the clamp uses the same geometry a viewport
+        // render would at this width.
+        let area = Rect::new(0, 0, width, u16::MAX);
+        let rows = image.reserved_rows(area);
+        if rows == 0 {
+            return Ok(None);
+        }
+
+        // Build the escape (and, for Kitty, mark the stable id committed) *before*
+        // reserving the footprint, so an undecodable source or the fallback
+        // persona reserves nothing and enters no rows into scrollback.
+        let Some(emission) = image.commit_to_scrollback(channel, protocol, area, 0) else {
+            return Ok(None);
+        };
+
+        // Reserve the image's rows in scrollback as blank cells: the graphics image
+        // is drawn over them out of band by the caller's flush. This is the row
+        // band the terminal's history now owns.
+        self.commit_rows(terminal, vec![Line::default(); rows as usize])?;
+        Ok(Some(emission))
     }
 }

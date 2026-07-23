@@ -182,6 +182,28 @@ impl MarkdownTheme {
 // Renderer
 // ---------------------------------------------------------------------------
 
+/// A markdown link located in the rendered output, so a host can emit a **real**
+/// OSC 8 hyperlink for it through the raw graphics/escape channel.
+///
+/// The markdown renderer paints a link's *visible* text as a styled span into the
+/// ratatui [`Buffer`], but a `Buffer` cell cannot carry the OSC 8
+/// `\x1b]8;;url\x1b\\` escape to the wire (it holds only a symbol + [`Style`]). So
+/// on a capable terminal the renderer records the link here — its `row` (the
+/// logical line index it landed on), its visible `text`, and its `url` — and the
+/// surrounding application flushes the true OSC 8 escape out of band via the same
+/// [`RawEmissionQueue`](crate::rt::components::RawEmissionQueue) that carries image
+/// escapes. That is what makes a real raw-bytes OSC 8 hyperlink (not the
+/// `text (url)` fallback) reachable and verifiable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownLink {
+    /// The logical line index (row) the link's visible text landed on.
+    pub row: u16,
+    /// The link's visible text, as painted into the buffer.
+    pub text: String,
+    /// The link's destination URL.
+    pub url: String,
+}
+
 /// Render markdown `source` into a vector of owned [`Line<'static>`] rich-text
 /// rows, laid out for a pane `width` columns wide.
 ///
@@ -192,8 +214,26 @@ impl MarkdownTheme {
 /// exact render area happens in [`MarkdownView::render`].
 #[must_use]
 pub fn render_markdown(source: &str, width: u16, theme: &MarkdownTheme) -> Vec<Line<'static>> {
+    render_markdown_with_links(source, width, theme).0
+}
+
+/// Render markdown, also returning the [`MarkdownLink`]s a capable terminal can
+/// surface as real OSC 8 hyperlinks through the raw channel.
+///
+/// Identical to [`render_markdown`] for the styled-text output; the extra return
+/// value is the list of links collected on a capable terminal (empty when OSC 8
+/// is unsupported — the `text (url)` fallback is painted into the cells instead
+/// and there is nothing to emit out of band). Each link's `row` is a *logical*
+/// line index; a caller that wraps the lines must translate it to the wrapped row
+/// before positioning the OSC 8 emission.
+#[must_use]
+pub fn render_markdown_with_links(
+    source: &str,
+    width: u16,
+    theme: &MarkdownTheme,
+) -> (Vec<Line<'static>>, Vec<MarkdownLink>) {
     if source.trim().is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let mut state = RenderState::new(theme, width);
@@ -207,7 +247,7 @@ pub fn render_markdown(source: &str, width: u16, theme: &MarkdownTheme) -> Vec<L
         state.handle_event(event);
     }
     state.flush_current();
-    state.lines
+    (state.lines, state.links)
 }
 
 /// A markdown block rendered as a scrollable, wrap-aware [`RtComponent`].
@@ -256,6 +296,19 @@ impl MarkdownView {
     #[must_use]
     pub fn lines(&self, width: u16) -> Vec<Line<'static>> {
         render_markdown(&self.source, width, &self.theme)
+    }
+
+    /// The [`MarkdownLink`]s in the source that a capable terminal can surface as
+    /// real OSC 8 hyperlinks through the raw channel (empty on a terminal that
+    /// does not speak OSC 8 — the `text (url)` fallback is painted instead).
+    ///
+    /// A host that wants clickable links renders [`lines`](MarkdownView::lines),
+    /// paints them, and — for each returned link — flushes an
+    /// [`osc8_emission`](crate::rt::components::osc8_emission) at the link's row
+    /// through the raw emission queue.
+    #[must_use]
+    pub fn links(&self, width: u16) -> Vec<MarkdownLink> {
+        render_markdown_with_links(&self.source, width, &self.theme).1
     }
 }
 
@@ -329,6 +382,9 @@ struct RenderState<'a> {
     /// Destination and visible text of the link currently being collected.
     link_url: Option<String>,
     link_text: Option<String>,
+    /// Links resolved on a capable terminal, for the host to surface as real OSC 8
+    /// hyperlinks through the raw channel.
+    links: Vec<MarkdownLink>,
 }
 
 impl<'a> RenderState<'a> {
@@ -348,6 +404,7 @@ impl<'a> RenderState<'a> {
             in_table_cell: false,
             link_url: None,
             link_text: None,
+            links: Vec::new(),
         }
     }
 
@@ -697,10 +754,21 @@ impl<'a> RenderState<'a> {
             style = style.fg(c);
         }
 
-        if supports_osc8_hyperlinks() {
-            // On a capable terminal the visible text carries the color/underline;
-            // the URL rides as an OSC 8 hyperlink, encoded per-span so a renderer
-            // that understands it can surface a real hyperlink.
+        if supports_osc8_hyperlinks() && !url.is_empty() {
+            // On a capable terminal the visible text carries the color/underline
+            // in the buffer; the URL cannot travel through a cell, so record the
+            // link (its row is the line currently being built) for the host to
+            // emit as a real OSC 8 escape out of band through the raw channel.
+            let row = u16::try_from(self.lines.len()).unwrap_or(u16::MAX);
+            self.links.push(MarkdownLink {
+                row,
+                text: visible.clone(),
+                url: url.clone(),
+            });
+            self.push_span(hyperlinked_span(&visible, &url, style));
+        } else if supports_osc8_hyperlinks() {
+            // A capable terminal but no URL (a bare `[text]()`): just the styled
+            // visible text, nothing to emit out of band.
             self.push_span(hyperlinked_span(&visible, &url, style));
         } else {
             let rendered = plain_link_text(&visible, &url);
@@ -934,6 +1002,11 @@ fn supports_osc8_hyperlinks() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes the two tests that mutate OSC 8 capability env vars, so they do
+    /// not race each other (or leak state) when the suite runs in parallel.
+    static OSC8_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// The plain text of a line: every span's content concatenated.
     fn line_text(line: &Line<'_>) -> String {
@@ -1034,6 +1107,63 @@ mod tests {
             plain_link_text("https://example.com", "https://example.com"),
             "https://example.com"
         );
+    }
+
+    #[test]
+    fn capable_terminal_collects_link_for_osc8_emission() {
+        let _guard = OSC8_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Force a capable terminal deterministically via TERM_PROGRAM, with the
+        // disable-override and multiplexer markers cleared. Assert the collected
+        // link carries the URL and the visible text is a clean span in the buffer
+        // (no `text (url)` suffix — that is the raw-channel branch).
+        unsafe { std::env::set_var("TERM_PROGRAM", "ghostty") };
+        unsafe { std::env::remove_var("HAND_DISABLE_OSC8") };
+        unsafe { std::env::remove_var("TMUX") };
+        let (lines, links) = render_markdown_with_links(
+            "see the [ratatui site](https://ratatui.rs) for docs",
+            80,
+            &MarkdownTheme::default(),
+        );
+        assert_eq!(links.len(), 1, "one link collected: {links:?}");
+        assert_eq!(links[0].text, "ratatui site");
+        assert_eq!(links[0].url, "https://ratatui.rs");
+        // The visible span carries the clean text, NOT the `text (url)` fallback.
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            text.contains("ratatui site"),
+            "visible text painted: {text:?}"
+        );
+        assert!(
+            !text.contains("(https://ratatui.rs)"),
+            "the URL must NOT be inlined as a suffix on a capable terminal: {text:?}"
+        );
+        unsafe { std::env::remove_var("TERM_PROGRAM") };
+    }
+
+    #[test]
+    fn incapable_terminal_collects_no_links_and_inlines_url() {
+        let _guard = OSC8_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // With OSC 8 disabled, there is nothing to emit out of band: no links are
+        // collected and the `text (url)` fallback is painted into the cells.
+        unsafe { std::env::set_var("HAND_DISABLE_OSC8", "1") };
+        let (lines, links) = render_markdown_with_links(
+            "see [the site](https://example.com)",
+            80,
+            &MarkdownTheme::default(),
+        );
+        assert!(links.is_empty(), "no OSC 8 links on an incapable terminal");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(
+            text.contains("the site (https://example.com)"),
+            "fallback inlines the URL: {text:?}"
+        );
+        unsafe { std::env::remove_var("HAND_DISABLE_OSC8") };
     }
 
     #[test]

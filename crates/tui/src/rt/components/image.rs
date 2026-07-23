@@ -50,6 +50,9 @@
 //!   and, when the bytes sniff, a `[<mime> WxH]` tag. No graphics bytes are ever
 //!   produced on this path.
 
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
@@ -63,8 +66,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::rt::events::RtKey;
 use crate::rt::view::{HandleOutcome, RtComponent};
 use crate::terminal_image::{
-    CellDimensions, ImageDimensions, ImageRenderOptions, allocate_image_id, encode_iterm2,
-    encode_kitty, get_capabilities, get_cell_dimensions, get_image_dimensions,
+    CellDimensions, ImageDimensions, ImageRenderOptions, allocate_image_id, delete_kitty_image,
+    encode_iterm2, encode_kitty, get_capabilities, get_cell_dimensions, get_image_dimensions,
+    hyperlink,
 };
 
 /// The graphics protocol this terminal will actually receive, resolved from a
@@ -460,6 +464,136 @@ impl RawEmissionQueue {
     }
 }
 
+/// A stable content key for an image: a hash of its raw source bytes.
+///
+/// Two [`RtImage`]s over byte-identical sources share a key, which is how the
+/// [`ScrollbackImageChannel`] gives the *same* Kitty image id to the same picture
+/// no matter how many times it is rendered. Hashing (rather than keying on the
+/// full byte vector) keeps the map small and the lookup cheap; a collision would
+/// only cause two different images to share an id, which the Kitty protocol
+/// tolerates (a later transmit under an id replaces the prior data), so the
+/// mapping is *stable*, not cryptographically unique.
+#[must_use]
+pub fn content_key(data: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The scrollback graphics channel: a shared registry that (1) assigns a
+/// **stable** Kitty image id per distinct image content, (2) remembers which ids
+/// have been committed into native scrollback (history) so they are *never*
+/// deleted, and (3) mints the viewport-only delete escape for an image the user
+/// drops — but only when that image did **not** enter scrollback.
+///
+/// # Why this exists
+///
+/// The in-viewport half of image emission ([`RawEmissionQueue`]) is enough while
+/// an image lives only in the live viewport: the frame diff paints and clears its
+/// reserved rows, and a resize just re-emits. Scrollback is different. Once an
+/// image scrolls above the inline viewport into the terminal's native history it
+/// must **survive** — every later frame, every `insert_before`, every resize and
+/// overlay toggle. Two rules make that safe and are the load-bearing invariants
+/// this type enforces:
+///
+/// - **Transmission is bounded and content-keyed.** A given picture is
+///   transmitted a bounded number of times (ideally once per distinct content),
+///   under a stable id ([`image_id`](ScrollbackImageChannel::image_id)). A frame
+///   repaint of an already-committed scrollback image transmits **nothing** — the
+///   terminal already holds the pixels under that id. Re-using an id for the same
+///   content is legal (not "exactly once"): the contract is *bounded and
+///   frame-independent*, not single-shot.
+/// - **A committed image is never deleted, and no wide delete is ever minted.**
+///   The Kitty delete-all forms (`d=A` / `d=a`) would wipe **every** image,
+///   including the ones sitting in scrollback — so this channel has no method that
+///   can produce them. The only delete it mints is a single-id
+///   [`delete_kitty_image`], and only for an id that has *not* been committed to
+///   history (a pure viewport image the user dropped). Asking to delete a
+///   committed id is a silent no-op: its scrollback copy must live on.
+///
+/// Cheap and cloneable (an `Arc<Mutex<…>>`), so the draw task, the history-commit
+/// path, and the gallery's drop gesture all share one registry.
+#[derive(Debug, Clone, Default)]
+pub struct ScrollbackImageChannel {
+    inner: Arc<Mutex<ScrollbackState>>,
+}
+
+/// The registry state behind a [`ScrollbackImageChannel`].
+#[derive(Debug, Default)]
+struct ScrollbackState {
+    /// Stable content-key → assigned Kitty image id.
+    ids: HashMap<u64, u32>,
+    /// Ids that have been committed into native scrollback (history). These are
+    /// protected: a delete request for one is refused so its scrollback copy
+    /// survives every later frame, resize, and overlay toggle.
+    committed: HashSet<u32>,
+}
+
+impl ScrollbackImageChannel {
+    /// An empty channel.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The stable Kitty image id for `data`, allocating one on first sight and
+    /// returning the same id for byte-identical content thereafter.
+    ///
+    /// This is the content→id map that keeps transmission bounded: two renders of
+    /// the same picture resolve to the same id, so the second render can be a
+    /// no-op transmit (the terminal already holds the pixels). The id is drawn
+    /// from the same process-wide allocator the viewport path uses
+    /// ([`allocate_image_id`]), so a scrollback id never clashes with a fresh
+    /// viewport id.
+    #[must_use]
+    pub fn image_id(&self, data: &[u8]) -> u32 {
+        let key = content_key(data);
+        let mut state = self.lock();
+        *state.ids.entry(key).or_insert_with(allocate_image_id)
+    }
+
+    /// Mark `id` as committed into native scrollback, protecting it from deletion.
+    ///
+    /// Called on the history-commit path right after an image's escape is written
+    /// into scrollback. From this point a drop gesture for `id` is a no-op and no
+    /// delete for it is ever minted — the picture belongs to history and must
+    /// outlive the viewport.
+    pub fn mark_committed(&self, id: u32) {
+        self.lock().committed.insert(id);
+    }
+
+    /// Whether `id` has been committed into scrollback (and is therefore
+    /// delete-protected).
+    #[must_use]
+    pub fn is_committed(&self, id: u32) -> bool {
+        self.lock().committed.contains(&id)
+    }
+
+    /// The Kitty delete escape for a **viewport-only** image the user dropped, or
+    /// `None` when `id` has been committed to scrollback (its copy must survive).
+    ///
+    /// The returned escape is always a single-id [`delete_kitty_image`]
+    /// (`\x1b_Ga=d,d=I,i=<id>\x1b\\`) — never a wide `d=A`/`d=a` form, which would
+    /// erase every image including the committed scrollback ones. This is the drop
+    /// gesture's only path to the wire, so "a dropped viewport image is deleted,
+    /// a scrollback image never is" is enforced structurally, not by convention.
+    #[must_use]
+    pub fn delete_viewport_image(&self, id: u32) -> Option<String> {
+        if self.is_committed(id) {
+            // A committed image lives in scrollback; deleting it would tear its
+            // history copy. Refuse.
+            return None;
+        }
+        Some(delete_kitty_image(id))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ScrollbackState> {
+        self.inner
+            .lock()
+            .expect("scrollback image channel mutex poisoned")
+    }
+}
+
 /// An image widget for the rt stack.
 ///
 /// Renders as **reserved rows plus an out-of-band graphics emission** (graphics
@@ -565,9 +699,30 @@ impl RtImage {
     /// transcode path).
     ///
     /// Split out and public so an emission test asserts the framing without a
-    /// live terminal or a queue.
+    /// live terminal or a queue. The Kitty id is freshly allocated each call; use
+    /// [`encode_with_id`](RtImage::encode_with_id) when a *stable* content→id
+    /// mapping is required (the scrollback path).
     #[must_use]
     pub fn encode(&self, protocol: ResolvedProtocol, area: Rect) -> Option<String> {
+        self.encode_with_id(protocol, area, None)
+    }
+
+    /// Build the encoded graphics escape, using `image_id` for the Kitty id when
+    /// supplied (else a freshly allocated one).
+    ///
+    /// The scrollback path passes a stable id from
+    /// [`ScrollbackImageChannel::image_id`] so the *same* picture is transmitted
+    /// under the *same* id every time — the "bounded, content-keyed transmission"
+    /// invariant. A `None` id reproduces the viewport path's fresh-per-call
+    /// allocation. The parameter is ignored for iTerm2 (its OSC 1337 carries no
+    /// protocol-level image id) and for the fallback (no graphics bytes).
+    #[must_use]
+    pub fn encode_with_id(
+        &self,
+        protocol: ResolvedProtocol,
+        area: Rect,
+        image_id: Option<u32>,
+    ) -> Option<String> {
         // Decode-validation before emit, on *every* graphics persona: an
         // undecodable source (truncated / corrupt bytes whose magic still sniffs)
         // must degrade to the placeholder box, never reach the wire as a half
@@ -593,12 +748,61 @@ impl RtImage {
                     ImageFormat::Png => Some(self.data.clone()),
                     _ => transcode_to_png(&self.data),
                 }?;
-                Some(encode_kitty(allocate_image_id(), &png, &opts))
+                Some(encode_kitty(
+                    image_id.unwrap_or_else(allocate_image_id),
+                    &png,
+                    &opts,
+                ))
             }
             // iTerm2 decodes every accepted format itself: pass the bytes native.
             ResolvedProtocol::ITerm2 => Some(encode_iterm2(&self.data, &opts)),
             ResolvedProtocol::Fallback => None,
         }
+    }
+
+    /// Commit this image into native scrollback (history) through the raw channel.
+    ///
+    /// This is the scrollback counterpart of the viewport [`render`](RtComponent::render)
+    /// enqueue. It resolves a **stable** id for the content via `channel`, encodes
+    /// the graphics escape under that id, and returns a [`PendingEmission`] anchored
+    /// at `history_row` for the draw/commit path to write once — while marking the
+    /// id committed so no later frame re-transmits it and no drop gesture can delete
+    /// it. Returns `None` on the fallback persona or an undecodable source (no
+    /// graphics bytes reach scrollback in those cases).
+    ///
+    /// Idempotence across frames is the point: calling this for an image that has
+    /// already been committed still returns its escape (id reuse is legal), but the
+    /// *caller* (the history sink) only invokes it once, on the commit that moves
+    /// the image above the viewport — a plain repaint never calls it, so a
+    /// committed scrollback image is transmitted a bounded number of times,
+    /// independent of the frame count.
+    #[must_use]
+    pub fn commit_to_scrollback(
+        &self,
+        channel: &ScrollbackImageChannel,
+        protocol: ResolvedProtocol,
+        area: Rect,
+        history_row: u16,
+    ) -> Option<PendingEmission> {
+        if protocol != ResolvedProtocol::Kitty {
+            // Only the Kitty protocol carries a stable, id-addressable image the
+            // scrollback survival + delete-protection model reasons about. iTerm2
+            // inline images have no protocol id; the fallback emits nothing.
+            let escape = self.encode_with_id(protocol, area, None)?;
+            return Some(PendingEmission {
+                escape,
+                row: history_row,
+                rows: self.reserved_rows(area),
+            });
+        }
+        let id = channel.image_id(&self.data);
+        let escape = self.encode_with_id(protocol, area, Some(id))?;
+        channel.mark_committed(id);
+        Some(PendingEmission {
+            escape,
+            row: history_row,
+            rows: self.reserved_rows(area),
+        })
     }
 
     /// Paint the bordered fallback placeholder into `area`, with a label that
@@ -748,6 +952,46 @@ pub fn transcode_to_png(data: &[u8]) -> Option<Vec<u8>> {
 #[must_use]
 pub fn base64_encode(data: &[u8]) -> String {
     STANDARD.encode(data)
+}
+
+/// Wrap `text` in a real OSC 8 hyperlink envelope
+/// (`\x1b]8;;<url>\x1b\\<text>\x1b]8;;\x1b\\`), reusing the legacy
+/// [`hyperlink`](crate::terminal_image::hyperlink) encoder unchanged.
+///
+/// # Why this rides the raw channel
+///
+/// A markdown link's URL cannot travel through a ratatui [`Buffer`] cell: a cell
+/// holds a symbol + [`Style`], and ratatui diffs cells — there is nowhere to store
+/// the OSC 8 `\x1b]8;;url\x1b\\` introducer/terminator so it survives to the wire.
+/// The markdown renderer therefore keeps the *visible* text as a styled span (the
+/// honest, buffer-safe rendering) and, on a capable terminal, the surrounding
+/// application emits the true OSC 8 escape out of band through this same
+/// [`RawEmissionQueue`] — exactly the mechanism a scrollback image uses. That is
+/// what makes a *real* raw-bytes OSC 8 hyperlink (not the `text (url)` fallback)
+/// reachable and verifiable. On a terminal that does not speak OSC 8 the renderer
+/// keeps the pinned `text (url)` fallback in the cells and nothing is enqueued
+/// here.
+#[must_use]
+pub fn osc8_hyperlink(text: &str, url: &str) -> String {
+    hyperlink(text, url)
+}
+
+/// Build a [`PendingEmission`] carrying a real OSC 8 hyperlink for the given
+/// viewport-local `row`, to be flushed through the raw channel after the frame
+/// draws.
+///
+/// The out-of-band companion to the markdown renderer's in-cell styled span: the
+/// span paints the visible, colored, underlined link text into the buffer, and
+/// this emission writes the true OSC 8 escape at the same row so a capable
+/// terminal surfaces a clickable hyperlink. `rows` is `1` — a hyperlink occupies
+/// no reserved footprint of its own (it annotates text already painted).
+#[must_use]
+pub fn osc8_emission(text: &str, url: &str, row: u16) -> PendingEmission {
+    PendingEmission {
+        escape: osc8_hyperlink(text, url),
+        row,
+        rows: 1,
+    }
 }
 
 /// Environment variable that force-enables the terminal cell-size query.
@@ -949,5 +1193,188 @@ mod tests {
         // (The env itself is asserted end-to-end in the integration test; here we
         // only pin the CSI 16 t byte string the enabled path emits.)
         assert_eq!(CELL_SIZE_QUERY_ENV, "HAND_TUI_QUERY_CELL_SIZE");
+    }
+
+    // --- scrollback channel: stable content→id map ---------------------------
+
+    #[test]
+    fn content_key_is_stable_and_content_sensitive() {
+        let a = b"the same picture bytes";
+        let b = b"the same picture bytes";
+        let c = b"a different picture";
+        assert_eq!(content_key(a), content_key(b), "identical bytes → same key");
+        assert_ne!(
+            content_key(a),
+            content_key(c),
+            "different bytes → different key"
+        );
+    }
+
+    #[test]
+    fn scrollback_channel_reuses_id_for_same_content() {
+        let channel = ScrollbackImageChannel::new();
+        let img = b"pretend png bytes";
+        let id1 = channel.image_id(img);
+        let id2 = channel.image_id(img);
+        let id3 = channel.image_id(img);
+        assert_eq!(id1, id2, "the same content maps to a stable id");
+        assert_eq!(id2, id3, "and keeps mapping to it across calls");
+        assert_ne!(id1, 0, "id 0 is invalid in the Kitty protocol");
+
+        // Distinct content gets a distinct id (the map is content-keyed).
+        let other = channel.image_id(b"a different image entirely");
+        assert_ne!(id1, other, "distinct content → distinct id");
+    }
+
+    // --- scrollback channel: viewport-only delete + no wide delete -----------
+
+    #[test]
+    fn viewport_only_delete_targets_the_single_id() {
+        let channel = ScrollbackImageChannel::new();
+        let id = channel.image_id(b"viewport image");
+        let del = channel
+            .delete_viewport_image(id)
+            .expect("an uncommitted viewport image can be deleted");
+        // A single-id delete: d=I,i=<id>. Never a wide d=A / d=a.
+        assert_eq!(del, format!("\x1b_Ga=d,d=I,i={id}\x1b\\"));
+        assert!(del.contains("d=I"), "delete-by-id form");
+        assert!(!del.contains("d=A"), "no delete-all (uppercase) form");
+        assert!(!del.contains("d=a"), "no delete-all (lowercase) form");
+    }
+
+    #[test]
+    fn committed_scrollback_image_is_never_deleted() {
+        let channel = ScrollbackImageChannel::new();
+        let id = channel.image_id(b"image that scrolled into history");
+        channel.mark_committed(id);
+        assert!(channel.is_committed(id));
+        assert!(
+            channel.delete_viewport_image(id).is_none(),
+            "a committed scrollback image must not yield a delete escape — its \
+             history copy must survive"
+        );
+    }
+
+    #[test]
+    fn dropping_viewport_image_after_others_committed_deletes_only_it() {
+        // Two images: one committed to scrollback, one still viewport-only. The
+        // drop gesture on the viewport one deletes exactly its id, and leaves the
+        // committed one untouched (no delete for it, ever, and no wide delete).
+        let channel = ScrollbackImageChannel::new();
+        let history_id = channel.image_id(b"history image");
+        let viewport_id = channel.image_id(b"viewport image");
+        channel.mark_committed(history_id);
+
+        let del = channel
+            .delete_viewport_image(viewport_id)
+            .expect("the viewport image is deletable");
+        assert!(
+            del.contains(&format!("i={viewport_id}")),
+            "deletes the viewport id"
+        );
+        assert!(
+            !del.contains(&format!("i={history_id}")),
+            "does not touch the committed id"
+        );
+        assert!(
+            !del.contains("d=A") && !del.contains("d=a"),
+            "no wide delete"
+        );
+        assert!(
+            channel.delete_viewport_image(history_id).is_none(),
+            "the committed history image is still protected"
+        );
+    }
+
+    // --- scrollback commit: stable id, bounded transmission ------------------
+
+    #[test]
+    fn commit_to_scrollback_uses_stable_id_and_marks_committed() {
+        // A real (decodable) 1x1 PNG so the Kitty encode path produces an APC.
+        let png = tiny_png();
+        let channel = ScrollbackImageChannel::new();
+        let image = RtImage::new(png.clone());
+        let area = Rect::new(0, 0, 40, 12);
+
+        let emission = image
+            .commit_to_scrollback(&channel, ResolvedProtocol::Kitty, area, 0)
+            .expect("a decodable Kitty image commits");
+        // The id is stable and now committed (delete-protected).
+        let id = channel.image_id(&png);
+        assert!(channel.is_committed(id), "commit marks the id committed");
+        assert!(
+            emission.escape.contains(&format!("i={id}")),
+            "the escape carries the stable id: {:?}",
+            emission.escape
+        );
+        assert!(emission.escape.starts_with("\x1b_G"), "a valid APC");
+        // A second commit of the same content reuses the same id (id reuse is
+        // legal — the contract is bounded/stable, not exactly-once).
+        let again = image
+            .commit_to_scrollback(&channel, ResolvedProtocol::Kitty, area, 0)
+            .expect("commit again");
+        assert!(again.escape.contains(&format!("i={id}")), "same id reused");
+    }
+
+    #[test]
+    fn commit_to_scrollback_declines_fallback_and_undecodable() {
+        let channel = ScrollbackImageChannel::new();
+        let area = Rect::new(0, 0, 40, 12);
+        // Fallback persona: no graphics bytes reach scrollback.
+        let image = RtImage::new(tiny_png());
+        assert!(
+            image
+                .commit_to_scrollback(&channel, ResolvedProtocol::Fallback, area, 0)
+                .is_none(),
+            "fallback commits no graphics escape"
+        );
+        // Undecodable source: degrades, nothing committed.
+        let corrupt = RtImage::new(vec![0xff, 0xd8, 0x00, 0x00]);
+        assert!(
+            corrupt
+                .commit_to_scrollback(&channel, ResolvedProtocol::Kitty, area, 0)
+                .is_none(),
+            "an undecodable source commits nothing to scrollback"
+        );
+    }
+
+    // --- OSC 8 hyperlink through the raw channel -----------------------------
+
+    #[test]
+    fn osc8_hyperlink_wraps_url_and_text() {
+        let s = osc8_hyperlink("click here", "https://example.com");
+        // A real OSC 8 envelope: \x1b]8;;<url>\x1b\\ <text> \x1b]8;;\x1b\\
+        assert_eq!(
+            s,
+            "\x1b]8;;https://example.com\x1b\\click here\x1b]8;;\x1b\\"
+        );
+        assert!(
+            s.starts_with("\x1b]8;;https://example.com"),
+            "url in the introducer"
+        );
+        assert!(s.contains("click here"), "visible text preserved");
+        assert!(s.ends_with("\x1b]8;;\x1b\\"), "closed by an empty OSC 8");
+    }
+
+    #[test]
+    fn osc8_emission_anchors_at_row_with_unit_footprint() {
+        let e = osc8_emission("link", "https://ratatui.rs", 5);
+        assert_eq!(e.row, 5, "anchored at the requested row");
+        assert_eq!(e.rows, 1, "a hyperlink reserves no footprint of its own");
+        assert!(e.escape.contains("https://ratatui.rs"), "carries the url");
+        assert!(e.escape.contains("\x1b]8;;"), "a real OSC 8 escape");
+    }
+
+    /// A minimal, genuinely decodable 1×1 PNG so the Kitty encode path runs
+    /// end-to-end without a fixture file (the scrollback channel tests only need
+    /// *some* valid image, not a specific one).
+    fn tiny_png() -> Vec<u8> {
+        use image::{ImageBuffer, Rgba};
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(1, 1, Rgba([10, 20, 30, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode tiny png");
+        out.into_inner()
     }
 }

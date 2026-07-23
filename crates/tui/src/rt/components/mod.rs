@@ -54,15 +54,17 @@ pub use editor::{
 };
 pub use image::{
     CELL_SIZE_QUERY_ENV, ClampedCells, ImageFormat, PendingEmission, RawEmissionQueue,
-    ResolvedProtocol, RtImage, base64_encode, cell_size_query_enabled, clamp_to_area, clip_label,
-    decodes, parse_cell_size_reply, resolve, resolve_protocol, sanitize_label, sniff_label,
+    ResolvedProtocol, RtImage, ScrollbackImageChannel, base64_encode, cell_size_query_enabled,
+    clamp_to_area, clip_label, content_key, decodes, osc8_emission, osc8_hyperlink,
+    parse_cell_size_reply, resolve, resolve_protocol, sanitize_label, sniff_label,
     transcode_to_png, write_cell_size_query,
 };
 pub use loader::{
     CancelOutcome, CancellableLoader, DEFAULT_CANCEL_HINT, DEFAULT_SPINNER_FRAMES, Loader,
 };
 pub use markdown::{
-    CodeHighlighter, MarkdownTheme, MarkdownView, plain_code_highlighter, render_markdown,
+    CodeHighlighter, MarkdownLink, MarkdownTheme, MarkdownView, plain_code_highlighter,
+    render_markdown, render_markdown_with_links,
 };
 pub use progress_bar::ProgressBar;
 pub use select_list::{
