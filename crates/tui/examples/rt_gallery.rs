@@ -778,8 +778,12 @@ async fn run() -> Result<(), SessionError> {
     // coalesces/rate-limits; the point is that a chunked emission at a frame seam
     // never leaves a half-escape.
     let flood_handle = if flood_requested_by_env() {
-        if let Some(image_index) = image_section_index(&lock(&state).sections) {
-            lock(&state).jump(image_index);
+        // Read the Image index and release the lock *before* jumping — a
+        // reentrant `lock(&state)` while the scrutinee's guard is still live would
+        // deadlock (std::sync::Mutex is not reentrant).
+        let image_index = image_section_index(&lock(&state).sections);
+        if let Some(index) = image_index {
+            lock(&state).jump(index);
         }
         let flood_requester = requester.clone();
         Some(tokio::spawn(async move {
