@@ -53,8 +53,10 @@ pub use editor::{
     MIN_INPUT_ROWS, PasteContent, PasteTransform, dropped_file_mention_transform,
 };
 pub use image::{
-    ImageFormat, PendingEmission, RawEmissionQueue, ResolvedProtocol, RtImage, base64_encode,
-    resolve, resolve_protocol, sniff_label, transcode_to_png,
+    CELL_SIZE_QUERY_ENV, ClampedCells, ImageFormat, PendingEmission, RawEmissionQueue,
+    ResolvedProtocol, RtImage, base64_encode, cell_size_query_enabled, clamp_to_area, clip_label,
+    decodes, parse_cell_size_reply, resolve, resolve_protocol, sanitize_label, sniff_label,
+    transcode_to_png, write_cell_size_query,
 };
 pub use loader::{
     CancelOutcome, CancellableLoader, DEFAULT_CANCEL_HINT, DEFAULT_SPINNER_FRAMES, Loader,

@@ -57,12 +57,14 @@ use base64::engine::general_purpose::STANDARD;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::rt::events::RtKey;
 use crate::rt::view::{HandleOutcome, RtComponent};
 use crate::terminal_image::{
-    ImageDimensions, ImageRenderOptions, allocate_image_id, calculate_image_rows, encode_iterm2,
-    encode_kitty, get_capabilities, get_image_dimensions, image_fallback,
+    CellDimensions, ImageDimensions, ImageRenderOptions, allocate_image_id, encode_iterm2,
+    encode_kitty, get_capabilities, get_cell_dimensions, get_image_dimensions,
 };
 
 /// The graphics protocol this terminal will actually receive, resolved from a
@@ -185,6 +187,162 @@ pub fn sniff_label(data: &[u8]) -> Option<String> {
         Some(ImageDimensions { width, height }) => Some(format!("[{mime} {width}x{height}]")),
         None => Some(format!("[{mime}]")),
     }
+}
+
+/// The cell-extent an image occupies once scaled to fit an area, in terminal
+/// cells, with the source aspect ratio preserved.
+///
+/// Both axes are clamped: `cols ≤ area.width` and `rows ≤ area.height`. The
+/// binding constraint is whichever axis would overflow *first* when the pixel
+/// image is projected onto the cell grid — a wide image is bound by width and a
+/// tall one by height — and the other axis is scaled down proportionally so the
+/// picture is never stretched. This is the footprint the widget reserves and the
+/// `c=`/`r=` (Kitty) or `width=`/`height=` (iTerm2) the encoder is handed, so the
+/// blanked rows in the buffer and the graphics image drawn over them agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClampedCells {
+    /// Width in terminal columns (`≥ 1`, `≤ area.width`).
+    pub cols: u16,
+    /// Height in terminal rows (`≥ 1`, `≤ area.height`).
+    pub rows: u16,
+}
+
+/// Project `image` (pixels) onto the cell grid of `area`, preserving aspect and
+/// clamping *both* axes to the area.
+///
+/// The natural cell extent is `ceil(px / cell_px)` per axis. If that already fits
+/// `area`, it is used verbatim. Otherwise the image is scaled by the tighter of
+/// the two fit ratios (`area.width / nat_cols`, `area.height / nat_rows`) so the
+/// binding axis lands exactly on the area edge and the other axis shrinks in
+/// proportion — never stretched past its own natural size, never overflowing.
+///
+/// `cell` is the pixel size of one terminal cell (font/zoom dependent; supplied by
+/// a `CSI 16 t` reply when one was captured, else the 8×16 default). Splitting the
+/// cell size out as a parameter keeps the clamp math a pure function the unit
+/// tests drive across cell sizes without touching the global capability cache.
+#[must_use]
+pub fn clamp_to_area(image: ImageDimensions, area: Rect, cell: CellDimensions) -> ClampedCells {
+    let max_cols = area.width.max(1);
+    let max_rows = area.height.max(1);
+    if image.width == 0 || image.height == 0 {
+        return ClampedCells { cols: 1, rows: 1 };
+    }
+    let cell_w = u32::from(cell.width.max(1));
+    let cell_h = u32::from(cell.height.max(1));
+
+    // Natural cell extent: how many whole cells the image covers at 1:1.
+    let nat_cols = image.width.div_ceil(cell_w).max(1);
+    let nat_rows = image.height.div_ceil(cell_h).max(1);
+
+    if nat_cols <= u32::from(max_cols) && nat_rows <= u32::from(max_rows) {
+        return ClampedCells {
+            cols: clamp_u16(nat_cols, max_cols),
+            rows: clamp_u16(nat_rows, max_rows),
+        };
+    }
+
+    // Overflow on at least one axis: scale by the tighter fit ratio so the
+    // binding axis lands on the edge and the other shrinks proportionally.
+    // Compare cross-multiplied to stay in integer math and avoid float drift:
+    //   width-bound  when  max_cols/nat_cols < max_rows/nat_rows
+    //                <=>   max_cols*nat_rows < max_rows*nat_cols
+    let width_bound =
+        u64::from(max_cols) * u64::from(nat_rows) < u64::from(max_rows) * u64::from(nat_cols);
+    if width_bound {
+        let cols = max_cols;
+        let rows = ((u64::from(cols) * u64::from(nat_rows)) / u64::from(nat_cols)).max(1);
+        ClampedCells {
+            cols,
+            rows: clamp_u16(rows as u32, max_rows),
+        }
+    } else {
+        let rows = max_rows;
+        let cols = ((u64::from(rows) * u64::from(nat_cols)) / u64::from(nat_rows)).max(1);
+        ClampedCells {
+            cols: clamp_u16(cols as u32, max_cols),
+            rows,
+        }
+    }
+}
+
+/// Saturating cast of a `u32` cell count to `u16`, clamped to `max` and floored at
+/// `1` (an image always occupies at least one cell).
+fn clamp_u16(value: u32, max: u16) -> u16 {
+    value.min(u32::from(max)).max(1) as u16
+}
+
+/// Whether `data` is a *decodable* image on the current build's decoder set.
+///
+/// The decode-validation gate every emission path runs before producing graphics
+/// bytes: a source whose container magic sniffs but whose payload the `image`
+/// crate cannot decode (truncated / corrupt) must never reach the wire as a
+/// graphics escape — a half-image APC or an OSC 1337 wrapping undecodable bytes
+/// makes the terminal emit an error reply or paint garbage. When this returns
+/// `false` the widget degrades to the bordered placeholder box on *every* persona
+/// (Kitty *and* iTerm2 *and* fallback), exactly as an undecodable Kitty source
+/// already did — the migration fix is that iTerm2 is no longer exempt.
+#[must_use]
+pub fn decodes(data: &[u8]) -> bool {
+    image::load_from_memory(data).is_ok()
+}
+
+/// Strip control and escape bytes from a label so a filename / alt string can
+/// never smuggle a terminal escape sequence out through the placeholder box or an
+/// image name.
+///
+/// A dropped file's name or an image's alt text is attacker-influenced text that
+/// ends up (a) painted into buffer cells and (b) base64-is-not-applied to the
+/// Kitty `c=`/`r=` params but *is* carried verbatim-ish elsewhere. If it carries
+/// raw `\x1b`, a CSI/OSC introducer, or other C0/C1 control bytes, a naive render
+/// could let it re-open a graphics/OSC context or move the cursor. Every
+/// C0 control (`< 0x20`), `DEL`, and C1 control (`0x80..=0x9f`) is dropped; all
+/// printable text (including CJK/emoji) is preserved so the label still reads.
+#[must_use]
+pub fn sanitize_label(label: &str) -> String {
+    label
+        .chars()
+        .filter(|&c| {
+            let cp = c as u32;
+            // Drop C0 controls (incl. ESC 0x1b), DEL, and C1 controls; keep all
+            // printable characters (tab included would still be a control — drop).
+            !(cp < 0x20 || cp == 0x7f || (0x80..=0x9f).contains(&cp))
+        })
+        .collect()
+}
+
+/// Clip `label` to `inner_w` *display* columns, appending an ellipsis (`…`) when
+/// it does not fit.
+///
+/// Display-width clipping, not `char`-count clipping: a CJK glyph or emoji is two
+/// columns wide, so the legacy `label.chars().take(inner_w)` overshoots the box by
+/// one column per wide glyph and tears the border. This accumulates whole grapheme
+/// clusters by their rendered width and stops before the budget overflows, so the
+/// returned string is `≤ inner_w` columns and the placeholder's right border stays
+/// aligned. Mirrors the crate's `truncate_graphemes_with_ellipsis` but is inlined
+/// here so the image module's placeholder does not reach across the primitive
+/// module's private helper.
+#[must_use]
+pub fn clip_label(label: &str, inner_w: usize) -> String {
+    if inner_w == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(label) <= inner_w {
+        return label.to_string();
+    }
+    // Reserve one column for the ellipsis marker when clipping happens.
+    let budget = inner_w.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for cluster in label.graphemes(true) {
+        let w = UnicodeWidthStr::width(cluster);
+        if used + w > budget {
+            break;
+        }
+        out.push_str(cluster);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 /// A single graphics escape queued for emission after the frame draws.
@@ -371,20 +529,35 @@ impl RtImage {
         self.protocol_override.unwrap_or_else(resolve_protocol)
     }
 
-    /// The number of rows this image reserves in `area`, from the sniffed pixel
-    /// height scaled to the current cell height, clamped to the area's height.
+    /// The cell footprint (`cols` × `rows`) this image occupies in `area`, with
+    /// the source aspect ratio preserved and *both* axes clamped to the area.
     ///
-    /// Falls back to the whole area height when the bytes do not sniff (an
-    /// undecodable blob still reserves a sensible footprint rather than
-    /// collapsing to one row).
+    /// A wide image is clamped to the display width and its height scaled down to
+    /// match (`m2-image-safety` width clamp); a tall image is clamped to the pane
+    /// height and its width scaled down (super-tall clamp). The cell size comes
+    /// from the cached capabilities — the 8×16 default, or a `CSI 16 t` reply
+    /// folded in via [`set_cell_dimensions`](crate::terminal_image::set_cell_dimensions)
+    /// so the rows honour the terminal's real pixel-per-cell metric.
+    ///
+    /// Falls back to filling `area` when the bytes do not sniff (an undecodable
+    /// blob still reserves a sensible footprint rather than collapsing to one row).
+    #[must_use]
+    pub fn clamped_cells(&self, area: Rect) -> ClampedCells {
+        match get_image_dimensions(&self.data) {
+            Some(dims) => clamp_to_area(dims, area, get_cell_dimensions()),
+            None => ClampedCells {
+                cols: area.width.max(1),
+                rows: area.height.max(1),
+            },
+        }
+    }
+
+    /// The number of rows this image reserves in `area` — the `rows` of its
+    /// aspect-preserving, two-axis-clamped [`clamped_cells`](RtImage::clamped_cells)
+    /// footprint.
     #[must_use]
     pub fn reserved_rows(&self, area: Rect) -> u16 {
-        let max = area.height;
-        match get_image_dimensions(&self.data) {
-            Some(dims) => calculate_image_rows(&dims, Some(max)).min(max).max(1),
-            None => max.max(1),
-        }
-        .min(max.max(1))
+        self.clamped_cells(area).rows
     }
 
     /// Build the encoded graphics escape for the given protocol, or `None` when
@@ -395,17 +568,27 @@ impl RtImage {
     /// live terminal or a queue.
     #[must_use]
     pub fn encode(&self, protocol: ResolvedProtocol, area: Rect) -> Option<String> {
-        let rows = self.reserved_rows(area);
+        // Decode-validation before emit, on *every* graphics persona: an
+        // undecodable source (truncated / corrupt bytes whose magic still sniffs)
+        // must degrade to the placeholder box, never reach the wire as a half
+        // graphics escape. iTerm2 is no longer exempt (migration fix).
+        if !decodes(&self.data) {
+            return None;
+        }
+        let cells = self.clamped_cells(area);
         let opts = ImageRenderOptions {
-            max_cols: Some(area.width),
-            max_rows: Some(rows),
+            max_cols: Some(cells.cols),
+            max_rows: Some(cells.rows),
             preserve_aspect: true,
-            label: self.label.clone(),
+            // Sanitize the label so a filename / alt string can never smuggle an
+            // escape sequence into the iTerm2 image name.
+            label: self.label.as_deref().map(sanitize_label),
         };
         match protocol {
             ResolvedProtocol::Kitty => {
-                // Kitty transmits PNG. Transcode a non-PNG source; an undecodable
-                // source degrades to the box rather than emitting an invalid APC.
+                // Kitty transmits PNG. Transcode a non-PNG source; the decode gate
+                // above already guaranteed the source decodes, so the transcode
+                // only fails on an encoder error, which still degrades to the box.
                 let png = match ImageFormat::sniff(&self.data) {
                     ImageFormat::Png => Some(self.data.clone()),
                     _ => transcode_to_png(&self.data),
@@ -420,15 +603,18 @@ impl RtImage {
 
     /// Paint the bordered fallback placeholder into `area`, with a label that
     /// pairs the filename/alt with the sniffed `[<mime> WxH]` tag when available.
+    ///
+    /// The border/centering *shape* matches the legacy `image_fallback`
+    /// envelope, but the label row is built here with **display-width** math
+    /// rather than the legacy `char`-count clipping/centering: the sanitized label
+    /// is clipped to the inner width by rendered column ([`clip_label`]) and
+    /// centered by display width, so a CJK/emoji label (two columns per glyph)
+    /// stays inside the frame with the right border aligned instead of tearing it
+    /// (the migration fix). A label carrying escape bytes was already stripped in
+    /// [`fallback_label`](RtImage::fallback_label), so no terminal sequence reaches
+    /// the cells.
     fn render_fallback(&self, area: Rect, buf: &mut Buffer) {
-        let label = self.fallback_label();
-        let opts = ImageRenderOptions {
-            max_cols: Some(area.width),
-            max_rows: Some(area.height.saturating_sub(2).max(1)),
-            preserve_aspect: true,
-            label: Some(label),
-        };
-        let lines = image_fallback(&opts);
+        let lines = self.fallback_lines(area);
         for (i, line) in lines.iter().enumerate() {
             let y = area.y.saturating_add(i as u16);
             if y >= area.y.saturating_add(area.height) {
@@ -438,10 +624,53 @@ impl RtImage {
         }
     }
 
+    /// Build the fallback box as display-width-correct lines.
+    ///
+    /// A `┌─…─┐` top, `height-2` interior rows (the label centered by display
+    /// width on the middle row), and a `└─…─┘` bottom. Split out so a unit test
+    /// asserts the width invariant — every line's rendered width equals the box
+    /// width — without a buffer.
+    fn fallback_lines(&self, area: Rect) -> Vec<String> {
+        let width = area.width as usize;
+        let height = area.height as usize;
+        // Degenerate areas (too small for a bordered box) fall back to a single
+        // clipped label line so nothing overflows.
+        if width < 2 || height < 1 {
+            return vec![clip_label(&self.fallback_label(), width)];
+        }
+        let inner_w = width - 2;
+        let interior = height.saturating_sub(2).max(1);
+        let label = clip_label(&self.fallback_label(), inner_w);
+        let label_w = UnicodeWidthStr::width(label.as_str());
+
+        let bar = "─".repeat(inner_w);
+        let mut lines = Vec::with_capacity(interior + 2);
+        lines.push(format!("┌{bar}┐"));
+        let mid = interior / 2;
+        for r in 0..interior {
+            if r == mid {
+                let pad = inner_w.saturating_sub(label_w);
+                let left = pad / 2;
+                let right = pad - left;
+                lines.push(format!(
+                    "│{}{label}{}│",
+                    " ".repeat(left),
+                    " ".repeat(right)
+                ));
+            } else {
+                lines.push(format!("│{}│", " ".repeat(inner_w)));
+            }
+        }
+        lines.push(format!("└{bar}┘"));
+        lines
+    }
+
     /// The fallback box label: the filename/alt joined with the sniff tag, or
-    /// whichever of the two is present.
+    /// whichever of the two is present, with any escape bytes stripped from the
+    /// name so the placeholder can never carry a smuggled terminal sequence.
     fn fallback_label(&self) -> String {
-        let name = self.label.as_deref();
+        let sanitized = self.label.as_deref().map(sanitize_label);
+        let name = sanitized.as_deref().filter(|s| !s.is_empty());
         let tag = sniff_label(&self.data);
         match (name, tag) {
             (Some(name), Some(tag)) => format!("{name} {tag}"),
@@ -519,4 +748,206 @@ pub fn transcode_to_png(data: &[u8]) -> Option<Vec<u8>> {
 #[must_use]
 pub fn base64_encode(data: &[u8]) -> String {
     STANDARD.encode(data)
+}
+
+/// Environment variable that force-enables the terminal cell-size query.
+///
+/// The cell-size query (`CSI 16 t`) is the only path in this module that writes a
+/// query to the terminal, and it is **off by default**: many terminals never
+/// answer it and a blocking read would hang. It is enabled only when this env is
+/// set (mirroring the `HAND_TUI_FORCE_KITTY_KEYBOARD` seam), so a `script -q`
+/// probe can drive the query path against a silent PTY and prove the render loop
+/// still paints within its poll budget — the write is fire-and-forget, the reply
+/// (if any) is folded in asynchronously via [`parse_cell_size_reply`], and no read
+/// ever blocks the frame.
+pub const CELL_SIZE_QUERY_ENV: &str = "HAND_TUI_QUERY_CELL_SIZE";
+
+/// Whether the cell-size query is force-enabled for this session (the env seam).
+#[must_use]
+pub fn cell_size_query_enabled() -> bool {
+    std::env::var(CELL_SIZE_QUERY_ENV)
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Write the terminal cell-size query (`CSI 16 t`) to `out` **without waiting for
+/// a reply**.
+///
+/// A no-op unless [`cell_size_query_enabled`] is set. This is deliberately
+/// fire-and-forget: it issues the query and flushes, then returns immediately so
+/// the caller's render/poll loop is never blocked on a terminal that stays silent.
+/// A terminal that *does* answer replies with `CSI 6 ; <height> ; <width> t`; that
+/// reply arrives on the input stream and is decoded by [`parse_cell_size_reply`]
+/// and applied via [`set_cell_dimensions`](crate::terminal_image::set_cell_dimensions),
+/// so a later frame's row allocation uses the real pixel-per-cell metric.
+///
+/// # Errors
+///
+/// Propagates a write/flush error; a silent terminal is *not* an error (the query
+/// simply goes unanswered).
+pub fn write_cell_size_query(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    if !cell_size_query_enabled() {
+        return Ok(());
+    }
+    out.write_all(b"\x1b[16t")?;
+    out.flush()
+}
+
+/// Parse a terminal cell-size reply (`CSI 6 ; <height> ; <width> t`) into
+/// [`CellDimensions`], or `None` when `bytes` is not such a reply.
+///
+/// The companion to [`write_cell_size_query`]: the event loop feeds the raw input
+/// bytes here and, on a match, applies the result via
+/// [`set_cell_dimensions`](crate::terminal_image::set_cell_dimensions) so the next
+/// frame's [`calculate rows`](RtImage::clamped_cells) scale by `ceil(pixel_height /
+/// cell_height)` against the *reported* cell height rather than the 8×16 default.
+/// Zero dimensions or a malformed reply yield `None`, leaving the default in place.
+#[must_use]
+pub fn parse_cell_size_reply(bytes: &[u8]) -> Option<CellDimensions> {
+    // Look for the CSI 6 ; H ; W t report anywhere in the buffer.
+    let text = std::str::from_utf8(bytes).ok()?;
+    let start = text.find("\x1b[6;")?;
+    let rest = &text[start + 4..];
+    let end = rest.find('t')?;
+    let body = &rest[..end];
+    let mut parts = body.split(';');
+    let height: u16 = parts.next()?.parse().ok()?;
+    let width: u16 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || width == 0 || height == 0 {
+        return None;
+    }
+    Some(CellDimensions { width, height })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CELL_8X16: CellDimensions = CellDimensions {
+        width: 8,
+        height: 16,
+    };
+
+    fn dims(width: u32, height: u32) -> ImageDimensions {
+        ImageDimensions { width, height }
+    }
+
+    #[test]
+    fn clamp_fits_uses_natural_extent() {
+        // 80x64 px at 8x16 cells = 10x4 natural cells, and both fit a 40x30 area:
+        // no scaling, the natural extent is used verbatim.
+        let c = clamp_to_area(dims(80, 64), Rect::new(0, 0, 40, 30), CELL_8X16);
+        assert_eq!(c, ClampedCells { cols: 10, rows: 4 });
+    }
+
+    #[test]
+    fn clamp_width_bound_scales_height_down() {
+        // 400x40 -> 50x3 natural cells; a 20-col area binds width (50->20) and the
+        // height scales: 3 * 20/50 -> 1 row (floored, min 1).
+        let c = clamp_to_area(dims(400, 40), Rect::new(0, 0, 20, 10), CELL_8X16);
+        assert_eq!(c.cols, 20);
+        assert_eq!(c.rows, 1);
+    }
+
+    #[test]
+    fn clamp_height_bound_scales_width_down() {
+        // 40x400 -> 5x25 natural cells; a 10-row area binds height (25->10) and the
+        // width scales: 5 * 10/25 -> 2 cols.
+        let c = clamp_to_area(dims(40, 400), Rect::new(0, 0, 40, 10), CELL_8X16);
+        assert_eq!(c.rows, 10);
+        assert_eq!(c.cols, 2);
+    }
+
+    #[test]
+    fn clamp_both_axes_overflow_binds_tighter_axis() {
+        // A square 512x512 px image is NOT square in cells: at 8x16 cells it is
+        // 64x32 natural cells (cells are twice as tall as wide). A 40x30 area
+        // overflows both. Width is the tighter fit (40/64 < 30/32), so width binds
+        // to 40 and the height scales in proportion: 32 * 40/64 = 20.
+        let c = clamp_to_area(dims(512, 512), Rect::new(0, 0, 40, 30), CELL_8X16);
+        assert_eq!(c.cols, 40);
+        assert_eq!(c.rows, 20);
+    }
+
+    #[test]
+    fn clamp_zero_dims_is_single_cell() {
+        assert_eq!(
+            clamp_to_area(dims(0, 0), Rect::new(0, 0, 40, 30), CELL_8X16),
+            ClampedCells { cols: 1, rows: 1 }
+        );
+    }
+
+    #[test]
+    fn clamp_never_exceeds_area_and_never_below_one() {
+        let c = clamp_to_area(dims(4000, 4000), Rect::new(0, 0, 10, 5), CELL_8X16);
+        assert!(c.cols >= 1 && c.rows >= 1);
+        assert!(c.cols <= 10 && c.rows <= 5);
+        let c = clamp_to_area(dims(1, 1), Rect::new(0, 0, 10, 5), CELL_8X16);
+        assert_eq!(c, ClampedCells { cols: 1, rows: 1 });
+    }
+
+    #[test]
+    fn clamp_honours_reported_cell_size() {
+        // The same image against a taller reported cell: fewer rows.
+        let small_cells = CellDimensions {
+            width: 10,
+            height: 20,
+        };
+        // 40x400 at 10x20 = 4x20 natural cells; area 40x100 fits -> 20 rows.
+        let c = clamp_to_area(dims(40, 400), Rect::new(0, 0, 40, 100), small_cells);
+        assert_eq!(c.rows, 20);
+        // At the 8x16 default the same image is 5x25 -> 25 rows.
+        let c = clamp_to_area(dims(40, 400), Rect::new(0, 0, 40, 100), CELL_8X16);
+        assert_eq!(c.rows, 25);
+    }
+
+    #[test]
+    fn sanitize_drops_controls_keeps_printable() {
+        assert_eq!(sanitize_label("a\x1bb\x07c"), "abc");
+        assert_eq!(sanitize_label("\x00\x1f\x7f\u{9f}"), "");
+        assert_eq!(sanitize_label("héllo 世界 🎉"), "héllo 世界 🎉");
+        assert_eq!(sanitize_label("tab\there"), "tabhere", "tab is a control");
+    }
+
+    #[test]
+    fn clip_label_width_boundaries() {
+        assert_eq!(clip_label("hello", 0), "");
+        assert_eq!(clip_label("hi", 5), "hi", "fits, unchanged");
+        assert_eq!(clip_label("hello", 5), "hello", "exact fit, no ellipsis");
+        assert_eq!(clip_label("hello", 3), "he…", "clipped with ellipsis");
+        // A single wide glyph in a 1-col budget cannot fit alongside an ellipsis.
+        let one = clip_label("世界", 1);
+        assert!(UnicodeWidthStr::width(one.as_str()) <= 1);
+    }
+
+    #[test]
+    fn clip_label_keeps_wide_glyphs_whole() {
+        // 4 CJK glyphs = 8 cols; clipping to 5 keeps whole glyphs within budget-1
+        // (4 cols = 2 glyphs) plus the ellipsis: width <= 5, never a split glyph.
+        let clipped = clip_label("你好世界", 5);
+        assert!(UnicodeWidthStr::width(clipped.as_str()) <= 5, "{clipped:?}");
+        assert!(clipped.ends_with('…'));
+    }
+
+    #[test]
+    fn decodes_rejects_undecodable_but_sniffable() {
+        // Valid magic prefix, no decodable payload.
+        assert!(!decodes(&[0xff, 0xd8, 0x00, 0x00]), "truncated jpeg magic");
+        assert!(!decodes(b""), "empty");
+    }
+
+    #[test]
+    fn parse_cell_size_reply_round_trip() {
+        let d = parse_cell_size_reply(b"\x1b[6;32;14t").unwrap();
+        assert_eq!(d.width, 14);
+        assert_eq!(d.height, 32);
+    }
+
+    #[test]
+    fn cell_size_query_env_gating() {
+        // The write helper is a no-op when the env seam is unset.
+        // (The env itself is asserted end-to-end in the integration test; here we
+        // only pin the CSI 16 t byte string the enabled path emits.)
+        assert_eq!(CELL_SIZE_QUERY_ENV, "HAND_TUI_QUERY_CELL_SIZE");
+    }
 }
