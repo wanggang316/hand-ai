@@ -12,6 +12,7 @@ pub mod built_in;
 pub mod color;
 pub mod core;
 pub mod loader;
+pub mod palette;
 pub mod ratatui_style;
 
 pub use built_in::{
@@ -31,4 +32,5 @@ pub use loader::{
     default_custom_themes_dir, default_theme, detect_terminal_background, load_theme,
     load_theme_from_path, resolve_theme_or_default, theme_by_name,
 };
+pub use palette::ThemePalette;
 pub use ratatui_style::resolved_to_ratatui;
