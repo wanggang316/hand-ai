@@ -33,19 +33,12 @@
 
 use hand_tui::rt::components::syntax_highlight::default_markdown_theme;
 use hand_tui::rt::components::{MarkdownTheme, render_markdown};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use model::{AssistantContentBlock, AssistantMessage, StopReason};
 
-/// User-bubble background tint — a muted slate, the rt-native equivalent of the
-/// legacy `#343541` user-message background. Applied to every row of the bubble
-/// (padding included) so the box tints edge to edge.
-const USER_BG: Color = Color::Rgb(52, 53, 65);
-/// User-bubble foreground — a light gray with good contrast against
-/// [`USER_BG`], so text stays readable inside the tinted region rather than
-/// falling back to a terminal default that may be invisible on the tint.
-const USER_FG: Color = Color::Rgb(230, 230, 230);
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The static label shown in place of a thinking block when thinking is
 /// collapsed (Ctrl+T). Mirrors the legacy `DEFAULT_HIDDEN_THINKING_LABEL`.
@@ -62,18 +55,21 @@ fn body_theme() -> MarkdownTheme {
 /// Structure fidelity is the contract: each *input* line (split on `\n`) is
 /// rendered as its own logical row, so a multi-line prompt keeps its shape and
 /// markdown soft-wrapping never merges two input lines into one. Every row —
-/// the one-column left/right padding included — carries the [`USER_BG`] tint so
-/// the bubble reads as one continuous background block, and text takes the
-/// contrasting [`USER_FG`] so it stays legible on the tint.
+/// the one-column left/right padding included — carries the palette's
+/// user-message background tint so the bubble reads as one continuous
+/// background block, and text takes the palette's contrasting user-message
+/// foreground so it stays legible on the tint.
 ///
 /// `width` is the render width; a body line is rendered as plain styled text
 /// (not markdown-parsed) so a lone `#` or `-` in a prompt is echoed verbatim
 /// rather than reinterpreted as a heading or list — the echo must show what the
-/// user typed.
+/// user typed. `palette` supplies the bubble's tint and text colour from the
+/// active theme (the default palette keeps the historical `#343541` look).
 #[must_use]
-pub fn user_bubble_lines(text: &str, width: u16) -> Vec<Line<'static>> {
-    let bg = Style::default().bg(USER_BG);
-    let body = Style::default().bg(USER_BG).fg(USER_FG);
+pub fn user_bubble_lines(text: &str, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+    let user_bg = palette.user_message_bg;
+    let bg = Style::default().bg(user_bg);
+    let body = Style::default().bg(user_bg).fg(palette.user_message_text);
     let pad_cols = usize::from(width.max(2)).saturating_sub(2);
 
     // A blank tinted row pads the top and bottom of the bubble; interior rows
@@ -121,6 +117,7 @@ pub fn assistant_lines(
     message: &AssistantMessage,
     hide_thinking: bool,
     width: u16,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let theme = body_theme();
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -133,6 +130,7 @@ pub fn assistant_lines(
                     hide_thinking,
                     width,
                     &theme,
+                    palette,
                 ));
             }
             AssistantContentBlock::Text(t) if !t.text.trim().is_empty() => {
@@ -143,7 +141,7 @@ pub fn assistant_lines(
         }
     }
 
-    if let Some(footnote) = error_footnote(message) {
+    if let Some(footnote) = error_footnote(message, palette) {
         lines.push(Line::default());
         lines.push(footnote);
     }
@@ -159,9 +157,10 @@ fn thinking_lines(
     hide: bool,
     width: u16,
     theme: &MarkdownTheme,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
     let dim_italic = Style::default()
-        .fg(Color::DarkGray)
+        .fg(palette.thinking_text)
         .add_modifier(Modifier::ITALIC);
 
     if hide {
@@ -191,7 +190,7 @@ fn thinking_lines(
 
 /// The error footnote for a message, or `None` when it stopped normally or
 /// carries a tool call (which owns its own error UI).
-fn error_footnote(message: &AssistantMessage) -> Option<Line<'static>> {
+fn error_footnote(message: &AssistantMessage, palette: &ThemePalette) -> Option<Line<'static>> {
     let has_tool_call = message
         .content
         .iter()
@@ -200,7 +199,7 @@ fn error_footnote(message: &AssistantMessage) -> Option<Line<'static>> {
         return None;
     }
 
-    let error_style = Style::default().fg(Color::Red);
+    let error_style = Style::default().fg(palette.error);
     match message.stop_reason {
         StopReason::Error => {
             let msg = message.error_message.as_deref().unwrap_or("Unknown error");
@@ -280,6 +279,13 @@ mod tests {
         Api, AssistantContentBlock, AssistantMessage, Provider, StopReason, TextContent,
         ThinkingContent, ToolCall, Usage,
     };
+    use ratatui::style::Color;
+
+    /// The default palette — the historical hard-coded look, so the existing
+    /// assertions keep pinning the same colours.
+    fn pal() -> ThemePalette {
+        ThemePalette::default()
+    }
 
     /// The plain concatenated text of a line.
     fn text_of(line: &Line<'_>) -> String {
@@ -320,7 +326,7 @@ mod tests {
 
     #[test]
     fn user_bubble_echoes_body_text() {
-        let lines = user_bubble_lines("hello world", 40);
+        let lines = user_bubble_lines("hello world", 40, &pal());
         assert!(
             joined(&lines).contains("hello world"),
             "bubble must echo the prompt: {:?}",
@@ -332,7 +338,7 @@ mod tests {
     fn user_bubble_multiline_keeps_one_row_per_input_line() {
         // Structure fidelity: two input lines stay two distinct body rows, never
         // merged by markdown soft-wrapping.
-        let lines = user_bubble_lines("line one\nline two", 40);
+        let lines = user_bubble_lines("line one\nline two", 40, &pal());
         let bodies: Vec<String> = lines
             .iter()
             .map(text_of)
@@ -351,11 +357,11 @@ mod tests {
     fn user_bubble_tints_every_row_background() {
         // Every row — padding included — carries the tint background so the
         // bubble reads as one continuous block.
-        let lines = user_bubble_lines("hi", 20);
+        let lines = user_bubble_lines("hi", 20, &pal());
         assert!(!lines.is_empty());
         for line in &lines {
             assert!(
-                line.spans.iter().all(|s| s.style.bg == Some(USER_BG)),
+                line.spans.iter().all(|s| s.style.bg == Some(pal().user_message_bg)),
                 "every span in a bubble row must be tinted: {line:?}"
             );
         }
@@ -366,7 +372,7 @@ mod tests {
         // The body row spans the full width so the tint reaches the right edge,
         // not just the length of the text.
         let width = 30u16;
-        let lines = user_bubble_lines("short", width);
+        let lines = user_bubble_lines("short", width, &pal());
         let body = lines
             .iter()
             .find(|l| text_of(l).contains("short"))
@@ -383,11 +389,80 @@ mod tests {
     fn user_bubble_echoes_markdown_source_verbatim() {
         // A `#` prompt is echoed literally, NOT reinterpreted as a heading (the
         // echo shows what the user typed).
-        let lines = user_bubble_lines("# not a heading", 40);
+        let lines = user_bubble_lines("# not a heading", 40, &pal());
         assert!(
             joined(&lines).contains("# not a heading"),
             "the leading # must survive verbatim: {:?}",
             joined(&lines)
+        );
+    }
+
+    // --- theme application (VAL-COMPAT-004) ------------------------------
+
+    #[test]
+    fn user_bubble_tints_from_the_palette() {
+        // The default palette keeps the historical tint; a custom palette
+        // recolours the bubble — the render function consumes the theme.
+        let default_lines = user_bubble_lines("hi", 20, &ThemePalette::default());
+        assert!(
+            default_lines
+                .iter()
+                .all(|l| l.spans.iter().all(|s| s.style.bg == Some(Color::Rgb(52, 53, 65)))),
+            "default palette keeps the #343541 tint"
+        );
+
+        let neon = ThemePalette {
+            user_message_bg: Color::Rgb(0x12, 0x00, 0x1f),
+            user_message_text: Color::Rgb(0xf0, 0xe6, 0xff),
+            ..ThemePalette::default()
+        };
+        let themed = user_bubble_lines("hi", 20, &neon);
+        assert!(
+            themed
+                .iter()
+                .all(|l| l.spans.iter().all(|s| s.style.bg == Some(Color::Rgb(0x12, 0x00, 0x1f)))),
+            "custom palette recolours the bubble tint"
+        );
+        let body = themed
+            .iter()
+            .find(|l| text_of(l).contains("hi"))
+            .expect("body row");
+        assert!(
+            body.spans
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(0xf0, 0xe6, 0xff))),
+            "custom palette recolours the bubble text"
+        );
+    }
+
+    #[test]
+    fn thinking_and_error_take_the_palette() {
+        // Thinking text and the error footnote colour from the palette, so a
+        // custom theme retints them while the default keeps the historical look.
+        let neon = ThemePalette {
+            thinking_text: Color::Rgb(0x00, 0xff, 0xff),
+            error: Color::Rgb(0xff, 0x00, 0x3c),
+            ..ThemePalette::default()
+        };
+        let mut msg = message(
+            vec![thinking_block("pondering"), text_block("answer")],
+            StopReason::Error,
+        );
+        msg.error_message = Some("boom".to_string());
+        let lines = assistant_lines(&msg, false, 40, &neon);
+        assert!(
+            lines.iter().any(|l| l
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(0x00, 0xff, 0xff)))),
+            "thinking retints from the palette"
+        );
+        assert!(
+            lines.iter().any(|l| l
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(0xff, 0x00, 0x3c)))),
+            "error footnote retints from the palette"
         );
     }
 
@@ -396,7 +471,7 @@ mod tests {
     #[test]
     fn assistant_renders_markdown_body() {
         let msg = message(vec![text_block("**bold** text")], StopReason::Stop);
-        let lines = assistant_lines(&msg, false, 40);
+        let lines = assistant_lines(&msg, false, 40, &pal());
         assert!(joined(&lines).contains("bold"));
         // A bold span is present (markdown parsed, not echoed raw).
         assert!(
@@ -414,7 +489,7 @@ mod tests {
             vec![text_block("```rust\nfn main() {}\n```")],
             StopReason::Stop,
         );
-        let out = joined(&assistant_lines(&msg, false, 40));
+        let out = joined(&assistant_lines(&msg, false, 40, &pal()));
         assert!(out.contains("# lang: rust"), "lang label: {out:?}");
         assert!(
             out.contains('┌') && out.contains('└'),
@@ -426,7 +501,7 @@ mod tests {
     #[test]
     fn empty_assistant_snapshot_renders_nothing() {
         let msg = message(vec![text_block("")], StopReason::Stop);
-        assert!(assistant_lines(&msg, false, 40).is_empty());
+        assert!(assistant_lines(&msg, false, 40, &pal()).is_empty());
     }
 
     // --- thinking blocks (VAL-CHAT-008) ----------------------------------
@@ -437,7 +512,7 @@ mod tests {
             vec![thinking_block("pondering"), text_block("answer")],
             StopReason::Stop,
         );
-        let lines = assistant_lines(&msg, false, 40);
+        let lines = assistant_lines(&msg, false, 40, &pal());
         let out = joined(&lines);
         assert!(out.contains("pondering"), "thinking body present: {out:?}");
         // Thinking precedes the answer.
@@ -465,7 +540,7 @@ mod tests {
             vec![thinking_block("secret reasoning"), text_block("answer")],
             StopReason::Stop,
         );
-        let out = joined(&assistant_lines(&msg, true, 40));
+        let out = joined(&assistant_lines(&msg, true, 40, &pal()));
         assert!(out.contains(HIDDEN_THINKING_LABEL), "static label: {out:?}");
         assert!(
             !out.contains("secret reasoning"),
@@ -481,7 +556,7 @@ mod tests {
     fn error_stop_reason_appends_red_error_footnote() {
         let mut msg = message(vec![text_block("partial")], StopReason::Error);
         msg.error_message = Some("rate limit".to_string());
-        let lines = assistant_lines(&msg, false, 40);
+        let lines = assistant_lines(&msg, false, 40, &pal());
         let footnote = lines
             .iter()
             .find(|l| text_of(l).contains("Error: rate limit"))
@@ -498,7 +573,7 @@ mod tests {
     #[test]
     fn aborted_stop_reason_appends_operation_aborted_footnote() {
         let msg = message(vec![text_block("partial")], StopReason::Aborted);
-        let out = joined(&assistant_lines(&msg, false, 40));
+        let out = joined(&assistant_lines(&msg, false, 40, &pal()));
         assert!(
             out.contains("Operation aborted"),
             "default abort label: {out:?}"
@@ -509,7 +584,7 @@ mod tests {
     fn aborted_uses_carried_reason_over_default() {
         let mut msg = message(vec![text_block("partial")], StopReason::Aborted);
         msg.error_message = Some("user cancelled".to_string());
-        let out = joined(&assistant_lines(&msg, false, 40));
+        let out = joined(&assistant_lines(&msg, false, 40, &pal()));
         assert!(out.contains("user cancelled"), "carried reason: {out:?}");
     }
 
@@ -527,7 +602,7 @@ mod tests {
             ],
             StopReason::Error,
         );
-        let out = joined(&assistant_lines(&msg, false, 40));
+        let out = joined(&assistant_lines(&msg, false, 40, &pal()));
         assert!(
             !out.contains("Error:"),
             "tool-call message must not carry a footnote: {out:?}"
@@ -537,7 +612,7 @@ mod tests {
     #[test]
     fn normal_stop_reason_has_no_footnote() {
         let msg = message(vec![text_block("all good")], StopReason::Stop);
-        let out = joined(&assistant_lines(&msg, false, 40));
+        let out = joined(&assistant_lines(&msg, false, 40, &pal()));
         assert!(
             !out.contains("Error"),
             "no footnote on a clean stop: {out:?}"
@@ -591,7 +666,7 @@ mod tests {
             vec![text_block("intro\n```rust\nfn main() {}\n```")],
             StopReason::Stop,
         );
-        let settled = joined(&assistant_lines(&final_msg, false, 40));
+        let settled = joined(&assistant_lines(&final_msg, false, 40, &pal()));
         assert_eq!(
             settled.matches('┌').count(),
             1,

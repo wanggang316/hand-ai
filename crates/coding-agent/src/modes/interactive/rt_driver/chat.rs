@@ -26,15 +26,16 @@
 //! `None` here — the driver commits the *final* snapshot on `MessageEnd`, which
 //! is the M1 live-block commit semantics (one commit, no duplication, no jump).
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Line;
 
 use super::messages;
 use crate::modes::interactive::event_dispatch::ChatUpdate;
+use crate::modes::interactive::theme::ThemePalette;
 
 /// Context the rich message renderers need: the pane width markdown bodies wrap
-/// to, and the global thinking-collapse flag (Ctrl+T) applied to every assistant
-/// message.
+/// to, the global thinking-collapse flag (Ctrl+T) applied to every assistant
+/// message, and the active theme palette that colours the message surfaces.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderContext {
     /// The render width in columns — markdown bodies and the user bubble wrap /
@@ -43,27 +44,33 @@ pub struct RenderContext {
     /// Whether thinking blocks render collapsed (the static label) rather than
     /// their full dim-italic body. Flipped globally by Ctrl+T.
     pub hide_thinking: bool,
+    /// The active theme palette: the user-bubble tint, thinking-text and
+    /// error/status colours resolve from it so a custom theme colours the chat
+    /// (VAL-COMPAT-004). Defaults to the historical palette.
+    pub palette: ThemePalette,
 }
 
 impl RenderContext {
-    /// A context for `width` columns with thinking expanded.
+    /// A context for `width` columns with thinking expanded and the default
+    /// (historical) palette.
     #[must_use]
     pub fn new(width: u16) -> Self {
         Self {
             width,
             hide_thinking: false,
+            palette: ThemePalette::default(),
         }
     }
 }
 
 /// Style for status / notice lines (compaction, `/help`, watchdog banner).
-fn status_style() -> Style {
-    Style::default().fg(Color::Yellow)
+fn status_style(palette: &ThemePalette) -> Style {
+    Style::default().fg(palette.warning)
 }
 
 /// Style for error banners.
-fn error_style() -> Style {
-    Style::default().fg(Color::Red)
+fn error_style(palette: &ThemePalette) -> Style {
+    Style::default().fg(palette.error)
 }
 
 /// Render one [`ChatUpdate`] into the scrollback lines it commits, or `None` when
@@ -75,12 +82,16 @@ fn error_style() -> Style {
 /// flat text.
 #[must_use]
 pub fn render_update(update: &ChatUpdate, ctx: RenderContext) -> Option<Vec<Line<'static>>> {
+    let palette = &ctx.palette;
     match update {
-        ChatUpdate::AppendUser { text } => Some(messages::user_bubble_lines(text, ctx.width)),
+        ChatUpdate::AppendUser { text } => {
+            Some(messages::user_bubble_lines(text, ctx.width, palette))
+        }
         ChatUpdate::AppendAssistant { message } => Some(messages::assistant_lines(
             message,
             ctx.hide_thinking,
             ctx.width,
+            palette,
         )),
         // Streaming deltas render in the active-area preview, not scrollback; the
         // final snapshot commits on MessageEnd through AppendAssistant.
@@ -91,18 +102,25 @@ pub fn render_update(update: &ChatUpdate, ctx: RenderContext) -> Option<Vec<Line
             is_error,
             exit_code,
             ..
-        } => Some(tool_end_lines(result_text, *is_error, *exit_code)),
+        } => Some(tool_end_lines(result_text, *is_error, *exit_code, palette)),
         // Tool start / update stream into a live component in a later feature; the
         // driver shows only the finalized result via ToolEnd.
         ChatUpdate::ToolStart { .. } | ChatUpdate::ToolUpdate { .. } => None,
-        ChatUpdate::AppendStatus { text } => Some(status_lines(text)),
-        ChatUpdate::ThemeChanged { theme } => Some(status_lines(&format!("[theme: {theme}]"))),
+        ChatUpdate::AppendStatus { text } => Some(status_lines(text, palette)),
+        ChatUpdate::ThemeChanged { theme } => {
+            Some(status_lines(&format!("[theme: {theme}]"), palette))
+        }
     }
 }
 
 /// A finalized tool result: a dim body plus an error/exit-code tag so the driver
 /// shows a tool ran and how it ended.
-fn tool_end_lines(result_text: &str, is_error: bool, exit_code: Option<i32>) -> Vec<Line<'static>> {
+fn tool_end_lines(
+    result_text: &str,
+    is_error: bool,
+    exit_code: Option<i32>,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let tag = match (is_error, exit_code) {
         (true, Some(code)) => format!("[tool error, exit {code}]"),
         (true, None) => "[tool error]".to_string(),
@@ -110,9 +128,9 @@ fn tool_end_lines(result_text: &str, is_error: bool, exit_code: Option<i32>) -> 
         (false, None) => "[tool ok]".to_string(),
     };
     let style = if is_error {
-        error_style()
+        error_style(palette)
     } else {
-        status_style()
+        status_style(palette)
     };
     let mut lines = vec![Line::from(tag).style(style)];
     lines.extend(plain_lines(result_text));
@@ -126,27 +144,29 @@ fn plain_lines(text: &str) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Status / notice lines, styled yellow.
-fn status_lines(text: &str) -> Vec<Line<'static>> {
+/// Status / notice lines, styled with the palette's warning colour.
+fn status_lines(text: &str, palette: &ThemePalette) -> Vec<Line<'static>> {
     text.split('\n')
-        .map(|line| Line::from(line.to_string()).style(status_style()))
+        .map(|line| Line::from(line.to_string()).style(status_style(palette)))
         .collect()
 }
 
-/// Public entry to the yellow status-line rendering, for a caller (the Ctrl+T
-/// toggle) that commits a status line directly without going through a
-/// [`ChatUpdate`].
+/// Public entry to the status-line rendering, for a caller (the Ctrl+T toggle,
+/// startup notices) that commits a status line directly without going through a
+/// [`ChatUpdate`]. Uses the default (historical yellow) palette — these
+/// secondary notices are not on the themed chat path.
 #[must_use]
 pub fn status_lines_for(text: &str) -> Vec<Line<'static>> {
-    status_lines(text)
+    status_lines(text, &ThemePalette::default())
 }
 
-/// An error banner, styled red, for the driver's error path (the red-banner
-/// route the legacy `push_error` took, kept distinct from dim status lines).
+/// An error banner, styled with the palette's error colour, for the driver's
+/// error path (the red-banner route the legacy `push_error` took, kept distinct
+/// from dim status lines). Uses the default (historical red) palette.
 #[must_use]
 pub fn error_lines(text: &str) -> Vec<Line<'static>> {
     text.split('\n')
-        .map(|line| Line::from(line.to_string()).style(error_style()))
+        .map(|line| Line::from(line.to_string()).style(error_style(&ThemePalette::default())))
         .collect()
 }
 

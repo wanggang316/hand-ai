@@ -27,7 +27,7 @@ use ratatui::text::Line;
 
 use model::AssistantMessage;
 
-use crate::modes::interactive::theme::Theme;
+use crate::modes::interactive::theme::{Theme, ThemePalette};
 
 use super::footer::{FooterViewModel, TokenUsageSummary};
 use super::summary::CollapsibleSummary;
@@ -198,6 +198,15 @@ impl DriverState {
     #[must_use]
     pub fn theme(&self) -> Option<&Arc<Theme>> {
         self.theme.as_ref()
+    }
+
+    /// The render-ready colour palette derived from the active theme. A custom
+    /// theme colours the UI through this; with no theme seeded (test
+    /// constructors) or a built-in theme active, it is the historical default
+    /// palette, so the default look is unchanged (VAL-COMPAT-004).
+    #[must_use]
+    pub fn palette(&self) -> ThemePalette {
+        ThemePalette::from_optional(self.theme.as_deref())
     }
 
     /// Queue a finalized block for a single scrollback commit. Empty blocks are

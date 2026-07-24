@@ -31,17 +31,13 @@
 //!   (the box needs the paired `ToolExecutionStart`/`End` events, which a stored
 //!   result does not carry).
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use model::{Message, ToolResultContent, UserContent, UserContentBlock};
 
 use super::messages::{assistant_lines, user_bubble_lines};
-
-/// Dim foreground for a replayed tool-result line — the rt-native equivalent of
-/// the legacy `DIM_FG`, so a resumed `[tool_name]` row recedes below the
-/// user/assistant messages the way it did in the legacy driver.
-const TOOL_DIM: Color = Color::DarkGray;
+use crate::modes::interactive::theme::ThemePalette;
 
 /// Render a resumed session's `messages` into ordered scrollback blocks, closed
 /// by a `[resumed: <label>]` marker.
@@ -50,14 +46,17 @@ const TOOL_DIM: Color = Color::DarkGray;
 /// single `insert_before`, so the replayed transcript lands in message order with
 /// the marker last. `width` wraps the message bodies; `hide_thinking` honours the
 /// global Ctrl+T collapse so a resume respects the persisted (or default) thinking
-/// visibility. An empty transcript still emits the marker block, so a resumed but
-/// empty session shows the boundary line rather than nothing.
+/// visibility. `palette` colours the replayed bubbles / bodies and the dim
+/// tool-result rows from the active theme (the default palette keeps the
+/// historical dim-gray look). An empty transcript still emits the marker block,
+/// so a resumed but empty session shows the boundary line rather than nothing.
 #[must_use]
 pub fn replay_blocks(
     messages: &[Message],
     label: &str,
     hide_thinking: bool,
     width: u16,
+    palette: &ThemePalette,
 ) -> Vec<Vec<Line<'static>>> {
     let mut blocks: Vec<Vec<Line<'static>>> = Vec::new();
 
@@ -65,10 +64,10 @@ pub fn replay_blocks(
         match message {
             Message::User(user) => {
                 let text = user_message_text(&user.content);
-                blocks.push(user_bubble_lines(&text, width));
+                blocks.push(user_bubble_lines(&text, width, palette));
             }
             Message::Assistant(assistant) => {
-                let lines = assistant_lines(assistant, hide_thinking, width);
+                let lines = assistant_lines(assistant, hide_thinking, width, palette);
                 // An empty assistant snapshot (e.g. a bare `MessageStart` that was
                 // persisted) renders no lines; skip it so no blank block scrolls.
                 if !lines.is_empty() {
@@ -76,12 +75,16 @@ pub fn replay_blocks(
                 }
             }
             Message::ToolResult(result) => {
-                blocks.push(vec![tool_result_line(&result.tool_name, &result.content)]);
+                blocks.push(vec![tool_result_line(
+                    &result.tool_name,
+                    &result.content,
+                    palette,
+                )]);
             }
         }
     }
 
-    blocks.push(vec![resumed_marker(label)]);
+    blocks.push(vec![resumed_marker(label, palette)]);
     blocks
 }
 
@@ -107,7 +110,11 @@ fn user_message_text(content: &UserContent) -> String {
 /// joins the result's text blocks with newlines collapsed to spaces so the row
 /// stays a compact one-liner (image blocks are dropped — a resumed result shows
 /// its text, not graphics bytes).
-fn tool_result_line(tool_name: &str, content: &[ToolResultContent]) -> Line<'static> {
+fn tool_result_line(
+    tool_name: &str,
+    content: &[ToolResultContent],
+    palette: &ThemePalette,
+) -> Line<'static> {
     let body: String = content
         .iter()
         .filter_map(|c| match c {
@@ -122,15 +129,17 @@ fn tool_result_line(tool_name: &str, content: &[ToolResultContent]) -> Line<'sta
     } else {
         format!("[{tool_name}] {body}")
     };
-    Line::from(Span::styled(text, Style::default().fg(TOOL_DIM)))
+    Line::from(Span::styled(text, Style::default().fg(palette.dim)))
 }
 
 /// The `[resumed: <label>]` marker line closing a replay. Dim so it reads as a
 /// boundary annotation rather than transcript content.
-fn resumed_marker(label: &str) -> Line<'static> {
+fn resumed_marker(label: &str, palette: &ThemePalette) -> Line<'static> {
     Line::from(Span::styled(
         format!("[resumed: {label}]"),
-        Style::default().fg(TOOL_DIM).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(palette.dim)
+            .add_modifier(Modifier::ITALIC),
     ))
 }
 
@@ -142,6 +151,13 @@ mod tests {
         Api, AssistantContentBlock, AssistantMessage, Provider, StopReason, TextContent,
         ToolResultMessage, Usage, UserMessage,
     };
+    use ratatui::style::Color;
+
+    /// The default palette — the historical dim-gray look — so the existing
+    /// assertions keep pinning the same colours.
+    fn pal() -> ThemePalette {
+        ThemePalette::default()
+    }
 
     /// The plain concatenated text of a line.
     fn text_of(line: &Line<'_>) -> String {
@@ -202,7 +218,7 @@ mod tests {
             user("second prompt"),
             Message::Assistant(assistant("second answer", StopReason::Stop)),
         ];
-        let blocks = replay_blocks(&messages, "my-session", false, 60);
+        let blocks = replay_blocks(&messages, "my-session", false, 60, &pal());
         let out = joined(&blocks);
 
         // Each fragment appears, and in transcript order.
@@ -219,7 +235,7 @@ mod tests {
 
     #[test]
     fn empty_transcript_still_emits_the_resumed_marker() {
-        let blocks = replay_blocks(&[], "empty-session", false, 60);
+        let blocks = replay_blocks(&[], "empty-session", false, 60, &pal());
         assert_eq!(blocks.len(), 1, "only the marker block");
         assert!(joined(&blocks).contains("[resumed: empty-session]"));
     }
@@ -229,7 +245,7 @@ mod tests {
     #[test]
     fn tool_result_renders_a_single_dimmed_bracketed_line() {
         let messages = vec![tool_result("read", "file contents here")];
-        let blocks = replay_blocks(&messages, "s", false, 60);
+        let blocks = replay_blocks(&messages, "s", false, 60, &pal());
         // The tool result is one block, one line.
         let tool_block = &blocks[0];
         assert_eq!(tool_block.len(), 1, "tool result is a single line");
@@ -237,7 +253,7 @@ mod tests {
         assert_eq!(text_of(line), "[read] file contents here");
         // It is dimmed (DarkGray fg).
         assert!(
-            line.spans.iter().all(|s| s.style.fg == Some(TOOL_DIM)),
+            line.spans.iter().all(|s| s.style.fg == Some(pal().dim)),
             "a replayed tool result must be dimmed: {line:?}"
         );
     }
@@ -245,7 +261,7 @@ mod tests {
     #[test]
     fn tool_result_collapses_newlines_to_stay_a_one_liner() {
         let messages = vec![tool_result("bash", "line one\nline two")];
-        let blocks = replay_blocks(&messages, "s", false, 60);
+        let blocks = replay_blocks(&messages, "s", false, 60, &pal());
         assert_eq!(
             text_of(&blocks[0][0]),
             "[bash] line one line two",
@@ -264,7 +280,7 @@ mod tests {
             is_error: false,
             timestamp: 0,
         })];
-        let blocks = replay_blocks(&messages, "s", false, 60);
+        let blocks = replay_blocks(&messages, "s", false, 60, &pal());
         assert_eq!(text_of(&blocks[0][0]), "[noop]");
     }
 
@@ -277,7 +293,7 @@ mod tests {
         // replayed, so a resumed error-ended session shows it.
         let mut errored = assistant("partial before failure", StopReason::Error);
         errored.error_message = Some("rate limit exceeded".to_string());
-        let blocks = replay_blocks(&[Message::Assistant(errored)], "err", false, 60);
+        let blocks = replay_blocks(&[Message::Assistant(errored)], "err", false, 60, &pal());
         let out = joined(&blocks);
         assert!(
             out.contains("Error: rate limit exceeded"),
@@ -301,7 +317,7 @@ mod tests {
     #[test]
     fn replaying_an_aborted_assistant_shows_the_operation_aborted_footnote() {
         let aborted = assistant("cut short", StopReason::Aborted);
-        let blocks = replay_blocks(&[Message::Assistant(aborted)], "s", false, 60);
+        let blocks = replay_blocks(&[Message::Assistant(aborted)], "s", false, 60, &pal());
         assert!(joined(&blocks).contains("Operation aborted"));
     }
 
@@ -309,7 +325,7 @@ mod tests {
 
     #[test]
     fn user_message_replays_as_a_tinted_bubble() {
-        let blocks = replay_blocks(&[user("hi there")], "s", false, 60);
+        let blocks = replay_blocks(&[user("hi there")], "s", false, 60, &pal());
         assert!(joined(&blocks).contains("hi there"));
         // The bubble tints its rows (the user-bubble contract).
         assert!(
@@ -332,7 +348,7 @@ mod tests {
             }),
             UserContentBlock::Text(TextContent::new("line b")),
         ]));
-        let blocks = replay_blocks(&[msg], "s", false, 60);
+        let blocks = replay_blocks(&[msg], "s", false, 60, &pal());
         let out = joined(&blocks);
         assert!(out.contains("line a"), "{out}");
         assert!(out.contains("line b"), "{out}");
@@ -346,7 +362,7 @@ mod tests {
             AssistantContentBlock::Thinking(model::types::ThinkingContent::new("secret reasoning")),
         );
         // hide_thinking = true → the body is replaced by the static label.
-        let blocks = replay_blocks(&[Message::Assistant(msg)], "s", true, 60);
+        let blocks = replay_blocks(&[Message::Assistant(msg)], "s", true, 60, &pal());
         let out = joined(&blocks);
         assert!(out.contains("Thinking..."), "collapsed label: {out}");
         assert!(

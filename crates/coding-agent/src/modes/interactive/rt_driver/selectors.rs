@@ -905,7 +905,8 @@ fn replay_into_scrollback(
     let mut guard = lock_state(state);
     let width = guard.size.cols;
     let hide_thinking = guard.hide_thinking;
-    let blocks = replay_blocks(&messages, &label, hide_thinking, width);
+    let palette = guard.palette();
+    let blocks = replay_blocks(&messages, &label, hide_thinking, width, &palette);
     for block in blocks {
         guard.queue_commit(block);
     }

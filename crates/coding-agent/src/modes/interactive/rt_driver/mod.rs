@@ -146,7 +146,8 @@ fn queue_startup_replay(session: &AgentSession, state: &Arc<Mutex<DriverState>>)
     let mut guard = lock_state(state);
     let width = guard.size.cols;
     let hide_thinking = guard.hide_thinking;
-    for block in self::replay::replay_blocks(messages, &label, hide_thinking, width) {
+    let palette = guard.palette();
+    for block in self::replay::replay_blocks(messages, &label, hide_thinking, width, &palette) {
         guard.queue_commit(block);
     }
     for message in messages {
@@ -1859,11 +1860,10 @@ fn finalize_assistant(
         // turn runner rebuilds the footer from this accumulator at the turn
         // boundary.
         guard.accumulate_usage(&assistant.usage);
-        let ctx = chat::RenderContext {
-            width: guard.size.cols,
-            hide_thinking: guard.hide_thinking,
-        };
-        let lines = messages::assistant_lines(assistant, ctx.hide_thinking, ctx.width);
+        let width = guard.size.cols;
+        let hide_thinking = guard.hide_thinking;
+        let palette = guard.palette();
+        let lines = messages::assistant_lines(assistant, hide_thinking, width, &palette);
         guard.remember_assistant(assistant.clone());
         lines
     };
@@ -1956,13 +1956,14 @@ fn assistant_stream_text(message: &model::AssistantMessage) -> String {
 }
 
 /// Build the [`chat::RenderContext`] from the current driver state — the render
-/// width and the global thinking-collapse flag — for the arms that render rich
-/// message bodies.
+/// width, the global thinking-collapse flag, and the active theme palette — for
+/// the arms that render rich message bodies.
 fn render_context(state: &Arc<Mutex<DriverState>>) -> chat::RenderContext {
     let guard = lock_state(state);
     chat::RenderContext {
         width: guard.size.cols,
         hide_thinking: guard.hide_thinking,
+        palette: guard.palette(),
     }
 }
 
@@ -1980,10 +1981,11 @@ fn toggle_thinking_globally(state: &Arc<Mutex<DriverState>>, requester: &FrameRe
         let mut guard = lock_state(state);
         let hidden = guard.toggle_thinking();
         let width = guard.size.cols;
+        let palette = guard.palette();
         let blocks: Vec<Vec<Line<'static>>> = guard
             .assistant_history
             .iter()
-            .map(|msg| messages::assistant_lines(msg, hidden, width))
+            .map(|msg| messages::assistant_lines(msg, hidden, width, &palette))
             .filter(|lines| !lines.is_empty())
             .collect();
         (blocks, thinking_status_line(hidden))
