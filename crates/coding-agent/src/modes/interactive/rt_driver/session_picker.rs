@@ -32,6 +32,7 @@ use tokio::sync::mpsc;
 
 use crate::core::session_manager::SessionInfo;
 
+use super::keys::NavKeys;
 use super::overlay::{DoneSignal, SelectorController};
 
 /// The most rows of the session list shown at once; the window scrolls to keep the
@@ -65,15 +66,30 @@ pub struct SessionPicker {
     tx: mpsc::UnboundedSender<SessionOutcome>,
     /// Raised on the terminal key (Enter/Esc) so the overlay runtime unmounts this.
     done: DoneSignal,
+    /// The resolved navigation keys, snapshotted from the live app-layer table when
+    /// the picker mounted (VAL-OVERLAY-021).
+    nav: NavKeys,
 }
 
 impl SessionPicker {
-    /// Build a picker over `sessions` (rendered in the given order).
+    /// Build a picker over `sessions` (rendered in the given order) with the
+    /// default navigation keys.
     #[must_use]
     pub fn new(
         sessions: Vec<SessionInfo>,
         tx: mpsc::UnboundedSender<SessionOutcome>,
         done: DoneSignal,
+    ) -> Self {
+        Self::with_nav(sessions, tx, done, NavKeys::default())
+    }
+
+    /// Build a picker with the given resolved navigation keys.
+    #[must_use]
+    pub fn with_nav(
+        sessions: Vec<SessionInfo>,
+        tx: mpsc::UnboundedSender<SessionOutcome>,
+        done: DoneSignal,
+        nav: NavKeys,
     ) -> Self {
         Self {
             sessions,
@@ -81,6 +97,7 @@ impl SessionPicker {
             title: "Resume session".to_string(),
             tx,
             done,
+            nav,
         }
     }
 
@@ -180,7 +197,7 @@ impl SessionPicker {
 
         lines.push(Line::from(String::new()));
         lines.push(Line::from(Span::styled(
-            "↑/↓ navigate   Enter open   Esc cancel".to_string(),
+            self.nav.hint_line("open", "cancel"),
             muted,
         )));
 
@@ -230,32 +247,29 @@ impl SelectorController for SessionPicker {
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
-        match key.key_id.as_deref() {
-            Some("up") => {
-                self.move_up();
-                HandleOutcome::Consumed
-            }
-            Some("down") => {
-                self.move_down();
-                HandleOutcome::Consumed
-            }
-            Some("enter") => {
-                // Enter on an empty list is inert: nothing to resume, so the picker
-                // stays open and the done flag is not raised (VAL-CHAT-032).
-                if self.confirm() {
-                    self.done.store(true, Ordering::SeqCst);
-                }
-                HandleOutcome::Consumed
-            }
-            Some("escape") => {
-                self.cancel();
+        // Navigation resolves against the snapshotted app-layer keys, so a user
+        // remap drives the picker (VAL-OVERLAY-021).
+        let Some(id) = key.key_id.as_deref() else {
+            // A modal selector owns even a bare-modifier key so it never reaches the
+            // editor beneath (VAL-OVERLAY-005).
+            return HandleOutcome::Consumed;
+        };
+        if self.nav.is_up(id) {
+            self.move_up();
+        } else if self.nav.is_down(id) {
+            self.move_down();
+        } else if self.nav.is_confirm(id) {
+            // Enter on an empty list is inert: nothing to resume, so the picker
+            // stays open and the done flag is not raised (VAL-CHAT-032).
+            if self.confirm() {
                 self.done.store(true, Ordering::SeqCst);
-                HandleOutcome::Consumed
             }
-            // A modal selector owns every key: even one it does not act on is
-            // consumed so it never reaches the editor beneath (VAL-OVERLAY-005).
-            _ => HandleOutcome::Consumed,
+        } else if self.nav.is_cancel(id) {
+            self.cancel();
+            self.done.store(true, Ordering::SeqCst);
         }
+        // A modal selector owns every key (VAL-OVERLAY-005).
+        HandleOutcome::Consumed
     }
 }
 

@@ -361,10 +361,7 @@ pub enum Diagnostic {
     },
     /// One chord bound to multiple same-scope actions — the chord is disabled
     /// for all of them (neither wins).
-    Conflict {
-        chord: String,
-        actions: Vec<String>,
-    },
+    Conflict { chord: String, actions: Vec<String> },
 }
 
 impl Diagnostic {
@@ -526,13 +523,21 @@ impl KeyBindings {
         self.by_action.get(&action)
     }
 
-    /// The canonical `key_id` string bound to `action`, if any.
+    /// The canonical `key_id` string *live* for `action`, if any.
     ///
-    /// This is what the rt driver matches an incoming key's id against; see
-    /// [`KeyChord::to_key_id`].
+    /// This is what the rt driver matches an incoming key's id against (see
+    /// [`KeyChord::to_key_id`]). Returns `None` when the action is unbound **or**
+    /// when its chord conflicts with another same-scope action (and was therefore
+    /// dropped from the reverse index) — a disabled chord must not silently fire
+    /// the action (VAL-COMPAT-003), so the driver falls back to the built-in id.
     #[must_use]
     pub fn key_id_for(&self, action: Action) -> Option<String> {
-        self.by_action.get(&action).map(KeyChord::to_key_id)
+        let chord = self.by_action.get(&action)?;
+        if self.resolve_chord_in(action.scope(), chord) == Some(action) {
+            Some(chord.to_key_id())
+        } else {
+            None
+        }
     }
 
     /// Reverse-resolve a chord to its action *within `scope`*, if bound.
@@ -1105,7 +1110,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = write_yaml(&dir, "kb.yaml", "copy-last-message: alt+c\n");
         let kb = KeyBindings::load(Some(&path), None).unwrap();
-        assert_eq!(kb.key_id_for(Action::CopyLastMessage).as_deref(), Some("alt+c"));
+        assert_eq!(
+            kb.key_id_for(Action::CopyLastMessage).as_deref(),
+            Some("alt+c")
+        );
     }
 
     #[test]
@@ -1159,7 +1167,10 @@ mod tests {
             "{:?}",
             kb.diagnostics()
         );
-        assert_eq!(kb.resolve(Action::Submit), Some(&KeyChord::plain(Key::Enter)));
+        assert_eq!(
+            kb.resolve(Action::Submit),
+            Some(&KeyChord::plain(Key::Enter))
+        );
     }
 
     #[test]

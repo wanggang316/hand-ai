@@ -65,6 +65,7 @@ pub mod clipboard;
 pub mod external_editor;
 pub mod footer;
 pub mod input;
+pub mod keys;
 pub mod login;
 pub mod login_dialog;
 pub mod login_provider_picker;
@@ -101,9 +102,11 @@ use tokio::sync::mpsc;
 
 use crate::core::agent_session::{AgentSession, AgentSessionEvent};
 use crate::core::error::CodingAgentError;
+use crate::core::keybindings::{Action, Diagnostic, KeyBindings};
 
 use self::chrome::{ChangelogStartupAction, ProgressState, PromptMark};
 use self::footer::build_footer_view;
+use self::keys::{SharedKeybindings, new_shared_keybindings, resolved_key_id};
 use self::overlay::{DoneSignal, SharedOverlay, new_done_signal, new_shared_overlay};
 use self::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_footer, lock_state};
 use self::watchdog::Watchdog;
@@ -261,6 +264,15 @@ impl InteractiveMode {
             lock_state(&state).queue_commit(block);
         }
 
+        // Load the user keybindings (app-layer): project `<cwd>/.hand` > global
+        // `~/.hand` > defaults. A *semantically* bad entry (unknown action,
+        // malformed chord, conflicting chord) never crashes the app — it lands a
+        // yellow diagnostic in the startup transcript and the affected action keeps
+        // its default; only an unreadable / syntactically broken file falls back to
+        // defaults with a single notice (VAL-COMPAT-003). The live table is shared so
+        // `/reload` can swap it and the selectors can snapshot it.
+        let keybindings = load_keybindings(&cwd, &state);
+
         // Startup replay: when the session was resumed (`--continue` / `--resume` /
         // `--fork` seed the transcript from disk), render its stored user /
         // assistant / tool-result messages into scrollback *in order*, closed by the
@@ -344,6 +356,7 @@ impl InteractiveMode {
             submits: submit_rx,
             overlays: overlays.clone(),
             overlay_done: overlay_done.clone(),
+            keybindings: keybindings.clone(),
         }));
 
         // Kick off first-run onboarding: queue a `/login` submit the turn runner
@@ -383,6 +396,7 @@ impl InteractiveMode {
             cancel: &cancel,
             overlays: &overlays,
             guard: &guard,
+            keybindings: &keybindings,
         })
         .await;
 
@@ -435,6 +449,10 @@ struct RunInputArgs<'a> {
     /// suspend/resume seam (VAL-EDITOR-020). The guard's own teardown contract is
     /// untouched — `restore` / `Drop` / the panic hook still fire exactly once.
     guard: &'a SessionGuard,
+    /// The live app-layer keybindings. The global-toggle dispatch below resolves
+    /// each action's chord through this table (so a user remap fires verbatim),
+    /// and `/reload` swaps the table behind it so new chords take effect live.
+    keybindings: &'a SharedKeybindings,
 }
 
 /// The interactive input loop.
@@ -453,6 +471,7 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
         cancel,
         overlays,
         guard,
+        keybindings,
     } = args;
 
     loop {
@@ -480,53 +499,68 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                     requester.request_frame();
                     continue;
                 }
-                // Ctrl+G opens the current buffer in the external editor
-                // (`$VISUAL` over `$EDITOR`). The driver yields the terminal to the
-                // editor (suspend raw mode), spawns it, then re-enters and repaints
-                // — a save-and-exit replaces the buffer, a non-zero exit leaves it
-                // and lands an error status line (VAL-EDITOR-020). Handled here
-                // (where the guard + editor + requester are in scope) before the
-                // editor so Ctrl+G never inserts a literal char.
-                if key.key_id.as_deref() == Some("ctrl+g") {
+                // The global toggles are resolved through the live app-layer table
+                // so a user remap fires verbatim and `/reload` re-points them
+                // (VAL-COMPAT-001 / VAL-COMPAT-020). The default chords match the
+                // built-in ids the rt pump tags, so an unconfigured session behaves
+                // exactly as before. `key_id` of `None` (a bare modifier / lock key)
+                // matches nothing.
+                let Some(pressed) = key.key_id.as_deref() else {
+                    // No canonical id — route to the editor (it may still act on the
+                    // raw event) and skip the id-driven toggles.
+                    if handle_key(&key, editor, state, submit_tx) == KeyOutcome::Quit {
+                        break;
+                    }
+                    requester.request_frame();
+                    continue;
+                };
+                // Open the current buffer in the external editor (`$VISUAL` over
+                // `$EDITOR`). The driver yields the terminal to the editor (suspend
+                // raw mode), spawns it, then re-enters and repaints — a save-and-exit
+                // replaces the buffer, a non-zero exit leaves it and lands an error
+                // status line (VAL-EDITOR-020). Handled here (where the guard +
+                // editor + requester are in scope) before the editor so the chord
+                // never inserts a literal char.
+                if pressed == resolved_key_id(keybindings, Action::OpenExternalEditor, "ctrl+g") {
                     open_external_editor(editor, state, requester, guard).await;
                     requester.request_frame();
                     continue;
                 }
-                // Ctrl+V pastes the system clipboard into the editor: text lands
-                // verbatim, an image is written to a temp PNG and its absolute path
-                // inserted, and an empty/unavailable clipboard lands a red status
-                // line and leaves the editor unchanged (VAL-IMG-010). Handled here
-                // so the driver — not the terminal's own paste — owns the read.
-                if key.key_id.as_deref() == Some("ctrl+v") {
+                // Paste the system clipboard into the editor: text lands verbatim, an
+                // image is written to a temp PNG and its absolute path inserted, and
+                // an empty/unavailable clipboard lands a red status line and leaves
+                // the editor unchanged (VAL-IMG-010). Handled here so the driver — not
+                // the terminal's own paste — owns the read.
+                if pressed == resolved_key_id(keybindings, Action::PasteClipboard, "ctrl+v") {
                     paste_clipboard(editor, state, requester);
                     requester.request_frame();
                     continue;
                 }
-                // Ctrl+T is a global toggle: it flips thinking-visibility across
-                // every assistant message in the transcript, so it is handled here
-                // (where the requester is in scope) rather than in the editor path.
-                if key.key_id.as_deref() == Some("ctrl+t") {
+                // A global toggle: flip thinking-visibility across every assistant
+                // message in the transcript, so it is handled here (where the
+                // requester is in scope) rather than in the editor path.
+                if pressed == resolved_key_id(keybindings, Action::ToggleThinking, "ctrl+t") {
                     toggle_thinking_globally(state, requester);
                     requester.request_frame();
                     continue;
                 }
-                // Ctrl+R expands / collapses the most-recent collapsible summary
-                // (compaction / branch / skill). Scrollback is immutable, so the
-                // toggle re-commits the summary in its new state — this is what
-                // makes the collapsed `(ctrl+r to expand)` hint *real*. Handled
-                // here because the summaries live on the shared state, not the
-                // session. A silent no-op when no summary has landed.
-                if key.key_id.as_deref() == Some("ctrl+r") {
+                // Expand / collapse the most-recent collapsible summary (compaction /
+                // branch / skill). Scrollback is immutable, so the toggle re-commits
+                // the summary in its new state — this is what makes the collapsed
+                // `(ctrl+r to expand)` hint *real*. Handled here because the summaries
+                // live on the shared state, not the session. A silent no-op when no
+                // summary has landed.
+                if pressed == resolved_key_id(keybindings, Action::ToggleLastSummary, "ctrl+r") {
                     toggle_last_summary(state, requester);
                     requester.request_frame();
                     continue;
                 }
-                // Ctrl+X copies the last assistant message — the keyboard twin of
-                // `/copy`. The copy needs the session (which the turn runner owns),
-                // so it is forwarded as a `/copy` submit through the same channel
-                // the turn runner drains; both paths hit the identical handler, so
-                // Ctrl+X and `/copy` behave the same (VAL-CHAT-023).
-                if key.key_id.as_deref() == Some("ctrl+x") {
+                // Copy the last assistant message — the keyboard twin of `/copy`. The
+                // copy needs the session (which the turn runner owns), so it is
+                // forwarded as a `/copy` submit through the same channel the turn
+                // runner drains; both paths hit the identical handler, so this chord
+                // and `/copy` behave the same (VAL-CHAT-023).
+                if pressed == resolved_key_id(keybindings, Action::CopyLastMessage, "ctrl+x") {
                     let _ = submit_tx.send("/copy".to_string());
                     requester.request_frame();
                     continue;
@@ -537,15 +571,15 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                 // not the OS — decides its meaning: cancel a turn, or a visible
                 // no-op. It must never exit (only Ctrl+D quits), so the terminal is
                 // never left raw.
-                match key.key_id.as_deref() {
-                    Some("escape") => {
+                match pressed {
+                    "escape" => {
                         // Cancel a streaming turn; otherwise fall through so the
                         // editor can use Esc (autocomplete dismiss, etc).
                         if try_cancel_turn(state, requester, cancel, CancelSource::Esc) {
                             continue;
                         }
                     }
-                    Some("ctrl+c") => {
+                    "ctrl+c" => {
                         // Cancel a streaming turn; idle it is a visible no-op — the
                         // app stays alive, no cancel line lands, the terminal is
                         // untouched. Either way, consume it (never reaches the
@@ -846,6 +880,10 @@ struct TurnRunner {
     /// The shared "top overlay finished" flag handed to a mounted selector so the
     /// input loop can close the dialog once the selector emits its outcome.
     overlay_done: DoneSignal,
+    /// The live app-layer keybindings. `/reload` swaps the table behind this
+    /// handle (new chords fire, old ones stop), and each registry-backed selector
+    /// snapshots its navigation keys from it when it mounts (VAL-OVERLAY-021).
+    keybindings: SharedKeybindings,
 }
 
 /// The turn-runner task: drains submitted user turns and runs each to
@@ -973,6 +1011,25 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     // `/model` / `/resume` / the config + picker families.
     if let Some(action) = slash::login_action(text) {
         run_login(runner, action).await;
+        return;
+    }
+
+    // `/hotkeys` renders the keyboard-shortcut listing against the *live* app-layer
+    // table (so user overrides surface, VAL-COMPAT-006). Intercepted here because
+    // the runner holds the live shared bindings; the sync-dispatch fallback only
+    // knows the defaults.
+    if slash::is_hotkeys(text) {
+        run_hotkeys(runner);
+        return;
+    }
+
+    // `/reload` reloads the app-layer keybindings from disk and swaps the live
+    // shared table (new chords fire, old ones stop) with a status line reporting
+    // the outcome (VAL-COMPAT-020). Intercepted here because it mutates the shared
+    // keybindings the input loop and selectors read; run *before* the sync dispatch
+    // so it does not fall through to the generic `[reload …]` stub.
+    if slash::is_reload(text) {
+        run_reload(runner);
         return;
     }
 
@@ -1171,6 +1228,71 @@ fn run_slash_command(runner: &mut TurnRunner, text: &str) {
     );
 }
 
+/// `/hotkeys` — render the keyboard-shortcut listing from the *live* app-layer
+/// table, so a user override (or a `/reload`ed change) surfaces immediately and the
+/// listing has no dead entries (VAL-COMPAT-006). Committed as a labelled box, the
+/// same chrome the other info commands use.
+fn run_hotkeys(runner: &mut TurnRunner) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    let text = {
+        let guard = runner.keybindings.lock().unwrap_or_else(|e| e.into_inner());
+        crate::modes::interactive::slash_commands::SlashCommandTable::hotkeys_text(&guard)
+    };
+    commit(
+        &runner.state,
+        &runner.requester,
+        chat::status_lines_for(&text),
+    );
+}
+
+/// `/reload` — re-read the app-layer keybindings from disk and swap the live
+/// shared table so the new chords take effect immediately (the old ones stop),
+/// then land a status line reporting the outcome (VAL-COMPAT-020).
+///
+/// The scope of *this* feature is the keybindings reload. On success it swaps the
+/// shared table in place (the input loop and future selector opens read the new
+/// bindings on their next key) and reports how many overrides + diagnostics the
+/// reload produced. A load error (unreadable / syntactically broken file) leaves
+/// the previous table in place and lands a yellow notice — a bad edit never wipes
+/// working bindings. Any load diagnostics are surfaced as yellow lines, same as at
+/// startup.
+fn run_reload(runner: &mut TurnRunner) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match KeyBindings::load_for_cwd(&runner.cwd) {
+        Ok(reloaded) => {
+            let diagnostics: Vec<Vec<Line<'static>>> = diagnostic_lines(reloaded.diagnostics());
+            let diag_count = reloaded.diagnostics().len();
+            // Swap the live table so the input loop's next resolve and the next
+            // selector open both see the reloaded bindings.
+            {
+                let mut guard = runner.keybindings.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = reloaded;
+            }
+            for line in diagnostics {
+                commit(&runner.state, &runner.requester, line);
+            }
+            let summary = if diag_count == 0 {
+                "[reloaded keybindings]".to_string()
+            } else {
+                format!("[reloaded keybindings — {diag_count} diagnostic(s) above]")
+            };
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::status_lines_for(&summary),
+            );
+        }
+        Err(e) => {
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::status_lines_for(&format!("[reload failed: {e} — kept current keybindings]")),
+            );
+        }
+    }
+}
+
 /// Execute `/compact` against the live session (VAL-CHAT-027).
 ///
 /// `/compact` is the one slash command that awaits, so it runs here on the turn
@@ -1261,6 +1383,7 @@ async fn run_model_selector(runner: &mut TurnRunner) {
 /// the dialog closes.
 async fn run_resume_picker(runner: &mut TurnRunner) {
     set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    let nav = keys::NavKeys::snapshot(&runner.keybindings);
     selectors::open_resume_picker(
         &mut runner.session,
         &runner.cwd,
@@ -1269,6 +1392,7 @@ async fn run_resume_picker(runner: &mut TurnRunner) {
         &runner.state,
         &runner.footer,
         &runner.requester,
+        nav,
     )
     .await;
 }
@@ -1341,6 +1465,7 @@ async fn run_config_selector(
         },
         // `/settings` opens the editable settings dialog (M2 SettingsList).
         SlashCommandAction::OpenSettingsSelector => {
+            let nav = keys::NavKeys::snapshot(&runner.keybindings);
             selectors::open_settings_selector(
                 &mut runner.session,
                 &runner.cwd,
@@ -1349,6 +1474,7 @@ async fn run_config_selector(
                 &runner.state,
                 &runner.footer,
                 &runner.requester,
+                nav,
             )
             .await;
         }
@@ -1397,6 +1523,7 @@ async fn run_picker_selector(
     match action {
         // `/tree` (bare or `<subdir>`) opens the directory picker.
         SlashCommandAction::OpenTreeSelector(arg) => {
+            let nav = keys::NavKeys::snapshot(&runner.keybindings);
             selectors::open_tree_selector(
                 &runner.cwd,
                 arg.as_deref(),
@@ -1404,6 +1531,7 @@ async fn run_picker_selector(
                 &runner.overlay_done,
                 &runner.state,
                 &runner.requester,
+                nav,
             )
             .await;
         }
@@ -1420,6 +1548,7 @@ async fn run_picker_selector(
         }
         // `/fork` (bare or `<entry-id>`) opens the fork-from-message picker.
         SlashCommandAction::Fork(_) => {
+            let nav = keys::NavKeys::snapshot(&runner.keybindings);
             selectors::open_fork_selector(
                 &mut runner.session,
                 &runner.cwd,
@@ -1428,6 +1557,7 @@ async fn run_picker_selector(
                 &runner.state,
                 &runner.footer,
                 &runner.requester,
+                nav,
             )
             .await;
         }
@@ -1913,6 +2043,39 @@ fn user_text(message: &model::UserMessage) -> Option<String> {
             .join("\n"),
     };
     (!text.trim().is_empty()).then_some(text)
+}
+
+/// Load the app-layer keybindings for `cwd` and queue any load diagnostics as
+/// yellow startup lines, returning the live shared table.
+///
+/// Resolution order is project (`<cwd>/.hand/keybindings.yaml`) > global
+/// (`$HAND_HOME`/`~`/.hand/keybindings.yaml) > defaults. A *semantically* bad
+/// entry (unknown action / malformed chord / conflicting chord) is skipped with a
+/// visible yellow diagnostic and the affected action keeps its default; a
+/// syntactically broken or unreadable file (the `Err` path) falls back to defaults
+/// with a single notice — the app always starts (VAL-COMPAT-003).
+fn load_keybindings(cwd: &std::path::Path, state: &Arc<Mutex<DriverState>>) -> SharedKeybindings {
+    let bindings = match KeyBindings::load_for_cwd(cwd) {
+        Ok(kb) => kb,
+        Err(e) => {
+            lock_state(state).queue_commit(chat::status_lines_for(&format!(
+                "keybindings: could not load config ({e}) — using defaults"
+            )));
+            KeyBindings::defaults()
+        }
+    };
+    for line in diagnostic_lines(bindings.diagnostics()) {
+        lock_state(state).queue_commit(line);
+    }
+    new_shared_keybindings(bindings)
+}
+
+/// Render each keybindings [`Diagnostic`] as a one-line yellow status block.
+fn diagnostic_lines(diagnostics: &[Diagnostic]) -> Vec<Vec<Line<'static>>> {
+    diagnostics
+        .iter()
+        .map(|d| chat::status_lines_for(&d.message()))
+        .collect()
 }
 
 /// Assemble the startup-chrome scrollback blocks in order: the welcome header,

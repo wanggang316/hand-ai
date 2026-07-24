@@ -189,6 +189,29 @@ pub fn is_open_resume_picker(line: &str) -> bool {
     ParsedSlashCommand::parse(line).is_some_and(|parsed| parsed.name == "resume")
 }
 
+/// Recognise a `/hotkeys` (or `/keybindings`) submission.
+///
+/// `/hotkeys` is intercepted on the turn runner *before* the sync slash dispatch
+/// so it can be rendered against the *live* app-layer keybindings table (which the
+/// runner holds), surfacing user overrides — the sync-dispatch fallback only knows
+/// the defaults.
+#[must_use]
+pub fn is_hotkeys(line: &str) -> bool {
+    ParsedSlashCommand::parse(line)
+        .is_some_and(|parsed| parsed.name == "hotkeys" || parsed.name == "keybindings")
+}
+
+/// Recognise a `/reload` submission.
+///
+/// `/reload` reloads the app-layer keybindings (and settings) from disk. It is
+/// intercepted on the async turn runner *before* the sync slash dispatch because
+/// it swaps the live shared keybindings table — the same reason the selector
+/// families are intercepted there.
+#[must_use]
+pub fn is_reload(line: &str) -> bool {
+    ParsedSlashCommand::parse(line).is_some_and(|parsed| parsed.name == "reload")
+}
+
 /// Recognise a `/compact` submission and pull its optional steering text.
 ///
 /// Returns `Some(None)` for a bare `/compact`, `Some(Some(steer))` for

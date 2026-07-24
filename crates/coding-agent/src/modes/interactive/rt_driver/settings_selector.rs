@@ -35,6 +35,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
+use super::keys::NavKeys;
 use super::overlay::{DoneSignal, SelectorController};
 
 /// The most rows of the settings body rendered into the scratch buffer at once —
@@ -67,17 +68,35 @@ pub struct SettingsSelector {
     tx: mpsc::UnboundedSender<SettingsOutcome>,
     /// Raised on the terminal key (first change / Esc) so the runtime unmounts this.
     done: DoneSignal,
+    /// The resolved cancel key, snapshotted from the live app-layer table. Only
+    /// the *cancel* key is app-layer here: up / down / confirm are owned by the
+    /// embedded M2 [`SettingsList`] (crates/tui, read-only), so they keep their
+    /// built-in keys — the app-layer surface the driver owns is the close gesture
+    /// (VAL-OVERLAY-021).
+    nav: NavKeys,
 }
 
 impl SettingsSelector {
-    /// Build a selector over `entries`. The caller (the driver) builds the entries
-    /// from the merged effective settings, with the three default-* rows first so a
-    /// project override is visible (VAL-OVERLAY-036).
+    /// Build a selector over `entries` with the default navigation keys.
     #[must_use]
     pub fn new(
         entries: Vec<SettingEntry>,
         tx: mpsc::UnboundedSender<SettingsOutcome>,
         done: DoneSignal,
+    ) -> Self {
+        Self::with_nav(entries, tx, done, NavKeys::default())
+    }
+
+    /// Build a selector over `entries` with the given resolved navigation keys.
+    /// The caller (the driver) builds the entries from the merged effective
+    /// settings, with the three default-* rows first so a project override is
+    /// visible (VAL-OVERLAY-036).
+    #[must_use]
+    pub fn with_nav(
+        entries: Vec<SettingEntry>,
+        tx: mpsc::UnboundedSender<SettingsOutcome>,
+        done: DoneSignal,
+        nav: NavKeys,
     ) -> Self {
         let snapshot = snapshot_of(&entries);
         let list = SettingsList::new(entries)
@@ -89,6 +108,7 @@ impl SettingsSelector {
             snapshot,
             tx,
             done,
+            nav,
         }
     }
 
@@ -136,10 +156,16 @@ impl SelectorController for SettingsSelector {
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
-        // Esc while *not* inline-editing closes the whole dialog with the specific
-        // `[/settings closed]` outcome (VAL-OVERLAY-004 exception). While editing, an
-        // Esc only discards the edit buffer, so let it fall through to the list.
-        if key.key_id.as_deref() == Some("escape") && !self.list.is_editing() {
+        // The cancel key (default Esc, remappable via `select-cancel`) while *not*
+        // inline-editing closes the whole dialog with the specific `[/settings
+        // closed]` outcome (VAL-OVERLAY-004 exception). While editing, an Esc only
+        // discards the edit buffer, so let it fall through to the list.
+        if key
+            .key_id
+            .as_deref()
+            .is_some_and(|id| self.nav.is_cancel(id))
+            && !self.list.is_editing()
+        {
             let _ = self.tx.send(SettingsOutcome::Closed);
             self.done.store(true, Ordering::SeqCst);
             return HandleOutcome::Consumed;

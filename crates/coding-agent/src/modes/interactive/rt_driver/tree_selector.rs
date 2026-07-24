@@ -33,6 +33,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
+use super::keys::NavKeys;
 use super::overlay::{DoneSignal, SelectorController};
 
 /// The most rows shown at once; the window scrolls to keep the selection visible.
@@ -158,10 +159,14 @@ pub struct TreeSelector {
     tx: mpsc::UnboundedSender<TreeOutcome>,
     /// Raised on the terminal key (Enter/Esc) so the overlay runtime unmounts this.
     done: DoneSignal,
+    /// The resolved navigation keys, snapshotted from the live app-layer table
+    /// when the selector mounted, so a user remap drives navigation + the hint
+    /// (VAL-OVERLAY-021).
+    nav: NavKeys,
 }
 
 impl TreeSelector {
-    /// Build a selector over `rows` under `title`.
+    /// Build a selector over `rows` under `title` with the default navigation keys.
     #[must_use]
     pub fn new(
         rows: Vec<TreeRow>,
@@ -169,12 +174,25 @@ impl TreeSelector {
         tx: mpsc::UnboundedSender<TreeOutcome>,
         done: DoneSignal,
     ) -> Self {
+        Self::with_nav(rows, title, tx, done, NavKeys::default())
+    }
+
+    /// Build a selector with the given resolved navigation keys.
+    #[must_use]
+    pub fn with_nav(
+        rows: Vec<TreeRow>,
+        title: impl Into<String>,
+        tx: mpsc::UnboundedSender<TreeOutcome>,
+        done: DoneSignal,
+        nav: NavKeys,
+    ) -> Self {
         Self {
             rows,
             title: title.into(),
             selected: 0,
             tx,
             done,
+            nav,
         }
     }
 
@@ -295,7 +313,7 @@ impl TreeSelector {
 
         lines.push(Line::from(String::new()));
         lines.push(Line::from(Span::styled(
-            "↑/↓ navigate   Enter pick   Esc cancel".to_string(),
+            self.nav.hint_line("pick", "cancel"),
             muted,
         )));
         lines
@@ -308,32 +326,29 @@ impl SelectorController for TreeSelector {
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
-        match key.key_id.as_deref() {
-            Some("up") => {
-                self.move_up();
-                HandleOutcome::Consumed
-            }
-            Some("down") => {
-                self.move_down();
-                HandleOutcome::Consumed
-            }
-            Some("enter") => {
-                // Enter on an empty tree is inert: nothing to pick, so the picker
-                // stays open and the done flag is not raised.
-                if self.confirm() {
-                    self.done.store(true, Ordering::SeqCst);
-                }
-                HandleOutcome::Consumed
-            }
-            Some("escape") => {
-                self.cancel();
-                self.done.store(true, Ordering::SeqCst);
-                HandleOutcome::Consumed
-            }
+        // Navigation is resolved against the snapshotted app-layer keys so a user
+        // remap (e.g. `select-down: j`) drives the picker (VAL-OVERLAY-021).
+        let Some(id) = key.key_id.as_deref() else {
             // A modal selector owns every key so none reaches the editor beneath
-            // (VAL-OVERLAY-005), even keys it does not act on.
-            _ => HandleOutcome::Consumed,
+            // (VAL-OVERLAY-005), even a bare-modifier key it does not act on.
+            return HandleOutcome::Consumed;
+        };
+        if self.nav.is_up(id) {
+            self.move_up();
+        } else if self.nav.is_down(id) {
+            self.move_down();
+        } else if self.nav.is_confirm(id) {
+            // Enter on an empty tree is inert: nothing to pick, so the picker
+            // stays open and the done flag is not raised.
+            if self.confirm() {
+                self.done.store(true, Ordering::SeqCst);
+            }
+        } else if self.nav.is_cancel(id) {
+            self.cancel();
+            self.done.store(true, Ordering::SeqCst);
         }
+        // Every key is consumed regardless (VAL-OVERLAY-005).
+        HandleOutcome::Consumed
     }
 }
 
@@ -591,5 +606,58 @@ mod tests {
         assert!(is_noise_dir("node_modules"));
         assert!(!is_noise_dir("src"));
         assert!(!is_noise_dir(".github"));
+    }
+
+    // --- custom navigation keys drive the registry-backed selector -------------
+
+    #[test]
+    fn custom_nav_keys_drive_navigation_and_the_hint() {
+        // VAL-OVERLAY-021: a user rebinds select-down to `j`; the picker navigates
+        // on `j` (not `down`) and the hint reflects it.
+        let rows = vec![
+            TreeRow {
+                rel_path: "a".into(),
+                label: "a".into(),
+                depth: 0,
+                is_dir: false,
+            },
+            TreeRow {
+                rel_path: "b".into(),
+                label: "b".into(),
+                depth: 0,
+                is_dir: false,
+            },
+        ];
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let done = super::super::overlay::new_done_signal();
+        let nav = NavKeys {
+            down: "j".to_string(),
+            ..NavKeys::default()
+        };
+        let mut sel = TreeSelector::with_nav(rows, "tree", tx, done.clone(), nav);
+
+        // The default `down` no longer moves; `j` does.
+        sel.handle_key(&key_id("down"));
+        assert_eq!(sel.selected_index(), 0, "default down is inert under remap");
+        sel.handle_key(&key_id("j"));
+        assert_eq!(sel.selected_index(), 1, "custom down key navigates");
+        sel.handle_key(&key_id("enter"));
+        assert!(done.load(Ordering::SeqCst));
+        assert_eq!(drain(&mut rx), Some(TreeOutcome::Selected("b".into())));
+
+        // The hint tells the truth about the custom key.
+        assert!(
+            body_text(&TreeSelector::with_nav(
+                vec![],
+                "t",
+                mpsc::unbounded_channel().0,
+                super::super::overlay::new_done_signal(),
+                NavKeys {
+                    down: "j".to_string(),
+                    ..NavKeys::default()
+                },
+            ))
+            .contains("↑/j"),
+        );
     }
 }

@@ -35,6 +35,7 @@ use std::sync::atomic::Ordering;
 
 use super::chat;
 use super::footer::{TokenUsageSummary, build_footer_view};
+use super::keys::NavKeys;
 use super::model_selector::{ModelOutcome, ModelSelector};
 use super::overlay::{self, DoneSignal, SelectorController, SharedOverlay};
 use super::replay::replay_blocks;
@@ -277,12 +278,13 @@ pub async fn open_settings_selector(
     state: &Arc<Mutex<DriverState>>,
     footer: &SharedFooter,
     requester: &FrameRequester,
+    nav: NavKeys,
 ) {
     let entries = build_settings_entries(session.settings().current());
 
     let (tx, mut rx) = mpsc::unbounded_channel::<SettingsOutcome>();
     done.store(false, Ordering::SeqCst);
-    let selector = SettingsSelector::new(entries, tx, done.clone());
+    let selector = SettingsSelector::with_nav(entries, tx, done.clone(), nav);
     let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(selector));
 
     overlay::mount(overlay, requester, controller, done.clone());
@@ -568,6 +570,7 @@ pub async fn open_tree_selector(
     done: &DoneSignal,
     state: &Arc<Mutex<DriverState>>,
     requester: &FrameRequester,
+    nav: NavKeys,
 ) {
     // Resolve the scan root: a bare `/tree` scans cwd; `/tree <subdir>` scans that
     // subtree (joined onto cwd, so a relative arg stays inside the project).
@@ -591,7 +594,7 @@ pub async fn open_tree_selector(
 
     let (tx, mut rx) = mpsc::unbounded_channel::<TreeOutcome>();
     done.store(false, Ordering::SeqCst);
-    let selector = TreeSelector::new(rows, title, tx, done.clone());
+    let selector = TreeSelector::with_nav(rows, title, tx, done.clone(), nav);
     let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(selector));
 
     overlay::mount(overlay, requester, controller, done.clone());
@@ -686,6 +689,7 @@ pub async fn open_fork_selector(
     state: &Arc<Mutex<DriverState>>,
     footer: &SharedFooter,
     requester: &FrameRequester,
+    nav: NavKeys,
 ) {
     let entries = session.fork_messages();
 
@@ -705,7 +709,7 @@ pub async fn open_fork_selector(
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ForkOutcome>();
     done.store(false, Ordering::SeqCst);
-    let selector = UserMessageSelector::new(messages, tx, done.clone());
+    let selector = UserMessageSelector::with_nav(messages, tx, done.clone(), nav);
     let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(selector));
 
     overlay::mount(overlay, requester, controller, done.clone());
@@ -805,6 +809,7 @@ pub async fn open_resume_picker(
     state: &Arc<Mutex<DriverState>>,
     footer: &SharedFooter,
     requester: &FrameRequester,
+    nav: NavKeys,
 ) {
     let sessions = list_resumable_sessions(session, cwd);
 
@@ -812,7 +817,7 @@ pub async fn open_resume_picker(
     // Reset the shared done flag before mounting (the runtime's "overlay finished"
     // latch, cleared per open so a prior selector's raise never leaks in).
     done.store(false, Ordering::SeqCst);
-    let picker = SessionPicker::new(sessions, tx, done.clone());
+    let picker = SessionPicker::with_nav(sessions, tx, done.clone(), nav);
     let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(picker));
 
     overlay::mount(overlay, requester, controller, done.clone());

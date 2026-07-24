@@ -30,6 +30,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
+use super::keys::NavKeys;
 use super::overlay::{DoneSignal, SelectorController};
 
 /// The most rows shown at once; the window scrolls to keep the selection visible.
@@ -67,16 +68,31 @@ pub struct UserMessageSelector {
     tx: mpsc::UnboundedSender<ForkOutcome>,
     /// Raised on the terminal key (Enter/Esc) so the overlay runtime unmounts this.
     done: DoneSignal,
+    /// The resolved navigation keys, snapshotted from the live app-layer table
+    /// when the selector mounted (VAL-OVERLAY-021).
+    nav: NavKeys,
 }
 
 impl UserMessageSelector {
-    /// Build a selector over `messages`, pre-selecting the **most recent** (last)
-    /// entry so a bare Enter forks at the latest turn (VAL-OVERLAY-023).
+    /// Build a selector over `messages` with the default navigation keys,
+    /// pre-selecting the **most recent** (last) entry so a bare Enter forks at the
+    /// latest turn (VAL-OVERLAY-023).
     #[must_use]
     pub fn new(
         messages: Vec<ForkItem>,
         tx: mpsc::UnboundedSender<ForkOutcome>,
         done: DoneSignal,
+    ) -> Self {
+        Self::with_nav(messages, tx, done, NavKeys::default())
+    }
+
+    /// Build a selector with the given resolved navigation keys.
+    #[must_use]
+    pub fn with_nav(
+        messages: Vec<ForkItem>,
+        tx: mpsc::UnboundedSender<ForkOutcome>,
+        done: DoneSignal,
+        nav: NavKeys,
     ) -> Self {
         let selected = messages.len().saturating_sub(1);
         Self {
@@ -84,6 +100,7 @@ impl UserMessageSelector {
             selected,
             tx,
             done,
+            nav,
         }
     }
 
@@ -208,7 +225,7 @@ impl UserMessageSelector {
 
         lines.push(Line::from(String::new()));
         lines.push(Line::from(Span::styled(
-            "↑/↓ navigate   Enter fork   Esc cancel".to_string(),
+            self.nav.hint_line("fork", "cancel"),
             muted,
         )));
         lines
@@ -228,30 +245,26 @@ impl SelectorController for UserMessageSelector {
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
-        match key.key_id.as_deref() {
-            Some("up") => {
-                self.move_up();
-                HandleOutcome::Consumed
-            }
-            Some("down") => {
-                self.move_down();
-                HandleOutcome::Consumed
-            }
-            Some("enter") => {
-                if self.confirm() {
-                    self.done.store(true, Ordering::SeqCst);
-                }
-                HandleOutcome::Consumed
-            }
-            Some("escape") => {
-                self.cancel();
+        // Navigation resolves against the snapshotted app-layer keys, so a user
+        // remap drives the picker (VAL-OVERLAY-021).
+        let Some(id) = key.key_id.as_deref() else {
+            // A modal selector owns even a bare-modifier key (VAL-OVERLAY-005).
+            return HandleOutcome::Consumed;
+        };
+        if self.nav.is_up(id) {
+            self.move_up();
+        } else if self.nav.is_down(id) {
+            self.move_down();
+        } else if self.nav.is_confirm(id) {
+            if self.confirm() {
                 self.done.store(true, Ordering::SeqCst);
-                HandleOutcome::Consumed
             }
-            // A modal selector owns every key so none reaches the editor beneath
-            // (VAL-OVERLAY-005), even keys it does not act on.
-            _ => HandleOutcome::Consumed,
+        } else if self.nav.is_cancel(id) {
+            self.cancel();
+            self.done.store(true, Ordering::SeqCst);
         }
+        // A modal selector owns every key (VAL-OVERLAY-005).
+        HandleOutcome::Consumed
     }
 }
 
