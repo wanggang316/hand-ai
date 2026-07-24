@@ -427,7 +427,15 @@ mod tests {
             command: "ls".to_string(),
             exclude_from_context: true,
         };
-        let lines = bash_block_lines(&parsed, "", BashOutcome::Exited(Some(0)), None, false, 40, &pal());
+        let lines = bash_block_lines(
+            &parsed,
+            "",
+            BashOutcome::Exited(Some(0)),
+            None,
+            false,
+            40,
+            &pal(),
+        );
         // The top rule and header take the dim accent; none carry the cyan
         // bash accent.
         let rule = &lines[0];

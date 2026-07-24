@@ -361,7 +361,9 @@ mod tests {
         assert!(!lines.is_empty());
         for line in &lines {
             assert!(
-                line.spans.iter().all(|s| s.style.bg == Some(pal().user_message_bg)),
+                line.spans
+                    .iter()
+                    .all(|s| s.style.bg == Some(pal().user_message_bg)),
                 "every span in a bubble row must be tinted: {line:?}"
             );
         }
@@ -405,9 +407,10 @@ mod tests {
         // recolours the bubble — the render function consumes the theme.
         let default_lines = user_bubble_lines("hi", 20, &ThemePalette::default());
         assert!(
-            default_lines
+            default_lines.iter().all(|l| l
+                .spans
                 .iter()
-                .all(|l| l.spans.iter().all(|s| s.style.bg == Some(Color::Rgb(52, 53, 65)))),
+                .all(|s| s.style.bg == Some(Color::Rgb(52, 53, 65)))),
             "default palette keeps the #343541 tint"
         );
 
@@ -418,9 +421,10 @@ mod tests {
         };
         let themed = user_bubble_lines("hi", 20, &neon);
         assert!(
-            themed
+            themed.iter().all(|l| l
+                .spans
                 .iter()
-                .all(|l| l.spans.iter().all(|s| s.style.bg == Some(Color::Rgb(0x12, 0x00, 0x1f)))),
+                .all(|s| s.style.bg == Some(Color::Rgb(0x12, 0x00, 0x1f)))),
             "custom palette recolours the bubble tint"
         );
         let body = themed

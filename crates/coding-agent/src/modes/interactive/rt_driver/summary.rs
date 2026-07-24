@@ -391,7 +391,12 @@ mod tests {
             "custom label colour applied"
         );
         // The default palette keeps the historical tint.
-        assert!(all_tinted(&labelled_box_lines("skills", "body", 60, &pal())));
+        assert!(all_tinted(&labelled_box_lines(
+            "skills",
+            "body",
+            60,
+            &pal()
+        )));
     }
 
     #[test]

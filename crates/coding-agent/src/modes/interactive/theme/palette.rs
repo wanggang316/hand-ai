@@ -246,8 +246,12 @@ mod tests {
         let json: ThemeJson = serde_json::from_str(&content).unwrap();
         // A custom theme carries its source path — the signal `from_theme` uses
         // to distinguish "custom, colour the UI" from "built-in, keep default".
-        Theme::from_json_with_path(&json, Some(ColorMode::Truecolor), Some(path.display().to_string()))
-            .unwrap()
+        Theme::from_json_with_path(
+            &json,
+            Some(ColorMode::Truecolor),
+            Some(path.display().to_string()),
+        )
+        .unwrap()
     }
 
     #[test]

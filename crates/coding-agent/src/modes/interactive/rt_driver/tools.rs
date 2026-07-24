@@ -413,7 +413,14 @@ mod tests {
 
     #[test]
     fn pending_state_uses_pending_tint() {
-        let lines = tool_box_lines("read", &json!({"path": "/x"}), "", ToolState::Pending, 60, &pal());
+        let lines = tool_box_lines(
+            "read",
+            &json!({"path": "/x"}),
+            "",
+            ToolState::Pending,
+            60,
+            &pal(),
+        );
         assert!(
             has_bg(&lines, PENDING_BG),
             "pending tint: {:?}",

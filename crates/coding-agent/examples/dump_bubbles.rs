@@ -17,6 +17,7 @@ use std::fmt::Write as _;
 
 use hand_coding_agent::modes::interactive::rt_driver::messages::user_bubble_lines;
 use hand_coding_agent::modes::interactive::rt_driver::tools::{ToolState, tool_box_lines};
+use hand_coding_agent::modes::interactive::theme::ThemePalette;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use serde_json::json;
@@ -146,10 +147,11 @@ fn dump(label: &str, lines: &[Line<'_>]) {
 
 fn main() {
     let width = 80u16;
+    let palette = ThemePalette::default();
 
-    dump("user 你好", &user_bubble_lines("你好", width));
-    dump("user hi @ width 80", &user_bubble_lines("hi", 80));
-    dump("user hi @ width 30", &user_bubble_lines("hi", 30));
+    dump("user 你好", &user_bubble_lines("你好", width, &palette));
+    dump("user hi @ width 80", &user_bubble_lines("hi", 80, &palette));
+    dump("user hi @ width 30", &user_bubble_lines("hi", 30, &palette));
 
     let error = tool_box_lines(
         "ls",
@@ -157,6 +159,7 @@ fn main() {
         "Invalid arguments for tool 'ls': \"\" is not of type \"object\" (path: )",
         ToolState::from_result(Some(true)),
         width,
+        &palette,
     );
     dump("tool ls (error)", &error);
 }
