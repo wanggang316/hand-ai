@@ -35,3 +35,6 @@ Cargo.lock
 
 # FDD runtime state (per-plan working state, never committed)
 .harness-runtime/
+
+# User-test run artifacts (transient output dir from docs/user-test-patterns.md)
+tests/runs/

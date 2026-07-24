@@ -54,6 +54,17 @@ pub fn is_remote_session() -> bool {
 pub fn read_clipboard_text() -> Option<String> {
     let mut cb = arboard::Clipboard::new().ok()?;
     let text = cb.get_text().ok()?;
+    fold_clipboard_text(text)
+}
+
+/// Fold a raw clipboard string into the "nothing to paste" convention: an
+/// empty string becomes `None` so callers never insert a zero-length paste.
+///
+/// Split out from [`read_clipboard_text`] so this decision is unit-tested
+/// without touching the real system clipboard — the native read on macOS
+/// (`NSPasteboard` via `arboard`) is not safe to hit from arbitrary parallel
+/// test threads.
+fn fold_clipboard_text(text: String) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
@@ -135,31 +146,32 @@ mod tests {
         let _ = is_remote_session();
     }
 
-    /// Round-trip the native clipboard. Gated to macOS — Linux CI rarely
-    /// has a display server, and on Windows the test runner can race
-    /// against other processes that own the clipboard. Run locally with
-    /// `cargo test -p hand-coding-agent --lib clipboard::` to exercise it.
-    #[cfg(target_os = "macos")]
+    // The empty-fold convention that `read_clipboard_text` applies to the
+    // native read. Tested through the pure helper rather than the real
+    // clipboard: hitting `NSPasteboard` (via `arboard`) from arbitrary
+    // parallel test threads crashes the macOS process, and CI has no
+    // pasteboard to read from anyway.
+
     #[test]
-    fn native_round_trip_when_clipboard_available() {
-        if std::env::var_os("CI").is_some() {
-            // CI runners may not provide a clipboard service even on
-            // macOS; skip rather than fail spuriously.
-            return;
-        }
-        let Ok(mut cb) = arboard::Clipboard::new() else {
-            // No clipboard service — skip.
-            return;
-        };
-        let payload = "hand-ai clipboard round-trip test";
-        if cb.set_text(payload.to_string()).is_err() {
-            return;
-        }
-        let got = cb.get_text().expect("get_text after set_text");
-        assert_eq!(got, payload);
-        // Same payload through the public read helper — kept inside this
-        // test so parallel test threads can't race on the shared system
-        // clipboard between set and read.
-        assert_eq!(read_clipboard_text().as_deref(), Some(payload));
+    fn fold_keeps_non_empty_text() {
+        assert_eq!(
+            fold_clipboard_text("hand-ai clipboard payload".to_string()).as_deref(),
+            Some("hand-ai clipboard payload"),
+        );
+    }
+
+    #[test]
+    fn fold_treats_empty_as_nothing_to_paste() {
+        assert_eq!(fold_clipboard_text(String::new()), None);
+    }
+
+    #[test]
+    fn fold_keeps_whitespace_only_text() {
+        // Only a *zero-length* read folds to `None`; a whitespace payload is
+        // a real value the caller may want to insert verbatim.
+        assert_eq!(
+            fold_clipboard_text("   ".to_string()).as_deref(),
+            Some("   ")
+        );
     }
 }
