@@ -36,8 +36,8 @@
 //!   two-line renderer, rebuilt from session state after each turn.
 //! - [`input`] — the editor component wiring (M2 [`Editor`](hand_tui::rt::components::Editor),
 //!   borderless / no-placeholder hand-chat style) and the bottom-area draw.
-//!   *Seam:* slash-command dispatch and `@`-mention autocomplete mount on the
-//!   editor here.
+//!   Slash-command dispatch mounts on this task; `@`-mention path autocomplete is
+//!   installed on the editor from [`mention`] at construction.
 //! - [`chat`] — [`ChatUpdate`](super::event_dispatch::ChatUpdate) → scrollback
 //!   [`Line`]s. *Seam:* the message components (markdown, thinking, bash, tool
 //!   cards) replace the flat text arms here without touching the commit path.
@@ -70,6 +70,7 @@ pub mod keys;
 pub mod login;
 pub mod login_dialog;
 pub mod login_provider_picker;
+pub mod mention;
 pub mod messages;
 pub mod model_selector;
 pub mod oauth_flow;
@@ -249,11 +250,14 @@ impl InteractiveMode {
         // The chat editor: borderless, no placeholder — the hand chat-input style.
         // The driver's own bottom-area geometry supplies the bordered box, so the
         // editor paints text only. History seeds the recall buffer from prior
-        // user turns so Up/Down recall survives a resume.
+        // user turns so Up/Down recall survives a resume. The `@`-mention provider
+        // snapshots the cwd file tree so typing `@<prefix>` opens the path-completion
+        // popup; it answers the `@` trigger only, leaving slash dispatch untouched.
         let editor: SharedEditor = Arc::new(Mutex::new(
             Editor::new()
                 .border(EditorBorder::None)
-                .with_history(recall_history(&session)),
+                .with_history(recall_history(&session))
+                .with_autocomplete_provider(mention::build_mention_provider(&cwd)),
         ));
         // Footer view-model — built from session state so every field (cwd, git
         // branch, model id/provider, thinking level, context %, usage) is visible
@@ -2913,5 +2917,56 @@ mod tests {
         assert_eq!(rx.try_recv().ok(), Some("msg two".to_string()));
         assert!(rx.try_recv().is_err(), "both submits queued, none dropped");
         assert!(lock_state(&state).streaming, "submit marks streaming");
+    }
+
+    /// Installing the `@`-mention provider and typing `@<prefix>` opens the
+    /// path-completion popup with the matching cwd file, while a bare `/` context
+    /// leaves it closed — slash dispatch is unaffected (VAL-CROSS-001 seam).
+    #[test]
+    fn mention_provider_opens_the_popup_on_an_at_prefix_only() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+
+        let mut editor = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(mention::build_mention_provider(dir.path()));
+
+        // A char key routed through the editor mutates the buffer and refreshes the
+        // popup off the new caret context, exactly as the live input pump does.
+        let char_key = |c: char| RtKey {
+            key_id: Some(c.to_string()),
+            raw: KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        };
+        for c in "@READM".chars() {
+            editor.handle_key(&char_key(c));
+        }
+
+        assert!(
+            editor.autocomplete_visible(),
+            "@READM opens the completion popup"
+        );
+        let labels: Vec<&str> = editor
+            .autocomplete()
+            .items()
+            .iter()
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(
+            labels.contains(&"README.md"),
+            "popup surfaces README.md: {labels:?}"
+        );
+
+        // A `/` at line start is a slash context, not `@`; the mention provider
+        // does not claim it, so the popup stays closed and slash dispatch is free.
+        let mut slash_editor = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(mention::build_mention_provider(dir.path()));
+        slash_editor.handle_key(&char_key('/'));
+        assert!(
+            !slash_editor.autocomplete_visible(),
+            "the `@`-mention provider is inert on the `/` trigger"
+        );
     }
 }
