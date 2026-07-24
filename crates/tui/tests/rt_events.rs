@@ -2,21 +2,18 @@
 //!
 //! Covers, per the feature's testable assertions:
 //! - `should_dispatch`: release/repeat filtering (VAL-CORE-014)
-//! - `key_event_to_key_id`: canonical KeyId strings matched *against legacy*
-//!   `parse_key_id` for a representative key set (VAL-CORE-031)
+//! - `key_event_to_key_id`: canonical KeyId strings for a representative key set
+//!   (VAL-CORE-031)
 //! - Esc vs alt-chord disambiguation (VAL-CORE-015, VAL-CORE-030)
 //! - Paste delivered as a single event (VAL-CORE-039)
 //!
-//! The KeyId cases deliberately drive the *legacy* `parse_key_id` from the
-//! equivalent raw bytes and compare its output to `key_event_to_key_id`, so the
-//! canonical modifier order is verified against the source of truth rather than
-//! hard-coded from assumption.
+//! Each KeyId case pins the canonical string a structured crossterm event must
+//! map to, in the canonical modifier order `shift, ctrl, alt, super`.
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MediaKeyCode,
     ModifierKeyCode,
 };
-use hand_tui::keys::parse_key_id;
 use hand_tui::rt::events::{
     RtInputEvent, RtKey, key_event_to_key_id, should_dispatch, translate_event,
 };
@@ -78,71 +75,70 @@ fn translate_filters_release_and_repeat_to_none() {
 }
 
 // =============================================================================
-// key_event_to_key_id — diff against legacy parse_key_id (VAL-CORE-031)
+// key_event_to_key_id — canonical KeyId strings (VAL-CORE-031)
 // =============================================================================
 
-/// Assert our structured mapping produces the same canonical KeyId string the
-/// legacy raw-byte parser produces for the equivalent logical key.
-fn assert_matches_legacy(event: KeyEvent, legacy_raw: &str) {
+/// Assert our structured mapping produces the given canonical KeyId string.
+fn assert_keyid(event: KeyEvent, expected: &str) {
     let ours = key_event_to_key_id(&event);
-    let legacy = parse_key_id(legacy_raw);
     assert_eq!(
-        ours, legacy,
-        "key_event_to_key_id({:?}) = {:?} but legacy parse_key_id({:?}) = {:?}",
-        event, ours, legacy_raw, legacy,
+        ours.as_deref(),
+        Some(expected),
+        "key_event_to_key_id({event:?}) = {ours:?}, expected {expected:?}",
     );
 }
 
 #[test]
-fn keyid_matches_legacy_for_representative_keys() {
-    // Each pair is (structured crossterm event, the raw bytes legacy would see
-    // for the same logical key). At least twelve representative keys.
+fn keyid_canonical_for_representative_keys() {
+    // Each pair is (structured crossterm event, the canonical KeyId string for
+    // the same logical key). At least twelve representative keys, pinned in the
+    // canonical modifier order `shift, ctrl, alt, super`.
 
-    // ctrl+c — raw control byte 0x03.
-    assert_matches_legacy(key(KeyCode::Char('c'), KeyModifiers::CONTROL), "\x03");
+    // ctrl+c.
+    assert_keyid(key(KeyCode::Char('c'), KeyModifiers::CONTROL), "ctrl+c");
 
-    // ctrl+shift+p — kitty CSI-u (112 = 'p', modifier 6 = shift+ctrl).
-    assert_matches_legacy(
+    // shift+ctrl+p.
+    assert_keyid(
         key(
             KeyCode::Char('p'),
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
         ),
-        "\x1b[112;6u",
+        "shift+ctrl+p",
     );
 
-    // escape — lone Esc byte.
-    assert_matches_legacy(key(KeyCode::Esc, KeyModifiers::NONE), "\x1b");
+    // escape.
+    assert_keyid(key(KeyCode::Esc, KeyModifiers::NONE), "escape");
 
-    // enter — CR.
-    assert_matches_legacy(key(KeyCode::Enter, KeyModifiers::NONE), "\r");
+    // enter.
+    assert_keyid(key(KeyCode::Enter, KeyModifiers::NONE), "enter");
 
-    // tab — HT.
-    assert_matches_legacy(key(KeyCode::Tab, KeyModifiers::NONE), "\t");
+    // tab.
+    assert_keyid(key(KeyCode::Tab, KeyModifiers::NONE), "tab");
 
-    // alt+enter — legacy ESC + CR.
-    assert_matches_legacy(key(KeyCode::Enter, KeyModifiers::ALT), "\x1b\r");
+    // alt+enter.
+    assert_keyid(key(KeyCode::Enter, KeyModifiers::ALT), "alt+enter");
 
-    // shift+enter — kitty CSI-u (13 = enter, modifier 2 = shift).
-    assert_matches_legacy(key(KeyCode::Enter, KeyModifiers::SHIFT), "\x1b[13;2u");
+    // shift+enter.
+    assert_keyid(key(KeyCode::Enter, KeyModifiers::SHIFT), "shift+enter");
 
     // arrow keys.
-    assert_matches_legacy(key(KeyCode::Up, KeyModifiers::NONE), "\x1b[A");
-    assert_matches_legacy(key(KeyCode::Down, KeyModifiers::NONE), "\x1b[B");
-    assert_matches_legacy(key(KeyCode::Left, KeyModifiers::NONE), "\x1b[D");
-    assert_matches_legacy(key(KeyCode::Right, KeyModifiers::NONE), "\x1b[C");
+    assert_keyid(key(KeyCode::Up, KeyModifiers::NONE), "up");
+    assert_keyid(key(KeyCode::Down, KeyModifiers::NONE), "down");
+    assert_keyid(key(KeyCode::Left, KeyModifiers::NONE), "left");
+    assert_keyid(key(KeyCode::Right, KeyModifiers::NONE), "right");
 
     // function keys.
-    assert_matches_legacy(key(KeyCode::F(1), KeyModifiers::NONE), "\x1bOP");
-    assert_matches_legacy(key(KeyCode::F(12), KeyModifiers::NONE), "\x1b[24~");
+    assert_keyid(key(KeyCode::F(1), KeyModifiers::NONE), "f1");
+    assert_keyid(key(KeyCode::F(12), KeyModifiers::NONE), "f12");
 
     // space.
-    assert_matches_legacy(key(KeyCode::Char(' '), KeyModifiers::NONE), " ");
+    assert_keyid(key(KeyCode::Char(' '), KeyModifiers::NONE), "space");
 
     // plain lowercase letter.
-    assert_matches_legacy(key(KeyCode::Char('a'), KeyModifiers::NONE), "a");
+    assert_keyid(key(KeyCode::Char('a'), KeyModifiers::NONE), "a");
 
-    // alt+letter — kitty CSI-u (97 = 'a', modifier 3 = alt).
-    assert_matches_legacy(key(KeyCode::Char('a'), KeyModifiers::ALT), "\x1b[97;3u");
+    // alt+letter.
+    assert_keyid(key(KeyCode::Char('a'), KeyModifiers::ALT), "alt+a");
 }
 
 #[test]
@@ -183,7 +179,7 @@ fn keyid_backtab_is_shift_tab_equivalent() {
     let backtab = key(KeyCode::BackTab, KeyModifiers::SHIFT);
     assert_eq!(key_event_to_key_id(&backtab).as_deref(), Some("shift+tab"));
 
-    assert_matches_legacy(key(KeyCode::Tab, KeyModifiers::SHIFT), "\x1b[Z");
+    assert_keyid(key(KeyCode::Tab, KeyModifiers::SHIFT), "shift+tab");
 }
 
 #[test]

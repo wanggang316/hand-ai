@@ -9,10 +9,9 @@
 //!   `Press` is dispatched as an action ([`should_dispatch`]) so a key never
 //!   double-fires.
 //! - **Canonical key ids.** [`key_event_to_key_id`] maps a structured
-//!   crossterm [`KeyEvent`] to the same canonical `KeyId` string the legacy
-//!   [`crate::keys::parse_key_id`] produces from raw bytes (modifier order
-//!   `shift, ctrl, alt, super`), so the existing keybindings registry keeps
-//!   resolving chords like `"ctrl+shift+p"` unchanged.
+//!   crossterm [`KeyEvent`] to a canonical [`KeyId`] string (modifier order
+//!   `shift, ctrl, alt, super`), so the keybindings registry keeps resolving
+//!   chords like `"ctrl+shift+p"` unchanged.
 //! - **Esc / alt-chord disambiguation.** crossterm already delivers the Alt
 //!   modifier as a flag, so a lone Esc maps to `"escape"` immediately and an
 //!   `Alt+<key>` chord maps to a single `"alt+<key>"` event — the legacy 50 ms
@@ -81,9 +80,8 @@ pub const fn should_dispatch(kind: KeyEventKind) -> bool {
 
 /// Map a structured crossterm [`KeyEvent`] to the canonical [`KeyId`] string.
 ///
-/// Produces the *same* string the legacy [`crate::keys::parse_key_id`] emits
-/// from raw bytes for the equivalent logical key, including modifier order
-/// (`shift, ctrl, alt, super`). Returns `None` for keys with no canonical
+/// Emits the canonical id for the logical key, with modifiers in the order
+/// `shift, ctrl, alt, super`. Returns `None` for keys with no canonical
 /// representation (bare modifiers, lock/media keys, `KeyCode::Null`).
 ///
 /// Alt is a plain modifier here: `Alt+a` is a single `"alt+a"` id, never an

@@ -1,7 +1,5 @@
 //! Integration tests for the terminal-image utilities.
 
-mod common;
-
 use hand_tui::{
     ImageDimensions, allocate_image_id, calculate_image_rows, delete_all_kitty_images,
     delete_kitty_image, get_gif_dimensions, get_image_dimensions, get_jpeg_dimensions,

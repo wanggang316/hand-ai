@@ -14,15 +14,11 @@
 //!
 //! Full startup chrome, the rich message components (markdown / thinking / bash /
 //! tool cards), the complete slash-command table, the selectors, and the full
-//! footer view-model land in later M3 features on the seams the [`rt_driver`]
-//! documents. The legacy `hand_tui::Tui` components (`components/`, `theme/`) are
-//! retained as migration source for those features.
+//! footer view-model all live in the [`rt_driver`] on the ratatui runtime.
 
-pub mod components;
 pub mod event_dispatch;
 pub mod rt_driver;
 pub mod slash_commands;
-pub mod syntax_highlight;
 pub mod theme;
 
 pub use rt_driver::watchdog::{DEFAULT_TURN_TIMEOUT, Watchdog};

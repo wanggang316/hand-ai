@@ -1,7 +1,5 @@
 //! Integration tests for the fuzzy matcher.
 
-mod common;
-
 use hand_tui::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 
 #[test]

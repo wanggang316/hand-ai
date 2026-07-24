@@ -18,7 +18,6 @@ pub mod modes;
 pub mod prelude;
 pub mod rpc;
 pub mod tools;
-pub mod tui_bridge;
 pub mod utils;
 
 // Convenience re-exports at crate root for non-prelude consumers.
