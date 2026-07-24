@@ -59,16 +59,19 @@ impl OAuthStatus {
 
     /// Append a status line and (implicitly, via the driver's repaint) surface it.
     pub fn push(&self, line: impl Into<String>) {
+        // The status lines are auxiliary cosmetic state (like the keybindings
+        // mutex): recover from a poisoned lock rather than fatally panicking, so
+        // a panic elsewhere doesn't cascade into losing the login progress buffer.
         self.lines
             .lock()
-            .expect("oauth status poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .push(line.into());
     }
 
     /// A snapshot of the current lines.
     #[must_use]
     pub fn snapshot(&self) -> Vec<String> {
-        self.lines.lock().expect("oauth status poisoned").clone()
+        self.lines.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Whether the user asked to cancel (pressed Esc).

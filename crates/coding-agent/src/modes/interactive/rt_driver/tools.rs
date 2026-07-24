@@ -353,7 +353,13 @@ fn parse_diff_line(line: &str) -> Option<ParsedLine> {
             break;
         }
     }
-    if !saw || num_end >= bytes.len() {
+    // At least one digit/space must follow the prefix, and the byte just before
+    // the content (`sep_idx`) must be the separator space. When the content is
+    // empty the loop runs to the end of the line, so `num_end == bytes.len()`
+    // and the separator space is the final byte — a valid empty diff line
+    // (`+ 5 `). A bare prefix with no separator (`saw == false`) or a header /
+    // hunk marker (whose separator byte isn't a space) still returns `None`.
+    if !saw {
         return None;
     }
     let sep_idx = num_end - 1;
@@ -364,7 +370,7 @@ fn parse_diff_line(line: &str) -> Option<ParsedLine> {
     Some(ParsedLine {
         prefix: first,
         line_num: line[1..sep_idx].trim_end_matches(' ').to_string(),
-        content: line[num_end..].to_string(),
+        content: line.get(num_end..).unwrap_or("").to_string(),
     })
 }
 
@@ -686,6 +692,68 @@ mod tests {
         assert!(
             added.spans.iter().all(|s| s.style.bg == Some(SUCCESS_BG)),
             "diff rows keep the box tint: {added:?}"
+        );
+    }
+
+    // --- empty diff lines parse as add/remove, not context ----------------
+
+    #[test]
+    fn parse_diff_line_accepts_empty_added_content() {
+        let parsed = parse_diff_line("+ 5 ").expect("empty added line must parse");
+        assert_eq!(parsed.prefix, '+');
+        // The line-num carries the leading padding space, matching the format
+        // used by non-empty rows (e.g. `+ 3 content`).
+        assert_eq!(parsed.line_num.trim(), "5");
+        assert_eq!(parsed.content, "");
+    }
+
+    #[test]
+    fn parse_diff_line_accepts_empty_removed_content() {
+        let parsed = parse_diff_line("- 5 ").expect("empty removed line must parse");
+        assert_eq!(parsed.prefix, '-');
+        assert_eq!(parsed.line_num.trim(), "5");
+        assert_eq!(parsed.content, "");
+    }
+
+    #[test]
+    fn parse_diff_line_rejects_hunk_marker_and_header() {
+        // A hunk marker and a `diff --git` header are non-diff lines and render
+        // as context (`None`), never as add/remove rows.
+        assert!(parse_diff_line("@@ -1,2 +1,2 @@").is_none());
+        assert!(parse_diff_line("diff --git a/x b/x").is_none());
+        // A bare prefix with no separator space is not a diff line either.
+        assert!(parse_diff_line("+").is_none());
+    }
+
+    #[test]
+    fn empty_added_line_renders_green() {
+        // An added line with empty content (`+ 5 `) must colour with the add
+        // style, not fall through to the dim context tint.
+        let lines = diff_lines("+ 5 ", SUCCESS_BG, &pal());
+        assert!(
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .any(|s| s.style.fg == Some(DIFF_ADDED)),
+            "empty added line must be green: {lines:?}"
+        );
+        assert!(
+            !has_bg(&lines, PENDING_BG),
+            "empty added line must not render as dim context"
+        );
+    }
+
+    #[test]
+    fn empty_removed_line_renders_red() {
+        // A removed line with empty content (`- 5 `) must colour with the remove
+        // style. Pair it with an added line so the intra-line path is skipped.
+        let lines = diff_lines("- 5 \n- 6 \n+ 7 x", SUCCESS_BG, &pal());
+        assert!(
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .any(|s| s.style.fg == Some(DIFF_REMOVED)),
+            "empty removed line must be red: {lines:?}"
         );
     }
 }

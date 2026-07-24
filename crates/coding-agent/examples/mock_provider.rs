@@ -60,7 +60,10 @@
 //!
 //! The server binds `127.0.0.1:<port>` (default `39217`, override with
 //! `MOCK_PROVIDER_PORT`) and prints `mock-provider listening on ...` once
-//! ready, so test harnesses can wait for that line. Timing knobs:
+//! ready, so test harnesses can wait for that line. Set `MOCK_PROVIDER_PORT=0`
+//! to bind an OS-assigned ephemeral port (what the test harness does to avoid
+//! port collisions and TIME_WAIT on repeated runs); the printed ready line then
+//! carries the real bound port, which the harness parses. Timing knobs:
 //! `MOCK_PROVIDER_SLOW_MS` (per-chunk delay for `slow`, default 60) and
 //! `MOCK_PROVIDER_STALL_MS` (withhold duration for `stall`, default 3000).
 
@@ -84,10 +87,19 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("mock-provider failed to bind {addr}: {e}"));
 
+    // Print the address the OS actually bound. With `MOCK_PROVIDER_PORT=0`
+    // (the test path) the kernel assigns an ephemeral port, so the harness must
+    // learn the real port from this line rather than assuming the requested
+    // one; a specific non-zero port (e.g. the documented 39217) round-trips
+    // unchanged.
+    let bound_addr = listener
+        .local_addr()
+        .unwrap_or_else(|e| panic!("mock-provider failed to read local addr: {e}"));
+
     // Emit a ready line on stdout (flushed) so a spawning harness can block
     // until the socket is accepting connections instead of racing a sleep.
     let mut stdout = std::io::stdout();
-    let _ = writeln!(stdout, "mock-provider listening on http://{addr}");
+    let _ = writeln!(stdout, "mock-provider listening on http://{bound_addr}");
     let _ = stdout.flush();
 
     loop {

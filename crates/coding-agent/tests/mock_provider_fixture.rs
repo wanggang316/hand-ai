@@ -4,9 +4,9 @@
 //!
 //! These tests need no API key and make no real network calls. The mock
 //! server is spawned as a subprocess (`cargo run --example mock_provider`)
-//! bound to a per-test high port; each scenario endpoint is curled with
-//! `reqwest` and its SSE shape asserted. The fixtures live at the workspace
-//! root under `tests/fixtures/tui/`.
+//! bound to an OS-assigned ephemeral port (read back from its ready line);
+//! each scenario endpoint is curled with `reqwest` and its SSE shape asserted.
+//! The fixtures live at the workspace root under `tests/fixtures/tui/`.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -46,8 +46,15 @@ impl Drop for MockServer {
     }
 }
 
-/// Start the mock server on `port` and block until it prints its ready line.
-fn start_mock_server(port: u16) -> MockServer {
+/// Start the mock server on an OS-assigned ephemeral port and block until it
+/// prints its ready line, from which the real port is parsed. Binding port 0
+/// avoids collisions and TIME_WAIT on repeated or overlapping runs.
+///
+/// The readiness wait is bounded by a hard wall-clock timeout: the blocking
+/// `read_line` loop runs on a background thread that reports the parsed port (or
+/// a failure) over a channel, so a child that never prints a ready line (a build
+/// error that only writes stderr, say) fails the test instead of hanging CI.
+fn start_mock_server() -> MockServer {
     let mut child = Command::new(env!("CARGO"))
         .args([
             "run",
@@ -57,7 +64,8 @@ fn start_mock_server(port: u16) -> MockServer {
             "-p",
             "hand-coding-agent",
         ])
-        .env("MOCK_PROVIDER_PORT", port.to_string())
+        // Bind an ephemeral port; the real one is read back from the ready line.
+        .env("MOCK_PROVIDER_PORT", "0")
         // Keep the stall short so the CI run of the stall scenario is quick;
         // the watchdog wiring lives in the driver (next feature), not here.
         .env("MOCK_PROVIDER_STALL_MS", "300")
@@ -68,25 +76,54 @@ fn start_mock_server(port: u16) -> MockServer {
         .expect("spawn mock_provider example");
 
     let stdout = child.stdout.take().expect("child stdout");
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    // The example prints "mock-provider listening on ..." once the socket is
-    // accepting. Read lines until we see it (cargo may emit build noise on
-    // stderr, which we inherited, not stdout).
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line).expect("read ready line");
-        if n == 0 {
-            panic!("mock_provider exited before printing ready line");
+
+    // Read the ready line on a background thread and hand back the parsed port
+    // (or an error string) over a channel. `recv_timeout` on the main thread
+    // then enforces a hard ceiling: a silent or failed child fails the test
+    // within the timeout instead of blocking `read_line` forever.
+    let (tx, rx) = std::sync::mpsc::channel::<Result<u16, String>>();
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    let _ = tx.send(Err(
+                        "mock_provider exited before printing ready line".to_string()
+                    ));
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = tx.send(Err(format!("read ready line failed: {e}")));
+                    return;
+                }
+            }
+            // "mock-provider listening on http://127.0.0.1:<port>"
+            if let Some(port) = line
+                .split(':')
+                .next_back()
+                .and_then(|p| p.trim().parse::<u16>().ok())
+                .filter(|_| line.contains("listening on"))
+            {
+                let _ = tx.send(Ok(port));
+                return;
+            }
         }
-        if line.contains("listening on") {
-            break;
+    });
+
+    let port = match rx.recv_timeout(Duration::from_secs(120)) {
+        Ok(Ok(port)) => port,
+        Ok(Err(e)) => {
+            let _ = child.kill();
+            panic!("{e}");
         }
-        if std::time::Instant::now() > deadline {
+        Err(_) => {
+            let _ = child.kill();
             panic!("timed out waiting for mock_provider ready line");
         }
-    }
+    };
 
     MockServer {
         child,
@@ -123,7 +160,7 @@ fn sse_chunks(body: &str) -> Vec<serde_json::Value> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn text_scenario_emits_content_deltas_and_done() {
-    let server = start_mock_server(39301);
+    let server = start_mock_server();
     let body = fetch_scenario(&server.base_url, "text").await;
 
     assert!(body.trim_end().ends_with("[DONE]"), "must end with [DONE]");
@@ -146,7 +183,7 @@ async fn text_scenario_emits_content_deltas_and_done() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn thinking_scenario_emits_reasoning_then_text() {
-    let server = start_mock_server(39302);
+    let server = start_mock_server();
     let body = fetch_scenario(&server.base_url, "thinking").await;
     let chunks = sse_chunks(&body);
 
@@ -165,7 +202,7 @@ async fn thinking_scenario_emits_reasoning_then_text() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn slow_scenario_streams_multiple_deltas() {
-    let server = start_mock_server(39303);
+    let server = start_mock_server();
     let body = fetch_scenario(&server.base_url, "slow").await;
     let chunks = sse_chunks(&body);
     let content_deltas = chunks
@@ -180,7 +217,7 @@ async fn slow_scenario_streams_multiple_deltas() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn stall_scenario_completes_after_a_gap() {
-    let server = start_mock_server(39304);
+    let server = start_mock_server();
     // With MOCK_PROVIDER_STALL_MS=300 the stream completes; the point is that
     // a gap occurs between the first and second content delta. We assert the
     // stream is well-formed and finishes.
@@ -196,7 +233,7 @@ async fn stall_scenario_completes_after_a_gap() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_call_scenario_emits_a_read_call() {
-    let server = start_mock_server(39305);
+    let server = start_mock_server();
     let body = fetch_scenario(&server.base_url, "tool_call").await;
     let chunks = sse_chunks(&body);
 
@@ -222,7 +259,7 @@ async fn tool_call_scenario_emits_a_read_call() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn edit_and_write_tool_scenarios_carry_expected_arguments() {
-    let server = start_mock_server(39306);
+    let server = start_mock_server();
 
     let edit = sse_chunks(&fetch_scenario(&server.base_url, "edit_tool").await);
     let edit_args: String = edit
@@ -242,7 +279,7 @@ async fn edit_and_write_tool_scenarios_carry_expected_arguments() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn image_result_scenario_requests_an_image_read() {
-    let server = start_mock_server(39307);
+    let server = start_mock_server();
     let chunks = sse_chunks(&fetch_scenario(&server.base_url, "image_result").await);
     let args: String = chunks
         .iter()
@@ -250,6 +287,47 @@ async fn image_result_scenario_requests_an_image_read() {
         .collect();
     let parsed: serde_json::Value = serde_json::from_str(&args).unwrap();
     assert_eq!(parsed["path"], "/tmp/mock-image.png");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn error_scenario_emits_partial_text_then_finish_error() {
+    let server = start_mock_server();
+    let chunks = sse_chunks(&fetch_scenario(&server.base_url, "error").await);
+
+    // A partial assistant text delta arrives before the stream errors out.
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(text, "partial before error");
+
+    // The turn ends with a `finish_reason: error` chunk rather than `stop`.
+    let errored = chunks
+        .iter()
+        .any(|c| c["choices"][0]["finish_reason"] == "error");
+    assert!(errored, "expected a finish_reason: error chunk");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streamed_fence_scenario_opens_and_closes_a_fence_across_deltas() {
+    let server = start_mock_server();
+    let chunks = sse_chunks(&fetch_scenario(&server.base_url, "streamed_fence").await);
+
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+
+    // The opening fence carries a language tag and both the opening and closing
+    // fences appear across the streamed deltas (two ``` occurrences).
+    assert!(
+        text.contains("```rust"),
+        "expected an opening fence with a language tag, got: {text}"
+    );
+    assert!(
+        text.matches("```").count() >= 2,
+        "expected both an opening and a closing fence, got: {text}"
+    );
 }
 
 #[test]
