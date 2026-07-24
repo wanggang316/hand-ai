@@ -19,8 +19,10 @@
 //! without a live terminal, a `SettingsManager`, or the network. The driver wires
 //! the pure decisions into scrollback commits and raw writes.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The product version, baked in at compile time.
 pub fn version() -> &'static str {
@@ -80,10 +82,11 @@ const KEY_HINTS: &[KeyHint] = &[
     },
 ];
 
-/// Style for the bold product name in the title.
-fn title_name_style() -> Style {
+/// Style for the bold product name in the title, coloured from the palette's
+/// accent (the default palette keeps the historical cyan).
+fn title_name_style(palette: &ThemePalette) -> Style {
     Style::default()
-        .fg(Color::Cyan)
+        .fg(palette.accent)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -97,9 +100,10 @@ fn hint_key_style() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 
-/// Style for a hint's action description (muted / dark grey).
-fn hint_action_style() -> Style {
-    Style::default().fg(Color::DarkGray)
+/// Style for a hint's action description, coloured from the palette's dim
+/// slot (the default palette keeps the historical dark grey).
+fn hint_action_style(palette: &ThemePalette) -> Style {
+    Style::default().fg(palette.dim)
 }
 
 /// Build the welcome-header scrollback lines: a title line
@@ -109,9 +113,14 @@ fn hint_action_style() -> Style {
 /// Pure over `(provider, model, version)` so the exact rendered text is asserted
 /// in a unit test without a live session.
 #[must_use]
-pub fn welcome_header_lines(provider: &str, model: &str, version: &str) -> Vec<Line<'static>> {
+pub fn welcome_header_lines(
+    provider: &str,
+    model: &str,
+    version: &str,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let title = Line::from(vec![
-        Span::styled("hand".to_string(), title_name_style()),
+        Span::styled("hand".to_string(), title_name_style(palette)),
         Span::styled(format!(" v{version}"), title_dim_style()),
         Span::styled(format!("   {provider}/{model}"), title_dim_style()),
     ]);
@@ -119,12 +128,12 @@ pub fn welcome_header_lines(provider: &str, model: &str, version: &str) -> Vec<L
     let mut hint_spans: Vec<Span<'static>> = Vec::new();
     for (i, hint) in KEY_HINTS.iter().enumerate() {
         if i > 0 {
-            hint_spans.push(Span::styled(" · ".to_string(), hint_action_style()));
+            hint_spans.push(Span::styled(" · ".to_string(), hint_action_style(palette)));
         }
         hint_spans.push(Span::styled(hint.key.to_string(), hint_key_style()));
         hint_spans.push(Span::styled(
             format!(" {}", hint.action),
-            hint_action_style(),
+            hint_action_style(palette),
         ));
     }
 
@@ -379,11 +388,11 @@ impl ProgressState {
 /// a trailing blank so it does not crowd the editor. Kept here (rather than in
 /// `chat.rs`) because it is startup chrome, not a chat update.
 #[must_use]
-pub fn changelog_lines(body: &str) -> Vec<Line<'static>> {
+pub fn changelog_lines(body: &str, palette: &ThemePalette) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
         "[changelog]".to_string(),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette.accent)
             .add_modifier(Modifier::BOLD),
     ))];
     for line in body.split('\n') {
@@ -393,20 +402,27 @@ pub fn changelog_lines(body: &str) -> Vec<Line<'static>> {
     lines
 }
 
-/// Render a yellow status/warning banner (tmux warning, update-available) into
-/// scrollback lines. Mirrors `chat::status_lines` styling but lives with the
-/// chrome so the startup path does not reach into the chat renderer's private
-/// helpers.
+/// Render a warning banner (tmux warning, update-available) into scrollback
+/// lines, coloured from the palette's warning slot (the default palette keeps
+/// the historical yellow). Mirrors `chat::status_lines` styling but lives with
+/// the chrome so the startup path does not reach into the chat renderer's
+/// private helpers.
 #[must_use]
-pub fn warning_lines(text: &str) -> Vec<Line<'static>> {
+pub fn warning_lines(text: &str, palette: &ThemePalette) -> Vec<Line<'static>> {
     text.split('\n')
-        .map(|line| Line::from(line.to_string()).style(Style::default().fg(Color::Yellow)))
+        .map(|line| Line::from(line.to_string()).style(Style::default().fg(palette.warning)))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+
+    /// The default palette — the historical chrome look.
+    fn pal() -> ThemePalette {
+        ThemePalette::default()
+    }
 
     fn text_of(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -414,7 +430,7 @@ mod tests {
 
     #[test]
     fn welcome_header_renders_title_hint_and_blank() {
-        let lines = welcome_header_lines("openai", "mock-model", "1.2.3");
+        let lines = welcome_header_lines("openai", "mock-model", "1.2.3", &pal());
         assert_eq!(lines.len(), 3, "title + hint + trailing blank");
         assert_eq!(text_of(&lines[0]), "hand v1.2.3   openai/mock-model");
         // The hint row lists every advertised key and its action.
@@ -428,6 +444,33 @@ mod tests {
             );
         }
         assert!(text_of(&lines[2]).is_empty(), "trailing line is blank");
+    }
+
+    #[test]
+    fn welcome_header_accent_takes_the_palette() {
+        // The default palette keeps the historical cyan title; a custom palette
+        // recolours the header accent, so a custom theme colours the chrome
+        // (VAL-COMPAT-004).
+        let default = welcome_header_lines("openai", "m", "1.0", &pal());
+        assert!(
+            default[0]
+                .spans
+                .iter()
+                .any(|s| s.content == "hand" && s.style.fg == Some(Color::Cyan)),
+            "default title is cyan"
+        );
+        let neon = ThemePalette {
+            accent: Color::Rgb(0xff, 0x00, 0xff),
+            ..ThemePalette::default()
+        };
+        let themed = welcome_header_lines("openai", "m", "1.0", &neon);
+        assert!(
+            themed[0]
+                .spans
+                .iter()
+                .any(|s| s.content == "hand" && s.style.fg == Some(Color::Rgb(0xff, 0x00, 0xff))),
+            "custom palette recolours the header accent"
+        );
     }
 
     #[test]
@@ -555,7 +598,7 @@ mod tests {
 
     #[test]
     fn changelog_lines_have_header_and_trailing_blank() {
-        let lines = changelog_lines("- a\n- b");
+        let lines = changelog_lines("- a\n- b", &pal());
         assert_eq!(text_of(&lines[0]), "[changelog]");
         assert_eq!(text_of(&lines[1]), "- a");
         assert_eq!(text_of(&lines[2]), "- b");
@@ -564,7 +607,7 @@ mod tests {
 
     #[test]
     fn warning_lines_style_yellow() {
-        let lines = warning_lines("careful\nnow");
+        let lines = warning_lines("careful\nnow", &pal());
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].style.fg, Some(Color::Yellow));
     }

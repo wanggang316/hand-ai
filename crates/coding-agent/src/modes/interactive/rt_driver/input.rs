@@ -36,6 +36,7 @@ use ratatui::widgets::{Block, Paragraph, Widget};
 use super::footer::{FooterViewModel, render_footer_lines};
 use super::overlay::SharedOverlay;
 use super::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_footer, lock_state};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The static message the working-loader shows while a turn streams.
 const LOADER_MESSAGE: &str = "Working…";
@@ -106,6 +107,7 @@ pub fn spawn_scheduler(
                 // dimmed dialog.
                 overlay_open: overlay_lines.is_some(),
                 overlay_lines,
+                palette: guard.palette(),
             };
             (snapshot, commits, raw)
         };
@@ -229,6 +231,10 @@ struct StateSnapshot {
     /// overlay is open. Captured as a `Send` `Vec<Line>` so the draw closure paints
     /// the overlay without holding the `?Send` M1 stack across the task boundary.
     overlay_lines: Option<Vec<Line<'static>>>,
+    /// The active theme palette this frame, so the footer's context-percentage
+    /// segment colours from the theme (the default palette keeps the historical
+    /// red/yellow thresholds).
+    palette: ThemePalette,
 }
 
 /// Paint one frame: the bordered bottom box, the optional working-loader row, the
@@ -314,7 +320,7 @@ fn draw(
     // The two-line footer view-model, rendered into the reserved footer rows.
     // `Paragraph` clips a line wider than the rect, so a narrow pane never spills.
     if footer_rect.height > 0 {
-        let lines = render_footer_lines(footer, footer_rect.width);
+        let lines = render_footer_lines(footer, footer_rect.width, &state.palette);
         Paragraph::new(Text::from(lines)).render(footer_rect, frame.buffer_mut());
     }
 }
@@ -559,6 +565,7 @@ mod tests {
             preview: Vec::new(),
             overlay_open: false,
             overlay_lines: None,
+            palette: ThemePalette::default(),
         };
         let footer = FooterViewModel::default();
         terminal
@@ -610,6 +617,7 @@ mod tests {
             preview: Vec::new(),
             overlay_open: false,
             overlay_lines: None,
+            palette: ThemePalette::default(),
         };
         let footer = FooterViewModel {
             cwd: "/tmp/proj".to_string(),
@@ -737,6 +745,7 @@ mod tests {
             preview: Vec::new(),
             overlay_open: true,
             overlay_lines: Some(vec![Line::from("→ claude-sonnet [anthropic]")]),
+            palette: ThemePalette::default(),
         };
         let footer = FooterViewModel {
             model_id: "base-model".to_string(),

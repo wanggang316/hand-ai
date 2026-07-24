@@ -36,20 +36,12 @@ use hand_tui::utils::strip_ansi;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use crate::modes::interactive::theme::ThemePalette;
+
 /// Visual-row budget for the collapsed output preview — the last N rendered
 /// rows are kept so the freshest output is always visible. Mirrors the legacy
 /// `PREVIEW_LINES`.
 pub const PREVIEW_ROWS: usize = 20;
-
-/// Bash accent — cyan, for the frame rule and command header of a normal `!cmd`.
-const BASH_ACCENT: Color = Color::Cyan;
-/// Dim accent — dark gray, for a `!!cmd` frame (excluded from the LLM context)
-/// and for muted output text.
-const DIM_ACCENT: Color = Color::DarkGray;
-/// Yellow — cancellation and truncation notices.
-const WARNING: Color = Color::Yellow;
-/// Red — a non-zero exit code.
-const ERROR: Color = Color::Red;
 
 /// How a finished inline bash command ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,12 +89,14 @@ pub fn parse_inline_bash(raw: &str) -> Option<ParsedBash> {
     }
 }
 
-/// The yellow `[bash] empty command` notice for a bare `!` / `!!` submission.
+/// The `[bash] empty command` notice for a bare `!` / `!!` submission, coloured
+/// from the palette's warning slot (the default palette keeps the historical
+/// yellow).
 #[must_use]
-pub fn empty_command_notice() -> Line<'static> {
+pub fn empty_command_notice(palette: &ThemePalette) -> Line<'static> {
     Line::from(Span::styled(
         "[bash] empty command".to_string(),
-        Style::default().fg(WARNING),
+        Style::default().fg(palette.warning),
     ))
 }
 
@@ -124,11 +118,15 @@ pub fn bash_block_lines(
     full_output_path: Option<&str>,
     expanded: bool,
     width: u16,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
+    // A `!cmd` frame takes the palette's bash-mode accent (historically cyan);
+    // a context-excluded `!!cmd` frame takes the dim accent so it reads
+    // differently at a glance.
     let accent = if parsed.exclude_from_context {
-        DIM_ACCENT
+        palette.dim
     } else {
-        BASH_ACCENT
+        palette.bash_mode
     };
     let rule = rule_line(accent, width);
 
@@ -144,7 +142,7 @@ pub fn bash_block_lines(
     // Output body: strip ANSI, normalise CR, muted foreground, one row per
     // logical output line — then collapse to the last PREVIEW_ROWS *visual*
     // rows unless expanded.
-    let body_style = Style::default().fg(DIM_ACCENT);
+    let body_style = Style::default().fg(palette.dim);
     let clean = strip_ansi(output).replace("\r\n", "\n").replace('\r', "\n");
     let body: Vec<Line<'static>> = clean
         .split('\n')
@@ -161,13 +159,13 @@ pub fn bash_block_lines(
     lines.extend(shown);
 
     // Status footer: exit code / cancellation, then any truncation footnote.
-    if let Some(footer) = status_line(outcome) {
+    if let Some(footer) = status_line(outcome, palette) {
         lines.push(footer);
     }
     if let Some(path) = full_output_path {
         lines.push(Line::from(Span::styled(
             format!("Output truncated. Full output: {path}"),
-            Style::default().fg(WARNING),
+            Style::default().fg(palette.warning),
         )));
     }
 
@@ -207,18 +205,18 @@ fn collapse_tail(
 
 /// The status footer row for a finished run, or `None` for a clean `exit 0`
 /// (which needs no annotation).
-fn status_line(outcome: BashOutcome) -> Option<Line<'static>> {
+fn status_line(outcome: BashOutcome, palette: &ThemePalette) -> Option<Line<'static>> {
     match outcome {
         BashOutcome::Cancelled => Some(Line::from(Span::styled(
             "(cancelled)".to_string(),
-            Style::default().fg(WARNING),
+            Style::default().fg(palette.warning),
         ))),
         BashOutcome::Exited(Some(0)) => None,
         BashOutcome::Exited(code) => {
             let code = code.map_or_else(|| "?".to_string(), |c| c.to_string());
             Some(Line::from(Span::styled(
                 format!("(exit {code})"),
-                Style::default().fg(ERROR),
+                Style::default().fg(palette.error),
             )))
         }
     }
@@ -227,6 +225,19 @@ fn status_line(outcome: BashOutcome) -> Option<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default palette — the historical bash-frame look — so the existing
+    /// assertions keep pinning the same colours.
+    fn pal() -> ThemePalette {
+        ThemePalette::default()
+    }
+
+    // The historical hard-coded accents, re-declared so the assertions read the
+    // same as before the palette was threaded through.
+    const BASH_ACCENT: Color = Color::Cyan;
+    const DIM_ACCENT: Color = Color::DarkGray;
+    const WARNING: Color = Color::Yellow;
+    const ERROR: Color = Color::Red;
 
     fn text_of(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -281,7 +292,7 @@ mod tests {
 
     #[test]
     fn empty_command_notice_is_yellow() {
-        let line = empty_command_notice();
+        let line = empty_command_notice(&pal());
         assert_eq!(text_of(&line), "[bash] empty command");
         assert!(line.spans.iter().any(|s| s.style.fg == Some(WARNING)));
     }
@@ -297,6 +308,7 @@ mod tests {
             None,
             false,
             40,
+            &pal(),
         );
         let out = joined(&lines);
         assert!(out.contains("$ echo hi"), "header: {out:?}");
@@ -313,6 +325,7 @@ mod tests {
             None,
             false,
             40,
+            &pal(),
         );
         let header = lines
             .iter()
@@ -324,6 +337,32 @@ mod tests {
     }
 
     #[test]
+    fn custom_palette_recolours_the_frame_accent() {
+        // A custom palette drives the bash-mode accent, so a custom theme colours
+        // the `!cmd` frame (VAL-COMPAT-004); the default keeps the historical cyan.
+        let neon = ThemePalette {
+            bash_mode: Color::Rgb(0x39, 0xff, 0x14),
+            ..ThemePalette::default()
+        };
+        let lines = bash_block_lines(
+            &normal("ls"),
+            "",
+            BashOutcome::Exited(Some(0)),
+            None,
+            false,
+            40,
+            &neon,
+        );
+        let rule = &lines[0];
+        assert!(
+            rule.spans
+                .iter()
+                .all(|s| s.style.fg == Some(Color::Rgb(0x39, 0xff, 0x14))),
+            "custom bash accent colours the frame rule"
+        );
+    }
+
+    #[test]
     fn nonzero_exit_shows_red_exit_code() {
         let lines = bash_block_lines(
             &normal("false"),
@@ -332,6 +371,7 @@ mod tests {
             None,
             false,
             40,
+            &pal(),
         );
         let footer = lines
             .iter()
@@ -352,6 +392,7 @@ mod tests {
             None,
             false,
             40,
+            &pal(),
         );
         assert!(
             !joined(&lines).contains("exit"),
@@ -369,6 +410,7 @@ mod tests {
             None,
             false,
             40,
+            &pal(),
         );
         let footer = lines
             .iter()
@@ -385,7 +427,7 @@ mod tests {
             command: "ls".to_string(),
             exclude_from_context: true,
         };
-        let lines = bash_block_lines(&parsed, "", BashOutcome::Exited(Some(0)), None, false, 40);
+        let lines = bash_block_lines(&parsed, "", BashOutcome::Exited(Some(0)), None, false, 40, &pal());
         // The top rule and header take the dim accent; none carry the cyan
         // bash accent.
         let rule = &lines[0];
@@ -410,6 +452,7 @@ mod tests {
             None,
             false,
             40,
+            &pal(),
         );
         let rule = &lines[0];
         assert!(rule.spans.iter().all(|s| s.style.fg == Some(BASH_ACCENT)));
@@ -430,6 +473,7 @@ mod tests {
             None,
             false,
             80,
+            &pal(),
         );
         let out = joined(&lines);
         // The tail is present, the head is dropped.
@@ -452,6 +496,7 @@ mod tests {
             None,
             true,
             80,
+            &pal(),
         );
         let out = joined(&lines);
         assert!(out.contains("row 0"), "head present when expanded: {out:?}");
@@ -476,6 +521,7 @@ mod tests {
             Some("/tmp/hand-bash-out.log"),
             false,
             80,
+            &pal(),
         );
         let footnote = lines
             .iter()
@@ -501,6 +547,7 @@ mod tests {
             None,
             false,
             80,
+            &pal(),
         );
         assert!(!joined(&lines).contains("Output truncated"));
     }
@@ -516,6 +563,7 @@ mod tests {
             None,
             true,
             80,
+            &pal(),
         );
         let out = joined(&lines);
         assert!(!out.contains('\r'), "CR must be normalised: {out:?}");

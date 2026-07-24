@@ -104,6 +104,7 @@ use tokio::sync::mpsc;
 use crate::core::agent_session::{AgentSession, AgentSessionEvent};
 use crate::core::error::CodingAgentError;
 use crate::core::keybindings::{Action, Diagnostic, KeyBindings};
+use crate::modes::interactive::theme::ThemePalette;
 
 use self::chrome::{ChangelogStartupAction, ProgressState, PromptMark};
 use self::footer::build_footer_view;
@@ -269,7 +270,8 @@ impl InteractiveMode {
         // frame paints. The changelog decision reads (and may write) settings, so
         // it runs while we still hold `&mut session`, before it moves into the
         // turn runner.
-        let startup = collect_startup_chrome(&mut session);
+        let startup_palette = lock_state(&state).palette();
+        let startup = collect_startup_chrome(&mut session, &startup_palette);
         for block in startup {
             lock_state(&state).queue_commit(block);
         }
@@ -1156,10 +1158,11 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
 /// `!` / `!!` commits the yellow `[bash] empty command` notice and runs nothing.
 async fn run_bash_inline(runner: &mut TurnRunner, parsed: bash::ParsedBash) {
     if parsed.command.is_empty() {
+        let palette = lock_state(&runner.state).palette();
         commit(
             &runner.state,
             &runner.requester,
-            vec![bash::empty_command_notice()],
+            vec![bash::empty_command_notice(&palette)],
         );
         return;
     }
@@ -1171,6 +1174,7 @@ async fn run_bash_inline(runner: &mut TurnRunner, parsed: bash::ParsedBash) {
     };
     {
         let mut guard = lock_state(&runner.state);
+        let palette = guard.palette();
         let running = bash::bash_block_lines(
             &header,
             "",
@@ -1178,6 +1182,7 @@ async fn run_bash_inline(runner: &mut TurnRunner, parsed: bash::ParsedBash) {
             None,
             true,
             guard.size.cols,
+            &palette,
         );
         guard.set_streaming_preview(Some(running));
     }
@@ -1201,7 +1206,10 @@ async fn run_bash_inline(runner: &mut TurnRunner, parsed: bash::ParsedBash) {
                 .full_output_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned());
-            let width = lock_state(&runner.state).size.cols;
+            let (width, palette) = {
+                let guard = lock_state(&runner.state);
+                (guard.size.cols, guard.palette())
+            };
             let lines = bash::bash_block_lines(
                 &parsed,
                 &run.result.output,
@@ -1209,6 +1217,7 @@ async fn run_bash_inline(runner: &mut TurnRunner, parsed: bash::ParsedBash) {
                 full_output_path.as_deref(),
                 false,
                 width,
+                &palette,
             );
             commit(&runner.state, &runner.requester, lines);
         }
@@ -2153,7 +2162,10 @@ fn diagnostic_lines(diagnostics: &[Diagnostic]) -> Vec<Vec<Line<'static>>> {
 /// changelog decision reads `last_changelog_version` from settings and, on
 /// display or a fresh install, records the current version back — so this takes
 /// `&mut session`. Empty blocks are skipped so no phantom scrollback lands.
-fn collect_startup_chrome(session: &mut AgentSession) -> Vec<Vec<Line<'static>>> {
+fn collect_startup_chrome(
+    session: &mut AgentSession,
+    palette: &ThemePalette,
+) -> Vec<Vec<Line<'static>>> {
     let mut blocks: Vec<Vec<Line<'static>>> = Vec::new();
 
     // 1. Welcome header — always first at the top of scrollback.
@@ -2162,15 +2174,16 @@ fn collect_startup_chrome(session: &mut AgentSession) -> Vec<Vec<Line<'static>>>
         model.provider.as_str(),
         &model.id,
         chrome::version(),
+        palette,
     ));
 
     // 2. tmux keyboard warning — only inside a misconfigured tmux.
     if let Some(warning) = chrome::check_tmux_keyboard_setup() {
-        blocks.push(chrome::warning_lines(warning));
+        blocks.push(chrome::warning_lines(warning, palette));
     }
 
     // 3. Changelog banner — three-state, gated on an empty (non-resumed) session.
-    if let Some(block) = changelog_startup_block(session) {
+    if let Some(block) = changelog_startup_block(session, palette) {
         blocks.push(block);
     }
 
@@ -2181,7 +2194,10 @@ fn collect_startup_chrome(session: &mut AgentSession) -> Vec<Vec<Line<'static>>>
 /// or `None` when the action is skip / record-only. On display or a fresh
 /// install it records the current version back into settings (best-effort — any
 /// save failure is swallowed so startup never blocks).
-fn changelog_startup_block(session: &mut AgentSession) -> Option<Vec<Line<'static>>> {
+fn changelog_startup_block(
+    session: &mut AgentSession,
+    palette: &ThemePalette,
+) -> Option<Vec<Line<'static>>> {
     let current_version = chrome::version();
     let messages_empty = session.messages().is_empty();
     let last_version = session.settings().current().last_changelog_version.clone();
@@ -2206,7 +2222,7 @@ fn changelog_startup_block(session: &mut AgentSession) -> Option<Vec<Line<'stati
                 .settings_mut()
                 .set_last_changelog_version(scope, Some(current_version.to_string()));
             let _ = session.settings().save(scope);
-            Some(chrome::changelog_lines(&body))
+            Some(chrome::changelog_lines(&body, palette))
         }
     }
 }
@@ -2224,7 +2240,8 @@ async fn version_probe(state: Arc<Mutex<DriverState>>, requester: FrameRequester
         crate::utils::version_check::check_for_new_version(&fetcher, current).await
     {
         let banner = chrome::update_available_banner(current, &latest);
-        commit(&state, &requester, chrome::warning_lines(&banner));
+        let palette = lock_state(&state).palette();
+        commit(&state, &requester, chrome::warning_lines(&banner, &palette));
     }
 }
 

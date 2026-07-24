@@ -18,8 +18,10 @@
 use std::path::Path;
 
 use hand_tui::utils::visible_width;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+
+use crate::modes::interactive::theme::ThemePalette;
 
 use crate::core::agent_session::AgentSession;
 
@@ -255,7 +257,11 @@ fn width_of(text: &str) -> usize {
 /// Pure: takes a borrowed view-model and a width, returns owned [`Line`]s, so it
 /// is unit-tested without a terminal.
 #[must_use]
-pub fn render_footer_lines(view: &FooterViewModel, width: u16) -> Vec<Line<'static>> {
+pub fn render_footer_lines(
+    view: &FooterViewModel,
+    width: u16,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
     let w = width as usize;
 
     // --- Line 1: cwd (~-abbreviated) + branch + session, dim ---------------
@@ -314,9 +320,9 @@ pub fn render_footer_lines(view: &FooterViewModel, width: u16) -> Vec<Line<'stat
                 format_tokens(view.context_window)
             );
             let color = if pct > 90.0 {
-                Some(Color::Red)
+                Some(palette.error)
             } else if pct > 70.0 {
-                Some(Color::Yellow)
+                Some(palette.warning)
             } else {
                 None
             };
@@ -391,6 +397,13 @@ pub fn render_footer_lines(view: &FooterViewModel, width: u16) -> Vec<Line<'stat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
+
+    /// The default palette — the historical footer look — so the existing
+    /// context-percent colour assertions keep pinning red/yellow.
+    fn pal() -> ThemePalette {
+        ThemePalette::default()
+    }
 
     fn text_of(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -423,13 +436,13 @@ mod tests {
 
     #[test]
     fn renders_two_lines() {
-        let lines = render_footer_lines(&sample(), 120);
+        let lines = render_footer_lines(&sample(), 120, &pal());
         assert_eq!(lines.len(), 2, "footer is two lines");
     }
 
     #[test]
     fn cwd_line_shows_branch_and_session() {
-        let lines = render_footer_lines(&sample(), 120);
+        let lines = render_footer_lines(&sample(), 120, &pal());
         let pwd = text_of(&lines[0]);
         assert!(pwd.contains("/tmp/work"), "cwd missing: {pwd:?}");
         assert!(pwd.contains("(main)"), "branch missing: {pwd:?}");
@@ -442,13 +455,13 @@ mod tests {
         v.cwd = "/Users/me/projects/x".to_string();
         v.git_branch = None;
         v.session_name = None;
-        let pwd = text_of(&render_footer_lines(&v, 120)[0]);
+        let pwd = text_of(&render_footer_lines(&v, 120, &pal())[0]);
         assert!(pwd.contains("~/projects/x"), "got {pwd:?}");
     }
 
     #[test]
     fn stats_line_shows_tokens_cost_context_and_model() {
-        let stats = text_of(&render_footer_lines(&sample(), 120)[1]);
+        let stats = text_of(&render_footer_lines(&sample(), 120, &pal())[1]);
         assert!(stats.contains("↑1.5k"), "input tokens missing: {stats:?}");
         assert!(stats.contains("↓2.0k"), "output tokens missing: {stats:?}");
         assert!(stats.contains("$0.123"), "cost missing: {stats:?}");
@@ -465,7 +478,7 @@ mod tests {
     fn high_context_percent_uses_red() {
         let mut v = sample();
         v.context_percent = Some(95.0);
-        let line = &render_footer_lines(&v, 120)[1];
+        let line = &render_footer_lines(&v, 120, &pal())[1];
         let colored = line
             .spans
             .iter()
@@ -477,7 +490,7 @@ mod tests {
     fn medium_context_percent_uses_yellow() {
         let mut v = sample();
         v.context_percent = Some(75.0);
-        let line = &render_footer_lines(&v, 120)[1];
+        let line = &render_footer_lines(&v, 120, &pal())[1];
         let colored = line
             .spans
             .iter()
@@ -486,17 +499,46 @@ mod tests {
     }
 
     #[test]
+    fn custom_palette_recolours_the_context_thresholds() {
+        // A custom palette drives the high/medium context-percentage colours, so
+        // a custom theme colours the footer (VAL-COMPAT-004); the default palette
+        // keeps the historical red/yellow (covered above).
+        let neon = ThemePalette {
+            error: Color::Rgb(0xff, 0x00, 0x3c),
+            warning: Color::Rgb(0xff, 0xea, 0x00),
+            ..ThemePalette::default()
+        };
+        let mut v = sample();
+        v.context_percent = Some(95.0);
+        let high = &render_footer_lines(&v, 120, &neon)[1];
+        assert!(
+            high.spans
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(0xff, 0x00, 0x3c))),
+            "high context uses the custom error colour"
+        );
+        v.context_percent = Some(75.0);
+        let med = &render_footer_lines(&v, 120, &neon)[1];
+        assert!(
+            med.spans
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(0xff, 0xea, 0x00))),
+            "medium context uses the custom warning colour"
+        );
+    }
+
+    #[test]
     fn provider_prefix_only_when_multiple_providers() {
         let mut v = sample();
         v.available_provider_count = 1;
-        let one = text_of(&render_footer_lines(&v, 120)[1]);
+        let one = text_of(&render_footer_lines(&v, 120, &pal())[1]);
         assert!(
             !one.contains("(openai)"),
             "single provider prefixed: {one:?}"
         );
 
         v.available_provider_count = 3;
-        let many = text_of(&render_footer_lines(&v, 120)[1]);
+        let many = text_of(&render_footer_lines(&v, 120, &pal())[1]);
         assert!(
             many.contains("(openai)"),
             "multi provider not prefixed: {many:?}"
@@ -507,7 +549,7 @@ mod tests {
     fn no_model_falls_back_to_placeholder() {
         let mut v = sample();
         v.model_id.clear();
-        let stats = text_of(&render_footer_lines(&v, 120)[1]);
+        let stats = text_of(&render_footer_lines(&v, 120, &pal())[1]);
         assert!(stats.contains("no-model"), "got {stats:?}");
     }
 
@@ -515,7 +557,7 @@ mod tests {
     fn thinking_off_renders_label() {
         let mut v = sample();
         v.thinking_level = "off".to_string();
-        let stats = text_of(&render_footer_lines(&v, 120)[1]);
+        let stats = text_of(&render_footer_lines(&v, 120, &pal())[1]);
         assert!(stats.contains("thinking off"), "got {stats:?}");
     }
 
@@ -523,7 +565,7 @@ mod tests {
     fn unknown_context_renders_question_mark() {
         let mut v = sample();
         v.context_percent = None;
-        let stats = text_of(&render_footer_lines(&v, 120)[1]);
+        let stats = text_of(&render_footer_lines(&v, 120, &pal())[1]);
         assert!(stats.contains("?/"), "got {stats:?}");
     }
 
@@ -531,7 +573,7 @@ mod tests {
     fn zero_usage_shows_only_context_segment() {
         let mut v = sample();
         v.usage = TokenUsageSummary::default();
-        let stats = text_of(&render_footer_lines(&v, 120)[1]);
+        let stats = text_of(&render_footer_lines(&v, 120, &pal())[1]);
         assert!(!stats.contains('↑'), "zero input shows no arrow: {stats:?}");
         assert!(!stats.contains('$'), "zero cost shows no dollar: {stats:?}");
         assert!(stats.contains("45.5%"), "context still present: {stats:?}");
@@ -593,7 +635,7 @@ mod tests {
         v.cwd = "/项目/工作目录/深层/路径".to_string();
         v.home_dir = None;
         for width in 1u16..=20 {
-            let _ = render_footer_lines(&v, width);
+            let _ = render_footer_lines(&v, width, &pal());
         }
     }
 }

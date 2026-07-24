@@ -15,7 +15,14 @@ use std::path::PathBuf;
 
 use hand_coding_agent::SessionManager;
 use hand_coding_agent::modes::interactive::rt_driver::replay::replay_blocks;
+use hand_coding_agent::modes::interactive::theme::ThemePalette;
 use ratatui::text::Line;
+
+/// The default theme palette — replay colouring is asserted on text/ordering,
+/// so the default (historical) palette is used throughout.
+fn pal() -> ThemePalette {
+    ThemePalette::default()
+}
 
 /// The path to a named session fixture.
 fn fixture(name: &str) -> PathBuf {
@@ -61,7 +68,7 @@ fn every_fixture_is_a_readable_session_with_a_transcript() {
 fn multi_message_fixture_replays_in_order_with_tool_line_and_marker() {
     // VAL-CHAT-012: ordered replay + a dimmed [tool_name] line + the resumed marker.
     let messages = load_messages("multi-message-resume");
-    let blocks = replay_blocks(&messages, "multi", false, 80);
+    let blocks = replay_blocks(&messages, "multi", false, 80, &pal());
     let out = joined(&blocks);
 
     let idx = |needle: &str| {
@@ -99,7 +106,7 @@ fn error_ended_fixture_replays_the_present_side_error_footnote() {
         "the error-ended fixture must carry a stop_reason=Error assistant message"
     );
 
-    let blocks = replay_blocks(&messages, "err", false, 80);
+    let blocks = replay_blocks(&messages, "err", false, 80, &pal());
     let out = joined(&blocks);
     assert!(
         out.contains("Error: rate limit exceeded"),
@@ -114,7 +121,7 @@ fn thinking_fixture_replays_the_thinking_block_then_answer() {
     // when expanded, and collapses to the static label when hidden.
     let messages = load_messages("thinking-blocks");
 
-    let expanded = joined(&replay_blocks(&messages, "t", false, 80));
+    let expanded = joined(&replay_blocks(&messages, "t", false, 80, &pal()));
     let think = expanded
         .find("Let me reason about this carefully.")
         .expect("thinking body present when expanded");
@@ -124,7 +131,7 @@ fn thinking_fixture_replays_the_thinking_block_then_answer() {
         "thinking must precede the answer:\n{expanded}"
     );
 
-    let collapsed = joined(&replay_blocks(&messages, "t", true, 80));
+    let collapsed = joined(&replay_blocks(&messages, "t", true, 80, &pal()));
     assert!(
         collapsed.contains("Thinking..."),
         "collapsed shows the static label:\n{collapsed}"
