@@ -772,6 +772,134 @@ mod tests {
         assert!(text.contains("base-model"), "base keeps rendering: {text}");
     }
 
+    // --- Active-area box geometry (M3 polish: box border alignment) --------
+
+    /// The columns of the left and right box edges on a given buffer row: any
+    /// cell carrying a vertical-bar or a corner glyph. A well-formed bordered box
+    /// row has exactly two — the left and right border columns.
+    fn edge_cols(terminal: &Terminal<TestBackend>, y: u16) -> Vec<u16> {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut cols = Vec::new();
+        for x in area.x..area.x + area.width {
+            if let Some(cell) = buf.cell((x, y))
+                && matches!(cell.symbol(), "│" | "┌" | "┐" | "└" | "┘")
+            {
+                cols.push(x);
+            }
+        }
+        cols
+    }
+
+    /// The top and bottom border rows of the active box: the first and last rows
+    /// that carry a horizontal-bar or corner glyph.
+    fn border_rows(terminal: &Terminal<TestBackend>) -> (u16, u16) {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut top = None;
+        let mut bottom = None;
+        for y in area.y..area.y + area.height {
+            let mut has_h = false;
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y))
+                    && matches!(cell.symbol(), "─" | "┌" | "┐" | "└" | "┘")
+                {
+                    has_h = true;
+                    break;
+                }
+            }
+            if has_h {
+                if top.is_none() {
+                    top = Some(y);
+                }
+                bottom = Some(y);
+            }
+        }
+        (
+            top.expect("a top border row"),
+            bottom.expect("a bottom border row"),
+        )
+    }
+
+    /// The M3 polish invariant: the active-area box is a true rectangle — its top
+    /// and bottom borders span exactly the same columns as the left/right side
+    /// borders on every interior row. A regression where the top border is drawn
+    /// a few columns wider than the content rows (or vice versa) leaves the box
+    /// corners misaligned; this pins the alignment across widths, even/odd column
+    /// counts, the tiny 40-col pane, and both the idle and streaming states so the
+    /// loader row never widens or narrows the box either.
+    #[test]
+    fn active_box_border_is_a_true_rectangle_across_widths_and_states() {
+        use hand_tui::rt::components::EditorBorder;
+
+        for &width in &[40u16, 41, 60, 80, 81, 100] {
+            for &streaming in &[false, true] {
+                let editor: SharedEditor =
+                    Arc::new(Mutex::new(Editor::new().border(EditorBorder::None)));
+                {
+                    let mut ed = lock_editor(&editor);
+                    // Long enough to wrap and fully fill the interior rows, so the
+                    // editor's own painting would expose any content/border overlap.
+                    ed.set_text(
+                        "the quick brown fox jumps over the lazy dog while the box border stays square",
+                    );
+                }
+                let mut loader = Loader::new(LOADER_MESSAGE);
+                loader.set_active(streaming);
+                let mut terminal = fixed_viewport(width, MAX_VIEWPORT_ROWS);
+                let height = terminal.get_frame().area().height;
+                let snapshot = StateSnapshot {
+                    size: TerminalSize::new(width, height),
+                    loader: streaming,
+                    loader_message: None,
+                    preview: Vec::new(),
+                    overlay_open: false,
+                    overlay_lines: None,
+                    palette: ThemePalette::default(),
+                };
+                let footer = FooterViewModel {
+                    model_id: "test-model".to_string(),
+                    ..FooterViewModel::default()
+                };
+                terminal
+                    .draw(|frame| draw(frame, &snapshot, &editor, &loader, &footer))
+                    .expect("draw one frame");
+
+                let (top, bottom) = border_rows(&terminal);
+                let top_edges = edge_cols(&terminal, top);
+                assert_eq!(
+                    top_edges.len(),
+                    2,
+                    "top border must have exactly two corners at width {width} streaming={streaming}, got {top_edges:?}",
+                );
+                let (left, right) = (top_edges[0], top_edges[1]);
+
+                // Every row from the top border to the bottom border (inclusive)
+                // must carry its left/right edge at exactly the same columns — the
+                // box is square, its top border no wider than its content rows.
+                for y in top..=bottom {
+                    let edges = edge_cols(&terminal, y);
+                    assert_eq!(
+                        edges,
+                        vec![left, right],
+                        "row {y} edges misaligned at width {width} streaming={streaming}: \
+                         expected [{left}, {right}], got {edges:?}",
+                    );
+                }
+
+                // The box spans the full viewport width (the active rect is `width`
+                // columns), so the right edge sits on the last column.
+                assert_eq!(left, 0, "box hugs the left edge at width {width}");
+                assert_eq!(
+                    right,
+                    width - 1,
+                    "box top border must reach the last column at width {width}, \
+                     not fall short of the content rows",
+                );
+            }
+        }
+    }
+
     #[test]
     fn flush_raw_empty_writes_nothing() {
         let mut buf: Vec<u8> = Vec::new();
@@ -793,5 +921,410 @@ mod tests {
         ]
         .concat();
         assert_eq!(buf, expected);
+    }
+
+    // --- Cross-region journeys (VAL-CROSS-001 / -002 / -003) ---------------
+    //
+    // These exercise the *driver-level slice* of each M3 cross-region journey:
+    // the pieces that flow through this module's `draw` + `HistorySink` commit
+    // path against a `TestBackend`, which is the leak-free / no-scrollback-leak
+    // ground truth (a tmux `capture-pane -S -` would fold in tmux's OWN resize
+    // reflow — see docs/user-test-patterns.md — so scrollback-leak correctness is
+    // asserted here on a raw `TestBackend`, never through tmux history).
+
+    use super::super::state::{DriverState, lock_state};
+    use hand_tui::rt::history::HistorySink;
+    use std::sync::Mutex as StdMutex;
+
+    /// A minimal stand-in for the frame scheduler: owns the fixed-max inline
+    /// `TestBackend` terminal and a `HistorySink`, and replays the scheduler's
+    /// per-frame contract — drain the state's queued scrollback commits through
+    /// the sink *before* drawing the viewport — so a test drives compose / stream
+    /// / settle / resize exactly as the live loop does.
+    struct JourneyHarness {
+        terminal: Terminal<TestBackend>,
+        history: HistorySink,
+        editor: SharedEditor,
+        /// The backend size the last frame drew against — mirrors the real
+        /// scheduler's `last_size`, so a size change is detected in the frame path
+        /// and the old-width viewport is wiped before autoresize can spill it.
+        last_size: Option<ratatui::layout::Size>,
+    }
+
+    impl JourneyHarness {
+        fn new(width: u16, height: u16) -> Self {
+            use hand_tui::rt::components::EditorBorder;
+            Self {
+                terminal: fixed_viewport(width, height),
+                history: HistorySink::new(),
+                editor: Arc::new(Mutex::new(Editor::new().border(EditorBorder::None))),
+                last_size: None,
+            }
+        }
+
+        /// Resize the backend the way a `RtInputEvent::Resize` does: the draw
+        /// path's own size-change detection then re-anchors the fixed viewport
+        /// on the next frame.
+        fn resize(&mut self, width: u16, height: u16) {
+            self.terminal.backend_mut().resize(width, height);
+        }
+
+        /// One scheduler frame: detect a backend resize and wipe the old-width
+        /// viewport *before* committing (so a stale-width fragment can never spill
+        /// into scrollback — the M1 resize-erase invariant), drain queued commits
+        /// into scrollback, then paint the viewport from a snapshot of the state.
+        fn frame(&mut self, state: &Arc<StdMutex<DriverState>>, footer: &FooterViewModel) {
+            // Resize-erase: exactly the scheduler's pre-commit wipe on a detected
+            // size change (see `spawn_scheduler`), the step that keeps the live
+            // region out of scrollback across a resize.
+            let current_size = self.terminal.size().ok();
+            if let Some(current) = current_size
+                && self.last_size.is_some_and(|prev| prev != current)
+            {
+                use hand_tui::rt::session::clear_viewport_region;
+                let _ = clear_viewport_region(&mut self.terminal);
+            }
+            self.last_size = current_size;
+
+            let commits = lock_state(state).take_commits();
+            for block in commits {
+                self.history
+                    .commit_lines(&mut self.terminal, block)
+                    .expect("commit block into scrollback");
+            }
+            let (size, streaming, preview) = {
+                let guard = lock_state(state);
+                (
+                    guard.size,
+                    guard.streaming,
+                    guard.streaming_preview.clone().unwrap_or_default(),
+                )
+            };
+            let mut loader = Loader::new(LOADER_MESSAGE);
+            loader.set_active(streaming);
+            let snapshot = StateSnapshot {
+                size,
+                loader: streaming,
+                loader_message: None,
+                preview,
+                overlay_open: false,
+                overlay_lines: None,
+                palette: ThemePalette::default(),
+            };
+            let editor = &self.editor;
+            let footer = footer.clone();
+            self.terminal
+                .draw(|frame| draw(frame, &snapshot, editor, &loader, &footer))
+                .expect("draw one journey frame");
+        }
+
+        /// Every scrollback row (committed history, oldest first) with trailing
+        /// blanks trimmed — the live viewport is deliberately excluded so a probe
+        /// asserts what actually *settled* into scrollback.
+        fn scrollback_rows(&self) -> Vec<String> {
+            let buf = self.terminal.backend().scrollback();
+            let area = buf.area;
+            let mut out = Vec::new();
+            for y in area.y..area.y + area.height {
+                let mut row = String::new();
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y)) {
+                        row.push_str(cell.symbol());
+                    }
+                }
+                let trimmed = row.trim_end().to_string();
+                if !trimmed.is_empty() {
+                    out.push(trimmed);
+                }
+            }
+            out
+        }
+
+        /// The live viewport text (the active box + preview band), joined per row.
+        fn viewport_text(&self) -> String {
+            let buf = self.terminal.backend().buffer();
+            let area = buf.area;
+            let mut out = String::new();
+            for y in area.y..area.y + area.height {
+                for x in area.x..area.x + area.width {
+                    if let Some(cell) = buf.cell((x, y)) {
+                        out.push_str(cell.symbol());
+                    }
+                }
+                out.push('\n');
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn compose_to_reply_settles_the_stream_into_scrollback_without_residue() {
+        // VAL-CROSS-001: an echoed user bubble commits to scrollback, a reply
+        // streams live in the preview band, then settles into scrollback on
+        // finalize — leaving the live band clean (no half-streamed residue) and
+        // the loader dismissed.
+        let mut h = JourneyHarness::new(60, MAX_VIEWPORT_ROWS);
+        let state = Arc::new(StdMutex::new(DriverState::new(TerminalSize::new(
+            60,
+            MAX_VIEWPORT_ROWS,
+        ))));
+        let footer = FooterViewModel::default();
+
+        // 1. Compose + submit: the user bubble is queued as a scrollback commit,
+        //    the way `AppendUser` does after a submit.
+        lock_state(&state).queue_commit(vec![Line::from("> tell me a joke")]);
+        h.frame(&state, &footer);
+        assert!(
+            h.scrollback_rows()
+                .iter()
+                .any(|r| r.contains("tell me a joke")),
+            "the echoed user bubble must settle into scrollback"
+        );
+
+        // 2. The turn streams: the loader shows and the partial reply renders in
+        //    the live preview band above the box (never in scrollback yet).
+        {
+            let mut guard = lock_state(&state);
+            guard.streaming = true;
+            guard.set_streaming_preview(Some(vec![Line::from("Why did the")]));
+        }
+        h.frame(&state, &footer);
+        let mid = h.viewport_text();
+        assert!(mid.contains("Working"), "loader visible mid-stream: {mid}");
+        assert!(
+            mid.contains("Why did the"),
+            "the live partial shows in the preview band: {mid}"
+        );
+        assert!(
+            !h.scrollback_rows()
+                .iter()
+                .any(|r| r.contains("Why did the")),
+            "an in-flight partial must NOT be in scrollback yet"
+        );
+
+        // 3. Finalize: clear the preview, drop the loader, and commit the final
+        //    reply to scrollback — the compose→reply→settle round trip.
+        {
+            let mut guard = lock_state(&state);
+            guard.set_streaming_preview(None);
+            guard.streaming = false;
+            guard.queue_commit(vec![Line::from("Why did the chicken cross the road?")]);
+        }
+        h.frame(&state, &footer);
+
+        assert!(
+            h.scrollback_rows()
+                .iter()
+                .any(|r| r.contains("chicken cross the road")),
+            "the finalized reply must settle into scrollback"
+        );
+        let after = h.viewport_text();
+        assert!(
+            !after.contains("Working"),
+            "the loader must be dismissed after settle: {after}"
+        );
+        assert!(
+            !after.contains("Why did the"),
+            "no half-streamed preview residue may linger in the live band: {after}"
+        );
+    }
+
+    #[test]
+    fn overlay_over_stream_dims_base_while_the_stream_keeps_rendering() {
+        // VAL-CROSS-002 (draw-layer slice): while a turn streams, opening an
+        // overlay dims the base but the streaming loader + preview keep rendering
+        // underneath it — the overlay is a pure draw layer, it never pauses the
+        // turn. (The Esc-closes-overlay / Esc-cancels-turn key routing is covered
+        // by the input-loop cancel path; here we pin the render invariant.)
+        let editor: SharedEditor = Arc::new(Mutex::new(
+            Editor::new().border(hand_tui::rt::components::EditorBorder::None),
+        ));
+        let mut loader = Loader::new(LOADER_MESSAGE);
+        loader.set_active(true);
+        let mut terminal = fixed_viewport(80, MAX_VIEWPORT_ROWS);
+        let snapshot = StateSnapshot {
+            size: TerminalSize::new(80, MAX_VIEWPORT_ROWS),
+            loader: true,
+            loader_message: None,
+            preview: vec![Line::from("streaming reply in flight")],
+            overlay_open: true,
+            overlay_lines: Some(vec![Line::from("→ claude-sonnet [anthropic]")]),
+            palette: ThemePalette::default(),
+        };
+        let footer = FooterViewModel::default();
+        terminal
+            .draw(|frame| {
+                draw(frame, &snapshot, &editor, &loader, &footer);
+                if let Some(lines) = snapshot.overlay_lines.clone() {
+                    let area = frame.area();
+                    draw_overlay(frame.buffer_mut(), area, lines);
+                }
+            })
+            .expect("draw one frame");
+
+        let buf = terminal.backend().buffer();
+        // The overlay is layered on top.
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("claude-sonnet"),
+            "overlay content on top: {text}"
+        );
+        // A corner base cell (outside the centered dialog) is dimmed.
+        let corner = buf.cell((0, buf.area.height - 1)).unwrap();
+        assert!(
+            corner.modifier.contains(Modifier::DIM),
+            "base cells outside the overlay dim while the stream runs underneath"
+        );
+    }
+
+    #[test]
+    fn resize_under_load_relays_out_leak_free_across_narrow_then_short() {
+        // VAL-CROSS-003: with the editor grown, the loader on, and a reply
+        // streaming, resize twice (narrow, then short). The bottom area re-lays
+        // to each new width/height every time, and the live region never leaks
+        // into scrollback — asserted on a raw `TestBackend`, the ground truth for
+        // this class (tmux `capture-pane -S -` would fold in tmux's own reflow).
+        let mut h = JourneyHarness::new(80, MAX_VIEWPORT_ROWS);
+        let state = Arc::new(StdMutex::new(DriverState::new(TerminalSize::new(
+            80,
+            MAX_VIEWPORT_ROWS,
+        ))));
+        let footer = FooterViewModel::default();
+
+        // Grow the editor (multi-line), turn the loader on, and stream a preview.
+        {
+            let mut ed = lock_editor(&h.editor);
+            ed.set_text("line one\nline two\nline three\nline four");
+        }
+        {
+            let mut guard = lock_state(&state);
+            guard.streaming = true;
+            guard.set_streaming_preview(Some(vec![
+                Line::from("streaming reply row A"),
+                Line::from("streaming reply row B"),
+            ]));
+        }
+        // Commit one settled block so scrollback is non-empty going in.
+        lock_state(&state).queue_commit(vec![Line::from("SETTLED-MARKER earlier reply")]);
+        h.frame(&state, &footer);
+
+        let baseline_scrollback = h.scrollback_rows();
+        assert!(
+            baseline_scrollback
+                .iter()
+                .any(|r| r.contains("SETTLED-MARKER")),
+            "the earlier reply is in scrollback before any resize"
+        );
+
+        // Resize #1 — narrow to 40 columns.
+        h.resize(40, MAX_VIEWPORT_ROWS);
+        lock_state(&state).size = TerminalSize::new(40, MAX_VIEWPORT_ROWS);
+        h.frame(&state, &footer);
+        // The active box re-lays out to the narrow width: its border reaches the
+        // last visible column, so the whole bottom UI followed the resize.
+        let (top_n, _) = border_rows(&h.terminal);
+        let edges_n = edge_cols(&h.terminal, top_n);
+        assert_eq!(
+            edges_n,
+            vec![0, 39],
+            "the box re-lays out to width 40 after the narrow resize"
+        );
+
+        // Resize #2 — short to 8 rows.
+        h.resize(40, 8);
+        lock_state(&state).size = TerminalSize::new(40, 8);
+        h.frame(&state, &footer);
+        // The active box is trimmed to fit the short pane (it never draws past
+        // the bottom edge): its bottom border sits within the 8-row viewport.
+        let (_, bottom_s) = border_rows(&h.terminal);
+        assert!(
+            bottom_s < 8,
+            "the box bottom border stays inside the 8-row short pane, at row {bottom_s}"
+        );
+
+        // Leak-free: no live-region content (the loader message or the streaming
+        // preview) ever leaked into scrollback across either resize. Only settled
+        // history is there.
+        let final_scrollback = h.scrollback_rows();
+        for row in &final_scrollback {
+            assert!(
+                !row.contains(LOADER_MESSAGE),
+                "the loader must never leak into scrollback on resize, found: {row:?}"
+            );
+            assert!(
+                !row.contains("streaming reply row"),
+                "the streaming preview must never leak into scrollback on resize, found: {row:?}"
+            );
+        }
+        assert!(
+            final_scrollback
+                .iter()
+                .any(|r| r.contains("SETTLED-MARKER")),
+            "the settled reply survives the resizes in scrollback"
+        );
+    }
+
+    // --- 0x0 PTY operability (VAL-COMPAT-011) ------------------------------
+
+    #[test]
+    fn driver_draw_is_operable_on_a_zero_sized_pty_via_fallback_geometry() {
+        // VAL-COMPAT-011: the interactive driver's own draw path stays operable
+        // when the terminal reports a degenerate 0x0 size. At runtime the rt
+        // session wraps the backend in a `FallbackSizeBackend`, whose geometry is
+        // exactly `effective_size(cols, rows)` — 80x24 for a 0x0 PTY. This drives
+        // the driver's `draw` at that resolved fallback geometry, the
+        // coding-agent-side counterpart to the rt-layer 0x0 render test, and pins
+        // that the box + footer render rather than the frame collapsing to
+        // nothing. (`FallbackSizeBackend` requires `Backend<Error = io::Error>`,
+        // which `TestBackend` is not, so the fallback size is resolved directly.)
+        use hand_tui::rt::session::{FALLBACK_COLS, FALLBACK_ROWS, effective_size};
+
+        // A 0x0 PTY resolves to the 80x24 fallback the driver actually renders at.
+        let (fallback_cols, fallback_rows) = effective_size(0, 0);
+        assert_eq!(
+            (fallback_cols, fallback_rows),
+            (FALLBACK_COLS, FALLBACK_ROWS)
+        );
+
+        let mut terminal = fixed_viewport(fallback_cols, MAX_VIEWPORT_ROWS);
+        let editor: SharedEditor = Arc::new(Mutex::new(
+            Editor::new().border(hand_tui::rt::components::EditorBorder::None),
+        ));
+        let loader = Loader::new(LOADER_MESSAGE);
+        let snapshot = StateSnapshot {
+            size: TerminalSize::new(fallback_cols, MAX_VIEWPORT_ROWS),
+            loader: false,
+            loader_message: None,
+            preview: Vec::new(),
+            overlay_open: false,
+            overlay_lines: None,
+            palette: ThemePalette::default(),
+        };
+        let footer = FooterViewModel {
+            model_id: "mock-model".to_string(),
+            ..FooterViewModel::default()
+        };
+
+        // The draw must succeed and paint the active-area box at the fallback
+        // width (a panic or an empty frame would be the 0x0 regression).
+        terminal
+            .draw(|frame| {
+                assert_eq!(
+                    frame.area().width,
+                    FALLBACK_COLS,
+                    "the frame renders at the 80-col fallback, not the 0-col PTY size"
+                );
+                draw(frame, &snapshot, &editor, &loader, &footer);
+            })
+            .expect("draw must succeed at fallback geometry on a 0x0 PTY");
+
+        assert!(
+            has_border(terminal.backend().buffer()),
+            "the active-area box paints at fallback geometry"
+        );
+        assert!(
+            buffer_text(&terminal).contains("mock-model"),
+            "the footer stays legible on a 0x0 PTY"
+        );
     }
 }
