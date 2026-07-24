@@ -62,6 +62,7 @@ pub mod bash;
 pub mod chat;
 pub mod chrome;
 pub mod clipboard;
+pub mod config_selector;
 pub mod external_editor;
 pub mod footer;
 pub mod input;
