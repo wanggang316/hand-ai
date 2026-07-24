@@ -270,6 +270,10 @@ pub fn apply_theme(
 ///   closed (the first change closes it).
 /// - **Closed** — Esc lands the specific `[/settings closed]` line (not a generic
 ///   cancel — the VAL-OVERLAY-004 exception).
+// One over the lint's ceiling: the resolved `nav` snapshot joins the existing
+// overlay-mount + session-apply parameter set. Grouping them into a context struct
+// would ripple through the whole selector-open family for no readability gain here.
+#[allow(clippy::too_many_arguments)]
 pub async fn open_settings_selector(
     session: &mut AgentSession,
     cwd: &Path,
@@ -681,6 +685,9 @@ pub async fn open_scoped_models_selector(
 /// A session with **no user messages** takes the no-data degradation: no overlay
 /// opens and the `[fork: no user messages to fork from]` status line lands
 /// (VAL-OVERLAY-019).
+// One over the lint's ceiling: `nav` joins the existing overlay-mount + session-apply
+// parameter set; see the note on `open_settings_selector`.
+#[allow(clippy::too_many_arguments)]
 pub async fn open_fork_selector(
     session: &mut AgentSession,
     cwd: &Path,
@@ -801,6 +808,9 @@ fn commit_summary(
 ///
 /// An empty list still mounts the picker (showing `(no sessions)`); it stays open
 /// until the user presses Esc, which cancels here.
+// One over the lint's ceiling: `nav` joins the existing overlay-mount + session-apply
+// parameter set; see the note on `open_settings_selector`.
+#[allow(clippy::too_many_arguments)]
 pub async fn open_resume_picker(
     session: &mut AgentSession,
     cwd: &Path,

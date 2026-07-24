@@ -1,0 +1,5 @@
+# Invalid variant: an unknown action name. The loader skips the bad entry with a
+# visible yellow startup diagnostic ("keybindings (...): unknown action 'bogus' —
+# skipped") and applies the valid sibling — the app still starts (VAL-COMPAT-003).
+bogus-action: ctrl+b
+copy-last-message: alt+c

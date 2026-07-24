@@ -1,0 +1,5 @@
+# Invalid variant: a malformed chord string (unknown modifier "hyper"). The
+# loader skips the override with a yellow startup diagnostic ("invalid chord
+# 'hyper+s' for 'submit' (...) — kept default") and the affected action keeps its
+# default binding — the app still starts (VAL-COMPAT-003).
+submit: hyper+s
