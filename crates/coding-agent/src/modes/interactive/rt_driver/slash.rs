@@ -574,6 +574,7 @@ fn apply_import(
         Ok(()) => {
             lock_state(state).usage = TokenUsageSummary::default();
             lock_state(state).queue_raw(CLEAR_SCREEN_AND_SCROLLBACK);
+            replay_imported_transcript(session, state);
             refresh_footer(session, cwd, state, footer);
             commit_status(
                 state,
@@ -582,6 +583,38 @@ fn apply_import(
             );
         }
         Err(e) => commit_error(state, requester, &format!("[/import failed: {e}]")),
+    }
+}
+
+/// Queue the imported session's stored transcript as ordered scrollback blocks so
+/// `/import` shows the imported conversation rather than leaving the screen empty
+/// (VAL-CHAT-041). Mirrors the `--resume` startup replay ([`queue_startup_replay`]
+/// in the driver's `mod.rs`): each message is wrapped through
+/// [`replay::replay_blocks`](super::replay::replay_blocks) and queued as a block,
+/// and assistant messages are seeded into the assistant-history so a later global
+/// Ctrl+T re-render includes them.
+///
+/// An empty transcript still emits the `[resumed: <label>]` marker block, so an
+/// imported-but-empty session shows the boundary line rather than nothing.
+fn replay_imported_transcript(session: &AgentSession, state: &Arc<Mutex<DriverState>>) {
+    let messages = session.messages();
+    let label = session
+        .label()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| session.session_id().chars().take(8).collect());
+
+    let mut guard = lock_state(state);
+    let width = guard.size.cols;
+    let hide_thinking = guard.hide_thinking;
+    let palette = guard.palette();
+    for block in super::replay::replay_blocks(messages, &label, hide_thinking, width, &palette) {
+        guard.queue_commit(block);
+    }
+    for message in messages {
+        if let model::Message::Assistant(a) = message {
+            guard.remember_assistant(a.clone());
+        }
     }
 }
 
@@ -1394,6 +1427,65 @@ mod tests {
             committed_text(&state).contains("/import"),
             "expected a usage hint, got: {}",
             committed_text(&state)
+        );
+    }
+
+    #[tokio::test]
+    async fn import_replays_the_imported_transcript() {
+        // VAL-CHAT-041: /import must switch the session AND replay its stored
+        // transcript into scrollback — not just clear the screen and confirm.
+        use crate::core::session_manager::SessionManager;
+
+        // Build an on-disk JSONL session carrying a user + assistant exchange, then
+        // import it.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cwd = Path::new("/tmp");
+        let mut source = SessionManager::create_in(cwd, dir.path()).unwrap();
+        source
+            .append_message(model::Message::User(model::UserMessage::new_text(
+                "imported user question",
+            )))
+            .unwrap();
+        source
+            .append_message(assistant_message("imported assistant reply"))
+            .unwrap();
+        let import_path = source.path().to_path_buf();
+
+        let mut session = test_session();
+        let state = state();
+        let footer = footer_of(&session, cwd);
+        let requester = test_requester();
+
+        let line = format!("/import {}", import_path.display());
+        dispatch_slash(&line, &mut session, cwd, &state, &footer, &requester);
+
+        // The session switched to the imported transcript.
+        assert_eq!(
+            session.message_count(),
+            2,
+            "the imported session's two messages must be adopted"
+        );
+        // The imported bodies were replayed into scrollback (not left empty), and the
+        // confirming status line still landed.
+        let out = committed_text(&state);
+        assert!(
+            out.contains("imported user question"),
+            "the imported user message must be replayed, got: {out}"
+        );
+        assert!(
+            out.contains("imported assistant reply"),
+            "the imported assistant message must be replayed, got: {out}"
+        );
+        assert!(
+            out.contains("imported session from"),
+            "the confirming status line must still land, got: {out}"
+        );
+        // The replayed assistant message is seeded into the assistant-history so a
+        // later global Ctrl+T re-render includes it.
+        assert_eq!(
+            lock_state(&state).assistant_history.len(),
+            1,
+            "the imported assistant message must be remembered for re-render"
         );
     }
 

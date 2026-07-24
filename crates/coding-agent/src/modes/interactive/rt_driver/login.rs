@@ -146,7 +146,21 @@ pub async fn open_login(
     // `/login <provider>` skips the picker (power-user path + the direct-arg
     // routing test); a bare `/login` opens the picker to choose one.
     let chosen = match provider.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(p) => Some(p.to_string()),
+        Some(p) => {
+            // Resolve the explicit provider against the catalog before mounting any
+            // dialog: an unknown id lands a coloured error and stops here, so
+            // `/login bogus` never opens a "Login to bogus" key dialog (VAL-OVERLAY-018).
+            // Matched case-insensitively, mirroring `oauth_provider_id`'s lowercasing.
+            let wanted = p.to_lowercase();
+            let matched = build_provider_rows(session)
+                .into_iter()
+                .find(|row| row.id.to_lowercase() == wanted);
+            let Some(row) = matched else {
+                commit_error(state, requester, &format!("[/login: unknown provider {p}]"));
+                return;
+            };
+            Some(row.id)
+        }
         None => {
             open_provider_picker(
                 session,
@@ -575,5 +589,142 @@ mod tests {
         // A stored credential → no first-run onboarding.
         let configured = registry_with_stored_key(&dir, "amazon-bedrock");
         assert!(registry_has_credentials(&configured));
+    }
+
+    // --- /login <provider> catalog validation (VAL-OVERLAY-018) -----------
+
+    use std::time::Duration;
+
+    use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler};
+    use hand_tui::rt::view::TerminalSize;
+
+    use super::super::overlay::{is_open, new_done_signal, new_shared_overlay};
+
+    /// A test model over the built-in catalog. `in_memory_with_client` builds a real
+    /// `ModelRegistry` from the client, so `build_provider_rows(session)` returns the
+    /// built-in provider catalog (anthropic, openai, …) the validation checks against.
+    fn test_model() -> model::Model {
+        model::Model {
+            id: "test-model".to_string(),
+            name: "Test".to_string(),
+            api: model::types::Api::AnthropicMessages,
+            provider: model::types::Provider::Anthropic,
+            base_url: String::new(),
+            reasoning: false,
+            input: vec![model::InputType::Text],
+            cost: model::Cost {
+                input: 0.0,
+                output: 0.0,
+                cache_read: 0.0,
+                cache_write: 0.0,
+            },
+            context_window: 200_000,
+            max_tokens: 4096,
+            headers: None,
+            compat: None,
+            thinking_level_map: None,
+        }
+    }
+
+    fn test_session() -> AgentSession {
+        AgentSession::in_memory_with_client(test_model(), vec![], model::Client::new())
+    }
+
+    fn test_requester() -> FrameRequester {
+        let (requester, _handle) = FrameScheduler::spawn(|| Ok(()));
+        requester
+    }
+
+    fn state() -> Arc<Mutex<DriverState>> {
+        Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))))
+    }
+
+    /// Every queued scrollback line, joined — a simple `contains` check for the
+    /// status/error lines a handler committed.
+    fn committed_text(state: &Arc<Mutex<DriverState>>) -> String {
+        lock_state(state)
+            .pending_commits
+            .iter()
+            .flatten()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn login_unknown_provider_errors_without_opening_a_dialog() {
+        // `/login bogus` must reject the unknown id with a coloured error and never
+        // mount a "Login to bogus / Paste your API key" dialog (VAL-OVERLAY-018).
+        let mut session = test_session();
+        let overlay = new_shared_overlay();
+        let done = new_done_signal();
+        let state = state();
+        let requester = test_requester();
+
+        // This branch returns early (no overlay await), so it completes promptly.
+        open_login(
+            &mut session,
+            Some("definitely-not-a-provider"),
+            &overlay,
+            &done,
+            &state,
+            &requester,
+        )
+        .await;
+
+        assert!(
+            !is_open(&overlay),
+            "an unknown provider must not mount any dialog"
+        );
+        let out = committed_text(&state);
+        assert!(
+            out.contains("unknown provider definitely-not-a-provider"),
+            "expected an unknown-provider error, got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_known_provider_still_opens_the_key_dialog() {
+        // A known non-OAuth provider (`openai`) still opens the API-key dialog: the
+        // validation only gates *unknown* ids, it does not change the happy path.
+        let mut session = test_session();
+        let overlay = new_shared_overlay();
+        let done = new_done_signal();
+        let state = state();
+        let requester = test_requester();
+
+        // The key dialog mounts, then awaits the user's submit (a channel this test
+        // never feeds), so drive the flow under a timeout: it is expected to still be
+        // awaiting when the timeout fires, with the dialog mounted.
+        let elapsed = tokio::time::timeout(
+            Duration::from_millis(200),
+            open_login(
+                &mut session,
+                Some("openai"),
+                &overlay,
+                &done,
+                &state,
+                &requester,
+            ),
+        )
+        .await;
+
+        assert!(
+            elapsed.is_err(),
+            "the key dialog should await the user's submit, not return"
+        );
+        assert!(
+            is_open(&overlay),
+            "a known provider must still mount the login dialog"
+        );
+        assert!(
+            !committed_text(&state).contains("unknown provider"),
+            "a known provider must not be rejected"
+        );
     }
 }
