@@ -530,6 +530,42 @@ impl SessionGuard {
         let kitty = self.kitty;
         restore_once(&SESSION_ACTIVE, || restore_terminal(kitty));
     }
+
+    /// Temporarily yield the terminal to a foreground child process (an external
+    /// `$VISUAL` / `$EDITOR` opened with Ctrl+G), then re-claim it with
+    /// [`resume`](SessionGuard::resume).
+    ///
+    /// Unlike [`restore`](SessionGuard::restore) this does **not** touch the
+    /// single-session `SESSION_ACTIVE` flag or the panic hook: the guard stays
+    /// live and its one-shot teardown contract (explicit restore / `Drop` / panic
+    /// hook, emitted exactly once) is unchanged. It only pops the interactive
+    /// escapes (paste-disable, kitty-pop, show-cursor) and leaves raw mode so the
+    /// spawned editor gets a clean cooked TTY. Best-effort — any escape-write or
+    /// raw-toggle error is swallowed, matching the teardown discipline (a failed
+    /// suspend must not panic the run loop).
+    ///
+    /// Pairs strictly with [`resume`](SessionGuard::resume): the caller suspends,
+    /// runs the child to completion, then resumes. This is the M3 Ctrl+G
+    /// terminal-handoff seam (VAL-EDITOR-020) — the smallest surface that lets the
+    /// interactive driver hand the terminal to an external editor and take it back
+    /// without tearing down the session.
+    pub fn suspend(&self) {
+        restore_terminal(self.kitty);
+    }
+
+    /// Re-claim the terminal after a [`suspend`](SessionGuard::suspend): re-enter
+    /// raw mode and re-write the interactive enter escapes (bracketed paste, and —
+    /// when this session pushed them — the kitty keyboard flags).
+    ///
+    /// Best-effort like [`suspend`](SessionGuard::suspend): errors are swallowed so
+    /// a partial resume never panics the run loop. The caller requests a full
+    /// repaint afterwards (the scheduler's per-frame viewport wipe redraws the
+    /// bottom UI cleanly), so no residue from the editor's screen survives.
+    pub fn resume(&self) {
+        let _ = enable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = write_enter_sequences(&mut stdout, self.kitty);
+    }
 }
 
 impl Drop for SessionGuard {

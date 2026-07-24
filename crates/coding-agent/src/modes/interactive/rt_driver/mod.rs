@@ -61,6 +61,8 @@
 pub mod bash;
 pub mod chat;
 pub mod chrome;
+pub mod clipboard;
+pub mod external_editor;
 pub mod footer;
 pub mod input;
 pub mod login;
@@ -223,9 +225,12 @@ impl InteractiveMode {
 
         // Seed the tracked size from the real terminal; resize events overwrite it.
         let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
-        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(
-            init_cols, init_rows,
-        ))));
+        let mut driver_state = DriverState::new(TerminalSize::new(init_cols, init_rows));
+        // Seed `show_images` from the merged settings so the image path honours the
+        // configured value from the first tool result; the `/settings` toggle flips
+        // it live thereafter (VAL-IMG-011).
+        driver_state.set_show_images(session.settings().current().terminal.show_images());
+        let state = Arc::new(Mutex::new(driver_state));
 
         // The chat editor: borderless, no placeholder — the hand chat-input style.
         // The driver's own bottom-area geometry supplies the bordered box, so the
@@ -377,6 +382,7 @@ impl InteractiveMode {
             submit_tx: &submit_tx,
             cancel: &cancel,
             overlays: &overlays,
+            guard: &guard,
         })
         .await;
 
@@ -423,6 +429,12 @@ struct RunInputArgs<'a> {
     /// it can reach the editor or the turn-control paths below. The mounted selector
     /// carries its own done flag, so the input loop needs only the overlay here.
     overlays: &'a SharedOverlay,
+    /// The live session guard, borrowed for the Ctrl+G terminal handoff: the input
+    /// loop suspends it (yield raw mode) around the external-editor spawn and
+    /// resumes it (re-enter raw mode) after, using the M1 SessionGuard
+    /// suspend/resume seam (VAL-EDITOR-020). The guard's own teardown contract is
+    /// untouched — `restore` / `Drop` / the panic hook still fire exactly once.
+    guard: &'a SessionGuard,
 }
 
 /// The interactive input loop.
@@ -440,6 +452,7 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
         submit_tx,
         cancel,
         overlays,
+        guard,
     } = args;
 
     loop {
@@ -464,6 +477,28 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                 // below never see it. The dialog closes itself once the selector
                 // raises its done flag on Enter/Esc.
                 if overlay::dispatch_key(overlays, requester, &key) {
+                    requester.request_frame();
+                    continue;
+                }
+                // Ctrl+G opens the current buffer in the external editor
+                // (`$VISUAL` over `$EDITOR`). The driver yields the terminal to the
+                // editor (suspend raw mode), spawns it, then re-enters and repaints
+                // — a save-and-exit replaces the buffer, a non-zero exit leaves it
+                // and lands an error status line (VAL-EDITOR-020). Handled here
+                // (where the guard + editor + requester are in scope) before the
+                // editor so Ctrl+G never inserts a literal char.
+                if key.key_id.as_deref() == Some("ctrl+g") {
+                    open_external_editor(editor, state, requester, guard).await;
+                    requester.request_frame();
+                    continue;
+                }
+                // Ctrl+V pastes the system clipboard into the editor: text lands
+                // verbatim, an image is written to a temp PNG and its absolute path
+                // inserted, and an empty/unavailable clipboard lands a red status
+                // line and leaves the editor unchanged (VAL-IMG-010). Handled here
+                // so the driver — not the terminal's own paste — owns the read.
+                if key.key_id.as_deref() == Some("ctrl+v") {
+                    paste_clipboard(editor, state, requester);
                     requester.request_frame();
                     continue;
                 }
@@ -697,6 +732,101 @@ fn is_quit_command(trimmed: &str) -> bool {
     // Only the bare command (no args) counts as a quit.
     let name = rest.split_whitespace().next().unwrap_or("");
     matches!(name.to_ascii_lowercase().as_str(), "quit" | "exit" | "q")
+}
+
+/// Open the current chat-input buffer in the external editor and apply the result
+/// (Ctrl+G, VAL-EDITOR-020).
+///
+/// Resolves the editor from `$VISUAL` (preferred) or `$EDITOR`; with neither set
+/// it lands the guidance line and does nothing. Otherwise it performs the terminal
+/// handoff: suspend the session guard (yield raw mode so the editor gets a clean
+/// cooked TTY), spawn the editor on the inherited terminal, wait for it, resume the
+/// guard (re-enter raw mode), and request a full repaint (the scheduler's per-frame
+/// viewport wipe redraws the bottom UI with no interleaved / stale frame). A
+/// save-and-exit replaces the buffer; a non-zero exit / spawn failure leaves the
+/// buffer untouched and commits the red error status line.
+///
+/// The blocking editor run is offloaded to `spawn_blocking` so the async input loop
+/// is not stalled on the child; the guard is suspended for exactly that span.
+async fn open_external_editor(
+    editor: &SharedEditor,
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    guard: &SessionGuard,
+) {
+    let Some(command) = external_editor::resolve_editor_command() else {
+        commit(
+            state,
+            requester,
+            chat::error_lines("[editor: set $VISUAL or $EDITOR to use Ctrl+G]"),
+        );
+        return;
+    };
+    let Some((program, args)) = external_editor::split_editor_command(&command) else {
+        commit(
+            state,
+            requester,
+            chat::error_lines("[editor: $VISUAL/$EDITOR is blank]"),
+        );
+        return;
+    };
+
+    // Snapshot the current buffer to seed the editor.
+    let buffer = lock_editor(editor).text();
+
+    // Terminal handoff: yield raw mode, run the editor on the inherited TTY, then
+    // re-enter raw mode. The blocking run is offloaded so the input loop's task is
+    // not wedged; the guard stays live (its teardown contract is untouched).
+    guard.suspend();
+    let outcome = tokio::task::spawn_blocking(move || {
+        external_editor::run_editor_roundtrip(&program, &args, &buffer)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        external_editor::EditorOutcome::Failed(format!("[editor task failed: {e}]"))
+    });
+    guard.resume();
+
+    match outcome {
+        external_editor::EditorOutcome::Replaced(text) => {
+            lock_editor(editor).set_text(&text);
+        }
+        external_editor::EditorOutcome::Failed(msg) => {
+            commit(state, requester, chat::error_lines(&msg));
+        }
+    }
+    // A full repaint redraws the bottom UI cleanly after the editor's screen — no
+    // interleaved or stale frame survives the handoff.
+    requester.request_frame();
+}
+
+/// Paste the system clipboard into the chat editor (Ctrl+V, VAL-IMG-010).
+///
+/// Text lands verbatim at the caret; an image is written to a temp PNG and its
+/// absolute path inserted at the caret; an empty / unavailable clipboard leaves the
+/// editor unchanged and commits a red status line. The clipboard reads happen here
+/// and the decision is delegated to [`clipboard::resolve_paste`] (pure, tested),
+/// so this wrapper only performs the reads and applies the outcome.
+fn paste_clipboard(
+    editor: &SharedEditor,
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+) {
+    let text = crate::utils::clipboard::read_clipboard_text();
+    let image = crate::utils::clipboard_image::read_clipboard_image().map_err(|e| e.to_string());
+    let outcome = clipboard::resolve_paste(text, image, &std::env::temp_dir());
+
+    match outcome {
+        clipboard::PasteOutcome::InsertText(text) => {
+            lock_editor(editor).insert_str(&text);
+        }
+        clipboard::PasteOutcome::InsertPath(path) => {
+            lock_editor(editor).insert_str(&path);
+        }
+        clipboard::PasteOutcome::Failed(msg) => {
+            commit(state, requester, chat::error_lines(&msg));
+        }
+    }
 }
 
 /// State the turn-runner task owns.
@@ -1612,7 +1742,11 @@ fn finalize_tool(
     result: &hand_agent::types::ToolResult,
     is_error: bool,
 ) {
-    let result_text = resolve_tool_result_text(result);
+    // Read the live `show_images` setting so a mid-session toggle takes effect on
+    // the next tool result: `false` forces the `[mime WxH]` placeholder even on a
+    // graphics-capable terminal (VAL-IMG-011).
+    let show_images = lock_state(state).show_images();
+    let result_text = resolve_tool_result_text(result, show_images);
     let lines = {
         let mut guard = lock_state(state);
         let pending = guard.take_tool(tool_call_id);
@@ -1631,26 +1765,33 @@ fn finalize_tool(
 ///
 /// A thin wrapper over [`tool_result_display_text`] that reads the process-global
 /// detected capabilities; the pure inner function takes them explicitly so the
-/// parity behaviour is unit-tested without touching the global cache.
-fn resolve_tool_result_text(result: &hand_agent::types::ToolResult) -> String {
+/// parity behaviour is unit-tested without touching the global cache. `show_images`
+/// is the live `terminal.show_images` setting, threaded from the driver state so a
+/// mid-session toggle takes effect on the next tool result (VAL-IMG-011).
+fn resolve_tool_result_text(result: &hand_agent::types::ToolResult, show_images: bool) -> String {
     let caps = hand_tui::get_capabilities();
-    tool_result_display_text(result, &caps)
+    tool_result_display_text(result, show_images, &caps)
 }
 
 /// Resolve a tool result's content to display text with image parity, against an
 /// explicit capability set.
 ///
 /// Routes the result blocks through
-/// [`get_text_output`](crate::tools::render_utils::get_text_output) with
-/// `show_images = true`: a graphics terminal (kitty / iTerm2) drops image blocks
-/// from the text (the chat shows no image — Decision Log ⑤ — so the chat emits
-/// zero graphics bytes), while a plain terminal substitutes a `[mime WxH]`
-/// indicator box so the presence of an image is still visible (VAL-IMG-019).
+/// [`get_text_output`](crate::tools::render_utils::get_text_output) with the live
+/// `show_images` flag: when `show_images` is `true` *and* the terminal is
+/// graphics-capable (kitty / iTerm2), image blocks are dropped from the text (the
+/// chat shows no image — Decision Log ⑤ — so the chat emits zero graphics bytes);
+/// otherwise — a plain terminal, or `show_images = false` on any terminal — each
+/// image is substituted with a `[mime WxH]` indicator box so its presence is still
+/// visible (VAL-IMG-019 / VAL-IMG-011). Flipping `show_images` off therefore forces
+/// the placeholder even on a graphics terminal, stopping all subsequent image
+/// graphics bytes mid-session.
 fn tool_result_display_text(
     result: &hand_agent::types::ToolResult,
+    show_images: bool,
     caps: &hand_tui::TerminalImageCapabilities,
 ) -> String {
-    crate::tools::render_utils::get_text_output(&result.content, true, caps)
+    crate::tools::render_utils::get_text_output(&result.content, show_images, caps)
 }
 
 /// The concatenated text content of an in-flight assistant partial, joined with
@@ -2297,7 +2438,8 @@ mod tests {
     /// no image bytes leak in (Decision Log ⑤ / VAL-IMG-019).
     #[test]
     fn tool_result_text_on_kitty_omits_the_image_with_no_indicator() {
-        let text = tool_result_display_text(&image_result(), &kitty_caps());
+        // show_images = true (the default) on a graphics terminal drops the image.
+        let text = tool_result_display_text(&image_result(), true, &kitty_caps());
         assert!(
             text.contains("screenshot"),
             "surrounding text kept: {text:?}"
@@ -2313,7 +2455,7 @@ mod tests {
     /// persona).
     #[test]
     fn tool_result_text_on_plain_shows_a_mime_indicator() {
-        let text = tool_result_display_text(&image_result(), &plain_caps());
+        let text = tool_result_display_text(&image_result(), true, &plain_caps());
         assert!(
             text.contains("screenshot"),
             "surrounding text kept: {text:?}"
@@ -2321,6 +2463,34 @@ mod tests {
         assert!(
             text.contains("image/png"),
             "plain terminal must show a [mime WxH] indicator: {text:?}"
+        );
+    }
+
+    /// With `show_images = false`, a graphics-capable (kitty) terminal is forced
+    /// to the `[mime WxH]` placeholder instead of dropping the image — this is the
+    /// mid-session `show_images` off behaviour: no image graphics bytes are
+    /// emitted, the placeholder stands in (VAL-IMG-011).
+    #[test]
+    fn show_images_false_forces_placeholder_even_on_kitty() {
+        let text = tool_result_display_text(&image_result(), false, &kitty_caps());
+        assert!(
+            text.contains("screenshot"),
+            "surrounding text kept: {text:?}"
+        );
+        assert!(
+            text.contains("image/png"),
+            "show_images=false must force the placeholder even on a graphics terminal: {text:?}"
+        );
+    }
+
+    /// With `show_images = true` restored, the graphics terminal again drops the
+    /// image (no placeholder) — the on/off/on transition VAL-IMG-011 probes.
+    #[test]
+    fn show_images_true_resumes_dropping_the_image_on_kitty() {
+        let text = tool_result_display_text(&image_result(), true, &kitty_caps());
+        assert!(
+            !text.contains("image/png"),
+            "show_images=true resumes the graphics path (no placeholder): {text:?}"
         );
     }
 

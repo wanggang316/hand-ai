@@ -315,6 +315,14 @@ fn apply_settings_change(
         .and_then(|_| settings.save(SettingsScope::Global));
     match result {
         Ok(()) => {
+            // `show_images` flips the driver-side render gate live so the next tool
+            // result honours the new value without a restart: off forces the
+            // `[mime WxH]` placeholder even on a graphics terminal, on resumes the
+            // graphics path (VAL-IMG-011).
+            if id == "show_images" {
+                lock_state(state)
+                    .set_show_images(session.settings().current().terminal.show_images());
+            }
             refresh_footer(session, cwd, state, footer, requester);
             commit_status(state, requester, &format!("[settings: {id} = {value}]"));
         }
@@ -382,6 +390,11 @@ fn build_settings_entries(merged: &Settings) -> Vec<SettingEntry> {
             "hide_thinking_block",
             SettingValue::Bool(merged.hide_thinking_block.unwrap_or(false)),
             "Hide thinking blocks in the transcript.",
+        ),
+        SettingEntry::new(
+            "show_images",
+            SettingValue::Bool(merged.terminal.show_images()),
+            "Render images inline (off forces text placeholders).",
         ),
         SettingEntry::new(
             "quiet_startup",
@@ -1310,12 +1323,87 @@ mod tests {
                         | "theme"
                         | "auto_compact"
                         | "hide_thinking_block"
+                        | "show_images"
                         | "quiet_startup"
                 ),
                 "unexpected settings id: {}",
                 e.key
             );
         }
+    }
+
+    /// The `/settings` dialog surfaces `show_images` as a bool toggle defaulting to
+    /// the merged effective value (`true`), so the mid-session toggle is reachable
+    /// from the dialog (VAL-IMG-011).
+    #[test]
+    fn build_settings_entries_includes_show_images_toggle() {
+        use crate::core::settings::Settings;
+
+        let merged = Settings::defaults();
+        let entries = build_settings_entries(&merged);
+        let show = entries
+            .iter()
+            .find(|e| e.key == "show_images")
+            .expect("show_images entry present in /settings");
+        assert_eq!(
+            show.value.to_string(),
+            "true",
+            "show_images defaults to the effective value (true)"
+        );
+    }
+
+    /// Applying `show_images = false` through the `/settings` change path persists
+    /// the setting *and* flips the live driver-state gate, so the next tool result
+    /// honours it without a restart (VAL-IMG-011). Toggling back to `true` restores
+    /// the gate. Driven with a settings manager backed by a temp global path so the
+    /// `save` in `apply_settings_change` succeeds and the flip runs.
+    #[tokio::test]
+    async fn apply_show_images_change_flips_the_live_driver_gate() {
+        use crate::core::settings::{Settings, SettingsManager};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let global_path = dir.path().join("settings.yaml");
+        let mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            Some(global_path),
+            None,
+        );
+        let mut session = test_session(true);
+        *session.settings_mut() = mgr;
+
+        let (state, req) = (state(), test_requester());
+        let footer = footer_of(&session, Path::new("."));
+        // Sanity: the driver gate starts on (the DriverState default).
+        assert!(lock_state(&state).show_images(), "gate starts on");
+
+        apply_settings_change(
+            &mut session,
+            Path::new("."),
+            "show_images",
+            "false",
+            &state,
+            &footer,
+            &req,
+        );
+        assert!(
+            !lock_state(&state).show_images(),
+            "applying show_images=false flips the live gate off mid-session"
+        );
+
+        apply_settings_change(
+            &mut session,
+            Path::new("."),
+            "show_images",
+            "true",
+            &state,
+            &footer,
+            &req,
+        );
+        assert!(
+            lock_state(&state).show_images(),
+            "applying show_images=true restores the live gate"
+        );
     }
 
     // --- /theme unknown-arg guidance (VAL-OVERLAY-018) --------------------

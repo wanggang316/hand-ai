@@ -133,18 +133,45 @@ pub struct DriverState {
     /// thinking toggle uses). The expand hint on a collapsed summary is *real*
     /// because this list plus the Ctrl+R listener make it so.
     pub collapsible_summaries: Vec<CollapsibleSummary>,
+    /// Whether image blocks may render as graphics this session (the
+    /// `terminal.show_images` setting). Seeded at launch from settings and flipped
+    /// live by the `/settings` `show_images` toggle. Read by the tool-result image
+    /// path per event: `false` forces the `[mime WxH]` placeholder even on a
+    /// graphics-capable terminal, so flipping it off mid-session stops all
+    /// subsequent image graphics bytes and flipping it back on resumes them
+    /// (VAL-IMG-011). It lives here (not on the session) so the event applier task
+    /// — which has no `&session` — reads the current value directly.
+    pub show_images: bool,
 }
 
 impl DriverState {
     /// A fresh state seeded with the real terminal geometry and a single-row
-    /// input body.
+    /// input body. `show_images` defaults to `true` (the settings default); the
+    /// caller overrides it from the merged settings via
+    /// [`set_show_images`](DriverState::set_show_images) at launch.
     #[must_use]
     pub fn new(size: TerminalSize) -> Self {
         Self {
             size,
             input_rows: MIN_INPUT_ROWS,
+            show_images: true,
             ..Self::default()
         }
+    }
+
+    /// Set whether image blocks may render as graphics (the `show_images`
+    /// setting). Called at launch to seed from merged settings, and by the
+    /// `/settings` toggle to flip it live so the change takes effect on the next
+    /// tool result without a restart (VAL-IMG-011).
+    pub fn set_show_images(&mut self, on: bool) {
+        self.show_images = on;
+    }
+
+    /// Whether image blocks may currently render as graphics. `false` forces the
+    /// `[mime WxH]` placeholder even on a graphics-capable terminal.
+    #[must_use]
+    pub fn show_images(&self) -> bool {
+        self.show_images
     }
 
     /// Queue a finalized block for a single scrollback commit. Empty blocks are
@@ -316,6 +343,21 @@ mod tests {
         assert_eq!(state.input_rows, MIN_INPUT_ROWS);
         assert_eq!(state.size, TerminalSize::new(120, 40));
         assert!(!state.streaming);
+    }
+
+    #[test]
+    fn new_defaults_show_images_on_and_toggle_flips_it() {
+        // The settings default is `true`; a fresh state mirrors it so images render
+        // by default (VAL-IMG-011). The toggle flips it live.
+        let mut state = DriverState::new(TerminalSize::new(80, 24));
+        assert!(state.show_images(), "images shown by default");
+        state.set_show_images(false);
+        assert!(
+            !state.show_images(),
+            "toggling off stops graphics mid-session"
+        );
+        state.set_show_images(true);
+        assert!(state.show_images(), "toggling back on resumes graphics");
     }
 
     #[test]
