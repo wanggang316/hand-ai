@@ -228,47 +228,24 @@ fn diff_lines(text: &str, bg: Color, palette: &ThemePalette) -> Vec<Line<'static
                 }
 
                 if removed.len() == 1 && added.len() == 1 {
-                    let (rspans, aspans) = intra_line_diff(
-                        &removed[0].line_num,
-                        &removed[0].content,
-                        &added[0].line_num,
-                        &added[0].content,
-                        bg,
-                        palette,
-                    );
+                    let (rspans, aspans) = intra_line_diff(&removed[0], &added[0], bg, palette);
                     out.push(Line::from(rspans));
                     out.push(Line::from(aspans));
                 } else {
                     for p in &removed {
-                        out.push(styled_row(
-                            &format!("-{} {}", p.line_num, replace_tabs(&p.content)),
-                            palette.diff_removed,
-                            bg,
-                        ));
+                        out.push(styled_row(&render_row(p), palette.diff_removed, bg));
                     }
                     for p in &added {
-                        out.push(styled_row(
-                            &format!("+{} {}", p.line_num, replace_tabs(&p.content)),
-                            palette.diff_added,
-                            bg,
-                        ));
+                        out.push(styled_row(&render_row(p), palette.diff_added, bg));
                     }
                 }
             }
             '+' => {
-                out.push(styled_row(
-                    &format!("+{} {}", parsed.line_num, replace_tabs(&parsed.content)),
-                    palette.diff_added,
-                    bg,
-                ));
+                out.push(styled_row(&render_row(&parsed), palette.diff_added, bg));
                 i += 1;
             }
             _ => {
-                out.push(styled_row(
-                    &format!(" {} {}", parsed.line_num, replace_tabs(&parsed.content)),
-                    palette.diff_context,
-                    bg,
-                ));
+                out.push(styled_row(&render_row(&parsed), palette.diff_context, bg));
                 i += 1;
             }
         }
@@ -289,15 +266,13 @@ fn styled_row(text: &str, fg: Color, bg: Color) -> Line<'static> {
 /// the changed tokens (a word-level diff). The equal portions render plainly;
 /// the changed tokens carry the [`Modifier::REVERSED`] highlight.
 fn intra_line_diff(
-    rnum: &str,
-    rcontent: &str,
-    anum: &str,
-    acontent: &str,
+    removed: &ParsedLine,
+    added: &ParsedLine,
     bg: Color,
     palette: &ThemePalette,
 ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
-    let old = replace_tabs(rcontent);
-    let new = replace_tabs(acontent);
+    let old = replace_tabs(&removed.content);
+    let new = replace_tabs(&added.content);
     let diff = TextDiff::configure().diff_words(old.as_str(), new.as_str());
 
     let removed_base = Style::default().fg(palette.diff_removed).bg(bg);
@@ -305,8 +280,20 @@ fn intra_line_diff(
     let removed_hi = removed_base.add_modifier(Modifier::REVERSED);
     let added_hi = added_base.add_modifier(Modifier::REVERSED);
 
-    let mut rspans = vec![Span::styled(format!("-{rnum} "), removed_base)];
-    let mut aspans = vec![Span::styled(format!("+{anum} "), added_base)];
+    // The prefix mirrors `render_row`: `-3 ` for a line-numbered row, a bare
+    // `-` for a standard unified-diff row (no number).
+    let rprefix = if removed.numbered {
+        format!("-{} ", removed.line_num)
+    } else {
+        "-".to_string()
+    };
+    let aprefix = if added.numbered {
+        format!("+{} ", added.line_num)
+    } else {
+        "+".to_string()
+    };
+    let mut rspans = vec![Span::styled(rprefix, removed_base)];
+    let mut aspans = vec![Span::styled(aprefix, added_base)];
 
     for change in diff.iter_all_changes() {
         let value = change.value().to_string();
@@ -326,15 +313,44 @@ fn intra_line_diff(
     (rspans, aspans)
 }
 
-/// Parsed pieces of a unified-diff line.
+/// Parsed pieces of a diff line.
 struct ParsedLine {
     prefix: char,
+    /// The 1-based line number in the line-numbered format (`+ 3 content`).
+    /// Empty for a standard unified-diff row (`+content`), which carries no
+    /// number; `numbered` distinguishes the two.
     line_num: String,
     content: String,
+    /// `true` for the internal line-numbered format (`([+\- ])(\s*\d*)\s(.*)`),
+    /// `false` for a standard unified-diff body row (`+content` / `-content`
+    /// with no line number).
+    numbered: bool,
 }
 
-/// Parse `([+\- ])(\s*\d*)\s(.*)`; `None` for non-diff lines (headers, hunk
-/// markers), which render as context.
+/// Reconstruct the display text for a parsed row, restoring its prefix. A
+/// line-numbered row renders `-3 content`; a standard unified-diff row renders
+/// `-content` (tabs expanded for width math in both).
+fn render_row(p: &ParsedLine) -> String {
+    let content = replace_tabs(&p.content);
+    if p.numbered {
+        format!("{}{} {}", p.prefix, p.line_num, content)
+    } else {
+        format!("{}{}", p.prefix, content)
+    }
+}
+
+/// Parse a diff line into its prefix / line-number / content.
+///
+/// Two formats are accepted:
+/// * the internal line-numbered format `([+\- ])(\s*\d*)\s(.*)` (e.g.
+///   `+ 3 new content`), and
+/// * a standard unified-diff body row `([+\-])(.*)` where the prefix is a
+///   single `+`/`-` immediately followed by content or end of line (e.g.
+///   `-foo` / `+bar`), as emitted by the edit tool's `generate_diff`.
+///
+/// `None` (rendered as context) for non-diff lines: the `--- ` / `+++ ` file
+/// headers, the `@@ ` hunk marker, and space-prefixed unified-diff context
+/// rows.
 fn parse_diff_line(line: &str) -> Option<ParsedLine> {
     let bytes = line.as_bytes();
     let first = *bytes.first()? as char;
@@ -358,20 +374,39 @@ fn parse_diff_line(line: &str) -> Option<ParsedLine> {
     // empty the loop runs to the end of the line, so `num_end == bytes.len()`
     // and the separator space is the final byte — a valid empty diff line
     // (`+ 5 `). A bare prefix with no separator (`saw == false`) or a header /
-    // hunk marker (whose separator byte isn't a space) still returns `None`.
-    if !saw {
-        return None;
-    }
-    let sep_idx = num_end - 1;
-    if bytes[sep_idx] != b' ' {
-        return None;
+    // hunk marker (whose separator byte isn't a space) falls through to the
+    // standard unified-diff path below.
+    if saw {
+        let sep_idx = num_end - 1;
+        if bytes[sep_idx] == b' ' {
+            return Some(ParsedLine {
+                prefix: first,
+                line_num: line[1..sep_idx].trim_end_matches(' ').to_string(),
+                content: line.get(num_end..).unwrap_or("").to_string(),
+                numbered: true,
+            });
+        }
     }
 
-    Some(ParsedLine {
-        prefix: first,
-        line_num: line[1..sep_idx].trim_end_matches(' ').to_string(),
-        content: line.get(num_end..).unwrap_or("").to_string(),
-    })
+    // Standard unified-diff body row: a single `+`/`-` immediately followed by
+    // at least one byte of content. The `--- ` / `+++ ` file headers are
+    // excluded by their second char — `--`/`++` are headers, rendered as
+    // context. A bare prefix (`+` / `-` with no content) stays `None` (it
+    // carries no change to colour), and a space-prefixed context row falls
+    // through to `None` as well.
+    if matches!(first, '+' | '-') {
+        let second = bytes.get(1).map(|b| *b as char);
+        if second.is_some() && second != Some(first) {
+            return Some(ParsedLine {
+                prefix: first,
+                line_num: String::new(),
+                content: line[1..].to_string(),
+                numbered: false,
+            });
+        }
+    }
+
+    None
 }
 
 /// Replace tabs with three spaces so terminal-width math stays sane on
@@ -754,6 +789,111 @@ mod tests {
                 .flat_map(|l| l.spans.iter())
                 .any(|s| s.style.fg == Some(DIFF_REMOVED)),
             "empty removed line must be red: {lines:?}"
+        );
+    }
+
+    // --- standard unified-diff rows (VAL-CHAT-039) ------------------------
+    //
+    // The edit tool's `generate_diff` emits a standard unified diff — `--- a/x`
+    // / `+++ b/x` / `@@ -1 +1 @@` headers, then bare `-foo` / `+bar` body rows
+    // with no line number. These must colour add/remove, while the three
+    // header/hunk lines render as context.
+
+    /// A minimal real unified diff, as `generate_diff` would produce for a
+    /// single-line replacement (`foo` → `bar`), with multiple body rows so the
+    /// intra-line highlight path is skipped and each row is a plain styled row.
+    const UNIFIED_FIXTURE: &str = "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-foo\n-baz\n+bar\n+qux";
+
+    fn row_with<'a>(lines: &'a [Line<'a>], needle: &str) -> &'a Line<'a> {
+        lines
+            .iter()
+            .find(|l| text_of(l).contains(needle))
+            .unwrap_or_else(|| panic!("row containing {needle:?} not found"))
+    }
+
+    fn row_fg(line: &Line<'_>) -> Option<Color> {
+        line.spans.iter().find_map(|s| s.style.fg)
+    }
+
+    #[test]
+    fn unified_diff_added_row_is_green() {
+        let lines = diff_lines(UNIFIED_FIXTURE, SUCCESS_BG, &pal());
+        assert_eq!(
+            row_fg(row_with(&lines, "bar")),
+            Some(DIFF_ADDED),
+            "unified-diff `+bar` must take the add colour: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn unified_diff_removed_row_is_red() {
+        let lines = diff_lines(UNIFIED_FIXTURE, SUCCESS_BG, &pal());
+        assert_eq!(
+            row_fg(row_with(&lines, "foo")),
+            Some(DIFF_REMOVED),
+            "unified-diff `-foo` must take the remove colour: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn unified_diff_headers_and_hunk_are_context() {
+        let lines = diff_lines(UNIFIED_FIXTURE, SUCCESS_BG, &pal());
+        for header in ["--- a/x", "+++ b/x", "@@ -1,2 +1,2 @@"] {
+            assert_eq!(
+                row_fg(row_with(&lines, header)),
+                Some(DIFF_CONTEXT),
+                "header/hunk line {header:?} must render as context: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unified_diff_single_line_modification_still_highlights() {
+        // A one-removed / one-added unified block routes through the intra-line
+        // path: red / green rows with inverse-video on the changed token, and a
+        // bare `-`/`+` prefix (no line number).
+        let lines = diff_lines(
+            "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-foo\n+bar",
+            SUCCESS_BG,
+            &pal(),
+        );
+        assert_eq!(row_fg(row_with(&lines, "foo")), Some(DIFF_REMOVED));
+        assert_eq!(row_fg(row_with(&lines, "bar")), Some(DIFF_ADDED));
+        assert!(
+            lines.iter().any(|l| l
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::REVERSED))),
+            "changed tokens in a unified single-line edit must be highlighted"
+        );
+        // The removed row's prefix is a bare `-`, not the line-numbered `-N `.
+        let removed = row_with(&lines, "foo");
+        assert!(
+            text_of(removed).starts_with("-foo"),
+            "unified removed row keeps its bare `-` prefix: {removed:?}"
+        );
+    }
+
+    #[test]
+    fn unified_diff_through_tool_box_keeps_tint() {
+        // End-to-end through `tool_box_lines`: the add/remove rows colour and
+        // still carry the box tint edge to edge.
+        let lines = tool_box_lines(
+            "edit",
+            &json!({"path": "/x"}),
+            UNIFIED_FIXTURE,
+            ToolState::Success,
+            60,
+            &pal(),
+        );
+        let added = row_with(&lines, "bar");
+        assert!(
+            added.spans.iter().any(|s| s.style.fg == Some(DIFF_ADDED)),
+            "added row green through tool_box_lines: {added:?}"
+        );
+        assert!(
+            added.spans.iter().all(|s| s.style.bg == Some(SUCCESS_BG)),
+            "diff rows keep the box tint: {added:?}"
         );
     }
 }
