@@ -95,6 +95,33 @@ pub fn is_open_model_selector(line: &str) -> bool {
     matches!(parsed.name.as_str(), "model" | "models") && parsed.args.is_empty()
 }
 
+/// The typed [`SlashCommandAction`] for a submission if it belongs to the config
+/// selector family (`/thinking`, `/theme`, `/settings`, `/model <pattern>`) — the
+/// commands the driver intercepts on the async turn runner (they may open an
+/// overlay and await, or apply a direct argument), *before* the sync slash
+/// dispatch. `None` for anything else (including bare `/model`, which
+/// [`is_open_model_selector`] already routes).
+///
+/// Returning the parsed action (rather than a bare predicate) lets the driver route
+/// the dialog-vs-direct-arg split off the same parse the sync dispatch would do, so
+/// the two paths never disagree.
+#[must_use]
+pub fn config_selector_action(line: &str) -> Option<SlashCommandAction> {
+    let parsed = ParsedSlashCommand::parse(line)?;
+    let ctx = SlashCommandContext {
+        // The context is only read by commands that echo the current model; the
+        // config-selector commands do not, so placeholder values are fine here —
+        // the driver re-dispatches against the live session when it applies.
+        model_id: String::new(),
+        provider: String::new(),
+    };
+    let action = match SlashCommandTable::dispatch(&parsed, &ctx) {
+        SlashCommandResult::Handled(action) => action,
+        SlashCommandResult::Unknown => return None,
+    };
+    super::selectors::is_config_selector_action(&action).then_some(action)
+}
+
 /// Whether a submission is a `/resume` command — the case that opens the session
 /// picker overlay.
 ///
@@ -280,10 +307,26 @@ pub fn apply_slash_action(
         // outside that path; surface the seam line rather than silently dropping it.
         open @ SlashCommandAction::OpenResumePicker => unsupported(&open, state, requester),
 
+        // The config-selector family (`/thinking`, `/theme`, `/settings`, and
+        // `/model <pattern>`) is intercepted on the async turn runner *before* this
+        // sync dispatch (see `run_turn` + `run_config_selector`): the bare forms
+        // mount a modal overlay and await, and the direct-arg forms apply against
+        // `&mut session`. Reaching these arms means a caller dispatched one outside
+        // that path; surface the seam line rather than silently dropping it — the
+        // same contract as `/model` / `/resume` above.
+        thinking @ SlashCommandAction::OpenThinkingSelector { .. } => {
+            unsupported(&thinking, state, requester)
+        }
+        settings @ SlashCommandAction::OpenSettingsSelector => {
+            unsupported(&settings, state, requester)
+        }
+        theme @ SlashCommandAction::Theme(_) => unsupported(&theme, state, requester),
+        model @ SlashCommandAction::ModelByPattern(_) => unsupported(&model, state, requester),
+
         // --- Follow-up feature seam ---------------------------------------
-        // Selector commands (/model, /theme, /thinking, …) land here as their
-        // features arrive; each replaces one arm without touching the dispatch
-        // wiring.
+        // The remaining selector commands (/login, /tree, scoped-models, …) land
+        // here as their features arrive; each replaces one arm without touching the
+        // dispatch wiring.
         other => unsupported(&other, state, requester),
     }
     SlashOutcome::Continue

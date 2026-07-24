@@ -69,9 +69,12 @@ pub mod overlay;
 pub mod replay;
 pub mod selectors;
 pub mod session_picker;
+pub mod settings_selector;
 pub mod slash;
 pub mod state;
 pub mod summary;
+pub mod theme_selector;
+pub mod thinking_selector;
 pub mod tools;
 pub mod watchdog;
 
@@ -780,6 +783,16 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
         return;
     }
 
+    // The config-selector family (`/thinking`, `/theme`, `/settings`, and
+    // `/model <pattern>`) is intercepted here for the same reason as `/model`: the
+    // bare forms mount a modal overlay and await the pick, and the direct-arg forms
+    // apply against `&mut session`. Both run on the turn runner, *before* the sync
+    // slash dispatch.
+    if let Some(action) = slash::config_selector_action(text) {
+        run_config_selector(runner, action).await;
+        return;
+    }
+
     // Slash commands are intercepted here — the turn runner is the one place
     // that owns `&mut session`, so the session-lifecycle commands (`/new`,
     // `/clone`, `/import`, `/name`) run against it directly. The `/quit` family
@@ -1075,6 +1088,111 @@ async fn run_resume_picker(runner: &mut TurnRunner) {
         &runner.requester,
     )
     .await;
+}
+
+/// Route a config-selector command (`/thinking`, `/theme`, `/settings`,
+/// `/model <pattern>`) to its overlay open or direct-arg apply (VAL-OVERLAY-013 /
+/// -014 / -017 / -018 / -025 / -026 / -036).
+///
+/// The input loop optimistically marked the state streaming on submit; a selector
+/// (or a direct-arg apply) is not a streaming turn, so clear that first. Then:
+///
+/// - the **bare** forms (`/thinking`, `/theme`, `/settings`) mount a modal overlay
+///   and await the pick;
+/// - the **direct-arg** forms (`/thinking <level>`, `/theme <name>`,
+///   `/model <pattern>`) apply immediately with a status line and no dialog.
+///
+/// The dialog-vs-direct-arg split is carried by the typed
+/// [`SlashCommandAction`](crate::modes::interactive::slash_commands::SlashCommandAction)
+/// the driver parsed before entering here.
+async fn run_config_selector(
+    runner: &mut TurnRunner,
+    action: crate::modes::interactive::slash_commands::SlashCommandAction,
+) {
+    use crate::modes::interactive::slash_commands::SlashCommandAction;
+
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match action {
+        // `/thinking` (bare) opens the ladder; `/thinking <level>` applies directly.
+        SlashCommandAction::OpenThinkingSelector { inline_level } => match inline_level {
+            None => {
+                selectors::open_thinking_selector(
+                    &mut runner.session,
+                    &runner.cwd,
+                    &runner.overlays,
+                    &runner.overlay_done,
+                    &runner.state,
+                    &runner.footer,
+                    &runner.requester,
+                )
+                .await;
+            }
+            Some(level) => selectors::apply_thinking_inline(
+                &mut runner.session,
+                &runner.cwd,
+                &level,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            ),
+        },
+        // `/theme` (bare) opens the picker; `/theme <name>` applies directly.
+        SlashCommandAction::Theme(name) => match name {
+            None => {
+                selectors::open_theme_selector(
+                    &mut runner.session,
+                    &runner.overlays,
+                    &runner.overlay_done,
+                    &runner.state,
+                    &runner.requester,
+                )
+                .await;
+            }
+            Some(name) => selectors::apply_theme_inline(
+                &mut runner.session,
+                &name,
+                &runner.state,
+                &runner.requester,
+            ),
+        },
+        // `/settings` opens the editable settings dialog (M2 SettingsList).
+        SlashCommandAction::OpenSettingsSelector => {
+            selectors::open_settings_selector(
+                &mut runner.session,
+                &runner.cwd,
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            )
+            .await;
+        }
+        // `/model <pattern>` is a non-interactive switch (bare `/model` is caught
+        // earlier by `is_open_model_selector`).
+        SlashCommandAction::ModelByPattern(pattern) => selectors::apply_model_pattern(
+            &mut runner.session,
+            &runner.cwd,
+            &pattern,
+            &runner.state,
+            &runner.footer,
+            &runner.requester,
+        ),
+        // `config_selector_action` only ever yields the four arms above; any other
+        // action means the routing predicate and this match disagree — dispatch it
+        // synchronously so it is never silently dropped.
+        other => {
+            let _ = slash::apply_slash_action(
+                other,
+                &mut runner.session,
+                &runner.cwd,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            );
+        }
+    }
 }
 
 /// Whether a failed turn commits the red `send failed` banner.
