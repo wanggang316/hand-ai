@@ -29,6 +29,8 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 use similar::{ChangeTag, TextDiff};
 
+use crate::modes::interactive::theme::ThemePalette;
+
 /// Lifecycle state of a tool call, driving the box background tint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolState {
@@ -40,26 +42,6 @@ pub enum ToolState {
     /// Result received with `is_error` — a red-ish tint.
     Failure,
 }
-
-// State backgrounds — muted truecolor tints so an explicit light body fg always
-// wins on contrast, matching the legacy dark-theme values.
-/// In-flight tool call background (`#282832`).
-const PENDING_BG: Color = Color::Rgb(40, 40, 50);
-/// Successful tool call background (`#283228`).
-const SUCCESS_BG: Color = Color::Rgb(40, 50, 40);
-/// Failed tool call background (`#3c2828`).
-const FAILURE_BG: Color = Color::Rgb(60, 40, 40);
-/// Bright cyan title, bold — the tool name.
-const TITLE_FG: Color = Color::Rgb(120, 220, 220);
-/// Light-grey body — args JSON and result text, readable on any tint.
-const BODY_FG: Color = Color::Rgb(220, 220, 220);
-
-/// Diff added-line foreground (green).
-const DIFF_ADDED: Color = Color::Green;
-/// Diff removed-line foreground (red).
-const DIFF_REMOVED: Color = Color::Red;
-/// Diff context-line foreground (dim gray).
-const DIFF_CONTEXT: Color = Color::DarkGray;
 
 impl ToolState {
     /// Resolve the state from the tool result's error flag. `None` (no result
@@ -73,11 +55,15 @@ impl ToolState {
         }
     }
 
-    fn background(self) -> Color {
+    /// The box background tint for this state, from the active palette. The
+    /// default palette keeps the historical muted truecolor tints
+    /// (`#282832` / `#283228` / `#3c2828`); a custom theme retints them from
+    /// its `toolPendingBg` / `toolSuccessBg` / `toolErrorBg` slots.
+    fn background(self, palette: &ThemePalette) -> Color {
         match self {
-            ToolState::Pending => PENDING_BG,
-            ToolState::Success => SUCCESS_BG,
-            ToolState::Failure => FAILURE_BG,
+            ToolState::Pending => palette.tool_pending_bg,
+            ToolState::Success => palette.tool_success_bg,
+            ToolState::Failure => palette.tool_error_bg,
         }
     }
 }
@@ -103,13 +89,14 @@ pub fn tool_box_lines(
     result_text: &str,
     state: ToolState,
     width: u16,
+    palette: &ThemePalette,
 ) -> Vec<Line<'static>> {
-    let bg = state.background();
+    let bg = state.background(palette);
     let title_style = Style::default()
         .bg(bg)
-        .fg(TITLE_FG)
+        .fg(palette.tool_title)
         .add_modifier(Modifier::BOLD);
-    let body_style = Style::default().bg(bg).fg(BODY_FG);
+    let body_style = Style::default().bg(bg).fg(palette.tool_output);
 
     // Frame the tinted rows with a blank tinted row top and bottom so the box
     // reads as one continuous block (the legacy BoxComponent padding).
@@ -135,7 +122,7 @@ pub fn tool_box_lines(
     if !result_text.is_empty() {
         out.push(blank_row(bg, width));
         if is_diff_tool(tool_name) {
-            for line in diff_lines(result_text, bg) {
+            for line in diff_lines(result_text, bg, palette) {
                 out.push(pad_existing(line, bg, width));
             }
         } else {
@@ -205,14 +192,14 @@ fn pad_existing(line: Line<'static>, bg: Color, width: u16) -> Line<'static> {
 /// Intra-line word highlighting (inverse video on changed tokens) is applied
 /// when a change block is exactly one removed + one added line — a single-line
 /// modification — matching the legacy renderer.
-fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
+fn diff_lines(text: &str, bg: Color, palette: &ThemePalette) -> Vec<Line<'static>> {
     let lines: Vec<&str> = text.split('\n').collect();
     let mut out: Vec<Line<'static>> = Vec::new();
 
     let mut i = 0;
     while i < lines.len() {
         let Some(parsed) = parse_diff_line(lines[i]) else {
-            out.push(styled_row(lines[i], DIFF_CONTEXT, bg));
+            out.push(styled_row(lines[i], palette.diff_context, bg));
             i += 1;
             continue;
         };
@@ -247,6 +234,7 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
                         &added[0].line_num,
                         &added[0].content,
                         bg,
+                        palette,
                     );
                     out.push(Line::from(rspans));
                     out.push(Line::from(aspans));
@@ -254,14 +242,14 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
                     for p in &removed {
                         out.push(styled_row(
                             &format!("-{} {}", p.line_num, replace_tabs(&p.content)),
-                            DIFF_REMOVED,
+                            palette.diff_removed,
                             bg,
                         ));
                     }
                     for p in &added {
                         out.push(styled_row(
                             &format!("+{} {}", p.line_num, replace_tabs(&p.content)),
-                            DIFF_ADDED,
+                            palette.diff_added,
                             bg,
                         ));
                     }
@@ -270,7 +258,7 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
             '+' => {
                 out.push(styled_row(
                     &format!("+{} {}", parsed.line_num, replace_tabs(&parsed.content)),
-                    DIFF_ADDED,
+                    palette.diff_added,
                     bg,
                 ));
                 i += 1;
@@ -278,7 +266,7 @@ fn diff_lines(text: &str, bg: Color) -> Vec<Line<'static>> {
             _ => {
                 out.push(styled_row(
                     &format!(" {} {}", parsed.line_num, replace_tabs(&parsed.content)),
-                    DIFF_CONTEXT,
+                    palette.diff_context,
                     bg,
                 ));
                 i += 1;
@@ -306,13 +294,14 @@ fn intra_line_diff(
     anum: &str,
     acontent: &str,
     bg: Color,
+    palette: &ThemePalette,
 ) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
     let old = replace_tabs(rcontent);
     let new = replace_tabs(acontent);
     let diff = TextDiff::configure().diff_words(old.as_str(), new.as_str());
 
-    let removed_base = Style::default().fg(DIFF_REMOVED).bg(bg);
-    let added_base = Style::default().fg(DIFF_ADDED).bg(bg);
+    let removed_base = Style::default().fg(palette.diff_removed).bg(bg);
+    let added_base = Style::default().fg(palette.diff_added).bg(bg);
     let removed_hi = removed_base.add_modifier(Modifier::REVERSED);
     let added_hi = added_base.add_modifier(Modifier::REVERSED);
 
@@ -390,6 +379,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The default palette — the historical hard-coded tints — so the existing
+    /// assertions keep pinning the same colours.
+    fn pal() -> ThemePalette {
+        ThemePalette::default()
+    }
+
+    // The historical hard-coded tints, re-declared here so the assertions read
+    // the same as before the palette was threaded through.
+    const PENDING_BG: Color = Color::Rgb(40, 40, 50);
+    const SUCCESS_BG: Color = Color::Rgb(40, 50, 40);
+    const FAILURE_BG: Color = Color::Rgb(60, 40, 40);
+    const DIFF_ADDED: Color = Color::Green;
+    const DIFF_REMOVED: Color = Color::Red;
+    const DIFF_CONTEXT: Color = Color::DarkGray;
+
     fn text_of(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
@@ -409,7 +413,7 @@ mod tests {
 
     #[test]
     fn pending_state_uses_pending_tint() {
-        let lines = tool_box_lines("read", &json!({"path": "/x"}), "", ToolState::Pending, 60);
+        let lines = tool_box_lines("read", &json!({"path": "/x"}), "", ToolState::Pending, 60, &pal());
         assert!(
             has_bg(&lines, PENDING_BG),
             "pending tint: {:?}",
@@ -419,14 +423,14 @@ mod tests {
 
     #[test]
     fn success_state_uses_success_tint() {
-        let lines = tool_box_lines("read", &json!({}), "ok", ToolState::Success, 60);
+        let lines = tool_box_lines("read", &json!({}), "ok", ToolState::Success, 60, &pal());
         assert!(has_bg(&lines, SUCCESS_BG));
         assert!(joined(&lines).contains("ok"));
     }
 
     #[test]
     fn failure_state_uses_failure_tint() {
-        let lines = tool_box_lines("read", &json!({}), "boom", ToolState::Failure, 60);
+        let lines = tool_box_lines("read", &json!({}), "boom", ToolState::Failure, 60, &pal());
         assert!(has_bg(&lines, FAILURE_BG));
         assert!(joined(&lines).contains("boom"));
     }
@@ -436,6 +440,38 @@ mod tests {
         assert_eq!(ToolState::from_result(None), ToolState::Pending);
         assert_eq!(ToolState::from_result(Some(false)), ToolState::Success);
         assert_eq!(ToolState::from_result(Some(true)), ToolState::Failure);
+    }
+
+    #[test]
+    fn custom_palette_retints_the_box_and_title() {
+        // A custom palette recolours the success tint and the bold title, so a
+        // custom theme colours the tool box (VAL-COMPAT-004) while the default
+        // palette keeps the historical look.
+        let neon = ThemePalette {
+            tool_success_bg: Color::Rgb(0x00, 0x1a, 0x0d),
+            tool_title: Color::Rgb(0x00, 0xff, 0xff),
+            ..ThemePalette::default()
+        };
+        let lines = tool_box_lines("read", &json!({}), "ok", ToolState::Success, 60, &neon);
+        assert!(
+            has_bg(&lines, Color::Rgb(0x00, 0x1a, 0x0d)),
+            "custom success tint applied"
+        );
+        let title = lines
+            .iter()
+            .find(|l| text_of(l).contains("read"))
+            .expect("title row");
+        assert!(
+            title
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(0x00, 0xff, 0xff))),
+            "custom title colour applied"
+        );
+        // The default palette keeps the historical tint.
+        let default_lines =
+            tool_box_lines("read", &json!({}), "ok", ToolState::Success, 60, &pal());
+        assert!(has_bg(&default_lines, SUCCESS_BG));
     }
 
     // --- name / args / result (VAL-CHAT-011) -----------------------------
@@ -448,6 +484,7 @@ mod tests {
             "",
             ToolState::Pending,
             60,
+            &pal(),
         );
         let title = lines
             .iter()
@@ -466,6 +503,7 @@ mod tests {
             "",
             ToolState::Pending,
             60,
+            &pal(),
         );
         let out = joined(&lines);
         assert!(out.contains("\"command\""), "args JSON key: {out:?}");
@@ -474,7 +512,7 @@ mod tests {
 
     #[test]
     fn empty_args_object_is_skipped() {
-        let lines = tool_box_lines("noop", &json!({}), "done", ToolState::Success, 60);
+        let lines = tool_box_lines("noop", &json!({}), "done", ToolState::Success, 60, &pal());
         let out = joined(&lines);
         assert!(!out.contains("{}"), "empty args must be skipped: {out:?}");
         assert!(out.contains("done"), "result still shown");
@@ -488,6 +526,7 @@ mod tests {
             "file body",
             ToolState::Success,
             60,
+            &pal(),
         );
         let out = joined(&lines);
         assert!(out.contains("file body"));
@@ -506,6 +545,7 @@ mod tests {
             "body",
             ToolState::Success,
             width,
+            &pal(),
         );
         for line in &lines {
             let row_width: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
@@ -539,6 +579,7 @@ mod tests {
             "+ 3 new content",
             ToolState::Success,
             60,
+            &pal(),
         );
         let added = lines
             .iter()
@@ -558,6 +599,7 @@ mod tests {
             "- 3 old content\n  4 kept",
             ToolState::Success,
             60,
+            &pal(),
         );
         let removed = lines
             .iter()
@@ -580,6 +622,7 @@ mod tests {
             "  1 unchanged line",
             ToolState::Success,
             60,
+            &pal(),
         );
         let ctx = lines
             .iter()
@@ -596,6 +639,7 @@ mod tests {
             "- 1 hello world\n+ 1 hello rust",
             ToolState::Success,
             60,
+            &pal(),
         );
         // Both a red and a green row are present.
         assert!(
@@ -626,6 +670,7 @@ mod tests {
             "+ 1 created by mock",
             ToolState::Success,
             60,
+            &pal(),
         );
         let added = lines
             .iter()

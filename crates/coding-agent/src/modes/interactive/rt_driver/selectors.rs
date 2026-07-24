@@ -785,7 +785,8 @@ fn commit_summary(
 ) {
     let mut guard = lock_state(state);
     let width = guard.size.cols;
-    let lines = super::summary::summary_lines(&summary, width);
+    let palette = guard.palette();
+    let lines = super::summary::summary_lines(&summary, width, &palette);
     guard.queue_commit(lines);
     guard.remember_summary(summary);
     drop(guard);

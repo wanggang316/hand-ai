@@ -1349,7 +1349,8 @@ async fn run_compact(runner: &mut TurnRunner, steer: Option<String>) {
             let lines = {
                 let mut guard = lock_state(&runner.state);
                 let width = guard.size.cols;
-                let lines = summary::summary_lines(&entry, width);
+                let palette = guard.palette();
+                let lines = summary::summary_lines(&entry, width, &palette);
                 guard.remember_summary(entry);
                 lines
             };
@@ -1902,7 +1903,15 @@ fn finalize_tool(
             None => (tool_name.to_string(), serde_json::Value::Null),
         };
         let state_tint = tools::ToolState::from_result(Some(is_error));
-        tools::tool_box_lines(&name, &args, &result_text, state_tint, guard.size.cols)
+        let palette = guard.palette();
+        tools::tool_box_lines(
+            &name,
+            &args,
+            &result_text,
+            state_tint,
+            guard.size.cols,
+            &palette,
+        )
     };
     commit(state, requester, lines);
 }
@@ -2009,8 +2018,9 @@ fn toggle_thinking_globally(state: &Arc<Mutex<DriverState>>, requester: &FrameRe
 fn toggle_last_summary(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester) {
     let lines = {
         let mut guard = lock_state(state);
+        let palette = guard.palette();
         match guard.toggle_last_summary() {
-            Some(entry) => summary::summary_lines(&entry, guard.size.cols),
+            Some(entry) => summary::summary_lines(&entry, guard.size.cols, &palette),
             None => return,
         }
     };

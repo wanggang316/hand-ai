@@ -27,16 +27,36 @@ use hand_tui::rt::components::syntax_highlight::default_markdown_theme;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-/// Muted-purple box background — the rt-native equivalent of the legacy
-/// `custom_message_bg` slot (`\x1b[48;5;53m`, xterm 53 ≈ `#5f005f`). Applied
-/// edge to edge on every row so the box reads as one continuous block.
-const BOX_BG: Color = Color::Rgb(95, 0, 95);
-/// Bold bright-magenta `[label]` header foreground.
-const LABEL_FG: Color = Color::Rgb(255, 120, 255);
-/// Bright-white body foreground, readable on [`BOX_BG`].
-const BODY_FG: Color = Color::Rgb(238, 238, 238);
-/// Dim foreground for the `(ctrl+r to expand)` hint parenthetical.
+use crate::modes::interactive::theme::ThemePalette;
+
+/// Dim foreground for the `(ctrl+r to expand)` hint parenthetical. Kept as a
+/// fixed dim grey — a secondary hint colour with no dedicated theme slot.
 const HINT_FG: Color = Color::Rgb(150, 150, 150);
+
+/// The resolved box colours for a summary / custom-message box, derived from
+/// the active palette. The default palette keeps the historical muted-purple
+/// look (`#5f005f` box, `#ff78ff` label, `#eeeeee` body); a custom theme
+/// retints them from its `customMessageBg` / `customMessageLabel` /
+/// `customMessageText` slots.
+#[derive(Debug, Clone, Copy)]
+struct BoxColors {
+    /// Box background tint, applied edge to edge on every row.
+    bg: Color,
+    /// Bold `[label]` header foreground.
+    label: Color,
+    /// Body-text foreground, readable on `bg`.
+    body: Color,
+}
+
+impl BoxColors {
+    fn from_palette(palette: &ThemePalette) -> Self {
+        Self {
+            bg: palette.custom_message_bg,
+            label: palette.custom_message_label,
+            body: palette.custom_message_text,
+        }
+    }
+}
 
 /// The key hint shown in a collapsed summary. Real: the driver's Ctrl+R
 /// listener honours it (legacy had the hint but no listener).
@@ -107,12 +127,19 @@ impl CollapsibleSummary {
 /// Collapsed: a single body line carrying the `(ctrl+r to expand)` hint, with
 /// the summary body hidden. Expanded: the full markdown body under a bold header.
 /// Either way the `[label]` header sits at the top and the whole box tints edge
-/// to edge in [`BOX_BG`].
+/// to edge in the palette's custom-message background. `palette` colours the
+/// box tint, label and body from the active theme (the default palette keeps
+/// the historical muted-purple look).
 #[must_use]
-pub fn summary_lines(summary: &CollapsibleSummary, width: u16) -> Vec<Line<'static>> {
-    let mut out = vec![blank_row(width)];
-    out.push(label_row(summary.kind.label(), width));
-    out.push(blank_row(width));
+pub fn summary_lines(
+    summary: &CollapsibleSummary,
+    width: u16,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let colors = BoxColors::from_palette(palette);
+    let mut out = vec![blank_row(width, colors)];
+    out.push(label_row(summary.kind.label(), width, colors));
+    out.push(blank_row(width, colors));
 
     if summary.expanded {
         let body = expanded_body(summary);
@@ -121,13 +148,13 @@ pub fn summary_lines(summary: &CollapsibleSummary, width: u16) -> Vec<Line<'stat
             width.max(2).saturating_sub(2),
             &default_markdown_theme(),
         ) {
-            out.push(tint_existing(line, width));
+            out.push(tint_existing(line, width, colors));
         }
     } else {
-        out.push(collapsed_line_row(summary, width));
+        out.push(collapsed_line_row(summary, width, colors));
     }
 
-    out.push(blank_row(width));
+    out.push(blank_row(width, colors));
     out
 }
 
@@ -147,9 +174,13 @@ fn expanded_body(summary: &CollapsibleSummary) -> String {
 
 /// The collapsed one-line body carrying the `(ctrl+r to expand)` hint, worded per
 /// kind.
-fn collapsed_line_row(summary: &CollapsibleSummary, width: u16) -> Line<'static> {
-    let body_style = Style::default().bg(BOX_BG).fg(BODY_FG);
-    let hint_style = Style::default().bg(BOX_BG).fg(HINT_FG);
+fn collapsed_line_row(
+    summary: &CollapsibleSummary,
+    width: u16,
+    colors: BoxColors,
+) -> Line<'static> {
+    let body_style = Style::default().bg(colors.bg).fg(colors.body);
+    let hint_style = Style::default().bg(colors.bg).fg(HINT_FG);
 
     let lead = match &summary.kind {
         SummaryKind::Compaction { tokens_before } => {
@@ -167,6 +198,7 @@ fn collapsed_line_row(summary: &CollapsibleSummary, width: u16) -> Line<'static>
             Span::styled(format!("({EXPAND_KEY} to expand)"), hint_style),
         ],
         width,
+        colors,
     )
 }
 
@@ -177,49 +209,56 @@ fn collapsed_line_row(summary: &CollapsibleSummary, width: u16) -> Line<'static>
 /// list. An empty body still produces a well-formed box (the callers pass a
 /// sensible `_(no …)_` empty form).
 #[must_use]
-pub fn labelled_box_lines(label: &str, body: &str, width: u16) -> Vec<Line<'static>> {
+pub fn labelled_box_lines(
+    label: &str,
+    body: &str,
+    width: u16,
+    palette: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let colors = BoxColors::from_palette(palette);
     let bracketed = format!("[{label}]");
-    let mut out = vec![blank_row(width)];
-    out.push(label_row(&bracketed, width));
+    let mut out = vec![blank_row(width, colors)];
+    out.push(label_row(&bracketed, width, colors));
     if !body.trim().is_empty() {
-        out.push(blank_row(width));
+        out.push(blank_row(width, colors));
         for line in render_markdown(
             body,
             width.max(2).saturating_sub(2),
             &default_markdown_theme(),
         ) {
-            out.push(tint_existing(line, width));
+            out.push(tint_existing(line, width, colors));
         }
     }
-    out.push(blank_row(width));
+    out.push(blank_row(width, colors));
     out
 }
 
-/// The bold bright-magenta `[label]` header row.
-fn label_row(bracketed: &str, width: u16) -> Line<'static> {
+/// The bold `[label]` header row, coloured from `colors`.
+fn label_row(bracketed: &str, width: u16, colors: BoxColors) -> Line<'static> {
     let label_style = Style::default()
-        .bg(BOX_BG)
-        .fg(LABEL_FG)
+        .bg(colors.bg)
+        .fg(colors.label)
         .add_modifier(Modifier::BOLD);
     padded_row(
         vec![Span::styled(bracketed.to_string(), label_style)],
         width,
+        colors,
     )
 }
 
 /// A blank, fully-tinted row spanning the width.
-fn blank_row(width: u16) -> Line<'static> {
+fn blank_row(width: u16, colors: BoxColors) -> Line<'static> {
     Line::from(Span::styled(
         " ".repeat(usize::from(width.max(1))),
-        Style::default().bg(BOX_BG),
+        Style::default().bg(colors.bg),
     ))
 }
 
 /// Wrap `spans` in a one-column-padded, right-filled row so the tint reaches
 /// both edges.
-fn padded_row(spans: Vec<Span<'static>>, width: u16) -> Line<'static> {
+fn padded_row(spans: Vec<Span<'static>>, width: u16, colors: BoxColors) -> Line<'static> {
     let visible: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let pad_bg = Style::default().bg(BOX_BG);
+    let pad_bg = Style::default().bg(colors.bg);
     let inner_cols = usize::from(width.max(2)).saturating_sub(2);
     let right_fill = inner_cols.saturating_sub(visible);
 
@@ -232,8 +271,8 @@ fn padded_row(spans: Vec<Span<'static>>, width: u16) -> Line<'static> {
 /// Tint an already-styled markdown row edge to edge: patch the box background
 /// over every span (keeping any markdown fg), then pad it to the width so the
 /// tint reaches both edges and the body sits one column in.
-fn tint_existing(line: Line<'static>, width: u16) -> Line<'static> {
-    let bg = Style::default().bg(BOX_BG);
+fn tint_existing(line: Line<'static>, width: u16, colors: BoxColors) -> Line<'static> {
+    let bg = Style::default().bg(colors.bg);
     let spans: Vec<Span<'static>> = line
         .spans
         .into_iter()
@@ -242,14 +281,14 @@ fn tint_existing(line: Line<'static>, width: u16) -> Line<'static> {
             // Default the fg to the readable body color when the markdown span
             // carried none, so text is legible on the tint.
             let style = if style.fg.is_none() {
-                style.fg(BODY_FG)
+                style.fg(colors.body)
             } else {
                 style
             };
             Span::styled(span.content.into_owned(), style)
         })
         .collect();
-    padded_row(spans, width)
+    padded_row(spans, width, colors)
 }
 
 /// Render a `u64` with comma thousands separators (`12345` → `"12,345"`).
@@ -269,6 +308,15 @@ fn format_thousands(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default palette — the historical muted-purple look — so the existing
+    /// assertions keep pinning the same colours.
+    fn pal() -> ThemePalette {
+        ThemePalette::default()
+    }
+
+    /// The historical box background tint, re-declared for the tint assertions.
+    const BOX_BG: Color = Color::Rgb(95, 0, 95);
 
     /// The plain concatenated text of a line.
     fn text_of(line: &Line<'_>) -> String {
@@ -292,7 +340,7 @@ mod tests {
 
     #[test]
     fn labelled_box_shows_label_and_body_tinted() {
-        let lines = labelled_box_lines("changelog", "## 1.0\n\n- did a thing", 60);
+        let lines = labelled_box_lines("changelog", "## 1.0\n\n- did a thing", 60, &pal());
         let out = joined(&lines);
         assert!(out.contains("[changelog]"), "label missing: {out:?}");
         assert!(out.contains("did a thing"), "body missing: {out:?}");
@@ -303,7 +351,7 @@ mod tests {
     fn labelled_box_empty_body_still_well_formed() {
         // The empty form (no skills / extensions installed) still renders a
         // labelled box, just without a body block.
-        let lines = labelled_box_lines("skills", "_(no skills discovered)_", 60);
+        let lines = labelled_box_lines("skills", "_(no skills discovered)_", 60, &pal());
         let out = joined(&lines);
         assert!(out.contains("[skills]"), "label present: {out:?}");
         assert!(
@@ -314,8 +362,41 @@ mod tests {
     }
 
     #[test]
+    fn custom_palette_retints_the_box() {
+        // A custom palette recolours the box tint and the label, so a custom
+        // theme colours the summary box (VAL-COMPAT-004); the default palette
+        // keeps the historical muted-purple look.
+        let neon = ThemePalette {
+            custom_message_bg: Color::Rgb(0x1a, 0x00, 0x33),
+            custom_message_label: Color::Rgb(0xff, 0x00, 0xff),
+            ..ThemePalette::default()
+        };
+        let lines = labelled_box_lines("skills", "body", 60, &neon);
+        assert!(
+            lines
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .all(|s| s.style.bg == Some(Color::Rgb(0x1a, 0x00, 0x33))),
+            "custom box tint applied edge to edge"
+        );
+        let label = lines
+            .iter()
+            .find(|l| text_of(l).contains("[skills]"))
+            .expect("label row");
+        assert!(
+            label
+                .spans
+                .iter()
+                .any(|s| s.style.fg == Some(Color::Rgb(0xff, 0x00, 0xff))),
+            "custom label colour applied"
+        );
+        // The default palette keeps the historical tint.
+        assert!(all_tinted(&labelled_box_lines("skills", "body", 60, &pal())));
+    }
+
+    #[test]
     fn labelled_box_bold_label() {
-        let lines = labelled_box_lines("diagnostics", "ok", 40);
+        let lines = labelled_box_lines("diagnostics", "ok", 40, &pal());
         let label = lines
             .iter()
             .find(|l| text_of(l).contains("[diagnostics]"))
@@ -334,7 +415,7 @@ mod tests {
     #[test]
     fn compaction_collapsed_shows_hint_and_hides_body() {
         let summary = CollapsibleSummary::compaction("secret summary body", 12_345);
-        let lines = summary_lines(&summary, 60);
+        let lines = summary_lines(&summary, 60, &pal());
         let out = joined(&lines);
         assert!(out.contains("[compaction]"), "label missing: {out:?}");
         assert!(
@@ -356,7 +437,7 @@ mod tests {
     fn compaction_expanded_shows_body_and_header() {
         let mut summary = CollapsibleSummary::compaction("the full summary text", 1_000);
         summary.expanded = true;
-        let out = joined(&summary_lines(&summary, 60));
+        let out = joined(&summary_lines(&summary, 60, &pal()));
         assert!(out.contains("[compaction]"), "label: {out:?}");
         assert!(
             out.contains("Compacted from 1,000 tokens"),
@@ -391,7 +472,7 @@ mod tests {
             summary: "hidden body".to_string(),
             expanded: false,
         };
-        let out = joined(&summary_lines(&summary, 60));
+        let out = joined(&summary_lines(&summary, 60, &pal()));
         assert!(out.contains("[skill]"), "label: {out:?}");
         assert!(out.contains("code-review"), "name: {out:?}");
         assert!(out.contains("(ctrl+r to expand)"), "hint: {out:?}");
@@ -405,7 +486,7 @@ mod tests {
             summary: "diverged here".to_string(),
             expanded: true,
         };
-        let out = joined(&summary_lines(&summary, 60));
+        let out = joined(&summary_lines(&summary, 60, &pal()));
         assert!(out.contains("[branch]"), "label: {out:?}");
         assert!(out.contains("diverged here"), "body: {out:?}");
     }

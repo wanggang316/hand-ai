@@ -39,6 +39,7 @@ use crate::modes::interactive::slash_commands::{
     ExportFormat, ParsedSlashCommand, SlashCommandAction, SlashCommandContext, SlashCommandResult,
     SlashCommandTable,
 };
+use crate::modes::interactive::theme::ThemePalette;
 
 use super::chat;
 use super::footer::{TokenUsageSummary, build_footer_view, thinking_level_label};
@@ -326,7 +327,7 @@ pub fn apply_slash_action(
             commit(
                 state,
                 requester,
-                labelled_box_lines("skills", &body, box_width(state)),
+                labelled_box_lines("skills", &body, box_width(state), &box_palette(state)),
             );
         }
         SlashCommandAction::ListExtensions => {
@@ -334,7 +335,7 @@ pub fn apply_slash_action(
             commit(
                 state,
                 requester,
-                labelled_box_lines("extensions", &body, box_width(state)),
+                labelled_box_lines("extensions", &body, box_width(state), &box_palette(state)),
             );
         }
         SlashCommandAction::ShowDiagnostics => {
@@ -342,7 +343,7 @@ pub fn apply_slash_action(
             commit(
                 state,
                 requester,
-                labelled_box_lines("diagnostics", &body, box_width(state)),
+                labelled_box_lines("diagnostics", &body, box_width(state), &box_palette(state)),
             );
         }
         SlashCommandAction::Changelog => {
@@ -350,7 +351,7 @@ pub fn apply_slash_action(
             commit(
                 state,
                 requester,
-                labelled_box_lines("changelog", &body, box_width(state)),
+                labelled_box_lines("changelog", &body, box_width(state), &box_palette(state)),
             );
         }
 
@@ -705,6 +706,13 @@ fn refresh_footer(
 /// terminal columns.
 fn box_width(state: &Arc<Mutex<DriverState>>) -> u16 {
     lock_state(state).size.cols
+}
+
+/// The active theme palette the info-command tinted boxes colour with — the
+/// default palette keeps the historical muted-purple look; a custom theme
+/// retints the box from its custom-message slots.
+fn box_palette(state: &Arc<Mutex<DriverState>>) -> ThemePalette {
+    lock_state(state).palette()
 }
 
 /// `/copy` (and its Ctrl+X shortcut) — copy the last assistant message's text to
