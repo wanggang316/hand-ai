@@ -233,6 +233,14 @@ impl InteractiveMode {
         // configured value from the first tool result; the `/settings` toggle flips
         // it live thereafter (VAL-IMG-011).
         driver_state.set_show_images(session.settings().current().terminal.show_images());
+        // Resolve the configured theme to a concrete palette, tolerating every
+        // failure mode (unknown name, malformed / partial JSON, `system`): the
+        // resolver always yields at least the built-in default, so a bad theme
+        // never blocks startup (VAL-COMPAT-004 / 005 / 016). The optional
+        // `fallback_reason` is surfaced as a startup diagnostic below.
+        let theme_resolution = resolve_startup_theme(&session);
+        driver_state.set_theme(Arc::new(theme_resolution.theme));
+        let theme_fallback_reason = theme_resolution.fallback_reason;
         let state = Arc::new(Mutex::new(driver_state));
 
         // The chat editor: borderless, no placeholder — the hand chat-input style.
@@ -262,6 +270,14 @@ impl InteractiveMode {
         let startup = collect_startup_chrome(&mut session);
         for block in startup {
             lock_state(&state).queue_commit(block);
+        }
+
+        // Surface a theme-fallback notice (unknown / malformed / partial theme)
+        // as a single yellow startup line — the session keeps running on the
+        // default palette (VAL-COMPAT-005 / 016), the same "never crash on bad
+        // config" discipline the keybindings loader uses.
+        if let Some(reason) = theme_fallback_reason {
+            lock_state(&state).queue_commit(chat::status_lines_for(&format!("theme: {reason}")));
         }
 
         // Load the user keybindings (app-layer): project `<cwd>/.hand` > global
@@ -2068,6 +2084,44 @@ fn load_keybindings(cwd: &std::path::Path, state: &Arc<Mutex<DriverState>>) -> S
         lock_state(state).queue_commit(line);
     }
     new_shared_keybindings(bindings)
+}
+
+/// Resolve the configured theme into a concrete palette for the renderers,
+/// tolerating every failure mode.
+///
+/// The `theme` setting names one of `dark` / `light` / `high-contrast` /
+/// `system`; the resolver additionally accepts any custom `<name>.json` in the
+/// user themes directory. Whatever the value, the result is never a hard
+/// failure — an unknown name, a malformed / partial JSON, or an unresolvable
+/// custom-dir all fold down to the built-in default palette, with a populated
+/// `fallback_reason` the caller lands as a startup notice
+/// (VAL-COMPAT-004 / 005 / 016).
+fn resolve_startup_theme(
+    session: &AgentSession,
+) -> crate::modes::interactive::theme::ResolvedTheme {
+    use crate::core::settings::ThemeSetting;
+    use crate::modes::interactive::theme::{
+        default_custom_themes_dir, default_theme, resolve_theme_or_default,
+    };
+
+    let name = match session.settings().current().theme() {
+        ThemeSetting::Dark => "dark",
+        ThemeSetting::Light => "light",
+        ThemeSetting::HighContrast => "high-contrast",
+        ThemeSetting::System => "system",
+    };
+
+    // The custom-theme directory may be unavailable (no home dir); fall back to
+    // the built-in default rather than failing. A built-in name still resolves
+    // from the embedded JSON, so only genuine custom themes are lost here.
+    let Ok(dir) = default_custom_themes_dir() else {
+        return crate::modes::interactive::theme::ResolvedTheme {
+            theme: default_theme(None),
+            fallback_reason: None,
+        };
+    };
+
+    resolve_theme_or_default(name, &dir, None)
 }
 
 /// Render each keybindings [`Diagnostic`] as a one-line yellow status block.

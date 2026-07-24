@@ -12,6 +12,7 @@ pub mod built_in;
 pub mod color;
 pub mod core;
 pub mod loader;
+pub mod ratatui_style;
 
 pub use built_in::{
     BUILTIN_THEME_NAMES, builtin_theme_json, dark_theme, dark_theme_json_str, light_theme,
@@ -26,7 +27,8 @@ pub use core::{
     ThinkingLevel,
 };
 pub use loader::{
-    ThemeInfo, ThemeLoadError, available_themes, available_themes_with_paths,
-    default_custom_themes_dir, detect_terminal_background, load_theme, load_theme_from_path,
-    theme_by_name,
+    ResolvedTheme, ThemeInfo, ThemeLoadError, available_themes, available_themes_with_paths,
+    default_custom_themes_dir, default_theme, detect_terminal_background, load_theme,
+    load_theme_from_path, resolve_theme_or_default, theme_by_name,
 };
+pub use ratatui_style::resolved_to_ratatui;

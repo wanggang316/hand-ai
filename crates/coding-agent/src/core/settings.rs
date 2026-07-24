@@ -2364,6 +2364,28 @@ mod tests {
         }
     }
 
+    /// VAL-COMPAT-017 (pinned behaviour): a syntactically corrupt
+    /// `settings.yaml` yields a **readable** error that names the offending
+    /// file, rather than a default-plus-warning silent start. The rt driver
+    /// surfaces this before `SessionGuard::enter` toggles raw mode, so the
+    /// terminal stays cooked. Contrast with an unknown-keys-only file, which
+    /// starts normally (see `unknown_top_level_key_ignored_without_error`).
+    #[test]
+    fn corrupt_settings_error_is_readable_and_names_the_file() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(&dir, "corrupt.yaml", "theme: light\n  : broken indent\n");
+        let err = Settings::load(Some(&p), None).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("YAML parse error"),
+            "error should be a readable YAML diagnostic: {rendered}"
+        );
+        assert!(
+            rendered.contains(&p.display().to_string()),
+            "error should name the offending file: {rendered}"
+        );
+    }
+
     #[test]
     fn missing_global_file_is_ok() {
         let dir = TempDir::new().unwrap();

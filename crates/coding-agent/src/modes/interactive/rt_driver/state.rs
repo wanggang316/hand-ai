@@ -27,6 +27,8 @@ use ratatui::text::Line;
 
 use model::AssistantMessage;
 
+use crate::modes::interactive::theme::Theme;
+
 use super::footer::{FooterViewModel, TokenUsageSummary};
 use super::summary::CollapsibleSummary;
 
@@ -142,6 +144,14 @@ pub struct DriverState {
     /// (VAL-IMG-011). It lives here (not on the session) so the event applier task
     /// — which has no `&session` — reads the current value directly.
     pub show_images: bool,
+    /// The resolved user [`Theme`] the renderers colour with, seeded at launch
+    /// from the `theme` setting via
+    /// [`resolve_theme_or_default`](crate::modes::interactive::theme::resolve_theme_or_default).
+    /// `None` until seeded (and in the test constructors), in which case a
+    /// renderer falls back to the built-in default palette. Shared as an `Arc`
+    /// so the draw closure and the event applier both read it cheaply without
+    /// cloning the colour maps.
+    pub theme: Option<Arc<Theme>>,
 }
 
 impl DriverState {
@@ -172,6 +182,22 @@ impl DriverState {
     #[must_use]
     pub fn show_images(&self) -> bool {
         self.show_images
+    }
+
+    /// Seed the resolved user theme the renderers colour with. Called at launch
+    /// with the theme produced by
+    /// [`resolve_theme_or_default`](crate::modes::interactive::theme::resolve_theme_or_default),
+    /// so a custom palette is applied and an unknown / corrupt theme has already
+    /// been folded down to the default.
+    pub fn set_theme(&mut self, theme: Arc<Theme>) {
+        self.theme = Some(theme);
+    }
+
+    /// The active user theme, if one has been seeded. A renderer with `None`
+    /// falls back to the built-in default palette.
+    #[must_use]
+    pub fn theme(&self) -> Option<&Arc<Theme>> {
+        self.theme.as_ref()
     }
 
     /// Queue a finalized block for a single scrollback commit. Empty blocks are
