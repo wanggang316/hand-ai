@@ -94,6 +94,21 @@ pub trait SelectorController: Send {
     /// selector consumes every key (so none reaches the editor) and raises its
     /// [`DoneSignal`] on Enter/Esc.
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome;
+
+    /// Handle a bracketed-paste payload while mounted, reporting whether it was
+    /// consumed.
+    ///
+    /// The default drops the paste (a list-style selector filters by key, not by
+    /// paste). A selector with a **text field** — the login key dialog — overrides
+    /// this to insert the *entire* payload in one shot: a multi-character API key
+    /// arriving as one paste event lands whole, never folded to one character
+    /// (VAL-OVERLAY-027 — the migration fix away from the legacy single-character
+    /// paste collapse). Returning [`HandleOutcome::Consumed`] keeps the paste from
+    /// also reaching the chat editor beneath (the same editor-isolation contract as
+    /// [`handle_key`](SelectorController::handle_key)).
+    fn handle_paste(&mut self, _text: &str) -> HandleOutcome {
+        HandleOutcome::Consumed
+    }
 }
 
 /// The shared, mounted selector plus its close flag, shared between the input loop
@@ -231,6 +246,32 @@ pub fn dispatch_key(overlay: &SharedOverlay, requester: &FrameRequester, key: &R
     true
 }
 
+/// Route a bracketed-paste payload through the mounted selector, reporting whether
+/// an overlay owned it.
+///
+/// The mirror of [`dispatch_key`] for paste events: with an overlay open the whole
+/// payload goes to the mounted selector's [`handle_paste`](SelectorController::handle_paste)
+/// (so a text-field selector lands the *entire* paste, not a folded marker or a
+/// single character — VAL-OVERLAY-027), and the caller must not also feed it to the
+/// editor. `false` when nothing is open, so the caller pastes into the editor as
+/// usual. A paste never raises the done flag, so this never closes the dialog.
+pub fn dispatch_paste(overlay: &SharedOverlay, requester: &FrameRequester, text: &str) -> bool {
+    let controller = {
+        let guard = overlay.lock();
+        match guard.as_ref() {
+            Some(m) => m.controller.clone(),
+            None => return false,
+        }
+    };
+
+    let _ = controller
+        .lock()
+        .expect("selector poisoned")
+        .handle_paste(text);
+    requester.request_frame();
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,6 +284,7 @@ mod tests {
     /// concrete selector.
     struct StubSelector {
         keys_seen: usize,
+        pasted: Arc<Mutex<String>>,
         done: DoneSignal,
     }
 
@@ -256,6 +298,13 @@ mod tests {
             if matches!(key.key_id.as_deref(), Some("enter") | Some("escape")) {
                 self.done.store(true, Ordering::SeqCst);
             }
+            HandleOutcome::Consumed
+        }
+
+        fn handle_paste(&mut self, text: &str) -> HandleOutcome {
+            // Accumulate the *whole* payload — the runtime must hand it over intact
+            // (VAL-OVERLAY-027), never split into per-character events.
+            self.pasted.lock().expect("pasted poisoned").push_str(text);
             HandleOutcome::Consumed
         }
     }
@@ -274,13 +323,23 @@ mod tests {
     }
 
     fn mount_stub(overlay: &SharedOverlay, requester: &FrameRequester) -> DoneSignal {
+        let (done, _) = mount_stub_with_paste(overlay, requester);
+        done
+    }
+
+    fn mount_stub_with_paste(
+        overlay: &SharedOverlay,
+        requester: &FrameRequester,
+    ) -> (DoneSignal, Arc<Mutex<String>>) {
         let done = new_done_signal();
+        let pasted = Arc::new(Mutex::new(String::new()));
         let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(StubSelector {
             keys_seen: 0,
+            pasted: pasted.clone(),
             done: done.clone(),
         }));
         mount(overlay, requester, controller, done.clone());
-        done
+        (done, pasted)
     }
 
     #[tokio::test]
@@ -337,6 +396,37 @@ mod tests {
             dispatch_key(&overlay, &requester, &key("escape"));
             assert!(!is_open(&overlay), "closed cleanly before reopen");
         }
+    }
+
+    #[tokio::test]
+    async fn a_paste_with_no_overlay_reports_unhandled() {
+        // No overlay open → the paste falls through to the editor (the caller pastes
+        // it), so dispatch_paste reports it did not own the payload.
+        let overlay = new_shared_overlay();
+        let requester = test_requester();
+        assert!(!dispatch_paste(&overlay, &requester, "sk-abc123"));
+    }
+
+    #[tokio::test]
+    async fn a_paste_lands_in_the_mounted_selector_whole() {
+        // VAL-OVERLAY-027: a multi-character paste reaches the mounted selector as a
+        // single intact payload (never folded to one character), and the overlay owns
+        // it so the editor beneath never sees it.
+        let overlay = new_shared_overlay();
+        let requester = test_requester();
+        let (_done, pasted) = mount_stub_with_paste(&overlay, &requester);
+
+        let key = "sk-ant-api03-THE-WHOLE-KEY-arrives-as-one-paste-event";
+        assert!(
+            dispatch_paste(&overlay, &requester, key),
+            "an open overlay owns the paste"
+        );
+        assert_eq!(
+            pasted.lock().unwrap().as_str(),
+            key,
+            "the selector received the entire payload intact"
+        );
+        assert!(is_open(&overlay), "a paste never closes the dialog");
     }
 
     #[tokio::test]

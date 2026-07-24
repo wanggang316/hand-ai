@@ -148,6 +148,34 @@ pub fn picker_selector_action(line: &str) -> Option<SlashCommandAction> {
     super::selectors::is_picker_selector_action(&action).then_some(action)
 }
 
+/// The typed [`SlashCommandAction`] for a submission if it belongs to the *login*
+/// family (`/login`, `/logout`) — the commands the driver intercepts on the async
+/// turn runner because they mount a modal overlay (provider picker → key dialog, or
+/// the OAuth flow) and await, or clear credentials. `None` for anything else.
+///
+/// Returning the parsed action (rather than a bare predicate) lets the driver route
+/// the flow off the same parse the sync dispatch would do, so the two paths never
+/// disagree — the same shape as [`picker_selector_action`].
+#[must_use]
+pub fn login_action(line: &str) -> Option<SlashCommandAction> {
+    let parsed = ParsedSlashCommand::parse(line)?;
+    let ctx = SlashCommandContext {
+        // The login commands do not echo the current model, so placeholders are
+        // fine — the driver re-reads the live session when it opens the overlay.
+        model_id: String::new(),
+        provider: String::new(),
+    };
+    let action = match SlashCommandTable::dispatch(&parsed, &ctx) {
+        SlashCommandResult::Handled(action) => action,
+        SlashCommandResult::Unknown => return None,
+    };
+    matches!(
+        action,
+        SlashCommandAction::OpenLoginDialog { .. } | SlashCommandAction::Logout
+    )
+    .then_some(action)
+}
+
 /// Whether a submission is a `/resume` command — the case that opens the session
 /// picker overlay.
 ///
@@ -361,9 +389,18 @@ pub fn apply_slash_action(
         }
         fork @ SlashCommandAction::Fork(_) => unsupported(&fork, state, requester),
 
+        // The login family (`/login`, `/logout`) mounts a modal overlay (provider
+        // picker → key dialog, or the OAuth flow) and awaits, or clears credentials,
+        // so it is intercepted on the async turn runner *before* this sync dispatch
+        // (see `run_turn` + `run_login`). Reaching these arms means a caller
+        // dispatched one outside that path; surface the seam line rather than
+        // silently dropping it — the same contract as `/model` / `/resume` above.
+        login @ SlashCommandAction::OpenLoginDialog { .. } => unsupported(&login, state, requester),
+        logout @ SlashCommandAction::Logout => unsupported(&logout, state, requester),
+
         // --- Follow-up feature seam ---------------------------------------
-        // The remaining selector commands (/login, …) land here as their features
-        // arrive; each replaces one arm without touching the dispatch wiring.
+        // The remaining selector commands land here as their features arrive; each
+        // replaces one arm without touching the dispatch wiring.
         other => unsupported(&other, state, requester),
     }
     SlashOutcome::Continue
@@ -1684,6 +1721,34 @@ mod tests {
         assert!(picker_selector_action("/help").is_none());
         assert!(picker_selector_action("/model").is_none());
         assert!(picker_selector_action("plain text").is_none());
+    }
+
+    // --- login-family interception (/login /logout) -----------------------
+
+    #[test]
+    fn login_action_routes_the_login_family() {
+        use crate::modes::interactive::slash_commands::SlashCommandAction;
+
+        // Bare `/login` opens the provider picker (no explicit provider).
+        assert!(matches!(
+            login_action("/login"),
+            Some(SlashCommandAction::OpenLoginDialog { provider: None })
+        ));
+        // `/login <provider>` carries the provider (case preserved for the
+        // case-insensitive OAuth-vs-key split downstream).
+        assert!(matches!(
+            login_action("/login Anthropic"),
+            Some(SlashCommandAction::OpenLoginDialog { provider: Some(p) }) if p == "Anthropic"
+        ));
+        // `/logout` clears credentials.
+        assert!(matches!(
+            login_action("/logout"),
+            Some(SlashCommandAction::Logout)
+        ));
+        // Unrelated commands never route to the login family.
+        assert!(login_action("/help").is_none());
+        assert!(login_action("/model").is_none());
+        assert!(login_action("plain text").is_none());
     }
 
     #[test]

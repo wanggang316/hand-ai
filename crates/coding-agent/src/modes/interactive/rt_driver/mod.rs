@@ -63,8 +63,12 @@ pub mod chat;
 pub mod chrome;
 pub mod footer;
 pub mod input;
+pub mod login;
+pub mod login_dialog;
+pub mod login_provider_picker;
 pub mod messages;
 pub mod model_selector;
+pub mod oauth_flow;
 pub mod overlay;
 pub mod replay;
 pub mod scoped_models_selector;
@@ -311,6 +315,17 @@ impl InteractiveMode {
         // always hits the current turn's token (VAL-CHAT-013 / VAL-CHAT-014).
         let cancel = session.cancel_handle();
 
+        // First-run onboarding gate (VAL-OVERLAY-022): with no provider credential on
+        // file (stored or via env var), greet the user and auto-open the login
+        // picker. Decided here, *before* the session moves into the turn runner
+        // (which owns `&mut session`); the welcome banner is committed now so it
+        // lands above the picker, and a `/login` submit is queued below so the turn
+        // runner opens the overlay.
+        let needs_onboarding = !login::any_provider_has_credentials(&session);
+        if needs_onboarding {
+            lock_state(&state).queue_commit(chat::status_lines_for(login::WELCOME_NO_CREDENTIALS));
+        }
+
         // Spawn the turn runner: it owns the session and runs each submitted turn
         // to completion under the watchdog. It does NOT exit the process.
         let turns = tokio::spawn(turn_runner(TurnRunner {
@@ -325,6 +340,14 @@ impl InteractiveMode {
             overlays: overlays.clone(),
             overlay_done: overlay_done.clone(),
         }));
+
+        // Kick off first-run onboarding: queue a `/login` submit the turn runner
+        // drains, which opens the provider picker on the overlay runtime. Sent after
+        // the runner is spawned so the channel is live; the welcome banner committed
+        // above renders first.
+        if needs_onboarding {
+            let _ = submit_tx.send("/login".to_string());
+        }
 
         // Spawn the event applier as an INDEPENDENT task. It must not share a
         // `select!` with the turn runner: `send_message` emits events through
@@ -502,6 +525,14 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                 }
             }
             RtInputEvent::Paste(payload) => {
+                // A mounted selector with a text field (the login key dialog) owns a
+                // paste first: the whole payload lands in its input in one shot
+                // (VAL-OVERLAY-027), and the editor beneath never sees it. Only when
+                // no overlay is open does the paste reach the chat editor.
+                if overlay::dispatch_paste(overlays, requester, &payload) {
+                    requester.request_frame();
+                    continue;
+                }
                 lock_editor(editor).insert_paste(&payload);
             }
             RtInputEvent::Resize { cols, rows } => {
@@ -802,6 +833,16 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     // same reason as `/model` / `/resume` / the config family.
     if let Some(action) = slash::picker_selector_action(text) {
         run_picker_selector(runner, action).await;
+        return;
+    }
+
+    // The login family (`/login`, `/logout`) mounts a modal overlay (provider picker
+    // → key dialog, or the OAuth flow) and awaits, or clears credentials, so it is
+    // intercepted here on the async turn runner (the one task that owns
+    // `&mut session`), *before* the sync slash dispatch — the same reason as
+    // `/model` / `/resume` / the config + picker families.
+    if let Some(action) = slash::login_action(text) {
+        run_login(runner, action).await;
         return;
     }
 
@@ -1263,6 +1304,57 @@ async fn run_picker_selector(
         // `picker_selector_action` only ever yields the three arms above; any other
         // action means the routing predicate and this match disagree — dispatch it
         // synchronously so it is never silently dropped.
+        other => {
+            let _ = slash::apply_slash_action(
+                other,
+                &mut runner.session,
+                &runner.cwd,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            );
+        }
+    }
+}
+
+/// Route a login-family command (`/login`, `/logout`) to its overlay flow
+/// (VAL-OVERLAY-015 / -016 / -027 / -028 / -029 / -034).
+///
+/// The input loop optimistically marked the state streaming on submit; a login flow
+/// is not a streaming turn, so clear that first. Then:
+///
+/// - `/login` (bare) opens the provider picker → the chosen provider's flow (OAuth
+///   for `anthropic` / `openai-codex` / `github-copilot`, else the API-key dialog);
+///   `/login <provider>` skips the picker and goes straight to that provider's flow,
+///   split case-insensitively (VAL-OVERLAY-034);
+/// - `/logout` clears stored credentials so the `configured` badge disappears on the
+///   next `/login` (VAL-OVERLAY-029).
+async fn run_login(
+    runner: &mut TurnRunner,
+    action: crate::modes::interactive::slash_commands::SlashCommandAction,
+) {
+    use crate::modes::interactive::slash_commands::SlashCommandAction;
+
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match action {
+        SlashCommandAction::OpenLoginDialog { provider } => {
+            login::open_login(
+                &mut runner.session,
+                provider.as_deref(),
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.requester,
+            )
+            .await;
+        }
+        SlashCommandAction::Logout => {
+            login::open_logout(&mut runner.session, None, &runner.state, &runner.requester).await;
+        }
+        // `login_action` only ever yields the two arms above; any other action means
+        // the routing predicate and this match disagree — dispatch it synchronously
+        // so it is never silently dropped.
         other => {
             let _ = slash::apply_slash_action(
                 other,
