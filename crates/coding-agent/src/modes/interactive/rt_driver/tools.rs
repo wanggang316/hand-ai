@@ -175,8 +175,9 @@ fn padded_row(spans: Vec<Span<'static>>, bg: Color, width: u16) -> Line<'static>
 /// Ensure an already-styled row is padded / right-filled to the width so its
 /// tint reaches both edges (used for pre-styled diff rows).
 fn pad_existing(line: Line<'static>, bg: Color, width: u16) -> Line<'static> {
-    // If the row is already a padded blank (equal width), leave it; otherwise
-    // rebuild it padded. Detect a padded row by a leading single-space pad span.
+    // If the row's visible content already spans the width, leave it as-is;
+    // otherwise rebuild it padded/right-filled. The decision is purely on total
+    // visible width — no inspection of individual pad spans.
     let visible: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
     let target = usize::from(width.max(1));
     if visible >= target {

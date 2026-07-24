@@ -401,6 +401,10 @@ impl OverlayStack {
     pub fn push(&mut self, overlay: Overlay) -> OverlayId {
         let id = OverlayId(self.next_id.fetch_add(1, Ordering::Relaxed));
         self.overlays.push((id, overlay));
+        // Symmetry with pop/remove/drain_mounts: the new top has not rendered
+        // yet, so the cached rect (belonging to the previous top) is stale until
+        // the next render re-sets it.
+        self.top_rect = None;
         id
     }
 

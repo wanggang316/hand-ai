@@ -239,8 +239,9 @@ fn elapsed_since(last_draw: Option<TokioInstant>) -> Option<Duration> {
 /// Honour a final pending frame once the channel has closed, then finish.
 ///
 /// Called on the shutdown path (all requesters dropped) when a request was in
-/// flight: draws once if the rate limiter permits, so the last state is not
-/// lost, then returns `Ok(())` to end the actor.
+/// flight: draws once **if** the rate limiter permits, so the last state is not
+/// lost — the shutdown draw is not unconditional, a frame still inside the
+/// current window is skipped — then returns `Ok(())` to end the actor.
 fn finish_pending<F>(
     clock: &FrameClock,
     last_draw: Option<TokioInstant>,

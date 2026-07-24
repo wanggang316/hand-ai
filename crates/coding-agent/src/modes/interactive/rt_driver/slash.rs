@@ -109,13 +109,9 @@ pub fn is_open_model_selector(line: &str) -> bool {
 #[must_use]
 pub fn config_selector_action(line: &str) -> Option<SlashCommandAction> {
     let parsed = ParsedSlashCommand::parse(line)?;
-    let ctx = SlashCommandContext {
-        // The context is only read by commands that echo the current model; the
-        // config-selector commands do not, so placeholder values are fine here —
-        // the driver re-dispatches against the live session when it applies.
-        model_id: String::new(),
-        provider: String::new(),
-    };
+    // Config-selector actions never read the context (they re-dispatch against the
+    // live session on apply); see `SlashCommandContext::placeholder`.
+    let ctx = SlashCommandContext::placeholder();
     let action = match SlashCommandTable::dispatch(&parsed, &ctx) {
         SlashCommandResult::Handled(action) => action,
         SlashCommandResult::Unknown => return None,
@@ -136,12 +132,9 @@ pub fn config_selector_action(line: &str) -> Option<SlashCommandAction> {
 #[must_use]
 pub fn picker_selector_action(line: &str) -> Option<SlashCommandAction> {
     let parsed = ParsedSlashCommand::parse(line)?;
-    let ctx = SlashCommandContext {
-        // The picker commands do not echo the current model, so placeholders are
-        // fine — the driver re-reads the live session when it opens the overlay.
-        model_id: String::new(),
-        provider: String::new(),
-    };
+    // Picker actions never read the context (the overlay re-reads the live
+    // session); see `SlashCommandContext::placeholder`.
+    let ctx = SlashCommandContext::placeholder();
     let action = match SlashCommandTable::dispatch(&parsed, &ctx) {
         SlashCommandResult::Handled(action) => action,
         SlashCommandResult::Unknown => return None,
@@ -160,12 +153,9 @@ pub fn picker_selector_action(line: &str) -> Option<SlashCommandAction> {
 #[must_use]
 pub fn login_action(line: &str) -> Option<SlashCommandAction> {
     let parsed = ParsedSlashCommand::parse(line)?;
-    let ctx = SlashCommandContext {
-        // The login commands do not echo the current model, so placeholders are
-        // fine — the driver re-reads the live session when it opens the overlay.
-        model_id: String::new(),
-        provider: String::new(),
-    };
+    // Login/logout actions never read the context (the overlay re-reads the live
+    // session); see `SlashCommandContext::placeholder`.
+    let ctx = SlashCommandContext::placeholder();
     let action = match SlashCommandTable::dispatch(&parsed, &ctx) {
         SlashCommandResult::Handled(action) => action,
         SlashCommandResult::Unknown => return None,

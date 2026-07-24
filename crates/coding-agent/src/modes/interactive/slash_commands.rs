@@ -95,9 +95,10 @@ pub enum SlashCommandAction {
     OpenThinkingSelector { inline_level: Option<String> },
     /// Open the settings selector overlay.
     OpenSettingsSelector,
-    /// Open the login dialog overlay. `provider` is the provider id to
-    /// authenticate against (e.g. `"anthropic"`, `"openai"`); when `None`
-    /// the dialog defaults to Anthropic.
+    /// Open the login flow overlay. `provider` is the provider id to authenticate
+    /// against (e.g. `"anthropic"`, `"openai"`), skipping straight to its key/OAuth
+    /// dialog; when `None` (a bare `/login`) the provider **picker** is opened first
+    /// so the user chooses which provider to authenticate against.
     OpenLoginDialog { provider: Option<String> },
     /// Open the session-resume picker (most-recent fallback).
     OpenResumePicker,
@@ -186,6 +187,24 @@ pub struct SlashCommandContext {
     pub model_id: String,
     /// Active provider label (e.g. `"anthropic"`).
     pub provider: String,
+}
+
+impl SlashCommandContext {
+    /// A context with empty `model_id`/`provider`, for dispatching commands whose
+    /// action does **not** read the context (the config-selector, picker, and
+    /// login families the async turn runner intercepts). Those branches route to a
+    /// live-session re-dispatch or an overlay that re-reads the session, so the
+    /// model/provider here are never observed — this constructor names that
+    /// invariant so a caller does not have to fabricate a fake session just to get
+    /// a parse. Commands that *do* echo the current model must build a real
+    /// context from the live session instead.
+    #[must_use]
+    pub fn placeholder() -> Self {
+        Self {
+            model_id: String::new(),
+            provider: String::new(),
+        }
+    }
 }
 
 impl fmt::Display for SlashCommandAction {

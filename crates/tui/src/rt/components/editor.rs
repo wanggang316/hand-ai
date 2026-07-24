@@ -73,10 +73,19 @@ use crate::rt::view::{HandleOutcome, RtComponent};
 
 /// The minimum number of interior text rows the box shows — a single line, so the
 /// caret always has a home even on an empty buffer.
+///
+/// `usize` because it clamps this editor's own row math. It intentionally shares a
+/// name *and value* with [`crate::rt::view::MIN_INPUT_ROWS`] (a `u16` used for
+/// viewport-layout geometry): the two describe the same 1→8 input-height policy
+/// from opposite sides. Keep the values in step; they are separate consts only so
+/// each side stays in its natural integer type without a cross-module cast.
 pub const MIN_INPUT_ROWS: usize = 1;
 
 /// The maximum number of interior text rows the box auto-grows to before it stops
 /// growing and scrolls its content internally. Matches the legacy 1→8 cap.
+///
+/// `usize` sibling of the `u16` [`crate::rt::view::MAX_INPUT_ROWS`]; see
+/// [`MIN_INPUT_ROWS`] for why the name/value coincidence is deliberate.
 pub const MAX_INPUT_ROWS: usize = 8;
 
 /// Maximum number of submitted prompts retained for Up/Down recall. Mirrors the
@@ -1093,6 +1102,13 @@ impl Editor {
 
     /// Yank the most recent kill at the caret (Emacs `C-y`). A no-op on an empty
     /// ring. The insert is one atomic undo unit so a following yank-pop can peel it.
+    ///
+    /// Yank deliberately routes through [`insert_paste`](Self::insert_paste), so a
+    /// yanked payload runs the *same* pipeline as a real paste — including any
+    /// installed [`PasteTransform`] (`@mention` rewrite) and the large-paste fold.
+    /// This parity is intentional: killed-then-yanked text is treated exactly like
+    /// pasted text. If a caller ever needs a verbatim, transform-free yank, add an
+    /// `insert_paste_raw` seam rather than special-casing here.
     fn yank(&mut self) {
         let text = self.kill_ring.yank().map(str::to_string);
         if let Some(text) = text {
@@ -1110,7 +1126,9 @@ impl Editor {
         };
         // Peel the previous yank's insert, then lay down the older entry. The undo
         // leaves the ring untouched (undo/redo never touch the ring), so the yank
-        // cursor the pop advanced stays valid.
+        // cursor the pop advanced stays valid. Like `yank`, this reuses
+        // `insert_paste`, so the older entry runs the same paste pipeline
+        // (transform + fold) — the parity is intentional (see `yank`).
         self.undo();
         self.insert_paste(&next);
     }
@@ -2145,7 +2163,12 @@ fn marker_covering(line: &str, col: usize) -> Option<u32> {
     while let Some(rel) = line[search_from..].find(PASTE_MARKER_PREFIX) {
         let start = search_from + rel;
         let after = &line[start..];
-        let rel_end = after.find(']')?;
+        // A prefix with no closing `]` is a malformed/unterminated token; stop the
+        // scan (there is no complete token from here on) rather than `?`-returning,
+        // which would also have ended the scan but reads as "propagate an error".
+        let Some(rel_end) = after.find(']') else {
+            break;
+        };
         let end = start + rel_end; // byte index of the ']'
         // The caret covers the token when it sits at the open bracket or strictly
         // inside (up to and including the char just before ']'); at or past the

@@ -37,15 +37,19 @@ pub fn new_shared_keybindings(bindings: KeyBindings) -> SharedKeybindings {
 
 /// Resolve the canonical `key_id` string currently bound to `action`.
 ///
-/// Falls back to `default_id` when the action is unbound (e.g. the user cleared
+/// Falls back to the action's built-in default chord
+/// ([`Action::default_key_id`]) when the action is unbound (e.g. the user cleared
 /// it via a conflicting override), so a global toggle never silently vanishes.
+/// Deriving the fallback from the action itself keeps it in lock-step with
+/// [`KeyBindings::defaults`](crate::core::keybindings::KeyBindings::defaults): a
+/// new action cannot drift from a hand-written literal here.
 #[must_use]
-pub fn resolved_key_id(bindings: &SharedKeybindings, action: Action, default_id: &str) -> String {
+pub fn resolved_key_id(bindings: &SharedKeybindings, action: Action) -> String {
     bindings
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .key_id_for(action)
-        .unwrap_or_else(|| default_id.to_string())
+        .unwrap_or_else(|| action.default_key_id())
 }
 
 /// A resolved snapshot of the registry-backed selector navigation ids.
@@ -211,7 +215,7 @@ mod tests {
         let kb = bindings_from("copy-last-message: ctrl+t\ntoggle-thinking: ctrl+t\n");
         let shared = new_shared_keybindings(kb);
         assert_eq!(
-            resolved_key_id(&shared, Action::CopyLastMessage, "ctrl+x"),
+            resolved_key_id(&shared, Action::CopyLastMessage),
             "ctrl+x",
             "unbound action falls back to its built-in id",
         );
@@ -221,10 +225,7 @@ mod tests {
     fn resolved_key_id_follows_override() {
         let kb = bindings_from("copy-last-message: alt+c\n");
         let shared = new_shared_keybindings(kb);
-        assert_eq!(
-            resolved_key_id(&shared, Action::CopyLastMessage, "ctrl+x"),
-            "alt+c"
-        );
+        assert_eq!(resolved_key_id(&shared, Action::CopyLastMessage), "alt+c");
     }
 
     #[test]

@@ -1206,8 +1206,10 @@ fn spawn_scheduler(
             // Issue the terminal cell-size query once, fire-and-forget: gated by
             // the `HAND_TUI_QUERY_CELL_SIZE` seam so it is a no-op by default, and
             // it never waits for a reply, so a silent PTY (which never answers)
-            // cannot stall the render loop. A reply, if any, is read on the input
-            // stream and folded in via `set_cell_dimensions` (see `run`).
+            // cannot stall the render loop. A reply, if any, would be folded in via
+            // `parse_cell_size_reply` + `set_cell_dimensions`; today the typed event
+            // pump drops the raw `CSI 6;H;W t` bytes (see the TODO in
+            // `rt::events::translate_event`), so the 8x16 default cell size is used.
             CELL_SIZE_QUERY_ONCE.call_once(|| {
                 let _ = write_cell_size_query(w);
             });

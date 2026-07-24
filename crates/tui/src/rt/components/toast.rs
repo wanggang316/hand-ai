@@ -190,9 +190,10 @@ impl Toast {
     }
 
     /// Set the maximum number of visible toasts; the extra older toasts are hidden
-    /// but retained.
+    /// but retained. Clamped to at least 1 (like the sibling lists) so a `0` never
+    /// silently hides every toast.
     pub fn set_max_visible(&mut self, max: usize) {
-        self.max_visible = max;
+        self.max_visible = max.max(1);
     }
 
     /// The maximum number of visible toasts.

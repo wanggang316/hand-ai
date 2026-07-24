@@ -879,11 +879,15 @@ fn spawn_scheduler(
         // `commit_lines` and `terminal.draw` both autoresize, and ratatui's inline
         // resize recompute scrolls the viewport's current cells (an old-width
         // border box / overlay rows) into scrollback before it re-anchors. Blanking
-        // the viewport first means only blank rows can spill — the stale old-width
-        // fragment never reaches scrollback (VAL-CORE-010/026). Doing this in the
-        // draw closure guarantees the very first draw after the resize erases first,
-        // even if the `Resize` event has not yet reached the input loop. Best-effort:
-        // a failed wipe must not abort the frame.
+        // the viewport first means only blank rows can spill through *ratatui's own*
+        // recompute path, so on a non-reflowing terminal no stale old-width fragment
+        // reaches scrollback (the ratatui side of VAL-CORE-010/026). It does not, and
+        // cannot, stop a terminal that reflows its history on resize (e.g. tmux) from
+        // re-wrapping whatever already landed in scrollback — that is the terminal's
+        // behaviour, outside rt's reach. Doing this in the draw closure guarantees the
+        // very first draw after the resize erases first, even if the `Resize` event
+        // has not yet reached the input loop. Best-effort: a failed wipe must not
+        // abort the frame.
         let current_size = terminal.size().ok();
         if let Some(current) = current_size
             && last_size.is_some_and(|prev| prev != current)

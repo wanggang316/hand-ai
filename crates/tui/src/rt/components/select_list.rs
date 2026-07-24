@@ -307,7 +307,12 @@ impl RtComponent for SelectList {
             let is_selected = i == self.selected;
 
             let indicator = if is_selected { "▸ " } else { "  " };
-            let label = pad_to_width(self.label_of(item), primary_width);
+            // Ellipsize an over-wide label to the primary-column width — matching
+            // the description column — instead of letting ratatui hard-clip it at
+            // the right edge with no `…`. A label that already fits is returned
+            // unchanged, then padded out to the column width as before.
+            let clipped = truncate_with_ellipsis(self.label_of(item), primary_width);
+            let label = pad_to_width(&clipped, primary_width);
 
             let mut spans: Vec<Span<'static>> = vec![Span::raw(format!("{indicator}{label}"))];
 
@@ -476,5 +481,31 @@ mod tests {
         // "amma" is a substring of "gamma" but not a prefix → no match.
         list.set_filter("amma");
         assert_eq!(list.filtered_len(), 0);
+    }
+
+    #[test]
+    fn overwide_primary_label_gets_ellipsis() {
+        // A label wider than the clamped primary column must be truncated with
+        // `…` (matching the description column), not hard-clipped by ratatui.
+        let list = SelectList::new(vec![SelectItem::new(
+            "v",
+            "a-very-long-label-that-overflows",
+        )])
+        .layout(SelectListLayout {
+            min_primary_column_width: Some(8),
+            max_primary_column_width: Some(8),
+        });
+
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        list.render(area, &mut buf);
+
+        let first_row: String = (0..area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(
+            first_row.contains('…'),
+            "over-wide primary label should ellipsize, got: {first_row:?}"
+        );
     }
 }

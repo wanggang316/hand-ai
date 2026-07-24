@@ -186,16 +186,20 @@ fn rule_line(color: Color, width: u16) -> Line<'static> {
 /// line that wraps to many rows is counted as it renders, matching the legacy
 /// visual-truncation contract. When expanded, or when the body already fits, the
 /// body is returned whole with zero hidden rows.
+///
+/// Every return path yields already-wrapped visual rows (the same `width` the
+/// caller commits at), so the shape is consistent regardless of `expanded`. The
+/// expanded path wraps too rather than handing back pre-wrap logical lines: the
+/// downstream commit re-wraps and `wrap_lines` is idempotent, so this is
+/// visually identical, but it removes the latent double-wrap footgun of mixing
+/// pre- and post-wrap rows out of one function.
 fn collapse_tail(
     body: &[Line<'static>],
     expanded: bool,
     width: u16,
 ) -> (Vec<Line<'static>>, usize) {
-    if expanded {
-        return (body.to_vec(), 0);
-    }
     let wrapped = wrap_lines(body, width.max(1));
-    if wrapped.len() <= PREVIEW_ROWS {
+    if expanded || wrapped.len() <= PREVIEW_ROWS {
         return (wrapped, 0);
     }
     let hidden = wrapped.len() - PREVIEW_ROWS;
@@ -515,6 +519,29 @@ mod tests {
         assert!(
             !out.contains("more lines"),
             "no collapse hint when expanded"
+        );
+    }
+
+    #[test]
+    fn collapse_tail_returns_wrapped_rows_on_both_paths() {
+        // A single logical line wider than `width` wraps to several visual rows.
+        let body = vec![Line::from(Span::raw("x".repeat(30)))];
+        let width = 10u16;
+        let wrapped = wrap_lines(&body, width);
+        assert!(
+            wrapped.len() > 1,
+            "test setup: the long line should wrap to multiple rows"
+        );
+
+        // Expanded path is now consistent with the collapsed path: it returns the
+        // already-wrapped rows (not the single pre-wrap logical line), so no caller
+        // can accidentally double-wrap a mixed-shape result.
+        let (shown, hidden) = collapse_tail(&body, true, width);
+        assert_eq!(hidden, 0, "expanded hides nothing");
+        assert_eq!(
+            shown.len(),
+            wrapped.len(),
+            "expanded path returns wrapped visual rows"
         );
     }
 

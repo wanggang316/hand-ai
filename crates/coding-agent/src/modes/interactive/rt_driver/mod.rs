@@ -302,11 +302,7 @@ impl InteractiveMode {
         // every other Enter variant. This is what makes a project `submit: alt+enter`
         // fire (bare Enter then stops submitting) rather than the editor's hardcoded
         // Enter handling winning (VAL-COMPAT-002). `/reload` re-applies it below.
-        lock_editor(&editor).set_submit_key(&resolved_key_id(
-            &keybindings,
-            Action::Submit,
-            "enter",
-        ));
+        lock_editor(&editor).set_submit_key(&resolved_key_id(&keybindings, Action::Submit));
 
         // Startup replay: when the session was resumed (`--continue` / `--resume` /
         // `--fork` seed the transcript from disk), render its stored user /
@@ -556,7 +552,7 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                 // status line (VAL-EDITOR-020). Handled here (where the guard +
                 // editor + requester are in scope) before the editor so the chord
                 // never inserts a literal char.
-                if pressed == resolved_key_id(keybindings, Action::OpenExternalEditor, "ctrl+g") {
+                if pressed == resolved_key_id(keybindings, Action::OpenExternalEditor) {
                     open_external_editor(editor, state, requester, guard).await;
                     requester.request_frame();
                     continue;
@@ -566,7 +562,7 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                 // an empty/unavailable clipboard lands a red status line and leaves
                 // the editor unchanged (VAL-IMG-010). Handled here so the driver — not
                 // the terminal's own paste — owns the read.
-                if pressed == resolved_key_id(keybindings, Action::PasteClipboard, "ctrl+v") {
+                if pressed == resolved_key_id(keybindings, Action::PasteClipboard) {
                     paste_clipboard(editor, state, requester);
                     requester.request_frame();
                     continue;
@@ -574,7 +570,7 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                 // A global toggle: flip thinking-visibility across every assistant
                 // message in the transcript, so it is handled here (where the
                 // requester is in scope) rather than in the editor path.
-                if pressed == resolved_key_id(keybindings, Action::ToggleThinking, "ctrl+t") {
+                if pressed == resolved_key_id(keybindings, Action::ToggleThinking) {
                     toggle_thinking_globally(state, requester);
                     requester.request_frame();
                     continue;
@@ -585,7 +581,7 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                 // `(ctrl+r to expand)` hint *real*. Handled here because the summaries
                 // live on the shared state, not the session. A silent no-op when no
                 // summary has landed.
-                if pressed == resolved_key_id(keybindings, Action::ToggleLastSummary, "ctrl+r") {
+                if pressed == resolved_key_id(keybindings, Action::ToggleLastSummary) {
                     toggle_last_summary(state, requester);
                     requester.request_frame();
                     continue;
@@ -595,7 +591,7 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
                 // forwarded as a `/copy` submit through the same channel the turn
                 // runner drains; both paths hit the identical handler, so this chord
                 // and `/copy` behave the same (VAL-CHAT-023).
-                if pressed == resolved_key_id(keybindings, Action::CopyLastMessage, "ctrl+x") {
+                if pressed == resolved_key_id(keybindings, Action::CopyLastMessage) {
                     let _ = submit_tx.send("/copy".to_string());
                     requester.request_frame();
                     continue;
@@ -1328,11 +1324,8 @@ fn run_reload(runner: &mut TurnRunner) {
             // Re-point the editor's submit chord from the reloaded table so a
             // changed `submit:` binding takes effect on the next key, mirroring the
             // startup wiring (VAL-COMPAT-002 / VAL-COMPAT-020).
-            lock_editor(&runner.editor).set_submit_key(&resolved_key_id(
-                &runner.keybindings,
-                Action::Submit,
-                "enter",
-            ));
+            lock_editor(&runner.editor)
+                .set_submit_key(&resolved_key_id(&runner.keybindings, Action::Submit));
             for line in diagnostics {
                 commit(&runner.state, &runner.requester, line);
             }

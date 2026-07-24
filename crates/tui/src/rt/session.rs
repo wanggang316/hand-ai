@@ -317,8 +317,12 @@ pub type SessionTerminal = Terminal<FallbackSizeBackend<CrosstermBackend<io::Std
 ///   (`compute_inline_size` → `append_lines`) scrolls the viewport's *current*
 ///   cells — an old-width border box, or overlay rows — into native scrollback
 ///   *before* it re-anchors and clears. Wiping the viewport to blank *first*
-///   means only blank rows can spill: the stale old-width fragment never reaches
-///   scrollback.
+///   means only blank rows can spill through *this* recompute path: on a
+///   non-reflowing terminal no stale old-width fragment reaches scrollback. This
+///   fixes only ratatui's own `compute_inline_size` → `append_lines` reflow; it
+///   cannot stop a terminal that reflows its scrollback on resize (e.g. tmux)
+///   from re-wrapping content that already landed in history — that reflow is the
+///   terminal's own behaviour, outside rt's control.
 ///
 /// Both uses map to the same terminal operation: for an inline viewport,
 /// [`Terminal::clear`] moves the backend cursor to the viewport's top row and

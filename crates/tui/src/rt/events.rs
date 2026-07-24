@@ -22,6 +22,11 @@
 //! Bracketed paste arrives as one [`Event::Paste`] carrying the whole payload,
 //! which becomes a single [`RtInputEvent::Paste`] rather than a burst of key
 //! actions.
+//!
+//! Terminal focus changes pass through untouched: [`Event::FocusGained`] and
+//! [`Event::FocusLost`] map one-to-one to [`RtInputEvent::FocusGained`] and
+//! [`RtInputEvent::FocusLost`] so the runtime can react to the window losing or
+//! regaining focus (e.g. pausing/resuming a blink) without a separate channel.
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
@@ -187,6 +192,16 @@ pub fn translate_event(event: Event) -> Option<RtInputEvent> {
         Event::FocusLost => Some(RtInputEvent::FocusLost),
         Event::Mouse(_) => None,
     }
+    // TODO(cell-size): the terminal's cell-size reply (`CSI 6 ; H ; W t`, the
+    // answer to [`write_cell_size_query`]) does not surface here. crossterm's
+    // typed `EventStream` parses only recognised events and silently drops this
+    // window-op report before it reaches `translate_event` — there is no `Event`
+    // variant that carries the raw bytes to feed
+    // [`parse_cell_size_reply`](crate::rt::components::parse_cell_size_reply).
+    // Folding a live reply into row scaling therefore needs a raw-byte input path
+    // (or a crossterm passthrough hook), which is a rearchitecture of the input
+    // pump rather than a local tweak, so it is deferred. Query + parse stay
+    // unit-tested and the 8x16 default cell size is used until then.
 }
 
 /// Drive an [`EventStream`] to completion, translating each event and pushing

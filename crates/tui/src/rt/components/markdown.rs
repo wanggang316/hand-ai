@@ -36,9 +36,11 @@
 //! [`MarkdownView`] wraps the rendered lines to its render area's width at the
 //! *styled-grapheme* level (the same model as
 //! [`wrap_lines`](crate::rt::history::wrap_lines)), so a narrow pane reflows
-//! cleanly without splitting a grapheme, without a style leaking past its span,
-//! and — because a code-block border row is emitted no wider than the pane — the
-//! block frame never breaks across a wrap.
+//! cleanly without splitting a grapheme and without a style leaking past its
+//! span. Because a code-block *border* row is emitted no wider than the pane, the
+//! top/bottom border rows never wrap onto a second line. Body lines inside the
+//! block still wrap like any other content — the border frame stays whole, the
+//! wrapped body rows just sit within it.
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use ratatui::buffer::Buffer;
@@ -208,10 +210,11 @@ pub struct MarkdownLink {
 /// rows, laid out for a pane `width` columns wide.
 ///
 /// `width` sets the span of full-width elements: a horizontal rule fills it, and
-/// a code-block border row is emitted no wider than it so the frame never breaks
-/// when the [`MarkdownView`] later wraps to the same width. The returned lines
-/// are *logical* rows — one per markdown line — not yet wrapped; wrapping to the
-/// exact render area happens in [`MarkdownView::render`].
+/// a code-block border row is emitted no wider than it so the *border rows* never
+/// wrap when the [`MarkdownView`] later wraps to the same width (body lines inside
+/// the block still wrap). The returned lines are *logical* rows — one per markdown
+/// line — not yet wrapped; wrapping to the exact render area happens in
+/// [`MarkdownView::render`].
 #[must_use]
 pub fn render_markdown(source: &str, width: u16, theme: &MarkdownTheme) -> Vec<Line<'static>> {
     render_markdown_with_links(source, width, theme).0

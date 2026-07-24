@@ -68,7 +68,11 @@ fn grapheme_width(cluster: &str) -> usize {
 }
 
 /// A single styled cell produced while decomposing a [`Line`] for wrapping.
-struct Cell {
+///
+/// Named `WrapCell` (not `Cell`) to avoid confusion with ratatui's
+/// [`buffer::Cell`](ratatui::buffer::Cell): this is a transient wrapping
+/// intermediary, not a terminal buffer cell.
+struct WrapCell {
     symbol: String,
     style: Style,
     width: usize,
@@ -94,9 +98,9 @@ fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
     // Decompose into styled cells. `styled_graphemes` resolves each grapheme's
     // effective style (line style patched by span style), so we never have to
     // re-derive styling while packing rows.
-    let cells: Vec<Cell> = line
+    let cells: Vec<WrapCell> = line
         .styled_graphemes(Style::default())
-        .map(|g| Cell {
+        .map(|g| WrapCell {
             symbol: g.symbol.to_string(),
             style: g.style,
             width: grapheme_width(g.symbol),
@@ -110,7 +114,7 @@ fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
     }
 
     let mut rows: Vec<Line<'static>> = Vec::new();
-    let mut current: Vec<Cell> = Vec::new();
+    let mut current: Vec<WrapCell> = Vec::new();
     let mut current_width = 0usize;
 
     for cell in cells {
@@ -135,7 +139,7 @@ fn wrap_line(line: &Line<'_>, width: u16) -> Vec<Line<'static>> {
 /// Rebuild one visual row from its packed cells, coalescing adjacent cells that
 /// share a style into a single [`Span`] so the row is compact but pixel-identical
 /// to the source styling.
-fn build_row(cells: &[Cell], line_style: Style) -> Line<'static> {
+fn build_row(cells: &[WrapCell], line_style: Style) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut buf = String::new();
     let mut run_style: Option<Style> = None;
@@ -251,6 +255,15 @@ impl HistorySink {
     /// The lower-level entry point used when the caller has already pre-wrapped
     /// (or when rows come from a source that must not be re-wrapped). `rows` are
     /// written verbatim, one per buffer row, in order. Empty input is a no-op.
+    ///
+    /// # Invariant
+    ///
+    /// `rows` must be wrapped to the terminal's current (post-autoresize) width.
+    /// This entry point does **no** wrapping and calls no `autoresize`: any row
+    /// wider than the viewport is truncated by `insert_before`. Callers that
+    /// start from logical lines must go through [`commit_lines`](Self::commit_lines)
+    /// (or replicate its `autoresize` + [`wrap_lines`] pre-wrap) so committed
+    /// height and painted rows stay in lock-step.
     ///
     /// # Errors
     ///

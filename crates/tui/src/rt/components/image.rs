@@ -741,16 +741,22 @@ impl RtImage {
         };
         match protocol {
             ResolvedProtocol::Kitty => {
-                // Kitty transmits PNG. Transcode a non-PNG source; the decode gate
-                // above already guaranteed the source decodes, so the transcode
-                // only fails on an encoder error, which still degrades to the box.
-                let png = match ImageFormat::sniff(&self.data) {
-                    ImageFormat::Png => Some(self.data.clone()),
-                    _ => transcode_to_png(&self.data),
-                }?;
+                // Kitty transmits PNG. A source that is already PNG is threaded
+                // through by reference (no clone); a non-PNG source is transcoded
+                // into an owned buffer. The decode gate above already guaranteed the
+                // source decodes, so the transcode only fails on an encoder error,
+                // which still degrades to the box.
+                let transcoded;
+                let png: &[u8] = match ImageFormat::sniff(&self.data) {
+                    ImageFormat::Png => &self.data,
+                    _ => {
+                        transcoded = transcode_to_png(&self.data)?;
+                        &transcoded
+                    }
+                };
                 Some(encode_kitty(
                     image_id.unwrap_or_else(allocate_image_id),
-                    &png,
+                    png,
                     &opts,
                 ))
             }
@@ -1020,10 +1026,13 @@ pub fn cell_size_query_enabled() -> bool {
 /// A no-op unless [`cell_size_query_enabled`] is set. This is deliberately
 /// fire-and-forget: it issues the query and flushes, then returns immediately so
 /// the caller's render/poll loop is never blocked on a terminal that stays silent.
-/// A terminal that *does* answer replies with `CSI 6 ; <height> ; <width> t`; that
-/// reply arrives on the input stream and is decoded by [`parse_cell_size_reply`]
-/// and applied via [`set_cell_dimensions`](crate::terminal_image::set_cell_dimensions),
-/// so a later frame's row allocation uses the real pixel-per-cell metric.
+/// A terminal that *does* answer replies with `CSI 6 ; <height> ; <width> t`. That
+/// reply is meant to be decoded by [`parse_cell_size_reply`] and applied via
+/// [`set_cell_dimensions`](crate::terminal_image::set_cell_dimensions) so a later
+/// frame's row allocation uses the real pixel-per-cell metric — but the raw report
+/// does not yet reach that path (crossterm's typed event pump drops it; see the
+/// TODO in [`translate_event`](crate::rt::events::translate_event)), so the 8×16
+/// default cell size is used until the reply is routed through.
 ///
 /// # Errors
 ///
@@ -1040,12 +1049,15 @@ pub fn write_cell_size_query(out: &mut impl std::io::Write) -> std::io::Result<(
 /// Parse a terminal cell-size reply (`CSI 6 ; <height> ; <width> t`) into
 /// [`CellDimensions`], or `None` when `bytes` is not such a reply.
 ///
-/// The companion to [`write_cell_size_query`]: the event loop feeds the raw input
-/// bytes here and, on a match, applies the result via
+/// The companion to [`write_cell_size_query`]: an input path that feeds the raw
+/// bytes here would, on a match, apply the result via
 /// [`set_cell_dimensions`](crate::terminal_image::set_cell_dimensions) so the next
 /// frame's [`calculate rows`](RtImage::clamped_cells) scale by `ceil(pixel_height /
 /// cell_height)` against the *reported* cell height rather than the 8×16 default.
-/// Zero dimensions or a malformed reply yield `None`, leaving the default in place.
+/// The typed event pump does not surface the raw report today (see the TODO in
+/// [`translate_event`](crate::rt::events::translate_event)), so this is currently
+/// exercised only by the unit tests. Zero dimensions or a malformed reply yield
+/// `None`, leaving the default in place.
 #[must_use]
 pub fn parse_cell_size_reply(bytes: &[u8]) -> Option<CellDimensions> {
     // Look for the CSI 6 ; H ; W t report anywhere in the buffer.

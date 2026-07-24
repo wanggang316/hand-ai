@@ -35,9 +35,16 @@ use crate::rt::events::RtKey;
 /// The maximum number of rows the auto-growing input body may occupy. The input
 /// grows one row per wrapped line of content from 1 up to this ceiling, then
 /// stops growing (further content scrolls within the input body).
+///
+/// `u16` for viewport-layout arithmetic. Shares its name/value with the editor's
+/// `usize` [`crate::rt::components::editor::MAX_INPUT_ROWS`] by design — same 1→8
+/// input-height policy, expressed in each module's natural integer type.
 pub const MAX_INPUT_ROWS: u16 = 8;
 
 /// The minimum number of input body rows: a single line, always visible.
+///
+/// `u16` counterpart of the editor's `usize`
+/// [`crate::rt::components::editor::MIN_INPUT_ROWS`]; keep the two in step.
 pub const MIN_INPUT_ROWS: u16 = 1;
 
 /// Rows consumed by the loader/spinner when it is showing (one row).

@@ -133,10 +133,13 @@ pub fn build_footer_view(
 /// running total. Called on each `MessageEnd` so the footer's spend segment
 /// increases monotonically across a session (VAL-CHAT-005).
 pub fn accumulate_usage(running: &mut TokenUsageSummary, usage: &model::Usage) {
-    running.input += usage.input;
-    running.output += usage.output;
-    running.cache_read += usage.cache_read;
-    running.cache_write += usage.cache_write;
+    // `saturating_add` on the `u64` token counters: an overflow needs astronomical
+    // token totals, but saturating keeps the footer monotonic (never wraps to a
+    // tiny number) for free. `cost_usd` is an `f64` and stays a plain add.
+    running.input = running.input.saturating_add(usage.input);
+    running.output = running.output.saturating_add(usage.output);
+    running.cache_read = running.cache_read.saturating_add(usage.cache_read);
+    running.cache_write = running.cache_write.saturating_add(usage.cache_write);
     running.cost_usd += usage.cost.total;
 }
 

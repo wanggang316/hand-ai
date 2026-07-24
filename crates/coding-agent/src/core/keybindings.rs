@@ -129,6 +129,33 @@ impl Action {
         Action::ALL.iter().copied().find(|a| a.as_str() == name)
     }
 
+    /// The canonical `key_id` string of this action's built-in default chord.
+    ///
+    /// Derived from [`KeyBindings::defaults`] — the single source of truth for the
+    /// default chords — so a fallback can never drift from the real default. Call
+    /// sites that resolve a live binding and need a fallback for an unbound action
+    /// (e.g. [`resolved_key_id`](crate::modes::interactive::rt_driver::keys::resolved_key_id))
+    /// should use this instead of a hand-written literal, so adding a new `Action`
+    /// (with its default in `defaults()`) cannot silently disagree with the
+    /// fallback string.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: every `Action` variant has a default chord in
+    /// `defaults()`. If a future variant is added without one, this panics loudly
+    /// at first use rather than shipping a wrong fallback — the coupling the method
+    /// exists to enforce.
+    #[must_use]
+    pub fn default_key_id(self) -> String {
+        KeyBindings::defaults()
+            .by_action
+            .get(&self)
+            .map(KeyChord::to_key_id)
+            .unwrap_or_else(|| {
+                panic!("Action::{self:?} has no default chord in KeyBindings::defaults()")
+            })
+    }
+
     /// Which input surface the action fires on.
     ///
     /// Input-line and selector-overlay actions live in **disjoint modes**: a
@@ -815,6 +842,26 @@ mod tests {
             Some(&KeyChord::with_mods(Key::Char('x'), KeyModifiers::CTRL))
         );
         assert!(kb.conflicts().is_empty());
+    }
+
+    #[test]
+    fn default_key_id_matches_defaults_for_every_action() {
+        let kb = KeyBindings::defaults();
+        for action in Action::ALL {
+            let via_method = action.default_key_id();
+            let via_defaults = kb
+                .by_action
+                .get(action)
+                .map(KeyChord::to_key_id)
+                .expect("every action has a default chord");
+            assert_eq!(
+                via_method, via_defaults,
+                "default_key_id drifted from defaults() for {action:?}",
+            );
+        }
+        // Pin a couple of concrete fallbacks the driver relies on.
+        assert_eq!(Action::Submit.default_key_id(), "enter");
+        assert_eq!(Action::CopyLastMessage.default_key_id(), "ctrl+x");
     }
 
     #[test]
