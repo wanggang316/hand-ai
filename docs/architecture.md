@@ -142,3 +142,70 @@ writes its escape at the viewport region rather than the exact reserved history 
 (`Terminal::viewport_area` is private — no public accessor for the post-`insert_before`
 absolute row), and a live `CSI 16 t` cell-size reply is not yet routed back through the typed
 event pump (the query is proven non-blocking; the reply→row-scaling path is unit-tested).
+
+## Interactive driver concurrency (added at M3; `crates/coding-agent/.../rt_driver`)
+
+The `hand` interactive driver runs on the rt stack as of M3 (the strangler cutover — the
+5071-line legacy `driver.rs` is deleted). Its run loop is split into **independent tokio
+tasks** communicating through channels and one `Arc<Mutex<DriverState>>`:
+
+1. **`turn_runner`** drains the submit channel and runs each `send_message` (or `/`-command,
+   `!`-bash, selector) **to completion** before pulling the next — this is the FIFO queue the
+   "messages submitted during a turn process in order" requirement rides on.
+2. **`event_applier`** drains `AgentSessionEvent`s and commits scrollback lines. It is a
+   **synchronous** apply over an async `recv()` loop.
+3. The **scheduler** owns the terminal (invariant #1). The other tasks only mutate shared
+   state and `request_frame()`.
+
+Load-bearing rules for this layer:
+
+- **Never multiplex the turn future and its own event stream in one `select!`.** `send_message`
+  emits events through the same channel it is driven from; a shared `select!` cancels the
+  in-flight turn the instant its first event arrives (the turn never completes, no HTTP call
+  lands). The two-task split exists specifically to avoid this — it was a real bug found and
+  fixed live during the skeleton.
+- **A `std::sync::Mutex` guard is never held across `.await`.** Every `lock_state`/`lock_editor`/
+  `lock_footer` guard is scoped in an explicit `{ … }` block (or a single expression) that drops
+  **before** any `.await`. `apply_event` is deliberately `fn`, not `async fn`, so no event-apply
+  guard can straddle a suspension point.
+- **Lock poisoning is fatal-by-design for render state.** `lock_state`/`lock_editor`/`lock_footer`
+  `.expect(...)` on poison: a poisoned lock means a panic already tore through the driver, and the
+  terminal-restoring panic hook has already fired — continuing would paint garbage. The shared
+  keybindings handle and the per-turn `CancellationToken` are the exceptions: they use
+  `unwrap_or_else(|e| e.into_inner())` / `if let Ok(token)` because a poisoned turn there just
+  means the turn already tore down, so recovering the inner value is harmless.
+- **Single teardown funnel — no `process::exit`, no raw-pointer `StopHandle`.** Every exit route
+  (Ctrl+D incl. over a non-empty buffer, `/quit`·`/exit`·`/q`, or a mid-stream quit) returns from
+  the input loop to one teardown block: drop the submit channel, `abort()` the turn/applier/
+  version tasks (a stalled mid-stream turn is abandoned, not awaited), drop the requester so the
+  scheduler drains its final frame + closes the sync block, `abort()` the input pump, then
+  `guard.restore()` (idempotent with `Drop`). This is what makes a mid-stream quit exit in
+  bounded time with the terminal cooked.
+- **OSC 133 / OSC 9;4 prompt+progress marks ride the raw-escape channel.** `DriverState.pending_raw`
+  (queue via `queue_raw`) is drained by `flush_raw` **after** `terminal.draw` but **inside** the
+  BSU/ESU sync block, bracketed by `ESC7`/`ESC8` cursor save/restore — the same discipline as the
+  M2 image channel, except these are terminal-global escapes (no row address). This keeps
+  invariant #1 intact. `/clear` reuses the channel for its `ESC[3J ESC[2J ESC[H` scrollback wipe
+  (the rt stack has no native scrollback-clear API yet).
+- **Overlays cross the task boundary as a `Send` `SelectorController`, not the M1 stack.** The M1
+  `OverlayStack` is `?Send`; a mounted selector lives behind its own `Arc<Mutex<dyn
+  SelectorController + Send>>` and the scheduler snapshots its `render_lines(width)` `Vec<Line>`
+  each frame, painting the dialog via the public `anchor_rect` geometry. The M1 `?Send` contract
+  is untouched.
+- **Two crates/tui seams only (strangler invariant).** M3 added exactly two things to
+  `crates/tui/src/rt/session.rs`: a single-session guard (`claim_session` `compare_exchange` +
+  panic-hook-once `Once`, so repeated enter/drop cycles don't stack panic hooks) and
+  `SessionGuard::suspend()`/`resume()` for the Ctrl+G external-editor handoff (they pop/re-push
+  the interactive escapes only, deliberately not touching `SESSION_ACTIVE` or the panic hook).
+
+## Theme application (M3)
+
+A custom `~/.hand/themes/*.json` recolours the rt UI via a per-frame `ThemePalette` snapshot
+(`DriverState::palette()`), threaded as `&ThemePalette` into the pure render functions across
+~24 modules. `ThemePalette::from_theme` keys off `Theme::source_path()`: a **built-in**
+`dark`/`light` (no source path) yields the historical hard-coded palette **byte-for-byte**, so
+the default look is unchanged; only a file-loaded (`source_path().is_some()`) theme recolours,
+and a custom slot resolving to `Color::Reset` falls back to the historical constant so an empty
+slot stays readable. Keybindings are unified on the durable app-layer `core::keybindings`
+(Decision Log 2026-07-24, option A); the legacy `hand_tui::keybindings` registry has no
+production consumer and is an M4 retirement target.
