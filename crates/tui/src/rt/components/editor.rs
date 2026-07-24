@@ -411,6 +411,11 @@ pub struct Editor {
     /// The live suggestion popup. Closed (empty) until a completable context
     /// under the caret yields candidates; refreshed after every buffer mutation.
     autocomplete: Autocomplete,
+    /// The canonical key id that submits the buffer (default `"enter"`). The host
+    /// binds this from the app-layer `Submit` action so a project `submit:
+    /// alt+enter` fires and bare Enter falls back to inserting a newline. Any
+    /// enter-family chord that is *not* the submit key inserts a newline instead.
+    submit_key: String,
 }
 
 impl Default for Editor {
@@ -446,6 +451,7 @@ impl Editor {
             paste_transform: None,
             autocomplete_provider: None,
             autocomplete: Autocomplete::new(),
+            submit_key: "enter".to_string(),
         }
     }
 
@@ -477,6 +483,25 @@ impl Editor {
         self.history = history;
         self.history.truncate(HISTORY_CAP);
         self
+    }
+
+    /// Bind the canonical key id that submits the buffer (default `"enter"`).
+    /// Builder form of [`set_submit_key`](Editor::set_submit_key).
+    #[must_use]
+    pub fn with_submit_key(mut self, id: &str) -> Self {
+        self.set_submit_key(id);
+        self
+    }
+
+    /// Bind the canonical key id that submits the buffer.
+    ///
+    /// The host resolves this from the app-layer `Submit` action (default
+    /// `"enter"`). With a custom chord (`"alt+enter"`), that chord submits and
+    /// bare Enter inserts a newline instead — the single submit decision point,
+    /// so the driver never has to second-guess the editor's Enter handling. Any
+    /// enter-family chord that is not the submit key inserts a newline.
+    pub fn set_submit_key(&mut self, id: &str) {
+        self.submit_key = id.to_string();
     }
 
     // -----------------------------------------------------------------
@@ -944,6 +969,18 @@ impl Editor {
     #[must_use]
     pub fn autocomplete_visible(&self) -> bool {
         self.autocomplete.is_visible()
+    }
+
+    /// The number of candidate rows the suggestion popup wants to paint (0 when it
+    /// is closed). A host that owns the surrounding box geometry — like the rt
+    /// driver — reserves this many rows for the popup band so it is not clipped.
+    #[must_use]
+    pub fn popup_row_count(&self) -> u16 {
+        if self.autocomplete.is_visible() {
+            self.autocomplete.visible_rows() as u16
+        } else {
+            0
+        }
     }
 
     /// Re-query the provider off the caret context and repopulate the popup.
@@ -1826,16 +1863,16 @@ impl Editor {
             return HandleOutcome::Ignored;
         };
         match id {
-            // Newline-insertion gestures.
-            "alt+enter" | "shift+enter" => {
-                // Shift+Enter is only distinguishable from Enter under an enhanced
-                // (kitty) keyboard; in plain mode it never arrives as this id.
-                self.insert_newline();
-                HandleOutcome::Consumed
-            }
-            "enter" => {
-                // Trailing-backslash soft break: a `\` immediately before Enter is
-                // consumed and replaced with a newline, suppressing the submit.
+            // Enter-family chords: the configured submit key submits; every other
+            // enter variant inserts a newline. With the default binding
+            // (`submit == enter`) bare Enter submits and alt/shift+Enter insert a
+            // newline — the historical behaviour. With a custom `submit: alt+enter`
+            // that chord submits and bare Enter inserts a newline instead.
+            // Shift+Enter is only distinguishable from Enter under an enhanced
+            // (kitty) keyboard; in plain mode it never arrives as this id.
+            "alt+enter" | "shift+enter" | "enter" if id == self.submit_key => {
+                // Trailing-backslash soft break: a `\` immediately before the submit
+                // key is consumed and replaced with a newline, suppressing the submit.
                 let line = &self.lines[self.cursor_line];
                 if self.cursor_col > 0 && line.as_bytes().get(self.cursor_col - 1) == Some(&b'\\') {
                     self.delete_back();
@@ -1843,6 +1880,10 @@ impl Editor {
                 } else {
                     self.submit();
                 }
+                HandleOutcome::Consumed
+            }
+            "alt+enter" | "shift+enter" | "enter" => {
+                self.insert_newline();
                 HandleOutcome::Consumed
             }
             // History navigation only at the buffer's logical edges; interior lines
@@ -2296,7 +2337,9 @@ mod tests {
     }
 
     #[test]
-    fn alt_enter_inserts_newline_not_submit() {
+    fn default_submit_key_alt_enter_inserts_newline_not_submit() {
+        // Default binding (submit == enter): alt+enter inserts a newline and does
+        // not submit, so a multi-line message can be composed before Enter sends it.
         let mut ed = Editor::new();
         type_str(&mut ed, "ab");
         ed.handle_key(&key("alt+enter", KeyCode::Enter, KeyModifiers::ALT));
@@ -2304,6 +2347,104 @@ mod tests {
         assert_eq!(ed.text(), "ab\ncd");
         assert_eq!(ed.line_count(), 2);
         assert!(ed.take_submit().is_none());
+    }
+
+    #[test]
+    fn custom_submit_key_alt_enter_submits() {
+        // With `submit: alt+enter`, that chord submits the buffer verbatim.
+        let mut ed = Editor::new().with_submit_key("alt+enter");
+        type_str(&mut ed, "ab");
+        ed.handle_key(&key("alt+enter", KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(ed.take_submit().as_deref(), Some("ab"));
+        assert_eq!(ed.text(), "", "buffer cleared after submit");
+    }
+
+    #[test]
+    fn custom_submit_key_bare_enter_inserts_newline() {
+        // When submit is bound to alt+enter, bare Enter stops submitting and
+        // inserts a newline instead (the non-submit enter variant).
+        let mut ed = Editor::new().with_submit_key("alt+enter");
+        type_str(&mut ed, "ab");
+        ed.handle_key(&key("enter", KeyCode::Enter, KeyModifiers::NONE));
+        type_str(&mut ed, "cd");
+        assert_eq!(ed.text(), "ab\ncd");
+        assert_eq!(ed.line_count(), 2);
+        assert!(ed.take_submit().is_none());
+    }
+
+    #[test]
+    fn set_submit_key_reapplies_binding() {
+        // The setter mirrors the builder so `/reload` can re-point the submit key
+        // on the live editor: bare Enter stops submitting (inserts a newline) and
+        // the new chord submits.
+        let mut ed = Editor::new();
+        ed.set_submit_key("alt+enter");
+        type_str(&mut ed, "a");
+        ed.handle_key(&key("enter", KeyCode::Enter, KeyModifiers::NONE));
+        assert!(ed.take_submit().is_none(), "bare Enter no longer submits");
+        type_str(&mut ed, "b");
+        ed.handle_key(&key("alt+enter", KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(ed.take_submit().as_deref(), Some("a\nb"));
+    }
+
+    /// Render `area` into a fresh buffer and collect each row as a trimmed String.
+    fn render_rows(ed: &Editor, area: Rect) -> Vec<String> {
+        let mut buf = Buffer::empty(area);
+        RtComponent::render(ed, area, &mut buf);
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(area.x + x, area.y + y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn mention_provider(paths: &[&str]) -> Arc<dyn AutocompleteProvider> {
+        use crate::rt::components::{PathEntry, PathProvider};
+        Arc::new(PathProvider::new(
+            paths.iter().map(|p| PathEntry::file(*p)).collect(),
+        ))
+    }
+
+    #[test]
+    fn popup_paints_candidate_rows_when_given_room() {
+        // The band below the box has rows to spare, so an active @-context paints
+        // its candidate labels — the driver-facing accessors report the popup and
+        // its row count for reserving the band.
+        let mut ed = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(mention_provider(&["README.md", "main.rs"]));
+        type_str(&mut ed, "@RE");
+        assert!(ed.autocomplete_visible(), "the @-context opens the popup");
+        assert!(ed.popup_row_count() >= 1, "at least one candidate row");
+
+        // A box of one editor row plus rows to spare below paints the popup band.
+        let area = Rect::new(0, 0, 40, 6);
+        let rows = render_rows(&ed, area);
+        assert!(
+            rows.iter().any(|r| r.contains("README.md")),
+            "popup paints the candidate: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn popup_paints_nothing_when_area_leaves_no_room_below_box() {
+        // A one-row area is entirely the editor box; the below-box band is empty,
+        // so the self-render paints no popup rows (the defect the driver fixes by
+        // reserving the band itself).
+        let mut ed = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(mention_provider(&["README.md"]));
+        type_str(&mut ed, "@RE");
+        assert!(ed.autocomplete_visible());
+
+        let area = Rect::new(0, 0, 40, 1);
+        let rows = render_rows(&ed, area);
+        assert!(
+            !rows.iter().any(|r| r.contains("README.md")),
+            "no room below the box → no popup painted: {rows:?}"
+        );
     }
 
     #[test]

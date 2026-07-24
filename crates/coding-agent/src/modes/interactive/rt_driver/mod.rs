@@ -297,6 +297,17 @@ impl InteractiveMode {
         // `/reload` can swap it and the selectors can snapshot it.
         let keybindings = load_keybindings(&cwd, &state);
 
+        // Route submit through the app-layer table: the editor SUBMITS on the
+        // chord bound to `Action::Submit` (default Enter) and inserts a newline on
+        // every other Enter variant. This is what makes a project `submit: alt+enter`
+        // fire (bare Enter then stops submitting) rather than the editor's hardcoded
+        // Enter handling winning (VAL-COMPAT-002). `/reload` re-applies it below.
+        lock_editor(&editor).set_submit_key(&resolved_key_id(
+            &keybindings,
+            Action::Submit,
+            "enter",
+        ));
+
         // Startup replay: when the session was resumed (`--continue` / `--resume` /
         // `--fork` seed the transcript from disk), render its stored user /
         // assistant / tool-result messages into scrollback *in order*, closed by the
@@ -1314,6 +1325,14 @@ fn run_reload(runner: &mut TurnRunner) {
                 let mut guard = runner.keybindings.lock().unwrap_or_else(|e| e.into_inner());
                 *guard = reloaded;
             }
+            // Re-point the editor's submit chord from the reloaded table so a
+            // changed `submit:` binding takes effect on the next key, mirroring the
+            // startup wiring (VAL-COMPAT-002 / VAL-COMPAT-020).
+            lock_editor(&runner.editor).set_submit_key(&resolved_key_id(
+                &runner.keybindings,
+                Action::Submit,
+                "enter",
+            ));
             for line in diagnostics {
                 commit(&runner.state, &runner.requester, line);
             }
@@ -2368,6 +2387,53 @@ mod tests {
         assert_eq!(outcome, KeyOutcome::Continue);
         assert_eq!(rx.try_recv().ok(), Some("do a thing".to_string()));
         assert!(lock_state(&state).streaming, "submit marks streaming");
+    }
+
+    /// A configured `submit: alt+enter` routes Alt+Enter through the editor's
+    /// submit path and forwards the buffer to the agent — while bare Enter, no
+    /// longer the submit chord, inserts a newline instead of sending
+    /// (VAL-COMPAT-002).
+    #[test]
+    fn configured_alt_enter_submit_routes_to_agent() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        // The startup / reload wiring points the editor's submit chord at the
+        // resolved `Action::Submit` binding; here that is alt+enter.
+        lock_editor(&editor).set_submit_key("alt+enter");
+        lock_editor(&editor).set_text("do a thing");
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        // Bare Enter no longer submits: it inserts a newline and forwards nothing.
+        let enter = RtKey {
+            key_id: Some("enter".to_string()),
+            raw: KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        };
+        assert_eq!(
+            handle_key(&enter, &editor, &state, &tx),
+            KeyOutcome::Continue
+        );
+        assert!(rx.try_recv().is_err(), "bare Enter must not submit");
+        assert!(
+            !lock_state(&state).streaming,
+            "bare Enter does not mark streaming"
+        );
+
+        // Alt+Enter is the submit chord: it forwards the (now multi-line) buffer.
+        let alt_enter = RtKey {
+            key_id: Some("alt+enter".to_string()),
+            raw: KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        };
+        assert_eq!(
+            handle_key(&alt_enter, &editor, &state, &tx),
+            KeyOutcome::Continue
+        );
+        assert_eq!(rx.try_recv().ok(), Some("do a thing".to_string()));
+        assert!(
+            lock_state(&state).streaming,
+            "alt+enter submit marks streaming"
+        );
     }
 
     /// The watchdog cancels a stalled turn on elapse and reports `TimedOut`,

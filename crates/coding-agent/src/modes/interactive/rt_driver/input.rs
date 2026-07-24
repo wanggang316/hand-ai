@@ -23,7 +23,7 @@
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use hand_tui::rt::components::{DEFAULT_SPINNER_FRAMES, Loader};
+use hand_tui::rt::components::{DEFAULT_SPINNER_FRAMES, Editor, Loader};
 use hand_tui::rt::history::{HistorySink, wrap_lines};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{EraseOnDrop, SessionTerminal, clear_viewport_region};
@@ -307,9 +307,18 @@ fn draw(
     // Render the editor and drive the hardware cursor from its reported caret.
     // When a modal overlay is open it owns focus, so the editor caret is suppressed
     // — the hardware cursor is not placed under the dimmed dialog.
+    //
+    // The editor self-renders its `@`/`/` suggestion popup in the band *below* its
+    // box, but the driver's inline geometry gives the editor a rect sized to
+    // exactly the box height — so that band is zero rows and the popup never
+    // paints. The driver owns the surrounding box, so it paints the popup itself,
+    // in a reserved band *above* the box (space below is the viewport's bottom
+    // edge; above it is the blank band the box is anchored over). This keeps the
+    // popup clear of the footer (inside the box) and of scrollback (below it).
     {
         let ed = lock_editor(editor);
         ed.render(editor_rect, frame.buffer_mut());
+        draw_autocomplete_popup(frame.buffer_mut(), &ed, area, geometry.active);
         // Disambiguate: the `RtComponent::cursor` (viewport-local `Option<Position>`)
         // over the inherent `Editor::cursor` (the `(line, col)` accessor). The
         // component caret is already anchored at `editor_rect` (its render area).
@@ -436,6 +445,39 @@ fn draw_stream_preview(
     let visible: Vec<Line<'static>> = wrapped[start..].to_vec();
 
     Paragraph::new(Text::from(visible)).render(band, frame.buffer_mut());
+}
+
+/// Paint the editor's `@`/`/` suggestion popup into a band immediately above the
+/// active box.
+///
+/// The editor's own `render` paints the popup only in the band *below* its box,
+/// which the driver's exact-height editor rect leaves empty — so the driver
+/// paints it here instead, via the editor's public
+/// [`autocomplete`](Editor::autocomplete) accessor. The band hangs off the top
+/// border of the active box, `popup_row_count` rows tall, clamped to the space
+/// between the box top and the viewport origin (`area.y`) so it never overwrites
+/// scrollback above nor the box below. A closed popup (zero rows) or a band with
+/// no room paints nothing.
+fn draw_autocomplete_popup(
+    buf: &mut ratatui::buffer::Buffer,
+    editor: &Editor,
+    area: Rect,
+    active: Rect,
+) {
+    if !editor.autocomplete_visible() {
+        return;
+    }
+    let wanted = editor.popup_row_count();
+    // The blank band above the box, from the viewport origin down to the box top.
+    let above = active.y.saturating_sub(area.y);
+    let rows = wanted.min(above);
+    if rows == 0 || active.width == 0 {
+        return;
+    }
+    // Hang the popup off the top border of the box, growing upward: its bottom row
+    // sits just above the box, so the newest completions stay flush with the input.
+    let popup = Rect::new(active.x, active.y.saturating_sub(rows), active.width, rows);
+    editor.autocomplete().render(popup, buf);
 }
 
 /// Split a bottom-area body rect into the editor (the top rows) and the footer
@@ -574,6 +616,70 @@ mod tests {
         terminal
             .draw(|frame| draw(frame, &snapshot, editor, loader, &footer))
             .expect("draw one frame");
+    }
+
+    /// Type `s` into a shared editor, one char per keystroke, so the autocomplete
+    /// popup refreshes off the caret context exactly as it does under real input.
+    fn type_into(editor: &SharedEditor, s: &str) {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use hand_tui::rt::events::RtKey;
+        let mut ed = lock_editor(editor);
+        for c in s.chars() {
+            ed.handle_key(&RtKey {
+                key_id: Some(c.to_string()),
+                raw: KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+            });
+        }
+    }
+
+    #[test]
+    fn autocomplete_popup_paints_above_the_box_when_visible() {
+        use hand_tui::rt::components::{EditorBorder, PathEntry, PathProvider};
+        use std::sync::Arc as StdArc;
+
+        // A data-injected `@`-mention provider (no filesystem) so the popup opens
+        // deterministically on `@RE`.
+        let provider = StdArc::new(PathProvider::new(vec![
+            PathEntry::file("README.md"),
+            PathEntry::file("main.rs"),
+        ]));
+        let editor: SharedEditor = Arc::new(Mutex::new(
+            Editor::new()
+                .border(EditorBorder::None)
+                .with_autocomplete_provider(provider),
+        ));
+        type_into(&editor, "@RE");
+        assert!(
+            lock_editor(&editor).autocomplete_visible(),
+            "the @-context must open the popup"
+        );
+
+        let loader = Loader::new(LOADER_MESSAGE);
+        let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
+        draw_frame(&mut terminal, &editor, &loader, false);
+
+        // The driver reserves a band above the box and paints the candidate there —
+        // the seam the editor's below-box self-render leaves empty.
+        let painted = buffer_text(&terminal);
+        assert!(
+            painted.contains("README.md"),
+            "the popup candidate must paint above the box, got:\n{painted}"
+        );
+    }
+
+    #[test]
+    fn no_autocomplete_popup_paints_when_closed() {
+        // With no completable context, the popup is closed and the driver paints no
+        // candidate band — the box + footer are the only chrome.
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        lock_editor(&editor).set_text("plain text");
+        let loader = Loader::new(LOADER_MESSAGE);
+        let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
+        draw_frame(&mut terminal, &editor, &loader, false);
+        assert!(
+            !lock_editor(&editor).autocomplete_visible(),
+            "no context, popup closed"
+        );
     }
 
     #[test]
