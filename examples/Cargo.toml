@@ -2,7 +2,7 @@
 name = "model-examples"
 version.workspace = true
 edition = "2024"
-rust-version = "1.85"
+rust-version.workspace = true
 
 [[bin]]
 name = "client-test"
