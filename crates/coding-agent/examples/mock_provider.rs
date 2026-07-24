@@ -42,7 +42,11 @@
 //! - `streamed_fence`: a text turn that opens a fenced code block *mid-stream*
 //!   (the opening ``` and body arrive across deltas, the closing fence last), so
 //!   a live probe can observe mid-stream containment and settle-once behaviour.
-//! - `error`: a partial text turn that ends with `finish_reason: "error"`.
+//! - `error`: a partial text turn that streams an OpenAI `error` object as a
+//!   `data:` line (the shape a real provider emits on a mid-stream failure), so
+//!   the client surfaces a `StopReason::Error` assistant message and the TUI's
+//!   OSC 9;4 error state fires. A trailing `finish_reason: "error"` chunk is
+//!   also written so a raw-SSE probe still sees the documented terminal shape.
 //!
 //! The tool-call scenarios (`tool_call`, `edit_tool`, `write_tool`,
 //! `image_result`) are two-round: the first request emits the tool call, and the
@@ -365,11 +369,18 @@ async fn stream_scenario(
             if has_tool_result {
                 emit_final_text(stream, "The edit has been applied.").await?;
             } else {
+                // The edit tool's schema requires `file_path` / `old_string` /
+                // `new_string` (not `path` / `oldString` / `newString`), so the
+                // args must use those exact keys or the tool errors with
+                // `"file_path" is a required property` instead of rendering a
+                // diff. Distinct old/new strings feed the diff renderer real
+                // content so the finalized tool box shows coloured +/- rows
+                // (VAL-CHAT-039).
                 emit_tool_call(
                     stream,
                     "call_mock_edit_0001",
                     "edit",
-                    r#"{"path":"/tmp/mock.txt","oldString":"foo","newString":"bar"}"#,
+                    r#"{"file_path":"/tmp/mock.txt","old_string":"foo","new_string":"bar"}"#,
                 )
                 .await?;
             }
@@ -425,7 +436,20 @@ async fn stream_scenario(
             write_chunk(stream, &usage_chunk(16, 24)).await?;
         }
         "error" => {
+            // A partial text delta lands, then the provider streams an OpenAI
+            // error object as a `data:` line — the shape a real provider emits
+            // when a turn fails mid-stream. The `openai-rust` client fails to
+            // deserialize it as a `chat.completion.chunk` (it carries an `error`
+            // object, not the required `id`/`choices`/... fields), so the model
+            // layer surfaces a `StopReason::Error` assistant message rather than
+            // a clean `stop`. This is what lets the TUI's OSC 9;4 error state
+            // fire on a failed turn (VAL-CHAT-018): a bare `finish_reason:
+            // "error"` chunk maps to `StopReason::Stop` client-side, so it alone
+            // never signals a failure. The trailing `finish_reason: "error"`
+            // chunk is still written so a raw-SSE probe of this scenario sees the
+            // documented terminal shape.
             write_chunk(stream, &text_delta_chunk("partial before error")).await?;
+            write_chunk(stream, &error_object_chunk("mock provider error")).await?;
             write_chunk(stream, &finish_chunk("error")).await?;
         }
         other => {
@@ -511,6 +535,19 @@ fn tool_call_args_chunk(args_fragment: &str) -> String {
     format!(
         r#"{{"id":"chatcmpl-mock","object":"chat.completion.chunk","created":1700000000,"model":"mock-model","choices":[{{"index":0,"delta":{{"tool_calls":[{{"index":0,"function":{{"arguments":{}}}}}]}},"finish_reason":null}}]}}"#,
         json_string(args_fragment)
+    )
+}
+
+/// An OpenAI-shape error object, framed as a `data:` line. Real providers stream
+/// this when a turn fails mid-response. It deliberately does *not* carry the
+/// `chat.completion.chunk` fields (`id` / `choices` / ...), so the `openai-rust`
+/// client fails to deserialize it as a chunk and the model layer surfaces a
+/// `StopReason::Error` assistant message — the failure signal the TUI's OSC 9;4
+/// error state keys off (VAL-CHAT-018).
+fn error_object_chunk(message: &str) -> String {
+    format!(
+        r#"{{"error":{{"message":{},"type":"server_error","code":null}}}}"#,
+        json_string(message)
     )
 }
 

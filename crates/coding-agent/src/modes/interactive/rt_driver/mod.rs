@@ -1065,9 +1065,15 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
         return;
     }
 
-    // Clear any stale cancel flag from a prior turn so a cancellation only ever
-    // suppresses *this* turn's error banner (VAL-CHAT-013 / VAL-CHAT-014).
-    lock_state(&runner.state).cancel_requested = false;
+    // Clear any stale cancel flag and in-band-error latch from a prior turn so a
+    // cancellation only ever suppresses *this* turn's error banner (VAL-CHAT-013 /
+    // VAL-CHAT-014) and a prior failure never masks this turn's progress-clear
+    // (VAL-CHAT-018).
+    {
+        let mut guard = lock_state(&runner.state);
+        guard.cancel_requested = false;
+        guard.reset_turn_error();
+    }
 
     // OSC 133 A — prompt start, before the user echo.
     queue_raw(&runner.state, &runner.requester, PromptMark::PromptStart);
@@ -1133,9 +1139,17 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
     };
 
     // OSC 133 C — command end, closing the balanced A/B/C region; then the
-    // progress terminal state (clear on success, error otherwise).
+    // progress terminal state. `progress_end` is the outcome-derived base — a
+    // `Clear` when `send_message` returned `Ok`, an `Error` on a `send_message`
+    // failure / timeout. But a provider stream error surfaces *in band* as a
+    // `StopReason::Error` assistant message with `send_message` still returning
+    // `Ok` (so the outcome reads `Completed` → base `Clear`); the event applier
+    // latched that failure, so `queue_terminal_progress` upgrades the base to
+    // `Error` and the trailing `Clear` never overwrites the red state
+    // (VAL-CHAT-018).
     queue_raw(&runner.state, &runner.requester, PromptMark::CommandEnd);
-    queue_progress(&runner.state, &runner.requester, progress_end);
+    lock_state(&runner.state).queue_terminal_progress(progress_end);
+    runner.requester.request_frame();
 
     set_streaming(&runner.state, &runner.editor, &runner.requester, false);
 
@@ -1759,8 +1773,10 @@ fn apply_event(
 ) {
     if let AgentSessionEvent::Error(msg) = event {
         // Surface the failure to the terminal's progress indicator (OSC 9;4
-        // error) alongside the red banner. The turn runner clears it at the turn
-        // boundary; here it marks the in-flight error immediately.
+        // error) alongside the red banner. Latch the turn as errored so the turn
+        // runner ends on the error state and the unconditional trailing `Clear`
+        // does not overwrite it (VAL-CHAT-018).
+        lock_state(state).mark_turn_error();
         queue_progress(state, requester, ProgressState::Error);
         commit(state, requester, chat::error_lines(msg));
         return;
@@ -1783,6 +1799,17 @@ fn apply_event(
             hand_agent::types::AgentEvent::MessageEnd {
                 message: model::Message::Assistant(assistant),
             } => {
+                // A provider stream error surfaces here, not as a `send_message`
+                // `Err`: the agent loop folds it into a `StopReason::Error`
+                // assistant message and returns `Ok`, so the turn reads as
+                // `Completed`. Latch the failure so the turn runner ends on the
+                // OSC 9;4 error state instead of the trailing `Clear`
+                // (VAL-CHAT-018). `finalize_assistant` still renders the red
+                // `Error: <msg>` banner from the message itself.
+                if assistant.stop_reason == model::StopReason::Error {
+                    lock_state(state).mark_turn_error();
+                    queue_progress(state, requester, ProgressState::Error);
+                }
                 finalize_assistant(state, requester, assistant);
                 return;
             }
@@ -2380,6 +2407,105 @@ mod tests {
         assert!(
             !cancel.lock().unwrap().is_cancelled(),
             "a completed turn must not cancel the token"
+        );
+    }
+
+    /// Build an assistant `MessageEnd` event carrying the given stop reason, the
+    /// shape a completed model turn delivers through the event applier.
+    fn assistant_message_end(stop_reason: model::StopReason) -> AgentSessionEvent {
+        let assistant = model::AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![model::AssistantContentBlock::Text(
+                model::types::TextContent::new("partial before error"),
+            )],
+            api: model::types::Api::OpenAICompletions,
+            provider: model::types::Provider::OpenAI,
+            model: "mock-model".to_string(),
+            usage: model::Usage::default(),
+            stop_reason,
+            error_message: Some("mock provider error".to_string()),
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        };
+        AgentSessionEvent::Agent(Box::new(hand_agent::types::AgentEvent::MessageEnd {
+            message: model::Message::Assistant(assistant),
+        }))
+    }
+
+    /// A turn whose model response ends on `StopReason::Error` (a provider stream
+    /// error, which the agent loop folds into a `StopReason::Error` assistant
+    /// message while `send_message` still returns `Ok`) must end the terminal
+    /// progress on the OSC 9;4 *error* state (`9;4;2`), and the turn boundary's
+    /// outcome-derived `Clear` (`9;4;0`) must not overwrite it (VAL-CHAT-018).
+    #[tokio::test]
+    async fn in_band_error_message_ends_progress_on_error_not_clobbered_by_clear() {
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let requester = test_requester();
+
+        // The event applier observes the error-ended assistant message: it latches
+        // the failure and queues the transient OSC 9;4 error immediately.
+        apply_event(
+            &state,
+            &requester,
+            &assistant_message_end(model::StopReason::Error),
+        );
+
+        // The turn boundary runs next. The outcome reads `Completed` (send_message
+        // returned Ok), so the outcome-derived base is `Clear` — but the latch
+        // upgrades it to `Error`, so no trailing `Clear` is queued.
+        lock_state(&state).queue_terminal_progress(ProgressState::Clear);
+
+        let raw = lock_state(&state).take_raw();
+        let last_progress = raw
+            .iter()
+            .rev()
+            .find(|s| s.starts_with("\x1b]9;4;"))
+            .copied();
+        assert_eq!(
+            last_progress,
+            Some(ProgressState::Error.sequence()),
+            "a failed turn must end on the OSC 9;4 error state, got raw {raw:?}"
+        );
+        assert!(
+            !raw.contains(&ProgressState::Clear.sequence()),
+            "the trailing Clear must not be queued once the turn errored: {raw:?}"
+        );
+        assert!(
+            !lock_state(&state).turn_error,
+            "queue_terminal_progress must take (clear) the latch"
+        );
+    }
+
+    /// A clean turn (`StopReason::Stop`) ends the terminal progress on `Clear`
+    /// (`9;4;0`): the error path never fires and the latch stays clear.
+    #[tokio::test]
+    async fn clean_turn_ends_progress_on_clear() {
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let requester = test_requester();
+
+        apply_event(
+            &state,
+            &requester,
+            &assistant_message_end(model::StopReason::Stop),
+        );
+        lock_state(&state).queue_terminal_progress(ProgressState::Clear);
+
+        let raw = lock_state(&state).take_raw();
+        let last_progress = raw
+            .iter()
+            .rev()
+            .find(|s| s.starts_with("\x1b]9;4;"))
+            .copied();
+        assert_eq!(
+            last_progress,
+            Some(ProgressState::Clear.sequence()),
+            "a clean turn must end on the OSC 9;4 clear state, got raw {raw:?}"
+        );
+        assert!(
+            !raw.contains(&ProgressState::Error.sequence()),
+            "a clean turn must never queue the error state: {raw:?}"
         );
     }
 

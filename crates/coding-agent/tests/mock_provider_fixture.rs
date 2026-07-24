@@ -262,13 +262,31 @@ async fn edit_and_write_tool_scenarios_carry_expected_arguments() {
     let server = start_mock_server();
 
     let edit = sse_chunks(&fetch_scenario(&server.base_url, "edit_tool").await);
+    let edit_name = edit
+        .iter()
+        .find_map(|c| c["choices"][0]["delta"]["tool_calls"][0]["function"]["name"].as_str());
+    assert_eq!(edit_name, Some("edit"));
+
     let edit_args: String = edit
         .iter()
         .filter_map(|c| c["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str())
         .collect();
     let edit_parsed: serde_json::Value = serde_json::from_str(&edit_args).unwrap();
-    assert_eq!(edit_parsed["oldString"], "foo");
-    assert_eq!(edit_parsed["newString"], "bar");
+    // The edit tool's schema requires `file_path` / `old_string` / `new_string`;
+    // the earlier `path` / `oldString` / `newString` keys made the tool error
+    // with `"file_path" is a required property` instead of rendering a diff. The
+    // distinct old/new strings give the diff renderer real +/- content
+    // (VAL-CHAT-039).
+    assert_eq!(
+        edit_parsed["file_path"], "/tmp/mock.txt",
+        "edit args must use the schema key `file_path`, not `path`"
+    );
+    assert_eq!(edit_parsed["old_string"], "foo");
+    assert_eq!(edit_parsed["new_string"], "bar");
+    assert_ne!(
+        edit_parsed["old_string"], edit_parsed["new_string"],
+        "old/new strings must differ so the diff has +/- rows"
+    );
 
     let write = sse_chunks(&fetch_scenario(&server.base_url, "write_tool").await);
     let write_name = write
@@ -306,6 +324,18 @@ async fn error_scenario_emits_partial_text_then_finish_error() {
         .iter()
         .any(|c| c["choices"][0]["finish_reason"] == "error");
     assert!(errored, "expected a finish_reason: error chunk");
+
+    // An OpenAI-shape error object is streamed as a `data:` line. This is the
+    // real failure signal: the `openai-rust` client fails to deserialize it as a
+    // `chat.completion.chunk`, so the model layer surfaces a `StopReason::Error`
+    // assistant message and the TUI's OSC 9;4 error state fires (VAL-CHAT-018). A
+    // bare `finish_reason: "error"` chunk alone maps to `StopReason::Stop`
+    // client-side and would never signal a failure.
+    let has_error_object = chunks.iter().any(|c| c["error"]["message"].is_string());
+    assert!(
+        has_error_object,
+        "expected an OpenAI error object `data:` line so the client observes a failure"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

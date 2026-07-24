@@ -29,6 +29,7 @@ use model::AssistantMessage;
 
 use crate::modes::interactive::theme::{Theme, ThemePalette};
 
+use super::chrome::ProgressState;
 use super::footer::{FooterViewModel, TokenUsageSummary};
 use super::summary::CollapsibleSummary;
 
@@ -123,6 +124,17 @@ pub struct DriverState {
     /// Reset at the start of every turn so a prior cancel never masks a genuine
     /// error on the next one.
     pub cancel_requested: bool,
+    /// Whether the in-flight turn saw an in-band failure — an
+    /// [`AgentSessionEvent::Error`](crate::core::agent_session::AgentSessionEvent::Error)
+    /// or a `MessageEnd` whose assistant message carries
+    /// [`StopReason::Error`](model::StopReason::Error). The event applier task sets
+    /// it as the error lands; the turn runner reads it at the turn boundary so a
+    /// turn that failed *while still returning `Ok`* (a provider stream error maps
+    /// to a `StopReason::Error` assistant message, not a `send_message` `Err`) ends
+    /// on the red OSC 9;4 error state rather than letting the unconditional trailing
+    /// `Clear` overwrite it (VAL-CHAT-018). Reset at the start of every turn so a
+    /// prior failure never masks a clean turn.
+    pub turn_error: bool,
     /// In-flight tool calls, keyed by `tool_call_id`, remembered from
     /// `ToolExecutionStart` so the matching `ToolExecutionEnd` can render a
     /// complete state-tinted box (the name + args from the start, the result +
@@ -285,6 +297,47 @@ impl DriverState {
     /// line already landed), so no red `send failed` banner is committed.
     pub fn take_cancel_requested(&mut self) -> bool {
         std::mem::take(&mut self.cancel_requested)
+    }
+
+    /// Latch that the in-flight turn saw an in-band failure. Called by the event
+    /// applier when an `Error` event or a `StopReason::Error` `MessageEnd` lands,
+    /// so the turn runner ends the turn on the OSC 9;4 error state.
+    pub fn mark_turn_error(&mut self) {
+        self.turn_error = true;
+    }
+
+    /// Take and clear the in-band-error latch. The turn runner calls this at the
+    /// turn boundary: a `true` result means the turn failed in-band (a provider
+    /// stream error surfaced as a `StopReason::Error` assistant message while
+    /// `send_message` still returned `Ok`), so the terminal progress ends on the
+    /// red error state instead of a clear.
+    #[must_use]
+    pub fn take_turn_error(&mut self) -> bool {
+        std::mem::take(&mut self.turn_error)
+    }
+
+    /// Reset the in-band-error latch at the start of a turn so a prior failure
+    /// never masks a clean turn's progress-clear.
+    pub fn reset_turn_error(&mut self) {
+        self.turn_error = false;
+    }
+
+    /// Queue the turn's terminal OSC 9;4 progress under a single lock: the red
+    /// `Error` sequence if the in-band-error latch is set (taking it), otherwise
+    /// the caller-chosen `base` (a `Clear` on success, an `Error` on a
+    /// `send_message` failure / timeout). Doing the take-and-queue atomically —
+    /// rather than reading the latch, then queuing in a second lock — closes the
+    /// race with the event applier task, which sets the latch and queues its own
+    /// `Error` on a separate task: whichever of the two locked sections runs last
+    /// writes the terminal state, and both agree on `Error` once the turn failed
+    /// (VAL-CHAT-018).
+    pub fn queue_terminal_progress(&mut self, base: ProgressState) {
+        let progress = if std::mem::take(&mut self.turn_error) {
+            ProgressState::Error
+        } else {
+            base
+        };
+        self.pending_raw.push(progress.sequence());
     }
 
     /// Remember an in-flight tool call's name + args so the matching `ToolEnd`
