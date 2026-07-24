@@ -253,29 +253,38 @@ fn combined_router_dispatches_by_trigger() {
     assert_eq!(popup_labels(&ed2), vec!["alpha.txt"], "at routes to path");
 }
 
-// --- VAL-EDITOR-007: Enter submits verbatim, Tab is the only accept ---------
+// --- VAL-EDITOR-007: Enter accepts the candidate while the popup is open -----
 
 #[test]
-fn enter_submits_buffer_verbatim_without_accepting() {
+fn enter_accepts_the_candidate_while_popup_is_open() {
     let mut ed = Editor::new();
     ed.set_autocomplete_provider(slash_provider(&["help", "history"]));
     type_str(&mut ed, "/h");
     assert!(ed.autocomplete_visible());
-    // Enter must submit the buffer *as typed* — never accept the candidate.
+    // Standard completion UX: with the popup open, Enter accepts the highlighted
+    // candidate (like Tab) and closes the popup — it does NOT submit the raw `/h`.
+    ed.handle_key(&enter());
+    assert_eq!(ed.text(), "/help", "Enter splices the selected candidate");
+    assert!(!ed.autocomplete_visible(), "accept closes the popup");
+    assert!(
+        ed.take_submit().is_none(),
+        "Enter accepts, it does not submit, while the popup is open"
+    );
+    // With the popup now closed, Enter submits as normal.
     ed.handle_key(&enter());
     assert_eq!(
         ed.take_submit().as_deref(),
-        Some("/h"),
-        "Enter submits the raw `/h`, not the selected `/help`"
+        Some("/help"),
+        "Enter submits once the popup is closed"
     );
 }
 
 #[test]
-fn tab_is_the_only_accept_gesture() {
+fn tab_accepts_the_candidate() {
     let mut ed = Editor::new();
     ed.set_autocomplete_provider(slash_provider(&["help"]));
     type_str(&mut ed, "/h");
-    // Tab accepts.
+    // Tab accepts (the other accept gesture alongside Enter-while-open).
     ed.handle_key(&tab());
     assert_eq!(ed.text(), "/help");
     assert!(ed.take_submit().is_none(), "Tab does not submit");

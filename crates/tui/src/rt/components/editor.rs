@@ -1805,14 +1805,21 @@ impl RtComponent for Editor {
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
         // When the suggestion popup is open, it captures its navigation gestures
         // before the buffer sees them: Up/Down move the indicator (never the
-        // buffer caret, never recall history), Tab accepts the selection (the
-        // *only* accept gesture — Enter still submits the buffer verbatim), and
-        // Esc closes the popup leaving the buffer untouched. Every other key
-        // falls through to the buffer, then the popup refreshes off the new
-        // context.
+        // buffer caret, never recall history); Tab and the submit key (Enter, by
+        // default) both accept the highlighted candidate and close the popup —
+        // standard completion UX, so an open popup never lets Enter submit the raw
+        // trigger token; and Esc closes the popup leaving the buffer untouched.
+        // Every other key falls through to the buffer, then the popup refreshes
+        // off the new context. With the popup closed the submit key behaves
+        // normally (submit / newline), handled by `handle_key_inner`.
         if let Some(id) = key.key_id.as_deref()
             && self.autocomplete.is_visible()
         {
+            // The submit key accepts the candidate rather than submitting while the
+            // popup is open. Checked first so a `submit: tab` binding still accepts.
+            if id == self.submit_key && self.accept_autocomplete() {
+                return HandleOutcome::Consumed;
+            }
             match id {
                 "up" => {
                     self.autocomplete.select_prev();
@@ -2426,6 +2433,37 @@ mod tests {
             rows.iter().any(|r| r.contains("README.md")),
             "popup paints the candidate: {rows:?}"
         );
+    }
+
+    #[test]
+    fn enter_accepts_the_highlighted_candidate_when_popup_is_open() {
+        // Standard completion UX: with the popup open over an @-context, the submit
+        // key (Enter, by default) accepts the highlighted candidate and closes the
+        // popup — it does NOT submit the raw `@`-token.
+        let mut ed = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(mention_provider(&["README.md", "main.rs"]));
+        type_str(&mut ed, "@RE");
+        assert!(ed.autocomplete_visible(), "the @-context opens the popup");
+
+        ed.handle_key(&key("enter", KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(ed.text(), "@README.md", "the candidate is spliced in");
+        assert!(!ed.autocomplete_visible(), "accept closes the popup");
+        assert!(ed.take_submit().is_none(), "Enter did not submit");
+    }
+
+    #[test]
+    fn enter_still_submits_when_popup_is_closed() {
+        // With no popup open, the submit key keeps its normal behaviour: bare Enter
+        // submits under the default binding.
+        let mut ed = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(mention_provider(&["README.md"]));
+        type_str(&mut ed, "hello");
+        assert!(!ed.autocomplete_visible(), "no @-context, popup closed");
+
+        ed.handle_key(&key("enter", KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(ed.take_submit().as_deref(), Some("hello"), "Enter submits");
     }
 
     #[test]
