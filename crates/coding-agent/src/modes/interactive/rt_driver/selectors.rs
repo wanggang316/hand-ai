@@ -204,7 +204,7 @@ pub async fn open_theme_selector(
     state: &Arc<Mutex<DriverState>>,
     requester: &FrameRequester,
 ) {
-    let current = theme_setting_id(session.settings().current().theme());
+    let current = theme_setting_id(&session.settings().current().theme()).to_string();
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ThemeOutcome>();
     done.store(false, Ordering::SeqCst);
@@ -383,7 +383,7 @@ fn build_settings_entries(merged: &Settings) -> Vec<SettingEntry> {
                     .iter()
                     .map(|t| (*t).to_string())
                     .collect(),
-                selected: theme_setting_index(merged.theme()),
+                selected: theme_setting_index(&merged.theme()),
             },
             "Color theme (applied on next launch).",
         ),
@@ -410,20 +410,17 @@ fn build_settings_entries(merged: &Settings) -> Vec<SettingEntry> {
     ]
 }
 
-/// The persistable id string for a [`ThemeSetting`] (`dark` / `light` /
-/// `high-contrast` / `system`).
-fn theme_setting_id(theme: ThemeSetting) -> &'static str {
-    match theme {
-        ThemeSetting::Dark => "dark",
-        ThemeSetting::Light => "light",
-        ThemeSetting::HighContrast => "high-contrast",
-        ThemeSetting::System => "system",
-    }
+/// The persistable id string for a [`ThemeSetting`] — the four built-in kebab
+/// tags (`dark` / `light` / `high-contrast` / `system`) or a custom theme's
+/// bare name.
+fn theme_setting_id(theme: &ThemeSetting) -> &str {
+    theme.as_tag()
 }
 
 /// The index of a [`ThemeSetting`] within
-/// [`THEME_NAMES`](super::theme_selector::THEME_NAMES).
-fn theme_setting_index(theme: ThemeSetting) -> usize {
+/// [`THEME_NAMES`](super::theme_selector::THEME_NAMES). A custom theme is not
+/// in the built-in list, so it falls back to the first row.
+fn theme_setting_index(theme: &ThemeSetting) -> usize {
     let id = theme_setting_id(theme);
     super::theme_selector::THEME_NAMES
         .iter()

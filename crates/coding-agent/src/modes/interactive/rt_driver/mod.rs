@@ -2121,17 +2121,17 @@ fn load_keybindings(cwd: &std::path::Path, state: &Arc<Mutex<DriverState>>) -> S
 fn resolve_startup_theme(
     session: &AgentSession,
 ) -> crate::modes::interactive::theme::ResolvedTheme {
-    use crate::core::settings::ThemeSetting;
     use crate::modes::interactive::theme::{
         default_custom_themes_dir, default_theme, resolve_theme_or_default,
     };
 
-    let name = match session.settings().current().theme() {
-        ThemeSetting::Dark => "dark",
-        ThemeSetting::Light => "light",
-        ThemeSetting::HighContrast => "high-contrast",
-        ThemeSetting::System => "system",
-    };
+    // Pass the setting's tag straight to the loader: the built-ins resolve from
+    // embedded JSON, and a `Custom` name reaches the custom-theme directory. The
+    // loader itself folds every failure (unknown name, malformed JSON) down to
+    // the default palette with a `fallback_reason`, so a custom name is never a
+    // hard failure here.
+    let setting = session.settings().current().theme();
+    let name = setting.as_tag();
 
     // The custom-theme directory may be unavailable (no home dir); fall back to
     // the built-in default rather than failing. A built-in name still resolves
