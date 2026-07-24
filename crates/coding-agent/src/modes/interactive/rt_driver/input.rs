@@ -287,8 +287,9 @@ fn draw(
     draw_stream_preview(frame, &state.preview, area, geometry.active);
 
     // The bordered box occupies only the active area; rows above it (freed by a
-    // collapse) stay blank and repaint clear each frame.
-    let block = Block::bordered().border_style(Style::default().fg(Color::DarkGray));
+    // collapse) stay blank and repaint clear each frame. The border colours from
+    // the active palette (the default palette keeps the historical dark grey).
+    let block = Block::bordered().border_style(Style::default().fg(state.palette.border));
     frame.render_widget(block, geometry.active);
 
     // The working-loader row, when streaming, sits just below the top border,
