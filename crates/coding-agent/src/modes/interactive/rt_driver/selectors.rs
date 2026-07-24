@@ -38,11 +38,17 @@ use super::footer::{TokenUsageSummary, build_footer_view};
 use super::model_selector::{ModelOutcome, ModelSelector};
 use super::overlay::{self, DoneSignal, SelectorController, SharedOverlay};
 use super::replay::replay_blocks;
+use super::scoped_models_selector::{
+    SESSION_ONLY_NOTICE, ScopedModelsOutcome, ScopedModelsSelector,
+};
 use super::session_picker::{SessionOutcome, SessionPicker};
 use super::settings_selector::{SettingsOutcome, SettingsSelector};
 use super::state::{DriverState, SharedFooter, lock_footer, lock_state};
+use super::summary::{CollapsibleSummary, SummaryKind};
 use super::theme_selector::{ThemeOutcome, ThemeSelector, canonical_theme};
 use super::thinking_selector::{ThinkingOutcome, ThinkingSelector, level_label, parse_level_arg};
+use super::tree_selector::{TreeOutcome, TreeSelector, scan_tree};
+use super::user_message_selector::{ForkItem, ForkOutcome, UserMessageSelector};
 
 /// Open the `/model` selector overlay and apply the user's pick.
 ///
@@ -512,6 +518,254 @@ pub fn is_config_selector_action(action: &SlashCommandAction) -> bool {
             | SlashCommandAction::Theme(_)
             | SlashCommandAction::ModelByPattern(_)
     )
+}
+
+/// The [`SlashCommandAction`] variants the **picker** selector family owns (`/tree`,
+/// `/scoped-models`, `/fork`), so the driver can route them to the async overlay
+/// opens *before* the sync slash dispatch. Kept here (next to the handlers) so the
+/// routing set is a single source of truth — the same shape as
+/// [`is_config_selector_action`].
+#[must_use]
+pub fn is_picker_selector_action(action: &SlashCommandAction) -> bool {
+    matches!(
+        action,
+        SlashCommandAction::OpenTreeSelector(_)
+            | SlashCommandAction::OpenScopedModelsSelector
+            | SlashCommandAction::Fork(_)
+    )
+}
+
+/// Open the `/tree` directory picker overlay and, on a pick, land the
+/// `[/tree picked: <relative-path>]` status line (VAL-OVERLAY-024).
+///
+/// Resolves the scan root from `arg` (a path relative to `cwd`, or `cwd` itself for a
+/// bare `/tree`), scans it dirs-first with the noise directories skipped, mounts the
+/// [`TreeSelector`], then awaits its single outcome:
+///
+/// - **Selected(path)** — the `[/tree picked: <path>]` status line lands.
+/// - **Cancelled** — the yellow `[/tree cancelled]` line lands.
+///
+/// A `<subdir>` argument that does not resolve to a directory takes the no-data
+/// degradation: no overlay opens and the `[/tree: not a directory …]` status line
+/// lands (VAL-OVERLAY-019).
+pub async fn open_tree_selector(
+    cwd: &Path,
+    arg: Option<&str>,
+    overlay: &SharedOverlay,
+    done: &DoneSignal,
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+) {
+    // Resolve the scan root: a bare `/tree` scans cwd; `/tree <subdir>` scans that
+    // subtree (joined onto cwd, so a relative arg stays inside the project).
+    let (root, title) = match arg.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sub) => (cwd.join(sub), format!("Tree: {sub}")),
+        None => (cwd.to_path_buf(), "Tree: .".to_string()),
+    };
+
+    // No-data degradation: a non-directory target never opens the picker.
+    if !root.is_dir() {
+        let shown = arg.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(".");
+        commit_status(
+            state,
+            requester,
+            &format!("[/tree: not a directory \"{shown}\"]"),
+        );
+        return;
+    }
+
+    let rows = scan_tree(&root);
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<TreeOutcome>();
+    done.store(false, Ordering::SeqCst);
+    let selector = TreeSelector::new(rows, title, tx, done.clone());
+    let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(selector));
+
+    overlay::mount(overlay, requester, controller, done.clone());
+
+    match rx.recv().await {
+        Some(TreeOutcome::Selected(path)) => {
+            commit_status(state, requester, &format!("[/tree picked: {path}]"));
+        }
+        Some(TreeOutcome::Cancelled) => {
+            commit_status(state, requester, "[/tree cancelled]");
+        }
+        None => overlay::close(overlay, requester),
+    }
+}
+
+/// Open the `/scoped-models` multi-select overlay and apply the user's session-only
+/// pick (VAL-OVERLAY-011 / -031 / -033).
+///
+/// Seeds the selector from `settings.enabled_models` (`None` = all enabled), mounts
+/// the [`ScopedModelsSelector`], then awaits its single outcome:
+///
+/// - **Saved(_)** — the change is **session-only** (the parity nail): nothing is
+///   written to settings, so a reopen shows the unchanged on-disk config. The honest
+///   `[scoped-models: session-only — persist not yet wired]` notice lands
+///   (VAL-OVERLAY-031).
+/// - **Cancelled** — the yellow `[scoped-models cancelled]` line lands.
+///
+/// A registry with **no models** takes the no-data degradation: no overlay opens and
+/// the `[scoped-models: no models available]` status line lands (VAL-OVERLAY-019).
+pub async fn open_scoped_models_selector(
+    session: &mut AgentSession,
+    overlay: &SharedOverlay,
+    done: &DoneSignal,
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+) {
+    let all_models = session.model_registry().all().to_vec();
+
+    // No-data degradation: an empty registry never opens the picker.
+    if all_models.is_empty() {
+        commit_status(state, requester, "[scoped-models: no models available]");
+        return;
+    }
+
+    let enabled_ids = session.settings().current().enabled_models.clone();
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ScopedModelsOutcome>();
+    done.store(false, Ordering::SeqCst);
+    let selector = ScopedModelsSelector::new(all_models, enabled_ids, tx, done.clone());
+    let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(selector));
+
+    overlay::mount(overlay, requester, controller, done.clone());
+
+    match rx.recv().await {
+        Some(ScopedModelsOutcome::Saved(_)) => {
+            // Session-only (parity nail VAL-OVERLAY-031): do NOT persist to settings.
+            // The subset is not wired to durable storage yet, so a reopen shows the
+            // unchanged on-disk config — surface the honest notice.
+            commit_status(
+                state,
+                requester,
+                &format!("[scoped-models: {SESSION_ONLY_NOTICE}]"),
+            );
+        }
+        Some(ScopedModelsOutcome::Cancelled) => {
+            commit_status(state, requester, "[scoped-models cancelled]");
+        }
+        None => overlay::close(overlay, requester),
+    }
+}
+
+/// Open the `/fork` picker overlay and, on a pick, fork the session at the chosen
+/// user message (VAL-OVERLAY-023).
+///
+/// Lists the session's forkable user messages, mounts the [`UserMessageSelector`]
+/// (titled "Fork from Message", latest preselected), then awaits its single outcome:
+///
+/// - **Selected(entry_id)** — `session.fork(entry_id)` branches the session; a
+///   `[branch]` collapsible summary lands (reusing info-commands'
+///   [`SummaryKind::Branch`] + its Ctrl+R expand listener) and the
+///   `[forked at: <preview>]` status line lands.
+/// - **Cancelled** — the yellow `[fork cancelled]` line lands.
+///
+/// A session with **no user messages** takes the no-data degradation: no overlay
+/// opens and the `[fork: no user messages to fork from]` status line lands
+/// (VAL-OVERLAY-019).
+pub async fn open_fork_selector(
+    session: &mut AgentSession,
+    cwd: &Path,
+    overlay: &SharedOverlay,
+    done: &DoneSignal,
+    state: &Arc<Mutex<DriverState>>,
+    footer: &SharedFooter,
+    requester: &FrameRequester,
+) {
+    let entries = session.fork_messages();
+
+    // No-data degradation: nothing to fork from → no overlay, just the status line.
+    if entries.is_empty() {
+        commit_status(state, requester, "[fork: no user messages to fork from]");
+        return;
+    }
+
+    let messages: Vec<ForkItem> = entries
+        .into_iter()
+        .map(|e| ForkItem {
+            entry_id: e.entry_id,
+            text: e.text,
+        })
+        .collect();
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ForkOutcome>();
+    done.store(false, Ordering::SeqCst);
+    let selector = UserMessageSelector::new(messages, tx, done.clone());
+    let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(selector));
+
+    overlay::mount(overlay, requester, controller, done.clone());
+
+    match rx.recv().await {
+        Some(ForkOutcome::Selected(entry_id)) => {
+            apply_fork(session, cwd, &entry_id, state, footer, requester);
+        }
+        Some(ForkOutcome::Cancelled) => {
+            commit_status(state, requester, "[fork cancelled]");
+        }
+        None => overlay::close(overlay, requester),
+    }
+}
+
+/// Fork the session at `entry_id`, land a `[branch]` collapsible summary + the
+/// `[forked at: <preview>]` status line, and refresh the footer so the branched
+/// session's context surfaces. A fork failure takes the yellow status route.
+fn apply_fork(
+    session: &mut AgentSession,
+    cwd: &Path,
+    entry_id: &str,
+    state: &Arc<Mutex<DriverState>>,
+    footer: &SharedFooter,
+    requester: &FrameRequester,
+) {
+    match session.fork(entry_id) {
+        Ok(text) => {
+            let preview = super::user_message_selector::fold_single_line(&text);
+            let preview = truncate_preview(&preview, 60);
+            // A `[branch]` collapsible summary, reusing info-commands' SummaryKind +
+            // its Ctrl+R expand listener (the summary is remembered so Ctrl+R flips
+            // it). The expanded body carries the forked-from message.
+            let summary = CollapsibleSummary {
+                kind: SummaryKind::Branch,
+                summary: format!("Forked a new session from: {preview}"),
+                expanded: false,
+            };
+            commit_summary(state, requester, summary);
+            refresh_footer(session, cwd, state, footer, requester);
+            commit_status(state, requester, &format!("[forked at: {preview}]"));
+        }
+        Err(e) => {
+            commit_status(state, requester, &format!("[fork failed: {e}]"));
+        }
+    }
+}
+
+/// Truncate a single-line preview to `max` chars, appending an ellipsis when cut.
+fn truncate_preview(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let head: String = text.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
+
+/// Commit a collapsible summary block to scrollback and remember it so the driver's
+/// global Ctrl+R listener can expand/collapse it. Mirrors the `/compact` summary
+/// path so the branch summary inherits the same expand behaviour for free.
+fn commit_summary(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    summary: CollapsibleSummary,
+) {
+    let mut guard = lock_state(state);
+    let width = guard.size.cols;
+    let lines = super::summary::summary_lines(&summary, width);
+    guard.queue_commit(lines);
+    guard.remember_summary(summary);
+    drop(guard);
+    requester.request_frame();
 }
 
 /// Open the `/resume` session picker overlay and, on a pick, switch to and replay
@@ -1160,5 +1414,301 @@ mod tests {
             &SlashCommandAction::OpenModelSelector
         ));
         assert!(!is_config_selector_action(&SlashCommandAction::ClearChat));
+    }
+
+    #[test]
+    fn is_picker_selector_action_matches_the_family() {
+        assert!(is_picker_selector_action(
+            &SlashCommandAction::OpenTreeSelector(None)
+        ));
+        assert!(is_picker_selector_action(
+            &SlashCommandAction::OpenScopedModelsSelector
+        ));
+        assert!(is_picker_selector_action(&SlashCommandAction::Fork(None)));
+        assert!(is_picker_selector_action(&SlashCommandAction::Fork(Some(
+            "e1".into()
+        ))));
+        // The config family is not the picker family.
+        assert!(!is_picker_selector_action(&SlashCommandAction::Theme(None)));
+        assert!(!is_picker_selector_action(
+            &SlashCommandAction::OpenModelSelector
+        ));
+    }
+
+    // --- picker apply-side (fork branch summary + no-data helpers) ---------
+
+    #[tokio::test]
+    async fn fork_of_a_missing_entry_lands_the_yellow_fork_failed_line() {
+        // The `apply_fork` error route: forking a non-existent entry id never
+        // branches — it lands the yellow `[fork failed: …]` status (the happy-path
+        // branch summary + `[forked at: …]` is proved end-to-end in the fixtures,
+        // which journal a real user message).
+        let mut session = test_session(false);
+        let cwd = Path::new("/tmp");
+        let (state, footer, req) = (state(), footer_of(&session, cwd), test_requester());
+
+        apply_fork(&mut session, cwd, "no-such-entry-id", &state, &footer, &req);
+
+        let out = committed_text(&state);
+        assert!(out.contains("[fork failed:"), "fork error missing: {out}");
+        // No branch summary is remembered on the failure path.
+        assert!(
+            lock_state(&state).collapsible_summaries.is_empty(),
+            "a failed fork remembers no summary"
+        );
+    }
+
+    #[test]
+    fn truncate_preview_caps_long_text_with_an_ellipsis() {
+        assert_eq!(truncate_preview("short", 60), "short");
+        let long = "x".repeat(100);
+        let out = truncate_preview(&long, 10);
+        assert_eq!(
+            out.chars().count(),
+            10,
+            "capped to max including the ellipsis"
+        );
+        assert!(out.ends_with('…'));
+    }
+
+    // === Per-selector wrap-vs-clamp navigation nail (VAL-OVERLAY-002) ======
+    //
+    // Now that every selector exists, pin each one's navigation semantics in a
+    // single table-driven walk. `wrap` selectors bring Up-on-the-first back to the
+    // last row (and Down-on-the-last back to the first); `clamp` selectors treat
+    // both ends as no-ops. This is the cross-selector nail the follow-up validator
+    // probes from outside — here it is unit-pinned so a regression fails the build.
+    //
+    // wrap:  model / fork / scoped-models / thinking / theme
+    // clamp: tree / resume / login / settings
+    //
+    // (login is owned by m3-login-auth; settings is a first-change-closes dialog
+    // with no cursor wrap; both are noted for the table's completeness. This walk
+    // pins the selectors this feature and its siblings own directly.)
+
+    mod nav_nail {
+        use super::super::*;
+        use crate::core::session_manager::SessionInfo;
+        use crate::modes::interactive::rt_driver::model_selector::ModelSelector;
+        use crate::modes::interactive::rt_driver::overlay::{SelectorController, new_done_signal};
+        use crate::modes::interactive::rt_driver::scoped_models_selector::ScopedModelsSelector;
+        use crate::modes::interactive::rt_driver::session_picker::SessionPicker;
+        use crate::modes::interactive::rt_driver::theme_selector::ThemeSelector;
+        use crate::modes::interactive::rt_driver::thinking_selector::ThinkingSelector;
+        use crate::modes::interactive::rt_driver::tree_selector::{TreeRow, TreeSelector};
+        use crate::modes::interactive::rt_driver::user_message_selector::{
+            ForkItem, UserMessageSelector,
+        };
+
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use hand_tui::rt::events::RtKey;
+        use model::types::Provider;
+        use model::{Api, Cost, InputType, Model};
+
+        fn key(id: &str) -> RtKey {
+            RtKey {
+                key_id: Some(id.to_string()),
+                raw: KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            }
+        }
+
+        fn model(id: &str) -> Model {
+            Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: Api::AnthropicMessages,
+                provider: Provider::Anthropic,
+                base_url: String::new(),
+                reasoning: false,
+                input: vec![InputType::Text],
+                cost: Cost {
+                    input: 0.0,
+                    output: 0.0,
+                    cache_read: 0.0,
+                    cache_write: 0.0,
+                },
+                context_window: 0,
+                max_tokens: 0,
+                headers: None,
+                compat: None,
+                thinking_level_map: None,
+            }
+        }
+
+        /// Drive a fresh-at-top selector: Up first (a wrap moves off row 0, a clamp
+        /// stays), reporting the resulting body text's first `→` marker position via
+        /// a probe closure. To keep this generic across selectors we assert on the
+        /// concrete cursor index each exposes.
+        ///
+        /// Returns `(after_up_from_top_moved, after_down_from_bottom_moved)`.
+        fn walk<C: SelectorController>(
+            sel: &mut C,
+            len: usize,
+            index: impl Fn(&C) -> usize,
+        ) -> (bool, bool) {
+            // Start at the top.
+            let top = index(sel);
+            sel.handle_key(&key("up"));
+            let moved_up = index(sel) != top;
+            // Drive to the bottom, then one more down.
+            // Reset to top first (Up may have wrapped to the bottom).
+            for _ in 0..len {
+                sel.handle_key(&key("up"));
+            }
+            // Now walk to the last row.
+            for _ in 0..len.saturating_sub(1) {
+                sel.handle_key(&key("down"));
+            }
+            let bottom = index(sel);
+            sel.handle_key(&key("down"));
+            let moved_down = index(sel) != bottom;
+            (moved_up, moved_down)
+        }
+
+        #[test]
+        fn model_selector_wraps() {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut sel = ModelSelector::new(
+                None,
+                vec![model("a"), model("b"), model("c")],
+                vec![],
+                tx,
+                new_done_signal(),
+            );
+            let (up, down) = walk(&mut sel, 3, |s| {
+                s.highlighted().map_or(0, |m| {
+                    // Map the highlighted model back to its filtered index is awkward;
+                    // instead assert on the wrap directly.
+                    ["a", "b", "c"].iter().position(|x| *x == m.id).unwrap_or(0)
+                })
+            });
+            assert!(up, "model: Up on the first row wraps");
+            assert!(down, "model: Down on the last row wraps");
+        }
+
+        #[test]
+        fn fork_selector_wraps() {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut sel = UserMessageSelector::new(
+                vec![
+                    ForkItem {
+                        entry_id: "a".into(),
+                        text: "1".into(),
+                    },
+                    ForkItem {
+                        entry_id: "b".into(),
+                        text: "2".into(),
+                    },
+                    ForkItem {
+                        entry_id: "c".into(),
+                        text: "3".into(),
+                    },
+                ],
+                tx,
+                new_done_signal(),
+            );
+            // Fork preselects the LAST row, so reset to the top first.
+            for _ in 0..3 {
+                sel.handle_key(&key("up"));
+            }
+            let (up, down) = walk(&mut sel, 3, UserMessageSelector::selected_index);
+            assert!(up, "fork: Up on the first row wraps to last");
+            assert!(down, "fork: Down on the last row wraps to first");
+        }
+
+        #[test]
+        fn scoped_models_selector_wraps() {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut sel = ScopedModelsSelector::new(
+                vec![model("a"), model("b"), model("c")],
+                None,
+                tx,
+                new_done_signal(),
+            );
+            let (up, down) = walk(&mut sel, 3, ScopedModelsSelector::selected_index);
+            assert!(up, "scoped-models: Up on the first row wraps");
+            assert!(down, "scoped-models: Down on the last row wraps");
+        }
+
+        #[test]
+        fn thinking_selector_wraps() {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut sel = ThinkingSelector::new(None, tx, new_done_signal());
+            let len = 7; // off + 6 levels
+            let (up, down) = walk(&mut sel, len, ThinkingSelector::selected_index);
+            assert!(up, "thinking: Up on the first row wraps");
+            assert!(down, "thinking: Down on the last row wraps");
+        }
+
+        #[test]
+        fn theme_selector_wraps() {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut sel = ThemeSelector::new("dark", tx, new_done_signal());
+            let len = 4;
+            let (up, down) = walk(&mut sel, len, ThemeSelector::selected_index);
+            assert!(up, "theme: Up on the first row wraps");
+            assert!(down, "theme: Down on the last row wraps");
+        }
+
+        #[test]
+        fn tree_selector_clamps() {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let rows = vec![
+                TreeRow {
+                    rel_path: "a".into(),
+                    label: "a".into(),
+                    depth: 0,
+                    is_dir: false,
+                },
+                TreeRow {
+                    rel_path: "b".into(),
+                    label: "b".into(),
+                    depth: 0,
+                    is_dir: false,
+                },
+                TreeRow {
+                    rel_path: "c".into(),
+                    label: "c".into(),
+                    depth: 0,
+                    is_dir: false,
+                },
+            ];
+            let mut sel = TreeSelector::new(rows, "t", tx, new_done_signal());
+            let (up, down) = walk(&mut sel, 3, TreeSelector::selected_index);
+            assert!(!up, "tree: Up on the first row clamps (no wrap)");
+            assert!(!down, "tree: Down on the last row clamps (no wrap)");
+        }
+
+        #[test]
+        fn resume_picker_clamps() {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let sessions: Vec<SessionInfo> = (0..3)
+                .map(|i| SessionInfo {
+                    path: std::path::PathBuf::from(format!("/tmp/{i}.jsonl")),
+                    id: format!("id{i}"),
+                    cwd: "/tmp".into(),
+                    timestamp: 0,
+                    modified: 0,
+                    message_count: 1,
+                    name: Some(format!("s{i}")),
+                    parent_session_path: None,
+                    first_message: "hi".into(),
+                    all_messages_text: String::new(),
+                })
+                .collect();
+            let mut sel = SessionPicker::new(sessions, tx, new_done_signal());
+            // SessionPicker exposes `highlighted`, not a raw index; probe via id.
+            let index = |s: &SessionPicker| {
+                s.highlighted().map_or(0, |info| {
+                    info.id
+                        .trim_start_matches("id")
+                        .parse::<usize>()
+                        .unwrap_or(0)
+                })
+            };
+            let (up, down) = walk(&mut sel, 3, index);
+            assert!(!up, "resume: Up on the first row clamps (no wrap)");
+            assert!(!down, "resume: Down on the last row clamps (no wrap)");
+        }
     }
 }

@@ -67,6 +67,7 @@ pub mod messages;
 pub mod model_selector;
 pub mod overlay;
 pub mod replay;
+pub mod scoped_models_selector;
 pub mod selectors;
 pub mod session_picker;
 pub mod settings_selector;
@@ -76,6 +77,8 @@ pub mod summary;
 pub mod theme_selector;
 pub mod thinking_selector;
 pub mod tools;
+pub mod tree_selector;
+pub mod user_message_selector;
 pub mod watchdog;
 
 use std::io;
@@ -793,6 +796,15 @@ async fn run_turn(runner: &mut TurnRunner, text: &str) {
         return;
     }
 
+    // The picker-selector family (`/tree`, `/scoped-models`, `/fork`) mounts a modal
+    // overlay and awaits the pick, so it is intercepted here on the async turn runner
+    // (the one task that owns `&mut session`), *before* the sync slash dispatch — the
+    // same reason as `/model` / `/resume` / the config family.
+    if let Some(action) = slash::picker_selector_action(text) {
+        run_picker_selector(runner, action).await;
+        return;
+    }
+
     // Slash commands are intercepted here — the turn runner is the one place
     // that owns `&mut session`, so the session-lifecycle commands (`/new`,
     // `/clone`, `/import`, `/name`) run against it directly. The `/quit` family
@@ -1180,6 +1192,75 @@ async fn run_config_selector(
             &runner.requester,
         ),
         // `config_selector_action` only ever yields the four arms above; any other
+        // action means the routing predicate and this match disagree — dispatch it
+        // synchronously so it is never silently dropped.
+        other => {
+            let _ = slash::apply_slash_action(
+                other,
+                &mut runner.session,
+                &runner.cwd,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            );
+        }
+    }
+}
+
+/// Route a picker-selector command (`/tree`, `/scoped-models`, `/fork`) to its
+/// overlay open (VAL-OVERLAY-011 / -019 / -023 / -024 / -031 / -033).
+///
+/// The input loop optimistically marked the state streaming on submit; a picker is
+/// not a streaming turn, so clear that first. Then mount the picker's modal overlay
+/// and await the pick — each open owns its no-data degradation (a non-directory
+/// `/tree`, an empty registry `/scoped-models`, a user-message-less `/fork` land the
+/// status line without opening) and applies its result against `&mut session`.
+async fn run_picker_selector(
+    runner: &mut TurnRunner,
+    action: crate::modes::interactive::slash_commands::SlashCommandAction,
+) {
+    use crate::modes::interactive::slash_commands::SlashCommandAction;
+
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match action {
+        // `/tree` (bare or `<subdir>`) opens the directory picker.
+        SlashCommandAction::OpenTreeSelector(arg) => {
+            selectors::open_tree_selector(
+                &runner.cwd,
+                arg.as_deref(),
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.requester,
+            )
+            .await;
+        }
+        // `/scoped-models` opens the session-only multi-select.
+        SlashCommandAction::OpenScopedModelsSelector => {
+            selectors::open_scoped_models_selector(
+                &mut runner.session,
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.requester,
+            )
+            .await;
+        }
+        // `/fork` (bare or `<entry-id>`) opens the fork-from-message picker.
+        SlashCommandAction::Fork(_) => {
+            selectors::open_fork_selector(
+                &mut runner.session,
+                &runner.cwd,
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            )
+            .await;
+        }
+        // `picker_selector_action` only ever yields the three arms above; any other
         // action means the routing predicate and this match disagree — dispatch it
         // synchronously so it is never silently dropped.
         other => {

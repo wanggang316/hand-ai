@@ -122,6 +122,32 @@ pub fn config_selector_action(line: &str) -> Option<SlashCommandAction> {
     super::selectors::is_config_selector_action(&action).then_some(action)
 }
 
+/// The typed [`SlashCommandAction`] for a submission if it belongs to the *picker*
+/// selector family (`/tree`, `/scoped-models`, `/fork`) — the commands the driver
+/// intercepts on the async turn runner because they mount a modal overlay and await
+/// the pick (`/tree` and `/scoped-models` unconditionally; `/fork` when it opens the
+/// picker — a bare `/fork` or `/fork <entry-id>` that resolves interactively). `None`
+/// for anything else.
+///
+/// Returning the parsed action (rather than a bare predicate) lets the driver route
+/// the three pickers off the same parse the sync dispatch would do, so the two paths
+/// never disagree — the same shape as [`config_selector_action`].
+#[must_use]
+pub fn picker_selector_action(line: &str) -> Option<SlashCommandAction> {
+    let parsed = ParsedSlashCommand::parse(line)?;
+    let ctx = SlashCommandContext {
+        // The picker commands do not echo the current model, so placeholders are
+        // fine — the driver re-reads the live session when it opens the overlay.
+        model_id: String::new(),
+        provider: String::new(),
+    };
+    let action = match SlashCommandTable::dispatch(&parsed, &ctx) {
+        SlashCommandResult::Handled(action) => action,
+        SlashCommandResult::Unknown => return None,
+    };
+    super::selectors::is_picker_selector_action(&action).then_some(action)
+}
+
 /// Whether a submission is a `/resume` command — the case that opens the session
 /// picker overlay.
 ///
@@ -323,10 +349,21 @@ pub fn apply_slash_action(
         theme @ SlashCommandAction::Theme(_) => unsupported(&theme, state, requester),
         model @ SlashCommandAction::ModelByPattern(_) => unsupported(&model, state, requester),
 
+        // The picker-selector family (`/tree`, `/scoped-models`, `/fork`) is
+        // intercepted on the async turn runner *before* this sync dispatch (see
+        // `run_turn` + `run_picker_selector`): each mounts a modal overlay and awaits
+        // the pick, then applies it against `&mut session`. Reaching these arms means
+        // a caller dispatched one outside that path; surface the seam line rather than
+        // silently dropping it — the same contract as `/model` / `/resume` above.
+        tree @ SlashCommandAction::OpenTreeSelector(_) => unsupported(&tree, state, requester),
+        scoped @ SlashCommandAction::OpenScopedModelsSelector => {
+            unsupported(&scoped, state, requester)
+        }
+        fork @ SlashCommandAction::Fork(_) => unsupported(&fork, state, requester),
+
         // --- Follow-up feature seam ---------------------------------------
-        // The remaining selector commands (/login, /tree, scoped-models, …) land
-        // here as their features arrive; each replaces one arm without touching the
-        // dispatch wiring.
+        // The remaining selector commands (/login, …) land here as their features
+        // arrive; each replaces one arm without touching the dispatch wiring.
         other => unsupported(&other, state, requester),
     }
     SlashOutcome::Continue
@@ -1608,6 +1645,45 @@ mod tests {
         assert!(!is_open_resume_picker("/model"));
         assert!(!is_open_resume_picker("resume"));
         assert!(!is_open_resume_picker("/"));
+    }
+
+    // --- picker-selector interception (/tree /scoped-models /fork) --------
+
+    #[test]
+    fn picker_selector_action_routes_the_three_pickers() {
+        use crate::modes::interactive::slash_commands::SlashCommandAction;
+
+        // `/tree` (bare and with a subdir) routes to the tree picker.
+        assert!(matches!(
+            picker_selector_action("/tree"),
+            Some(SlashCommandAction::OpenTreeSelector(None))
+        ));
+        assert!(matches!(
+            picker_selector_action("/tree src"),
+            Some(SlashCommandAction::OpenTreeSelector(Some(_)))
+        ));
+        // `/scoped-models` (and its underscore alias) routes to the multi-select.
+        assert!(matches!(
+            picker_selector_action("/scoped-models"),
+            Some(SlashCommandAction::OpenScopedModelsSelector)
+        ));
+        assert!(matches!(
+            picker_selector_action("/scoped_models"),
+            Some(SlashCommandAction::OpenScopedModelsSelector)
+        ));
+        // `/fork` (bare and with an entry id) routes to the fork picker.
+        assert!(matches!(
+            picker_selector_action("/fork"),
+            Some(SlashCommandAction::Fork(None))
+        ));
+        assert!(matches!(
+            picker_selector_action("/fork e123"),
+            Some(SlashCommandAction::Fork(Some(_)))
+        ));
+        // Unrelated commands never route to the picker family.
+        assert!(picker_selector_action("/help").is_none());
+        assert!(picker_selector_action("/model").is_none());
+        assert!(picker_selector_action("plain text").is_none());
     }
 
     #[test]
