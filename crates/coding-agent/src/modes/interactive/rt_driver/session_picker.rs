@@ -26,7 +26,7 @@ use std::sync::atomic::Ordering;
 
 use hand_tui::rt::events::RtKey;
 use hand_tui::rt::view::HandleOutcome;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
@@ -34,6 +34,7 @@ use crate::core::session_manager::SessionInfo;
 
 use super::keys::NavKeys;
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The most rows of the session list shown at once; the window scrolls to keep the
 /// selection visible.
@@ -161,9 +162,9 @@ impl SessionPicker {
 
     /// The list body rendered as styled lines (the title, the windowed rows or the
     /// empty placeholder, and the key hint), wrapped to `width`.
-    fn body_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(Color::DarkGray);
-        let accent = Style::default().fg(Color::Cyan);
+    fn body_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(palette.dim);
+        let accent = Style::default().fg(palette.accent);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -183,7 +184,7 @@ impl SessionPicker {
         } else {
             let (start, end) = self.visible_window();
             for i in start..end {
-                lines.push(session_row(&self.sessions[i], i == self.selected));
+                lines.push(session_row(&self.sessions[i], i == self.selected, palette));
             }
             // A position footnote when the list is windowed.
             let count = self.sessions.len();
@@ -208,9 +209,9 @@ impl SessionPicker {
 
 /// Render one session row: a cursor mark, the session name, a short id, and the
 /// first-message preview. The highlighted row is accent-bold.
-fn session_row(session: &SessionInfo, selected: bool) -> Line<'static> {
-    let accent = Style::default().fg(Color::Cyan);
-    let muted = Style::default().fg(Color::DarkGray);
+fn session_row(session: &SessionInfo, selected: bool, palette: &ThemePalette) -> Line<'static> {
+    let accent = Style::default().fg(palette.accent);
+    let muted = Style::default().fg(palette.dim);
 
     let name = session
         .name
@@ -242,8 +243,8 @@ fn session_row(session: &SessionInfo, selected: bool) -> Line<'static> {
 }
 
 impl SelectorController for SessionPicker {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.body_lines(width)
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -316,7 +317,7 @@ mod tests {
 
     fn body_text(picker: &SessionPicker) -> String {
         picker
-            .body_lines(80)
+            .body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans

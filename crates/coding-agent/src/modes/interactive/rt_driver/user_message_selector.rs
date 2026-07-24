@@ -26,12 +26,13 @@ use std::sync::atomic::Ordering;
 
 use hand_tui::rt::events::RtKey;
 use hand_tui::rt::view::HandleOutcome;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::keys::NavKeys;
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The most rows shown at once; the window scrolls to keep the selection visible.
 const MAX_VISIBLE: usize = 10;
@@ -179,9 +180,9 @@ impl UserMessageSelector {
 
     /// The picker body rendered as styled lines (title, subtitle, windowed rows, key
     /// hint), wrapped to `width`.
-    fn body_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(Color::DarkGray);
-        let accent = Style::default().fg(Color::Cyan);
+    fn body_lines(&self, _width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(palette.dim);
+        let accent = Style::default().fg(palette.accent);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(Span::styled(
@@ -240,8 +241,8 @@ pub fn fold_single_line(text: &str) -> String {
 }
 
 impl SelectorController for UserMessageSelector {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.body_lines(width)
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -305,7 +306,7 @@ mod tests {
     }
 
     fn body_text(sel: &UserMessageSelector) -> String {
-        sel.body_lines(80)
+        sel.body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans

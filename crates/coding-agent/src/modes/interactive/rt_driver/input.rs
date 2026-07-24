@@ -96,7 +96,9 @@ pub fn spawn_scheduler(
             // draw closure can paint the overlay without holding the (?Send) M1
             // stack across the task boundary — the rt-demo pattern. Measured against
             // the overlay interior width for the current viewport.
-            let overlay_lines = overlay.render_lines(overlay_interior_width(guard.size.cols));
+            let palette = guard.palette();
+            let overlay_lines =
+                overlay.render_lines(overlay_interior_width(guard.size.cols), &palette);
             let snapshot = StateSnapshot {
                 size: guard.size,
                 loader: guard.streaming,
@@ -107,7 +109,7 @@ pub fn spawn_scheduler(
                 // dimmed dialog.
                 overlay_open: overlay_lines.is_some(),
                 overlay_lines,
-                palette: guard.palette(),
+                palette,
             };
             (snapshot, commits, raw)
         };

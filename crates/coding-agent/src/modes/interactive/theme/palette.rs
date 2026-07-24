@@ -50,11 +50,14 @@ pub struct ThemePalette {
     /// Status / warning line foreground.
     pub warning: Color,
 
-    // --- chrome -----------------------------------------------------------
-    /// Header product-name accent.
+    // --- chrome / selectors ----------------------------------------------
+    /// Header product-name accent, and the selector highlight / cursor accent.
     pub accent: Color,
-    /// Dim chrome (version / model, hint keys and actions).
+    /// Dim chrome (version / model, hint keys and actions) and muted selector
+    /// rows / labels.
     pub dim: Color,
+    /// Success accent (selector "current" / "enabled" marks).
+    pub success: Color,
 
     // --- tools ------------------------------------------------------------
     /// In-flight tool-box background tint.
@@ -102,6 +105,7 @@ const DEFAULT_ERROR: Color = Color::Red;
 const DEFAULT_WARNING: Color = Color::Yellow;
 const DEFAULT_ACCENT: Color = Color::Cyan;
 const DEFAULT_DIM: Color = Color::DarkGray;
+const DEFAULT_SUCCESS: Color = Color::Green;
 const DEFAULT_TOOL_PENDING_BG: Color = Color::Rgb(40, 40, 50);
 const DEFAULT_TOOL_SUCCESS_BG: Color = Color::Rgb(40, 50, 40);
 const DEFAULT_TOOL_ERROR_BG: Color = Color::Rgb(60, 40, 40);
@@ -128,6 +132,7 @@ impl Default for ThemePalette {
             warning: DEFAULT_WARNING,
             accent: DEFAULT_ACCENT,
             dim: DEFAULT_DIM,
+            success: DEFAULT_SUCCESS,
             tool_pending_bg: DEFAULT_TOOL_PENDING_BG,
             tool_success_bg: DEFAULT_TOOL_SUCCESS_BG,
             tool_error_bg: DEFAULT_TOOL_ERROR_BG,
@@ -176,6 +181,7 @@ impl ThemePalette {
             warning: fg(ThemeColor::Warning, default.warning),
             accent: fg(ThemeColor::Accent, default.accent),
             dim: fg(ThemeColor::Dim, default.dim),
+            success: fg(ThemeColor::Success, default.success),
             tool_pending_bg: bg(ThemeBg::ToolPendingBg, default.tool_pending_bg),
             tool_success_bg: bg(ThemeBg::ToolSuccessBg, default.tool_success_bg),
             tool_error_bg: bg(ThemeBg::ToolErrorBg, default.tool_error_bg),
@@ -257,6 +263,7 @@ mod tests {
         assert_eq!(p.warning, Color::Yellow);
         assert_eq!(p.accent, Color::Cyan);
         assert_eq!(p.dim, Color::DarkGray);
+        assert_eq!(p.success, Color::Green);
         assert_eq!(p.tool_pending_bg, Color::Rgb(40, 40, 50));
         assert_eq!(p.tool_success_bg, Color::Rgb(40, 50, 40));
         assert_eq!(p.tool_error_bg, Color::Rgb(60, 40, 40));

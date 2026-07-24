@@ -199,7 +199,12 @@ fn spawn_selector_scheduler(
             let area = terminal.get_frame().area();
             overlay_interior_width(area.width)
         };
-        let overlay_lines = overlays.render_lines(width);
+        // The standalone CLI selector has no interactive DriverState, so it
+        // renders on the default (historical) palette.
+        let overlay_lines = overlays.render_lines(
+            width,
+            &crate::modes::interactive::theme::ThemePalette::default(),
+        );
         let mut stdout = std::io::stdout();
         draw_synchronized(&mut stdout, |_w| {
             terminal.draw(|frame| {

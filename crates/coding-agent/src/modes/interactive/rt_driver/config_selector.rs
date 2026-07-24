@@ -28,7 +28,7 @@ use std::sync::atomic::Ordering;
 
 use hand_tui::rt::events::RtKey;
 use hand_tui::rt::view::HandleOutcome;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
@@ -38,6 +38,7 @@ use crate::core::extensions::source_registry::{
 
 use super::keys::NavKeys;
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The most rows shown at once; the window scrolls to keep the selection visible.
 const MAX_VISIBLE: usize = 15;
@@ -214,10 +215,10 @@ impl ConfigSelector {
 
     /// The dialog body as styled lines: the title + hint, then the windowed
     /// group/subgroup/item rows (or the empty placeholder).
-    fn body_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let accent = Style::default().fg(Color::Cyan);
-        let muted = Style::default().fg(Color::DarkGray);
-        let success = Style::default().fg(Color::Green);
+    fn body_lines(&self, _width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let accent = Style::default().fg(palette.accent);
+        let muted = Style::default().fg(palette.dim);
+        let success = Style::default().fg(palette.success);
         let dim = Style::default().add_modifier(Modifier::DIM);
         let bold = Style::default().add_modifier(Modifier::BOLD);
 
@@ -247,7 +248,7 @@ impl ConfigSelector {
 
         let (start, end) = self.visible_window();
         for absolute in start..end {
-            lines.push(self.render_row(absolute, &self.flat[absolute]));
+            lines.push(self.render_row(absolute, &self.flat[absolute], palette));
         }
 
         // Scroll counter when the list overflows the window.
@@ -287,10 +288,10 @@ impl ConfigSelector {
     }
 
     /// Render one flattened row (group header, subgroup header, or item).
-    fn render_row(&self, absolute: usize, row: &FlatRow) -> Line<'static> {
-        let accent = Style::default().fg(Color::Cyan);
-        let muted = Style::default().fg(Color::DarkGray);
-        let success = Style::default().fg(Color::Green);
+    fn render_row(&self, absolute: usize, row: &FlatRow, palette: &ThemePalette) -> Line<'static> {
+        let accent = Style::default().fg(palette.accent);
+        let muted = Style::default().fg(palette.dim);
+        let success = Style::default().fg(palette.success);
         let dim = Style::default().add_modifier(Modifier::DIM);
 
         match row {
@@ -325,8 +326,8 @@ impl ConfigSelector {
 }
 
 impl SelectorController for ConfigSelector {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.body_lines(width)
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -552,7 +553,7 @@ mod tests {
     }
 
     fn body_text(sel: &ConfigSelector) -> String {
-        sel.body_lines(80)
+        sel.body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans
@@ -628,7 +629,7 @@ mod tests {
         ]);
         let (sel, _rx, _done) = selector(&resolved);
         let lines: Vec<String> = sel
-            .body_lines(80)
+            .body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();

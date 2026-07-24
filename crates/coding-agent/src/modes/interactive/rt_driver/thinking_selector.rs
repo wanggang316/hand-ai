@@ -24,11 +24,12 @@ use std::sync::atomic::Ordering;
 use hand_tui::rt::events::RtKey;
 use hand_tui::rt::view::HandleOutcome;
 use model::ThinkingLevel;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The ordered thinking ladder: `off` (represented as `None`) plus every
 /// [`ThinkingLevel`] variant, top-to-bottom from least to most reasoning.
@@ -184,10 +185,10 @@ impl ThinkingSelector {
 
     /// The ladder body rendered as styled lines (a header, then one row per level
     /// with its budget description and a checkmark on the current level).
-    fn body_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(Color::DarkGray);
-        let accent = Style::default().fg(Color::Cyan);
-        let success = Style::default().fg(Color::Green);
+    fn body_lines(&self, _width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(palette.dim);
+        let accent = Style::default().fg(palette.accent);
+        let success = Style::default().fg(palette.success);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::styled("Thinking level".to_string(), muted));
@@ -222,8 +223,8 @@ impl ThinkingSelector {
 }
 
 impl SelectorController for ThinkingSelector {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.body_lines(width)
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -279,7 +280,7 @@ mod tests {
     }
 
     fn body_text(sel: &ThinkingSelector) -> String {
-        sel.body_lines(80)
+        sel.body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans

@@ -22,11 +22,12 @@ use std::sync::atomic::Ordering;
 
 use hand_tui::rt::events::RtKey;
 use hand_tui::rt::view::HandleOutcome;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The persistable theme names, in menu order. These are exactly the values the
 /// settings layer accepts for the `theme` key, so a pick always round-trips.
@@ -134,10 +135,10 @@ impl ThemeSelector {
         let _ = self.tx.send(ThemeOutcome::Cancelled);
     }
 
-    fn body_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(Color::DarkGray);
-        let accent = Style::default().fg(Color::Cyan);
-        let success = Style::default().fg(Color::Green);
+    fn body_lines(&self, _width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(palette.dim);
+        let accent = Style::default().fg(palette.accent);
+        let success = Style::default().fg(palette.success);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::styled("Theme".to_string(), muted));
@@ -174,8 +175,8 @@ impl ThemeSelector {
 }
 
 impl SelectorController for ThemeSelector {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.body_lines(width)
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -209,6 +210,7 @@ mod tests {
     use super::*;
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::style::Color;
 
     fn key_id(id: &str) -> RtKey {
         RtKey {
@@ -230,7 +232,7 @@ mod tests {
     }
 
     fn body_text(sel: &ThemeSelector) -> String {
-        sel.body_lines(80)
+        sel.body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans
@@ -258,6 +260,35 @@ mod tests {
         assert!(
             body.contains("restart to apply"),
             "restart hint missing: {body}"
+        );
+    }
+
+    #[test]
+    fn highlight_accent_takes_the_palette() {
+        // The selected row's accent colours from the palette, so a custom theme
+        // recolours the selector highlight (VAL-COMPAT-004); the default palette
+        // keeps the historical cyan.
+        let (sel, _rx, _done) = selector("dark");
+        let neon = ThemePalette {
+            accent: Color::Rgb(0xff, 0x00, 0xff),
+            ..ThemePalette::default()
+        };
+        let themed = sel.body_lines(80, &neon);
+        assert!(
+            themed
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .any(|s| s.style.fg == Some(Color::Rgb(0xff, 0x00, 0xff))),
+            "custom accent recolours the highlighted row"
+        );
+        // The default palette keeps the historical cyan accent.
+        let default = sel.body_lines(80, &ThemePalette::default());
+        assert!(
+            default
+                .iter()
+                .flat_map(|l| l.spans.iter())
+                .any(|s| s.style.fg == Some(Color::Cyan)),
+            "default accent is cyan"
         );
     }
 

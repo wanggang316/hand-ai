@@ -54,6 +54,8 @@ use hand_tui::rt::scheduler::FrameRequester;
 use hand_tui::rt::view::HandleOutcome;
 use ratatui::text::Line;
 
+use crate::modes::interactive::theme::ThemePalette;
+
 /// A cheap, cloneable "I am finished" flag a selector raises when it has emitted
 /// its outcome and wants to be unmounted.
 ///
@@ -86,9 +88,11 @@ pub fn new_done_signal() -> DoneSignal {
 /// state (the list, the query string, the outcome channel, the done flag), so this
 /// bound is free and is what lets the selector cross into the spawned tasks.
 pub trait SelectorController: Send {
-    /// The selector's interior as styled lines, wrapped to `width`. Called every
-    /// frame by the scheduler; must not retain the buffer.
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>>;
+    /// The selector's interior as styled lines, wrapped to `width`, coloured from
+    /// the active theme `palette`. Called every frame by the scheduler; must not
+    /// retain the buffer. The default palette keeps the historical accent/muted
+    /// look; a custom theme recolours the highlight and accents (VAL-COMPAT-004).
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>>;
 
     /// Handle a key while mounted, reporting whether it was consumed. A modal
     /// selector consumes every key (so none reaches the editor) and raises its
@@ -144,10 +148,10 @@ impl SharedOverlay {
         self.lock().is_some()
     }
 
-    /// The mounted selector's render lines for `width`, or `None` when nothing is
-    /// open. Called by the scheduler each frame.
+    /// The mounted selector's render lines for `width`, coloured from `palette`,
+    /// or `None` when nothing is open. Called by the scheduler each frame.
     #[must_use]
-    pub fn render_lines(&self, width: u16) -> Option<Vec<Line<'static>>> {
+    pub fn render_lines(&self, width: u16, palette: &ThemePalette) -> Option<Vec<Line<'static>>> {
         let guard = self.lock();
         let mounted = guard.as_ref()?;
         let controller = mounted.controller.clone();
@@ -156,7 +160,7 @@ impl SharedOverlay {
             controller
                 .lock()
                 .expect("selector poisoned")
-                .render_lines(width),
+                .render_lines(width, palette),
         )
     }
 
@@ -289,7 +293,7 @@ mod tests {
     }
 
     impl SelectorController for StubSelector {
-        fn render_lines(&self, _width: u16) -> Vec<Line<'static>> {
+        fn render_lines(&self, _width: u16, _palette: &ThemePalette) -> Vec<Line<'static>> {
             vec![Line::from("stub")]
         }
 
@@ -433,9 +437,15 @@ mod tests {
     async fn render_lines_reflects_the_mounted_selector() {
         let overlay = new_shared_overlay();
         let requester = test_requester();
-        assert!(overlay.render_lines(40).is_none(), "nothing mounted");
+        let palette = ThemePalette::default();
+        assert!(
+            overlay.render_lines(40, &palette).is_none(),
+            "nothing mounted"
+        );
         mount_stub(&overlay, &requester);
-        let lines = overlay.render_lines(40).expect("mounted selector renders");
+        let lines = overlay
+            .render_lines(40, &palette)
+            .expect("mounted selector renders");
         assert_eq!(lines.len(), 1);
     }
 }

@@ -24,11 +24,12 @@ use std::sync::atomic::Ordering;
 
 use hand_tui::rt::events::RtKey;
 use hand_tui::rt::view::HandleOutcome;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The outcome the key dialog emits on its channel — exactly one per open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,9 +132,9 @@ impl LoginKeyDialog {
     /// The dialog body as styled lines: the prompt, the masked field, and the
     /// `(esc to cancel)` hint. The field is masked so the secret never appears in a
     /// captured frame (VAL-OVERLAY-016).
-    fn body_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(Color::DarkGray);
-        let accent = Style::default().fg(Color::Cyan);
+    fn body_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(palette.dim);
+        let accent = Style::default().fg(palette.accent);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(Span::styled(
@@ -165,8 +166,8 @@ impl LoginKeyDialog {
 }
 
 impl SelectorController for LoginKeyDialog {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.body_lines(width)
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -235,7 +236,7 @@ mod tests {
     }
 
     fn body_text(d: &LoginKeyDialog) -> String {
-        d.body_lines(80)
+        d.body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans

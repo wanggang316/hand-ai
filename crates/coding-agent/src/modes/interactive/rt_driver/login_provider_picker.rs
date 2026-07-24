@@ -29,11 +29,12 @@ use std::sync::atomic::Ordering;
 use hand_tui::fuzzy::{FuzzyMatch, fuzzy_filter};
 use hand_tui::rt::events::RtKey;
 use hand_tui::rt::view::HandleOutcome;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The most provider rows shown at once; the window scrolls to keep the selection
 /// visible.
@@ -223,9 +224,9 @@ impl LoginProviderPicker {
 
     /// The picker body rendered as styled lines (title, query, rows or the empty
     /// hint, and the key hint), wrapped to `width`.
-    fn body_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(Color::DarkGray);
-        let accent = Style::default().fg(Color::Cyan);
+    fn body_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(palette.dim);
+        let accent = Style::default().fg(palette.accent);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -247,6 +248,7 @@ impl LoginProviderPicker {
                 lines.push(provider_row(
                     &self.providers[self.filtered[i]],
                     i == self.selected,
+                    palette,
                 ));
             }
             let count = self.filtered.len();
@@ -271,11 +273,11 @@ impl LoginProviderPicker {
 
 /// Render one provider row: a cursor mark, the name, its credential badge, and the
 /// auth-method hint. The highlighted row is accent-bold.
-fn provider_row(row: &LoginProviderRow, selected: bool) -> Line<'static> {
-    let accent = Style::default().fg(Color::Cyan);
-    let muted = Style::default().fg(Color::DarkGray);
-    let success = Style::default().fg(Color::Green);
-    let warning = Style::default().fg(Color::Yellow);
+fn provider_row(row: &LoginProviderRow, selected: bool, palette: &ThemePalette) -> Line<'static> {
+    let accent = Style::default().fg(palette.accent);
+    let muted = Style::default().fg(palette.dim);
+    let success = Style::default().fg(palette.success);
+    let warning = Style::default().fg(palette.warning);
 
     let mut spans: Vec<Span<'static>> = Vec::new();
     if selected {
@@ -305,8 +307,8 @@ fn provider_row(row: &LoginProviderRow, selected: bool) -> Line<'static> {
 }
 
 impl SelectorController for LoginProviderPicker {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.body_lines(width)
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -393,7 +395,7 @@ mod tests {
     }
 
     fn body_text(p: &LoginProviderPicker) -> String {
-        p.body_lines(80)
+        p.body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans
@@ -450,7 +452,7 @@ mod tests {
         assert!(body.contains("[api key]"), "api-key method hint: {body}");
         // A provider with no credential shows no badge word.
         let google_line = p
-            .body_lines(80)
+            .body_lines(80, &ThemePalette::default())
             .into_iter()
             .map(|l| {
                 l.spans

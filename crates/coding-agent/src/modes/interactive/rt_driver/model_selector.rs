@@ -36,6 +36,7 @@ use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The most rows of the model list shown at once; the window scrolls to keep the
 /// selection visible.
@@ -309,10 +310,10 @@ impl ModelSelector {
 
     /// The list body rendered as styled lines (the header, the query line, the
     /// windowed rows, and the footer), wrapped to `width`.
-    fn body_lines(&self, width: u16) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(Color::DarkGray);
-        let accent = Style::default().fg(Color::Cyan);
-        let success = Style::default().fg(Color::Green);
+    fn body_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(palette.dim);
+        let accent = Style::default().fg(palette.accent);
+        let success = Style::default().fg(palette.success);
         let warning = Style::default().fg(Color::Yellow);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -404,11 +405,11 @@ impl ModelSelector {
 }
 
 impl SelectorController for ModelSelector {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
         // The scheduler paints these inside the anchored, bordered, dimmed overlay
         // rect; it clips rows/cols wider than the interior so a small terminal never
         // spills past the border.
-        self.body_lines(width)
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -527,7 +528,7 @@ mod tests {
     }
 
     fn body_text(sel: &ModelSelector) -> String {
-        sel.body_lines(80)
+        sel.body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans

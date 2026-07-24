@@ -37,6 +37,7 @@ use tokio::sync::mpsc;
 
 use super::keys::NavKeys;
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The most rows of the settings body rendered into the scratch buffer at once —
 /// generous so the whole (short) settings list plus its description/hint chrome
@@ -141,6 +142,10 @@ impl SettingsSelector {
     /// Render the embedded list into a scratch buffer and lift each painted row
     /// back into a styled [`Line`], preserving the list's per-cell styling (the
     /// bold selected row, the dim description/hint, the edit caret block).
+    ///
+    /// This selector paints through the M2 [`SelectList`] component, which owns
+    /// its own theming; the driver-side palette is therefore not applied here
+    /// (the component is a read-only reuse).
     fn body_lines(&self, width: u16) -> Vec<Line<'static>> {
         let width = width.max(1);
         let area = Rect::new(0, 0, width, RENDER_ROWS);
@@ -151,7 +156,7 @@ impl SettingsSelector {
 }
 
 impl SelectorController for SettingsSelector {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
+    fn render_lines(&self, width: u16, _palette: &ThemePalette) -> Vec<Line<'static>> {
         self.body_lines(width)
     }
 

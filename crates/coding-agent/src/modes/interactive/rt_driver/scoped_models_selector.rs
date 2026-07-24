@@ -40,6 +40,7 @@ use ratatui::text::{Line, Span};
 use tokio::sync::mpsc;
 
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The most rows shown at once; the window scrolls to keep the selection visible.
 const MAX_VISIBLE: usize = 8;
@@ -462,10 +463,10 @@ impl ScopedModelsSelector {
         (start, (start + MAX_VISIBLE).min(count))
     }
 
-    fn body_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(Color::DarkGray);
-        let accent = Style::default().fg(Color::Cyan);
-        let success = Style::default().fg(Color::Green);
+    fn body_lines(&self, _width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(palette.dim);
+        let accent = Style::default().fg(palette.accent);
+        let success = Style::default().fg(palette.success);
         let dim = Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM);
@@ -551,8 +552,8 @@ impl ScopedModelsSelector {
 }
 
 impl SelectorController for ScopedModelsSelector {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.body_lines(width)
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -676,7 +677,7 @@ mod tests {
     }
 
     fn body_text(sel: &ScopedModelsSelector) -> String {
-        sel.body_lines(80)
+        sel.body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans

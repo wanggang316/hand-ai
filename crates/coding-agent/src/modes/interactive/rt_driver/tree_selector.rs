@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 
 use super::keys::NavKeys;
 use super::overlay::{DoneSignal, SelectorController};
+use crate::modes::interactive::theme::ThemePalette;
 
 /// The most rows shown at once; the window scrolls to keep the selection visible.
 const MAX_VISIBLE: usize = 16;
@@ -259,9 +260,9 @@ impl TreeSelector {
 
     /// The tree body rendered as styled lines (title, windowed rows or the empty
     /// placeholder, and the key hint), wrapped to `width`.
-    fn body_lines(&self, _width: u16) -> Vec<Line<'static>> {
-        let muted = Style::default().fg(Color::DarkGray);
-        let accent = Style::default().fg(Color::Cyan);
+    fn body_lines(&self, _width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(palette.dim);
+        let accent = Style::default().fg(palette.accent);
         let dir_style = Style::default().fg(Color::Blue);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
@@ -321,8 +322,8 @@ impl TreeSelector {
 }
 
 impl SelectorController for TreeSelector {
-    fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
-        self.body_lines(width)
+    fn render_lines(&self, width: u16, palette: &ThemePalette) -> Vec<Line<'static>> {
+        self.body_lines(width, palette)
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
@@ -378,7 +379,7 @@ mod tests {
     }
 
     fn body_text(sel: &TreeSelector) -> String {
-        sel.body_lines(80)
+        sel.body_lines(80, &ThemePalette::default())
             .iter()
             .map(|l| {
                 l.spans
