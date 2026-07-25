@@ -19,7 +19,7 @@ hand-tui = { path = "../tui" }
 # types (Editor, Line, Rect, RtKey) are ratatui / crossterm types surfaced by
 # hand-tui, so the driver names them directly. Versions pinned to match hand-tui.
 ratatui = { version = "0.30.2", features = ["scrolling-regions"] }
-crossterm = { version = "0.29", features = ["event-stream"] }
+crossterm = "0.29"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # preserve_order keeps JSON object keys in insertion order, so session

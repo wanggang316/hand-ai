@@ -1014,6 +1014,24 @@ impl Editor {
         }
     }
 
+    /// Whether accepting the highlighted candidate would leave the buffer
+    /// unchanged: the trigger token under the caret is already byte-identical to
+    /// the candidate's insertion text (e.g. a fully typed `/quit` with the
+    /// `/quit` row highlighted). The submit-key path uses this to fall through
+    /// to a normal submit instead of consuming the keypress on a pointless
+    /// splice. `false` when there is no candidate or the caret left the
+    /// completable context — those paths resolve through
+    /// [`accept_autocomplete`](Editor::accept_autocomplete) exactly as before.
+    fn accept_is_noop(&self) -> bool {
+        let Some(item) = self.autocomplete.selected() else {
+            return false;
+        };
+        let Some(ctx) = self.context_at_cursor() else {
+            return false;
+        };
+        &self.lines[self.cursor_line][ctx.start_col..self.cursor_col] == item.insert_text.as_str()
+    }
+
     /// Accept the selected candidate: splice its insertion text over the trigger
     /// token under the caret as one undo unit, then close the popup.
     ///
@@ -1825,18 +1843,30 @@ impl RtComponent for Editor {
         // before the buffer sees them: Up/Down move the indicator (never the
         // buffer caret, never recall history); Tab and the submit key (Enter, by
         // default) both accept the highlighted candidate and close the popup —
-        // standard completion UX, so an open popup never lets Enter submit the raw
-        // trigger token; and Esc closes the popup leaving the buffer untouched.
-        // Every other key falls through to the buffer, then the popup refreshes
-        // off the new context. With the popup closed the submit key behaves
-        // normally (submit / newline), handled by `handle_key_inner`.
+        // standard completion UX, so an open popup never lets Enter submit a raw,
+        // incomplete trigger token; and Esc closes the popup leaving the buffer
+        // untouched. Every other key falls through to the buffer, then the popup
+        // refreshes off the new context. With the popup closed the submit key
+        // behaves normally (submit / newline), handled by `handle_key_inner`.
         if let Some(id) = key.key_id.as_deref()
             && self.autocomplete.is_visible()
         {
             // The submit key accepts the candidate rather than submitting while the
             // popup is open. Checked first so a `submit: tab` binding still accepts.
-            if id == self.submit_key && self.accept_autocomplete() {
-                return HandleOutcome::Consumed;
+            // Exception: when the accept would be a no-op — the token under the
+            // caret is already byte-identical to the candidate's insertion text
+            // (a fully typed `/quit` with the `/quit` row highlighted) — the popup
+            // just closes and the key falls through to the normal submit path, so
+            // a complete command submits in ONE keypress instead of needing a
+            // second Enter. A meaningful accept (any buffer change: `/mo` →
+            // `/model`, or an argument-taking command gaining its trailing space)
+            // still consumes the key so the user reviews before submitting.
+            if id == self.submit_key {
+                if self.accept_is_noop() {
+                    self.autocomplete.close();
+                } else if self.accept_autocomplete() {
+                    return HandleOutcome::Consumed;
+                }
             }
             match id {
                 "up" => {
@@ -2473,6 +2503,52 @@ mod tests {
         assert_eq!(ed.text(), "@README.md", "the candidate is spliced in");
         assert!(!ed.autocomplete_visible(), "accept closes the popup");
         assert!(ed.take_submit().is_none(), "Enter did not submit");
+    }
+
+    fn slash_provider(names: &[&str]) -> Arc<dyn AutocompleteProvider> {
+        use crate::rt::components::{SlashCommand, SlashProvider};
+        Arc::new(SlashProvider::new(
+            names.iter().map(|n| SlashCommand::new(*n)).collect(),
+        ))
+    }
+
+    #[test]
+    fn enter_submits_a_fully_typed_command_in_one_keypress() {
+        // A COMPLETE command under the caret — the buffer is already
+        // byte-identical to the highlighted candidate's splice — must not eat the
+        // keypress on a no-op accept: the popup closes and the SAME Enter
+        // submits, so `/quit` goes in one press instead of two.
+        let mut ed = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(slash_provider(&["quit", "help"]));
+        type_str(&mut ed, "/quit");
+        assert!(ed.autocomplete_visible(), "the /-context opens the popup");
+
+        ed.handle_key(&key("enter", KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            ed.take_submit().as_deref(),
+            Some("/quit"),
+            "one Enter submits the complete command"
+        );
+        assert!(!ed.autocomplete_visible(), "popup closed by the submit");
+        assert_eq!(ed.text(), "", "buffer cleared after submit");
+    }
+
+    #[test]
+    fn enter_still_accepts_a_partial_command_without_submitting() {
+        // A PARTIAL token (`/mo` under a `/model` candidate) keeps the current
+        // behaviour: Enter accepts the candidate — a meaningful buffer change —
+        // and no submit is latched; the user reviews before sending.
+        let mut ed = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(slash_provider(&["model", "quit"]));
+        type_str(&mut ed, "/mo");
+        assert!(ed.autocomplete_visible(), "the /-context opens the popup");
+
+        ed.handle_key(&key("enter", KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(ed.text(), "/model", "the candidate is spliced in");
+        assert!(ed.take_submit().is_none(), "accept did not submit");
+        assert!(!ed.autocomplete_visible(), "accept closes the popup");
     }
 
     #[test]
