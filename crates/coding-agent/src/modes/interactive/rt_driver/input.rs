@@ -12,8 +12,9 @@
 //!    [`bottom_area_geometry`]`.offset_y(frame.area().y)` (M1 FIX-2: the viewport
 //!    origin drifts down as scrollback fills), then renders the bordered box
 //!    around the editor only (borderless — the box is the driver's), the
-//!    optional working-loader row (M2 [`Loader`]) inside it, and the two-line
-//!    footer view-model in an unbordered band *below* the box;
+//!    optional working-loader row in an unbordered row directly *above* the box
+//!    (M2 [`Loader`]), and the two-line footer view-model in an unbordered band
+//!    *below* it;
 //! 4. drives the hardware cursor from the editor's reported caret.
 //!
 //! This mirrors the rt demo's scheduler/draw split exactly; the only differences
@@ -28,7 +29,9 @@ use hand_tui::rt::components::{DEFAULT_SPINNER_FRAMES, Editor, Loader};
 use hand_tui::rt::history::{HistorySink, wrap_lines};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{EraseOnDrop, SessionTerminal, clear_viewport_region};
-use hand_tui::rt::view::{MAX_VIEWPORT_ROWS, RtComponent, bottom_area_geometry};
+use hand_tui::rt::view::{
+    BORDER_ROWS, LOADER_ROWS, MAX_VIEWPORT_ROWS, RtComponent, bottom_area_geometry,
+};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Text};
@@ -45,8 +48,7 @@ const LOADER_MESSAGE: &str = "Working…";
 /// Rows the footer view-model occupies in the unbordered band *below* the
 /// bordered box (the cwd line + the stats line). Reserved from the fixed
 /// viewport budget before the box is laid out, so the footer sits glued under
-/// the box's bottom border and the box wraps only the editor (and the
-/// streaming loader row).
+/// the box's bottom border and the box wraps only the editor.
 const FOOTER_ROWS: u16 = 2;
 
 /// The smallest useful bordered box: the top + bottom border rows plus one
@@ -77,13 +79,14 @@ pub fn spawn_scheduler(
     // anything autoresizes and spills.
     let mut last_size: Option<ratatui::layout::Size> = None;
 
-    // The working-loader shown in the bordered slot while a turn streams. Owned by
-    // the draw closure (not shared): it is toggled active/idle from the streaming
-    // flag and ticked once per frame while streaming, so the spinner animates and
-    // the static "Working…" message is present only mid-turn. When the turn ends
-    // the geometry drops the loader row entirely and the fixed-viewport blank
-    // repaint wipes it — no ghost "Working…" or border fragment left in the
-    // active area or in scrollback (M1 shrink-erase invariant).
+    // The working-loader shown in the unbordered row directly above the box while
+    // a turn streams. Owned by the draw closure (not shared): it is toggled
+    // active/idle from the streaming flag and ticked once per frame while
+    // streaming, so the spinner animates and the static "Working…" message is
+    // present only mid-turn. When the turn ends the draw path drops the loader
+    // row entirely and the fixed-viewport blank repaint wipes it — no ghost
+    // "Working…" or border fragment left in the active area or in scrollback
+    // (M1 shrink-erase invariant).
     let mut loader = Loader::new(LOADER_MESSAGE).frames(
         DEFAULT_SPINNER_FRAMES
             .iter()
@@ -222,7 +225,8 @@ struct StateSnapshot {
     /// The tracked terminal geometry this frame lays out against.
     size: hand_tui::rt::view::TerminalSize,
     /// Whether the loader row shows (streaming turn in flight). Drives both the
-    /// geometry (whether a loader row is reserved) and the loader's active state.
+    /// layout (whether the row above the box is reserved) and the loader's
+    /// active state.
     loader: bool,
     /// An override for the loader message this frame, or `None` for the default
     /// `Working…`. Set by a long-running operation (`/compact`) so the loader
@@ -247,9 +251,10 @@ struct StateSnapshot {
     palette: ThemePalette,
 }
 
-/// Paint one frame: the bordered bottom box (wrapping only the editor and the
-/// optional working-loader row) and the two-line footer in the unbordered band
-/// below it — laid out inside the fixed inline viewport.
+/// Paint one frame: the bordered bottom box (wrapping only the editor), the
+/// working-loader row in the unbordered row directly above it while streaming,
+/// and the two-line footer in the unbordered band below it — laid out inside
+/// the fixed inline viewport.
 fn draw(
     frame: &mut ratatui::Frame,
     state: &StateSnapshot,
@@ -261,8 +266,9 @@ fn draw(
 
     // The editor's desired interior rows drive the auto-grow. Measure it against
     // the interior width the box will give it (2 border columns), clamped to the
-    // 1..=8 input-row band by the geometry helper.
-    let editor_rows = {
+    // 1..=8 input-row band by the geometry helper. The popup's wanted rows are
+    // read under the same lock — the loader-row arbitration below needs them.
+    let (editor_rows, popup_wanted) = {
         let ed = lock_editor(editor);
         // desired_height on a borderless editor returns interior rows only; probe
         // against a representative interior rect (border insets applied below).
@@ -272,7 +278,7 @@ fn draw(
             area.width.saturating_sub(2).max(1),
             area.height.max(1),
         );
-        ed.desired_height(probe).max(1)
+        (ed.desired_height(probe).max(1), ed.popup_row_count())
     };
 
     // The footer renders BELOW the box, so its rows come out of the fixed
@@ -283,25 +289,52 @@ fn draw(
     // one editor row, so the caret always keeps a home.
     let viewport_budget = MAX_VIEWPORT_ROWS.min(state.size.rows.max(1));
     let footer_rows = FOOTER_ROWS.min(viewport_budget.saturating_sub(MIN_BOX_ROWS));
+    let box_budget = viewport_budget.saturating_sub(footer_rows);
+
+    // While streaming, the loader occupies one unbordered row directly ABOVE the
+    // box's top border (the box wraps only the editor). Reserving that row here
+    // caps the editor's growth one row earlier, so at max growth the box top
+    // stops one row short of the viewport origin and the loader always has a
+    // home. Idle frames reserve nothing — the layout is identical to the
+    // loader-free one. The `.max(1)` keeps the caret's single editor row on a
+    // tiny pane; when even the reserved row then has no room, the loader yields
+    // below rather than squeezing the editor.
+    let loader_reserve = if state.loader { LOADER_ROWS } else { 0 };
+    let editor_rows = editor_rows.min(
+        box_budget
+            .saturating_sub(BORDER_ROWS)
+            .saturating_sub(loader_reserve)
+            .max(1),
+    );
 
     // Lay the fixed-max bottom area out inside the viewport, then translate every
     // rect down by `area.y` so the bottom UI paints at the viewport's real rows —
     // not absolute row 0, which drifts off-screen once `insert_before` moves the
     // viewport down (the "box vanishes after a big block" bug). This is the M1
-    // FIX-2 offset_y invariant.
-    let geometry = bottom_area_geometry(
-        editor_rows,
-        state.loader,
-        area.width,
-        viewport_budget.saturating_sub(footer_rows),
-    )
-    .offset_y(area.y);
+    // FIX-2 offset_y invariant. `loader_visible` is hard-false: the geometry's
+    // interior loader slot is retired — the loader row lives above the box now.
+    let geometry =
+        bottom_area_geometry(editor_rows, false, area.width, box_budget).offset_y(area.y);
 
-    // The live streaming preview paints in the blank band ABOVE the active box
-    // (between the viewport origin and the box's top), so the in-flight assistant
-    // partial grows in place without touching scrollback. When the preview is
-    // taller than the band, its tail is shown so the newest tokens stay visible.
-    draw_stream_preview(frame, &state.preview, area, geometry.active);
+    // Arbitrate the blank band above the box (viewport origin → box top): while
+    // streaming the loader claims the band's bottom row, glued to the top border
+    // — unless the popup needs the space. The popup wins and the loader yields
+    // for the frame (the same degradation spirit as the footer's collapse), so
+    // the two never overlap and the order stays popup < loader < box.
+    let band = geometry.active.y.saturating_sub(area.y);
+    let popup_leaves_room = popup_wanted == 0 || band >= popup_wanted.saturating_add(LOADER_ROWS);
+    let loader_rows = if state.loader && band >= LOADER_ROWS && popup_leaves_room {
+        LOADER_ROWS
+    } else {
+        0
+    };
+
+    // The live streaming preview paints in the blank band ABOVE the loader row
+    // and the active box (between the viewport origin and whichever is higher),
+    // so the in-flight assistant partial grows in place without touching
+    // scrollback. When the preview is taller than the band, its tail is shown so
+    // the newest tokens stay visible.
+    draw_stream_preview(frame, &state.preview, area, geometry.active, loader_rows);
 
     // The bordered box occupies only the active area; rows above it (freed by a
     // collapse) stay blank and repaint clear each frame. The border colours from
@@ -309,16 +342,24 @@ fn draw(
     let block = Block::bordered().border_style(Style::default().fg(state.palette.border));
     frame.render_widget(block, geometry.active);
 
-    // The working-loader row, when streaming, sits just below the top border,
-    // inside the box. The M2 Loader paints nothing when inactive, and the
-    // geometry reserves this row only while streaming — so the dismissal at
-    // AgentEnd leaves no "Working…" or spinner residue.
-    if let Some(loader_rect) = geometry.loader {
+    // The working-loader row, while streaming, sits directly ABOVE the box's top
+    // border, unbordered — inset to the box's interior columns like the footer,
+    // so the spinner + message column-align with the editor text. The M2 Loader
+    // paints nothing when inactive, and the row is claimed only while streaming —
+    // so the dismissal at AgentEnd leaves no "Working…" or spinner residue (the
+    // fixed-viewport blank repaint wipes the freed row).
+    if loader_rows > 0 {
+        let loader_rect = Rect::new(
+            area.x,
+            geometry.active.y.saturating_sub(loader_rows),
+            area.width,
+            loader_rows,
+        );
         loader.render(inset(loader_rect), frame.buffer_mut());
     }
 
-    // The box interior below the loader is the editor's alone — the footer no
-    // longer shares it.
+    // The box interior is the editor's alone — neither the loader nor the footer
+    // shares it.
     let editor_rect = inset(geometry.input);
 
     // Render the editor and drive the hardware cursor from its reported caret.
@@ -329,14 +370,15 @@ fn draw(
     // box, but the driver's inline geometry gives the editor a rect sized to
     // exactly the box height — so that band is zero rows and the popup never
     // paints. The driver owns the surrounding box, so it paints the popup itself,
-    // in a reserved band *above* the box (below the box sit the footer band and
-    // the viewport's bottom edge; above it is the blank band the box is anchored
-    // over). This keeps the popup clear of the footer (below the box) and of
-    // scrollback (above the viewport).
+    // in a reserved band *above* the box and the loader row (below the box sit
+    // the footer band and the viewport's bottom edge; above it is the blank band
+    // the box is anchored over). This keeps the popup clear of the loader
+    // (directly above the box), the footer (below the box), and scrollback
+    // (above the viewport).
     {
         let ed = lock_editor(editor);
         ed.render(editor_rect, frame.buffer_mut());
-        draw_autocomplete_popup(frame.buffer_mut(), &ed, area, geometry.active);
+        draw_autocomplete_popup(frame.buffer_mut(), &ed, area, geometry.active, loader_rows);
         // Disambiguate: the `RtComponent::cursor` (viewport-local `Option<Position>`)
         // over the inherent `Editor::cursor` (the `(line, col)` accessor). The
         // component caret is already anchored at `editor_rect` (its render area).
@@ -447,20 +489,26 @@ pub(crate) fn draw_overlay(
 /// Paint the streaming preview into the blank band above the active box.
 ///
 /// The band runs from the viewport origin (`area.y`) down to the top of the
-/// active box. The preview is wrapped to the width and, when it is taller than
-/// the band, its **tail** is shown so the newest tokens are always visible (the
-/// preview grows upward off the top of the band, matching how a streamed reply
-/// reads). An empty band or empty preview paints nothing.
+/// active box, minus the `reserved_below` rows claimed at the band's bottom by
+/// the loader row — the preview never overwrites the spinner glued to the box.
+/// The preview is wrapped to the width and, when it is taller than the band,
+/// its **tail** is shown so the newest tokens are always visible (the preview
+/// grows upward off the top of the band, matching how a streamed reply reads).
+/// An empty band or empty preview paints nothing.
 fn draw_stream_preview(
     frame: &mut ratatui::Frame,
     preview: &[Line<'static>],
     area: Rect,
     active: Rect,
+    reserved_below: u16,
 ) {
     if preview.is_empty() {
         return;
     }
-    let band_height = active.y.saturating_sub(area.y);
+    let band_height = active
+        .y
+        .saturating_sub(area.y)
+        .saturating_sub(reserved_below);
     if band_height == 0 || area.width == 0 {
         return;
     }
@@ -476,35 +524,39 @@ fn draw_stream_preview(
 }
 
 /// Paint the editor's `@`/`/` suggestion popup into a band immediately above the
-/// active box.
+/// active box (and above the loader row, when one is glued to the box top).
 ///
 /// The editor's own `render` paints the popup only in the band *below* its box,
 /// which the driver's exact-height editor rect leaves empty — so the driver
 /// paints it here instead, via the editor's public
 /// [`autocomplete`](Editor::autocomplete) accessor. The band hangs off the top
-/// border of the active box, `popup_row_count` rows tall, clamped to the space
-/// between the box top and the viewport origin (`area.y`) so it never overwrites
-/// scrollback above nor the box below. A closed popup (zero rows) or a band with
-/// no room paints nothing.
+/// of the loader row (`reserved_below` rows above the box top; zero when idle or
+/// when the loader yielded), `popup_row_count` rows tall, clamped to the space
+/// up to the viewport origin (`area.y`) so it never overwrites scrollback above
+/// nor the loader/box below. A closed popup (zero rows) or a band with no room
+/// paints nothing.
 fn draw_autocomplete_popup(
     buf: &mut ratatui::buffer::Buffer,
     editor: &Editor,
     area: Rect,
     active: Rect,
+    reserved_below: u16,
 ) {
     if !editor.autocomplete_visible() {
         return;
     }
     let wanted = editor.popup_row_count();
-    // The blank band above the box, from the viewport origin down to the box top.
-    let above = active.y.saturating_sub(area.y);
+    // The blank band above the loader row (or the box top when no loader row),
+    // from the viewport origin down.
+    let bottom = active.y.saturating_sub(reserved_below);
+    let above = bottom.saturating_sub(area.y);
     let rows = wanted.min(above);
     if rows == 0 || active.width == 0 {
         return;
     }
-    // Hang the popup off the top border of the box, growing upward: its bottom row
-    // sits just above the box, so the newest completions stay flush with the input.
-    let popup = Rect::new(active.x, active.y.saturating_sub(rows), active.width, rows);
+    // Hang the popup off its band bottom, growing upward: its last row sits just
+    // above the loader/box, so the newest completions stay flush with the input.
+    let popup = Rect::new(active.x, bottom.saturating_sub(rows), active.width, rows);
     editor.autocomplete().render(popup, buf);
 }
 
@@ -535,7 +587,7 @@ mod tests {
         assert_eq!(inset(r).width, 0);
     }
 
-    // --- Loader slot lifecycle (VAL-CHAT-003 / VAL-COMPAT-008) --------------
+    // --- Loader row lifecycle (VAL-CHAT-003 / VAL-COMPAT-008) ---------------
 
     use hand_tui::rt::components::Editor;
     use hand_tui::rt::view::TerminalSize;
@@ -712,22 +764,116 @@ mod tests {
     }
 
     #[test]
-    fn loader_slot_shows_while_streaming_and_leaves_no_residue_after() {
+    fn popup_paints_above_the_loader_row_when_both_are_visible() {
+        use hand_tui::rt::components::{EditorBorder, PathEntry, PathProvider};
+        use std::sync::Arc as StdArc;
+
+        // Typing an @-mention mid-stream: with room in the band the loader keeps
+        // its row glued to the box top and the popup band hangs off the loader's
+        // top — popup, loader, box, footer from top to bottom, never overlapping.
+        let provider = StdArc::new(PathProvider::new(vec![
+            PathEntry::file("README.md"),
+            PathEntry::file("main.rs"),
+        ]));
+        let editor: SharedEditor = Arc::new(Mutex::new(
+            Editor::new()
+                .border(EditorBorder::None)
+                .with_autocomplete_provider(provider),
+        ));
+        type_into(&editor, "@RE");
+        let mut loader = Loader::new(LOADER_MESSAGE);
+        loader.set_active(true);
+        let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
+        draw_frame(&mut terminal, &editor, &loader, true);
+
+        let (top, bottom) = border_rows(&terminal);
+        let loader_row = row_of(&terminal, "Working").expect("loader row painted");
+        let popup_row = row_of(&terminal, "README.md").expect("popup row painted");
+        assert_eq!(
+            loader_row,
+            top - 1,
+            "the loader row stays glued directly above the box top border"
+        );
+        assert!(
+            popup_row < loader_row,
+            "the popup paints above the loader row ({popup_row} < {loader_row})"
+        );
+        let footer_row = row_of(&terminal, "no-model").expect("footer stats row");
+        assert!(
+            footer_row > bottom,
+            "the footer stays below the box, clear of popup and loader"
+        );
+    }
+
+    #[test]
+    fn popup_wins_the_band_and_the_loader_yields_when_the_budget_is_tight() {
+        use hand_tui::rt::components::{EditorBorder, PathEntry, PathProvider};
+        use std::sync::Arc as StdArc;
+
+        // At streaming max growth the band above the box is exactly the loader's
+        // reserved row. An open popup needs that row too — the popup wins and the
+        // loader yields for the frame (the footer-collapse degradation spirit),
+        // so nothing overlaps.
+        let provider = StdArc::new(PathProvider::new(vec![
+            PathEntry::file("README.md"),
+            PathEntry::file("main.rs"),
+        ]));
+        let editor: SharedEditor = Arc::new(Mutex::new(
+            Editor::new()
+                .border(EditorBorder::None)
+                .with_autocomplete_provider(provider),
+        ));
+        // Nine full lines plus a trailing empty one, then the typed @-mention on
+        // the last line: 10 content rows pin the editor at its clamp while the
+        // caret keeps a completable @RE context.
+        lock_editor(&editor).set_text("l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n");
+        type_into(&editor, "@RE");
+        assert!(
+            lock_editor(&editor).autocomplete_visible(),
+            "the @-context must open the popup"
+        );
+        let mut loader = Loader::new(LOADER_MESSAGE);
+        loader.set_active(true);
+        let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
+        draw_frame(&mut terminal, &editor, &loader, true);
+
+        let (top, _bottom) = border_rows(&terminal);
+        assert_eq!(top, 1, "streaming max growth leaves a one-row band above");
+        assert_eq!(
+            row_of(&terminal, "README.md"),
+            Some(0),
+            "the popup wins the single band row"
+        );
+        assert_eq!(
+            row_of(&terminal, "Working"),
+            None,
+            "the loader yields to the popup for the frame"
+        );
+    }
+
+    #[test]
+    fn loader_row_shows_above_the_box_while_streaming_and_leaves_no_residue_after() {
         let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
         let mut loader = Loader::new(LOADER_MESSAGE);
         let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
 
         // While streaming, the loader is active and its static message is painted
-        // inside the bordered slot.
+        // in the unbordered row directly ABOVE the box's top border.
         loader.set_active(true);
         draw_frame(&mut terminal, &editor, &loader, true);
         assert!(
             buffer_text(&terminal).contains(LOADER_MESSAGE),
             "loader message must be visible while streaming"
         );
+        let (top, _bottom) = border_rows(&terminal);
+        assert_eq!(
+            row_of(&terminal, "Working").expect("loader row painted"),
+            top - 1,
+            "the loader row sits directly above the box's top border"
+        );
 
         // After the turn ends, the loader is dismissed: it paints nothing and the
-        // fixed-viewport blank repaint wipes the shrunk row — no "Working…" or
+        // fixed-viewport blank repaint wipes the freed row — no "Working…" or
         // border fragment is left behind (the shrink-leak regression).
         loader.set_active(false);
         draw_frame(&mut terminal, &editor, &loader, false);
@@ -850,9 +996,10 @@ mod tests {
     fn max_editor_growth_keeps_box_plus_footer_within_the_viewport_budget() {
         use hand_tui::rt::components::EditorBorder;
 
-        // At the editor's maximum auto-grow (and with the loader row streaming),
-        // the box is trimmed so box + footer never exceed the fixed viewport
-        // height — the footer's last row stays inside MAX_VIEWPORT_ROWS.
+        // At the editor's maximum auto-grow the box is trimmed so loader + box +
+        // footer never exceed the fixed viewport height — the footer's last row
+        // stays inside MAX_VIEWPORT_ROWS, and while streaming the loader row
+        // still has its home directly above the box top.
         for &streaming in &[false, true] {
             let editor: SharedEditor =
                 Arc::new(Mutex::new(Editor::new().border(EditorBorder::None)));
@@ -867,10 +1014,19 @@ mod tests {
             draw_frame_with_footer(&mut terminal, &editor, &loader, streaming, &probe_footer());
 
             let (top, bottom) = border_rows(&terminal);
-            assert_eq!(
-                top, 0,
-                "the box top reaches the viewport origin at max growth (streaming={streaming})"
-            );
+            if streaming {
+                assert_eq!(
+                    top, 1,
+                    "streaming max growth stops one row short of the origin for the loader"
+                );
+                assert_eq!(
+                    row_of(&terminal, "Working"),
+                    Some(0),
+                    "the loader row paints in the reserved row above the box top"
+                );
+            } else {
+                assert_eq!(top, 0, "idle max growth reaches the viewport origin");
+            }
             let cwd_row = row_of(&terminal, "/tmp/proj").expect("cwd row painted");
             let stats_row = row_of(&terminal, "test-model").expect("stats row painted");
             assert_eq!(
