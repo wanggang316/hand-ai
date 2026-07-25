@@ -27,6 +27,7 @@ use model::{Model, ThinkingLevel};
 use tokio::sync::mpsc;
 
 use crate::core::agent_session::AgentSession;
+use crate::core::model_registry::ModelRegistry;
 use crate::core::session_manager::{SessionInfo, SessionManager};
 use crate::core::settings::{Settings, SettingsScope, ThemeSetting, ThinkingLevelSetting};
 use crate::modes::interactive::slash_commands::SlashCommandAction;
@@ -288,7 +289,8 @@ pub async fn open_settings_selector(
     requester: &FrameRequester,
     nav: NavKeys,
 ) {
-    let entries = build_settings_entries(session.settings().current());
+    let provider_ids = provider_choice_ids(session.model_registry());
+    let entries = build_settings_entries(session.settings().current(), &provider_ids);
 
     let (tx, mut rx) = mpsc::unbounded_channel::<SettingsOutcome>();
     done.store(false, Ordering::SeqCst);
@@ -340,16 +342,57 @@ fn apply_settings_change(
     }
 }
 
+/// The `/settings` cycle order for `default_thinking_level` — exactly the level
+/// ids [`apply_setting_by_id`] parses for that setting, lowest to highest.
+///
+/// [`apply_setting_by_id`]: crate::core::settings::SettingsManager::apply_setting_by_id
+const THINKING_LEVEL_CHOICES: [&str; 7] =
+    ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// The unique provider ids in the registry's catalog, sorted — the same source
+/// the `/login` picker rows draw from, so the `/settings` provider choices track
+/// the live catalog (custom `models.json` providers included).
+fn provider_choice_ids(registry: &ModelRegistry) -> Vec<String> {
+    let mut ids: Vec<String> = registry
+        .all()
+        .iter()
+        .map(|m| m.provider.as_str().to_string())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// An enum setting seeded at `current` within `choices`. A `current` that is not
+/// in the list (a custom provider, the `(unset)` placeholder) is **prepended** so
+/// the merged effective value is always the visible seed (VAL-OVERLAY-036) and
+/// the first Enter cycles off it onto a real choice.
+fn enum_seeded_at(current: String, mut choices: Vec<String>) -> SettingValue {
+    let selected = match choices.iter().position(|c| *c == current) {
+        Some(idx) => idx,
+        None => {
+            choices.insert(0, current);
+            0
+        }
+    };
+    SettingValue::Enum { choices, selected }
+}
+
 /// Build the `/settings` dialog entries from the **merged effective** settings.
 ///
-/// The three `default_*` rows come first, rendered as their effective string values
-/// (`(unset)` when unset) so a project override is visible (VAL-OVERLAY-036, the
-/// issue #16 UAT regression); the editable toggles/enums follow. Every id here is
-/// one [`apply_setting_by_id`](crate::core::settings::SettingsManager::apply_setting_by_id)
+/// The three `default_*` rows come first so a project override is visible
+/// (VAL-OVERLAY-036, the issue #16 UAT regression). `default_provider` and
+/// `default_thinking_level` are **Enum** rows — Enter cycles the live provider
+/// catalog / the fixed thinking ladder, seeded at the merged effective value (an
+/// unknown or `(unset)` value is prepended so the seed stays representable).
+/// `default_model` stays a text edit: a catalog can carry hundreds of models, so
+/// picking happens in `/model` instead. The editable toggles/enums follow. Every
+/// id here is one
+/// [`apply_setting_by_id`](crate::core::settings::SettingsManager::apply_setting_by_id)
 /// accepts, so a change always round-trips.
 ///
 /// [`apply_setting_by_id`]: crate::core::settings::SettingsManager::apply_setting_by_id
-fn build_settings_entries(merged: &Settings) -> Vec<SettingEntry> {
+fn build_settings_entries(merged: &Settings, provider_ids: &[String]) -> Vec<SettingEntry> {
     let provider = merged
         .default_provider
         .clone()
@@ -366,17 +409,23 @@ fn build_settings_entries(merged: &Settings) -> Vec<SettingEntry> {
         // The merged effective defaults, first, so a project override is visible.
         SettingEntry::new(
             "default_provider",
-            SettingValue::String(provider),
+            enum_seeded_at(provider, provider_ids.to_vec()),
             "Effective default provider (global + project merged).",
         ),
         SettingEntry::new(
             "default_model",
             SettingValue::String(model),
-            "Effective default model (global + project merged).",
+            "Effective default model (global + project merged). Pick interactively via /model.",
         ),
         SettingEntry::new(
             "default_thinking_level",
-            SettingValue::String(thinking),
+            enum_seeded_at(
+                thinking,
+                THINKING_LEVEL_CHOICES
+                    .iter()
+                    .map(|l| (*l).to_string())
+                    .collect(),
+            ),
             "Effective default thinking level (global + project merged).",
         ),
         // Editable toggles / enums.
@@ -1312,12 +1361,14 @@ mod tests {
         merged.default_model = Some("claude-opus-4-7".to_string());
         merged.default_thinking_level = Some(ThinkingLevelSetting::High);
 
-        let entries = build_settings_entries(&merged);
+        let providers = vec!["anthropic".to_string(), "openai".to_string()];
+        let entries = build_settings_entries(&merged, &providers);
         // The three default-* rows come first, in order.
         assert_eq!(entries[0].key, "default_provider");
         assert_eq!(entries[1].key, "default_model");
         assert_eq!(entries[2].key, "default_thinking_level");
-        // Their effective (merged) string values are visible.
+        // Their effective (merged) values are visible (the enum rows display
+        // their seeded choice).
         assert_eq!(entries[0].value.to_string(), "anthropic");
         assert_eq!(entries[1].value.to_string(), "claude-opus-4-7");
         assert_eq!(entries[2].value.to_string(), "high");
@@ -1328,9 +1379,11 @@ mod tests {
         use crate::core::settings::Settings;
 
         // A truly empty merged view (no provider/model/thinking set) shows the
-        // `(unset)` placeholder for each default row.
+        // `(unset)` placeholder for each default row — the enum rows prepend it so
+        // the seed is representable.
         let merged = Settings::default();
-        let entries = build_settings_entries(&merged);
+        let providers = vec!["anthropic".to_string()];
+        let entries = build_settings_entries(&merged, &providers);
         assert_eq!(entries[0].value.to_string(), "(unset)");
         assert_eq!(entries[1].value.to_string(), "(unset)");
         assert_eq!(entries[2].value.to_string(), "(unset)");
@@ -1354,6 +1407,190 @@ mod tests {
         }
     }
 
+    // --- /settings enum rows (provider + thinking cycle-select) -----------
+
+    #[test]
+    fn settings_thinking_level_is_the_fixed_ladder_seeded_at_current() {
+        use crate::core::settings::Settings;
+
+        let mut merged = Settings::defaults();
+        merged.default_thinking_level = Some(ThinkingLevelSetting::Medium);
+
+        let entries = build_settings_entries(&merged, &[]);
+        let SettingValue::Enum { choices, selected } = &entries[2].value else {
+            panic!(
+                "default_thinking_level must be an enum, got {:?}",
+                entries[2].value
+            );
+        };
+        assert_eq!(
+            choices, &THINKING_LEVEL_CHOICES,
+            "the fixed ladder, in order"
+        );
+        assert_eq!(choices[*selected], "medium", "seeded at the merged value");
+    }
+
+    #[test]
+    fn settings_provider_enum_prepends_an_unknown_current_value() {
+        use crate::core::settings::Settings;
+
+        // A merged provider that is not in the catalog (a custom models.json
+        // provider removed since, say) still seeds: it is prepended.
+        let mut merged = Settings::defaults();
+        merged.default_provider = Some("custom-proxy".to_string());
+
+        let providers = vec!["anthropic".to_string(), "openai".to_string()];
+        let entries = build_settings_entries(&merged, &providers);
+        let SettingValue::Enum { choices, selected } = &entries[0].value else {
+            panic!(
+                "default_provider must be an enum, got {:?}",
+                entries[0].value
+            );
+        };
+        assert_eq!(choices[0], "custom-proxy", "unknown current is prepended");
+        assert_eq!(*selected, 0, "and it is the seed");
+        assert_eq!(
+            &choices[1..],
+            &["anthropic", "openai"],
+            "catalog ids follow"
+        );
+    }
+
+    #[test]
+    fn settings_default_model_stays_text_pointing_at_model_command() {
+        use crate::core::settings::Settings;
+
+        // A catalog can carry hundreds of models — cycling is unusable, so the
+        // model row stays a text edit and its description points at /model.
+        let merged = Settings::defaults();
+        let entries = build_settings_entries(&merged, &[]);
+        assert!(
+            matches!(entries[1].value, SettingValue::String(_)),
+            "default_model stays a string edit"
+        );
+        assert!(
+            entries[1].description.contains("/model"),
+            "description points at /model: {}",
+            entries[1].description
+        );
+    }
+
+    /// The end-to-end enum-cycle path: entries built from the merged view, the
+    /// dialog cycles `default_thinking_level` one rung (`high` → `xhigh`), and the
+    /// emitted change persists through `apply_settings_change` — the same
+    /// first-change-persists route every settings edit takes (VAL-OVERLAY-013).
+    #[tokio::test]
+    async fn cycling_thinking_in_the_dialog_persists_the_next_ladder_value() {
+        use crate::core::settings::{Settings, SettingsManager};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use hand_tui::rt::events::RtKey;
+
+        let mut merged = Settings::defaults();
+        merged.default_thinking_level = Some(ThinkingLevelSetting::High);
+        let entries = build_settings_entries(&merged, &["anthropic".to_string()]);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut sel = SettingsSelector::new(entries, tx, overlay::new_done_signal());
+        let key = |id: &str, code: KeyCode| RtKey {
+            key_id: Some(id.to_string()),
+            raw: KeyEvent::new(code, KeyModifiers::NONE),
+        };
+        // Down to the thinking row (index 2), Enter cycles high -> xhigh.
+        sel.handle_key(&key("down", KeyCode::Down));
+        sel.handle_key(&key("down", KeyCode::Down));
+        sel.handle_key(&key("enter", KeyCode::Enter));
+        let Ok(SettingsOutcome::Changed { id, value }) = rx.try_recv() else {
+            panic!("cycling the thinking row must emit a change");
+        };
+        assert_eq!(id, "default_thinking_level");
+        assert_eq!(value, "xhigh", "the next ladder rung after high");
+
+        // The emitted change persists through the driver's apply path.
+        let dir = tempfile::TempDir::new().unwrap();
+        let global_path = dir.path().join("settings.yaml");
+        let mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            Some(global_path.clone()),
+            None,
+        );
+        let mut session = test_session(true);
+        *session.settings_mut() = mgr;
+        let (state, req) = (state(), test_requester());
+        let footer = footer_of(&session, Path::new("."));
+
+        apply_settings_change(
+            &mut session,
+            Path::new("."),
+            &id,
+            &value,
+            &state,
+            &footer,
+            &req,
+        );
+
+        assert_eq!(
+            session.settings().current().default_thinking_level,
+            Some(ThinkingLevelSetting::Xhigh),
+            "the cycled value is the new effective setting"
+        );
+        let written = std::fs::read_to_string(&global_path).unwrap();
+        assert!(
+            written.contains("xhigh"),
+            "persisted YAML carries the level: {written}"
+        );
+        let out = committed_text(&state);
+        assert!(
+            out.contains("[settings: default_thinking_level = xhigh]"),
+            "status line missing: {out}"
+        );
+    }
+
+    #[test]
+    fn every_thinking_ladder_value_round_trips_through_apply_setting_by_id() {
+        use crate::core::settings::{Settings, SettingsManager, SettingsScope};
+
+        // Every choice the enum can commit must be accepted by the settings arm.
+        let mut mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            None,
+            None,
+        );
+        for level in THINKING_LEVEL_CHOICES {
+            mgr.apply_setting_by_id(SettingsScope::Global, "default_thinking_level", level)
+                .unwrap_or_else(|e| panic!("ladder value {level} rejected: {e}"));
+            let effective = mgr
+                .current()
+                .default_thinking_level
+                .map(thinking_setting_id);
+            assert_eq!(effective.as_deref(), Some(level), "{level} sticks");
+        }
+    }
+
+    #[test]
+    fn every_provider_id_round_trips_through_apply_setting_by_id() {
+        use crate::core::settings::{Settings, SettingsManager, SettingsScope};
+
+        // Provider ids are open-ended (custom models.json providers), so the arm
+        // accepts any catalog id verbatim — including dashed custom ones.
+        let mut mgr = SettingsManager::from_layers_for_test(
+            Settings::default(),
+            Settings::default(),
+            None,
+            None,
+        );
+        for id in ["anthropic", "openai", "openrouter", "custom-proxy"] {
+            mgr.apply_setting_by_id(SettingsScope::Global, "default_provider", id)
+                .unwrap_or_else(|e| panic!("provider id {id} rejected: {e}"));
+            assert_eq!(
+                mgr.current().default_provider.as_deref(),
+                Some(id),
+                "{id} sticks"
+            );
+        }
+    }
+
     /// The `/settings` dialog surfaces `show_images` as a bool toggle defaulting to
     /// the merged effective value (`true`), so the mid-session toggle is reachable
     /// from the dialog (VAL-IMG-011).
@@ -1362,7 +1599,7 @@ mod tests {
         use crate::core::settings::Settings;
 
         let merged = Settings::defaults();
-        let entries = build_settings_entries(&merged);
+        let entries = build_settings_entries(&merged, &[]);
         let show = entries
             .iter()
             .find(|e| e.key == "show_images")

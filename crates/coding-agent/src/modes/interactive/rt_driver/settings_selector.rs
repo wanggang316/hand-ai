@@ -269,23 +269,38 @@ mod tests {
         }
     }
 
-    /// Entries with the three merged-default display rows first (as strings, so the
-    /// effective value is visible) then a couple of editable toggles/enums.
+    /// Entries mirroring the production shape: the three merged-default rows
+    /// first (provider and thinking level as cycle enums seeded at the effective
+    /// value, the model as an editable string) then a toggle and an enum.
     fn entries() -> Vec<SettingEntry> {
         vec![
             SettingEntry::new(
                 "default_provider",
-                SettingValue::String("anthropic".into()),
+                SettingValue::Enum {
+                    choices: vec!["anthropic".into(), "openai".into()],
+                    selected: 0,
+                },
                 "Effective default provider.",
             ),
             SettingEntry::new(
                 "default_model",
                 SettingValue::String("claude-opus".into()),
-                "Effective default model.",
+                "Effective default model. Pick interactively via /model.",
             ),
             SettingEntry::new(
                 "default_thinking_level",
-                SettingValue::String("high".into()),
+                SettingValue::Enum {
+                    choices: vec![
+                        "off".into(),
+                        "minimal".into(),
+                        "low".into(),
+                        "medium".into(),
+                        "high".into(),
+                        "xhigh".into(),
+                        "max".into(),
+                    ],
+                    selected: 4, // "high"
+                },
                 "Effective default thinking level.",
             ),
             SettingEntry::new("auto_compact", SettingValue::Bool(true), "Auto-compact"),
@@ -390,6 +405,42 @@ mod tests {
             Some(SettingsOutcome::Changed { id, value }) => {
                 assert_eq!(id, "theme");
                 assert_eq!(value, "light");
+            }
+            other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    // --- the default_* enum rows cycle on Enter (the m6 enum-select fix) ---
+
+    #[test]
+    fn cycling_the_thinking_row_emits_the_next_ladder_value() {
+        let (mut sel, mut rx, done) = selector();
+        // Down to the thinking row (index 2) and cycle it: high -> xhigh.
+        sel.handle_key(&key_id("down", KeyCode::Down));
+        sel.handle_key(&key_id("down", KeyCode::Down));
+        sel.handle_key(&key_id("enter", KeyCode::Enter));
+        assert!(
+            done.load(Ordering::SeqCst),
+            "first change closes the dialog"
+        );
+        match drain(&mut rx) {
+            Some(SettingsOutcome::Changed { id, value }) => {
+                assert_eq!(id, "default_thinking_level");
+                assert_eq!(value, "xhigh", "the next ladder rung after high");
+            }
+            other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cycling_the_provider_row_emits_a_provider_id() {
+        let (mut sel, mut rx, _done) = selector();
+        // The provider row is the first, already selected: Enter cycles it.
+        sel.handle_key(&key_id("enter", KeyCode::Enter)); // anthropic -> openai
+        match drain(&mut rx) {
+            Some(SettingsOutcome::Changed { id, value }) => {
+                assert_eq!(id, "default_provider");
+                assert_eq!(value, "openai");
             }
             other => panic!("expected Changed, got {other:?}"),
         }
