@@ -1062,10 +1062,12 @@ async fn run() -> Result<(), SessionError> {
     }
 
     // Drop the requester so the scheduler drains its final frame and stops, then
-    // wait for it to release the terminal before restoring.
+    // wait for it to release the terminal before restoring. The pump's shutdown
+    // flag stops its bounded-poll loop within one poll interval (a
+    // blocking-pool thread cannot be aborted).
     drop(requester);
     let _ = scheduler.await;
-    pump.abort();
+    pump.shutdown();
     guard.restore();
     Ok(())
 }

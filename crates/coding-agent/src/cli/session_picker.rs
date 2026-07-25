@@ -103,10 +103,11 @@ async fn run_picker(
     let selection = picker_input_loop(&mut events, &overlays, &requester, &mut rx).await;
 
     // Single teardown: drop the last requester so the scheduler drains its final
-    // frame (EraseOnDrop wipes the viewport) and stops; then stop the pump.
+    // frame (EraseOnDrop wipes the viewport) and stops; then stop the pump (its
+    // shutdown flag ends the bounded-poll loop within one poll interval).
     drop(requester);
     let _ = scheduler.await;
-    pump.abort();
+    pump.shutdown();
 
     Ok(selection)
 }

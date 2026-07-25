@@ -340,7 +340,11 @@ impl InteractiveMode {
             overlays.clone(),
         );
 
-        // Spawn the rt input pump (crossterm EventStream → RtInputEvent channel).
+        // Spawn the rt input pump: a bounded-poll crossterm reader on a
+        // blocking thread → RtInputEvent channel. Bounded polls keep the
+        // resize path's cursor-position queries answerable (a parked
+        // EventStream reader would strand their replies — see
+        // hand_tui::rt::events).
         let (mut events, pump) = spawn_event_pump(EVENT_CHANNEL_CAPACITY);
 
         // Register the SIGHUP listener so a closing PTY master takes the same
@@ -449,9 +453,12 @@ impl InteractiveMode {
         drop(requester);
         let _ = scheduler.await;
 
-        // Stop the input pump (crossterm EventStream — cancellable, unlike the
-        // legacy blocking stdin thread that forced the process::exit hack).
-        pump.abort();
+        // Stop the input pump: flip its shutdown flag. A blocking-pool thread
+        // ignores abort(), so the bounded-poll loop watches the flag and exits
+        // within one poll interval. Deliberately not awaited: the runtime
+        // joins the thread at shutdown, and dropping `events` on return
+        // unblocks a pump parked on a full channel.
+        pump.shutdown();
 
         // Explicit restore before returning; Drop would also do it (idempotent).
         guard.restore();

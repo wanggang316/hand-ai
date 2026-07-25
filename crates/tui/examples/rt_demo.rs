@@ -508,7 +508,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // The rt input pipeline drives crossterm's async EventStream and the frame
+    // The rt input pump runs on tokio's blocking thread pool and the frame
     // scheduler is an async actor, so the demo needs a tokio runtime.
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
@@ -601,8 +601,9 @@ async fn run() -> Result<(), SessionError> {
     // so an exit mid-flood can never leave an unterminated `?2026h`.
     let (requester, scheduler) = spawn_scheduler(terminal, state.clone(), handles.clone());
 
-    // Spawn the rt input pump: it reads crossterm's EventStream, translates each
-    // event, and delivers RtInputEvents over the channel.
+    // Spawn the rt input pump: a bounded-poll crossterm reader on a blocking
+    // thread that translates each event and delivers RtInputEvents over the
+    // channel.
     let (mut events, pump) = spawn_event_pump(EVENT_CHANNEL_CAPACITY);
 
     // Register the SIGHUP listener. A closing PTY master (stdin close) delivers
@@ -656,9 +657,10 @@ async fn run() -> Result<(), SessionError> {
     loop {
         // The loop wakes on either an input event or a SIGHUP. Two clean-exit
         // paths converge on the teardown below:
-        //   - the event channel closing (`None`): the event pump reached
-        //     EventStream EOF — i.e. stdin closed — dropped its sender, and the
-        //     channel is now empty; this is the plain Ctrl+D / EOF exit.
+        //   - the event channel closing (`None`): the event pump hit end of
+        //     input — i.e. stdin closed, surfacing as a read error — dropped
+        //     its sender, and the channel is now empty; this is the plain
+        //     Ctrl+D / EOF exit.
         //   - a SIGHUP: a closing PTY master (stdin close) that the kernel
         //     reports as a hangup, routed here so it exits cleanly with the
         //     terminal restored instead of terminating the process raw.
@@ -812,8 +814,9 @@ async fn run() -> Result<(), SessionError> {
     drop(requester);
     let _ = scheduler.await;
 
-    // Stop the input pump.
-    pump.abort();
+    // Stop the input pump: flip its shutdown flag; the bounded-poll loop exits
+    // within one poll interval (a blocking-pool thread cannot be aborted).
+    pump.shutdown();
 
     // Explicit restore before returning; Drop would also do it.
     guard.restore();

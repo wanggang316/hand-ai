@@ -234,9 +234,29 @@ fn fallback_backend_survives_size_error() {
 }
 
 #[test]
-fn fallback_backend_cursor_error_becomes_origin() {
+fn fallback_backend_cursor_error_propagates_on_a_sized_terminal() {
+    // A failed cursor query on a live, sized terminal is a real fault: masking
+    // it as the origin would anchor the inline viewport at row 0, over the
+    // transcript, and home `Terminal::clear` to the screen top (the resize
+    // regression). It must propagate.
     let mut backend = FallbackSizeBackend::new(FakeBackend::new(Some(Size::new(80, 24)), None));
-    assert_eq!(backend.get_cursor_position().unwrap(), Position::ORIGIN);
+    assert!(
+        backend.get_cursor_position().is_err(),
+        "a cursor failure on nonzero geometry must not be masked as the origin"
+    );
+}
+
+#[test]
+fn fallback_backend_cursor_error_becomes_origin_on_degenerate_geometry() {
+    // A 0x0 (or size-unqueryable) PTY is the headless case the wrapper exists
+    // for: the cursor query legitimately goes unanswered there, so the origin
+    // keeps rendering alive — the same signal the size fallback keys on
+    // (VAL-COMPAT-011).
+    let mut zeroed = FallbackSizeBackend::new(FakeBackend::new(Some(Size::new(0, 0)), None));
+    assert_eq!(zeroed.get_cursor_position().unwrap(), Position::ORIGIN);
+
+    let mut unqueryable = FallbackSizeBackend::new(FakeBackend::new(None, None));
+    assert_eq!(unqueryable.get_cursor_position().unwrap(), Position::ORIGIN);
 }
 
 #[test]

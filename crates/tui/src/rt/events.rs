@@ -1,7 +1,8 @@
 //! Input event pipeline for the ratatui runtime.
 //!
-//! Reads crossterm events off an async [`EventStream`] and translates them
-//! into the unified [`RtInputEvent`] type consumed by the runtime. Three
+//! Reads crossterm events off a **bounded-poll loop** on a blocking thread
+//! ([`spawn_event_pump`]) and translates them into the unified
+//! [`RtInputEvent`] type consumed by the runtime. Three translation
 //! behaviours matter here and are pinned by unit tests:
 //!
 //! - **Release/repeat filtering.** Under the kitty keyboard protocol a single
@@ -26,9 +27,33 @@
 //! [`Event::FocusLost`] map one-to-one to [`RtInputEvent::FocusGained`] and
 //! [`RtInputEvent::FocusLost`] so the runtime can react to the window losing or
 //! regaining focus (e.g. pausing/resuming a blink) without a separate channel.
+//!
+//! # Why bounded polls (the resize deadlock)
+//!
+//! The pump deliberately does **not** drive crossterm's async `EventStream`.
+//! The stream's background reader parks inside crossterm's process-global
+//! event lock with *no timeout* until the next public event arrives. While it
+//! is parked, a cursor-position query (`ESC[6n` — issued by ratatui's inline
+//! resize path for `Terminal::clear` and its viewport-size recompute) cannot
+//! take the lock; worse, the terminal's `ESC[..R` reply is consumed by the
+//! parked reader and stranded in its skipped-event buffer until the next
+//! keypress completes that poll cycle. Every query then stalls for its full
+//! internal timeout and errors out — dragging the window (a SIGWINCH storm)
+//! became a multi-second stall with the layout stuck at the old width and the
+//! viewport re-anchored over the transcript. Bounded polls release the global
+//! lock at least every [`POLL_INTERVAL`], and crossterm re-queues the stranded
+//! reply as each cycle ends, so a cursor query resolves within a cycle or two.
+//!
+//! Shutdown: a thread on tokio's blocking pool ignores `JoinHandle::abort`, so
+//! the pump watches a shared [`AtomicBool`] ([`EventPumpHandle::shutdown`])
+//! and exits at the top of its next poll cycle.
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use futures_util::StreamExt;
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::keys::KeyId;
@@ -192,7 +217,7 @@ pub fn translate_event(event: Event) -> Option<RtInputEvent> {
     }
     // TODO(cell-size): the terminal's cell-size reply (`CSI 6 ; H ; W t`, the
     // answer to [`write_cell_size_query`]) does not surface here. crossterm's
-    // typed `EventStream` parses only recognised events and silently drops this
+    // typed event API parses only recognised events and silently drops this
     // window-op report before it reaches `translate_event` — there is no `Event`
     // variant that carries the raw bytes to feed
     // [`parse_cell_size_reply`](crate::rt::components::parse_cell_size_reply).
@@ -202,20 +227,62 @@ pub fn translate_event(event: Event) -> Option<RtInputEvent> {
     // unit-tested and the 8x16 default cell size is used until then.
 }
 
-/// Drive an [`EventStream`] to completion, translating each event and pushing
-/// the runtime events onto `sink`.
+/// Upper bound on how long one pump cycle may hold crossterm's global event
+/// lock. Shorter means faster shutdown response and quicker delivery of a
+/// stranded cursor-position reply; longer means fewer idle wakeups. 50ms is
+/// far below perception for a resize repaint and negligible as idle load.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// A pollable source of crossterm events — the seam that lets the pump loop
+/// run against a scripted source in unit tests. The production implementation
+/// is [`CrosstermEvents`].
+pub trait EventSource {
+    /// Wait up to `timeout` for an event to become readable.
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool>;
+
+    /// Read the next event. Only called after [`poll`](Self::poll) returned
+    /// `Ok(true)`.
+    fn read(&mut self) -> io::Result<Event>;
+}
+
+/// The terminal-backed [`EventSource`] over crossterm's global event reader.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CrosstermEvents;
+
+impl EventSource for CrosstermEvents {
+    fn poll(&mut self, timeout: Duration) -> io::Result<bool> {
+        crossterm::event::poll(timeout)
+    }
+
+    fn read(&mut self) -> io::Result<Event> {
+        crossterm::event::read()
+    }
+}
+
+/// Drive `source` until shutdown, translating each event and pushing the
+/// runtime events onto `sink`.
 ///
-/// Runs until the stream ends (EOF), the receiver is dropped (send fails), or a
-/// read error surfaces. Untranslatable events (filtered keys, mouse) are
-/// skipped silently. This is input only: it does not schedule frames.
-pub async fn run_event_loop(
-    mut events: EventStream,
-    sink: mpsc::Sender<RtInputEvent>,
-) -> std::io::Result<()> {
-    while let Some(next) = events.next().await {
-        let event = next?;
+/// Blocking — meant for a dedicated (blocking-pool) thread. Each cycle
+/// bounded-polls for at most [`POLL_INTERVAL`], so crossterm's global event
+/// lock is released regularly (see the module docs for why that bound is
+/// load-bearing). Exits when `shutdown` is set (checked once per cycle), when
+/// the receiver is dropped (send fails), or with the first poll/read error —
+/// a closing PTY master surfaces here as a read error, which drops the sender
+/// and closes the channel: the EOF exit signal consumers rely on.
+/// Untranslatable events (filtered keys, mouse) are skipped silently. This is
+/// input only: it does not schedule frames.
+pub fn run_event_loop<S: EventSource>(
+    source: &mut S,
+    shutdown: &AtomicBool,
+    sink: &mpsc::Sender<RtInputEvent>,
+) -> io::Result<()> {
+    while !shutdown.load(Ordering::Relaxed) {
+        if !source.poll(POLL_INTERVAL)? {
+            continue;
+        }
+        let event = source.read()?;
         if let Some(rt_event) = translate_event(event)
-            && sink.send(rt_event).await.is_err()
+            && sink.blocking_send(rt_event).is_err()
         {
             // Receiver hung up: consumer is gone, stop pumping.
             break;
@@ -224,20 +291,46 @@ pub async fn run_event_loop(
     Ok(())
 }
 
-/// Spawn [`run_event_loop`] on the current tokio runtime, returning the
-/// receiving end of the event channel and the join handle.
+/// Handle to a spawned event pump: signals shutdown and joins the pump thread.
 ///
-/// Convenience for consumers (the demo) that just want a stream of
-/// [`RtInputEvent`]s without owning the pump loop. `capacity` bounds the
-/// channel.
+/// A thread on tokio's blocking pool ignores `JoinHandle::abort`, so stopping
+/// the pump is a cooperative flag flip: [`shutdown`](Self::shutdown) sets the
+/// flag and the loop exits at the top of its next cycle, within
+/// [`POLL_INTERVAL`].
+#[derive(Debug)]
+pub struct EventPumpHandle {
+    shutdown: Arc<AtomicBool>,
+    join: tokio::task::JoinHandle<io::Result<()>>,
+}
+
+impl EventPumpHandle {
+    /// Signal the pump loop to stop. Returns immediately; the loop observes
+    /// the flag within one [`POLL_INTERVAL`]. Safe to call more than once.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+    }
+
+    /// Signal shutdown and wait for the pump thread to exit, surfacing the
+    /// error its loop ended with, if any.
+    pub async fn join(self) -> io::Result<()> {
+        self.shutdown();
+        self.join.await.map_err(io::Error::other)?
+    }
+}
+
+/// Spawn the bounded-poll pump on tokio's blocking thread pool, returning the
+/// receiving end of the event channel and the pump handle.
+///
+/// `capacity` bounds the channel; a full channel parks the pump thread until
+/// the consumer drains it (interactive input never approaches that). Stop the
+/// pump with [`EventPumpHandle::shutdown`]; the thread also exits on its own
+/// when the receiver is dropped or the terminal input closes.
 #[must_use]
-pub fn spawn_event_pump(
-    capacity: usize,
-) -> (
-    mpsc::Receiver<RtInputEvent>,
-    tokio::task::JoinHandle<std::io::Result<()>>,
-) {
+pub fn spawn_event_pump(capacity: usize) -> (mpsc::Receiver<RtInputEvent>, EventPumpHandle) {
     let (tx, rx) = mpsc::channel(capacity);
-    let handle = tokio::spawn(run_event_loop(EventStream::new(), tx));
-    (rx, handle)
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&shutdown);
+    let join =
+        tokio::task::spawn_blocking(move || run_event_loop(&mut CrosstermEvents, &flag, &tx));
+    (rx, EventPumpHandle { shutdown, join })
 }

@@ -6,17 +6,26 @@
 //!   (VAL-CORE-031)
 //! - Esc vs alt-chord disambiguation (VAL-CORE-015, VAL-CORE-030)
 //! - Paste delivered as a single event (VAL-CORE-039)
+//! - The bounded-poll pump loop (`run_event_loop`): translation onto the
+//!   channel, prompt shutdown, error propagation, receiver-drop exit
 //!
 //! Each KeyId case pins the canonical string a structured crossterm event must
 //! map to, in the canonical modifier order `shift, ctrl, alt, super`.
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MediaKeyCode,
     ModifierKeyCode,
 };
 use hand_tui::rt::events::{
-    RtInputEvent, RtKey, key_event_to_key_id, should_dispatch, translate_event,
+    EventSource, RtInputEvent, RtKey, key_event_to_key_id, run_event_loop, should_dispatch,
+    translate_event,
 };
+use tokio::sync::mpsc;
 
 // --- helpers ---------------------------------------------------------------
 
@@ -289,5 +298,176 @@ fn focus_events_map_through() {
     assert_eq!(
         translate_event(Event::FocusLost),
         Some(RtInputEvent::FocusLost)
+    );
+}
+
+// =============================================================================
+// Bounded-poll pump loop (run_event_loop)
+// =============================================================================
+
+/// A scripted [`EventSource`]: yields its events in order, then flips the
+/// shared shutdown flag so the loop exits exactly as the real pump does on
+/// teardown.
+struct ScriptedSource {
+    events: VecDeque<Event>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl ScriptedSource {
+    fn new(events: Vec<Event>, shutdown: Arc<AtomicBool>) -> Self {
+        Self {
+            events: events.into(),
+            shutdown,
+        }
+    }
+}
+
+impl EventSource for ScriptedSource {
+    fn poll(&mut self, _timeout: Duration) -> std::io::Result<bool> {
+        if self.events.is_empty() {
+            self.shutdown.store(true, Ordering::Relaxed);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn read(&mut self) -> std::io::Result<Event> {
+        Ok(self.events.pop_front().expect("read only after poll=true"))
+    }
+}
+
+/// A source that never has an event: `poll` sleeps out its bounded timeout and
+/// reports nothing readable, mirroring an idle terminal.
+struct IdleSource;
+
+impl EventSource for IdleSource {
+    fn poll(&mut self, timeout: Duration) -> std::io::Result<bool> {
+        std::thread::sleep(timeout);
+        Ok(false)
+    }
+
+    fn read(&mut self) -> std::io::Result<Event> {
+        unreachable!("poll never reports an event")
+    }
+}
+
+#[test]
+fn pump_loop_translates_key_resize_paste_onto_the_channel() {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let mut source = ScriptedSource::new(
+        vec![
+            Event::Key(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            // A release must be filtered by the loop's translate step, not
+            // forwarded.
+            Event::Key(key_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )),
+            Event::Resize(120, 40),
+            Event::Paste("two\nlines".to_string()),
+            Event::FocusGained,
+        ],
+        shutdown.clone(),
+    );
+    let (tx, mut rx) = mpsc::channel(8);
+
+    run_event_loop(&mut source, &shutdown, &tx).expect("scripted pump loop runs clean");
+
+    // Delivered in order, with the release filtered out.
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RtInputEvent::Key(RtKey { key_id: Some(id), .. })) if id == "a"
+    ));
+    assert_eq!(
+        rx.try_recv().ok(),
+        Some(RtInputEvent::Resize {
+            cols: 120,
+            rows: 40
+        })
+    );
+    assert_eq!(
+        rx.try_recv().ok(),
+        Some(RtInputEvent::Paste("two\nlines".to_string()))
+    );
+    assert_eq!(rx.try_recv().ok(), Some(RtInputEvent::FocusGained));
+    assert!(rx.try_recv().is_err(), "no further events expected");
+}
+
+#[test]
+fn pump_loop_shutdown_flag_stops_it_within_a_poll_cycle() {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let flag = shutdown.clone();
+    let (tx, _rx) = mpsc::channel(1);
+
+    let pump = std::thread::spawn(move || run_event_loop(&mut IdleSource, &flag, &tx));
+
+    // Let the loop park in at least one bounded poll, then signal shutdown.
+    std::thread::sleep(Duration::from_millis(20));
+    let signalled_at = Instant::now();
+    shutdown.store(true, Ordering::Relaxed);
+
+    let result = pump.join().expect("pump thread must not panic");
+    assert!(result.is_ok(), "shutdown exit is clean: {result:?}");
+    // One bounded poll cycle is 50ms; anything close to that is prompt. The
+    // generous bound keeps the assertion robust on a loaded CI host while
+    // still catching an unbounded park (the EventStream regression) outright.
+    assert!(
+        signalled_at.elapsed() < Duration::from_secs(1),
+        "pump must exit within ~one poll interval of the shutdown flag, took {:?}",
+        signalled_at.elapsed()
+    );
+}
+
+#[test]
+fn pump_loop_propagates_a_read_error() {
+    struct FailingSource;
+    impl EventSource for FailingSource {
+        fn poll(&mut self, _timeout: Duration) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn read(&mut self) -> std::io::Result<Event> {
+            Err(std::io::Error::other("terminal input closed"))
+        }
+    }
+
+    let shutdown = AtomicBool::new(false);
+    let (tx, mut rx) = mpsc::channel(1);
+    let result = run_event_loop(&mut FailingSource, &shutdown, &tx);
+    assert!(result.is_err(), "a read error must surface to the caller");
+    // The sender is dropped with the loop's stack frame at the call site
+    // (spawn_blocking), which closes the channel — the EOF signal consumers
+    // select on. Here the local `tx` still holds it open, so only emptiness
+    // is asserted.
+    assert!(rx.try_recv().is_err(), "no event precedes the error");
+}
+
+#[test]
+fn pump_loop_stops_when_the_receiver_is_dropped() {
+    /// An endless source: there is always another key. Only the send failure
+    /// can stop the loop, since the shutdown flag never flips.
+    struct EndlessSource;
+    impl EventSource for EndlessSource {
+        fn poll(&mut self, _timeout: Duration) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn read(&mut self) -> std::io::Result<Event> {
+            Ok(Event::Key(KeyEvent {
+                code: KeyCode::Char('x'),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }))
+        }
+    }
+
+    let shutdown = AtomicBool::new(false);
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+
+    let result = run_event_loop(&mut EndlessSource, &shutdown, &tx);
+    assert!(
+        result.is_ok(),
+        "a hung-up receiver is a clean stop, not an error"
     );
 }

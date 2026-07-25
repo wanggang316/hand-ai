@@ -17,9 +17,14 @@ Module map (`crates/tui/src/rt/`):
 - `session.rs` — terminal lifecycle: raw mode, inline `Terminal` init, kitty keyboard
   flags, bracketed paste, `SessionGuard` (RAII + panic hook, idempotent restore),
   `FallbackSizeBackend` (0×0 PTY → 80×24), SIGHUP listener, viewport erase primitive.
-- `events.rs` — crossterm `EventStream` → unified `RtInputEvent` (Key/Paste/Resize);
-  `KeyEventKind::Press` filtering; `key_event_to_key_id` (byte-equal to legacy
-  `keys::parse_key_id` canonical strings — modifier order shift, ctrl, alt, super).
+- `events.rs` — bounded-poll input pump (blocking `poll(50ms)`/`read` loop on a
+  `spawn_blocking` thread, `AtomicBool` shutdown) → unified `RtInputEvent`
+  (Key/Paste/Resize); `KeyEventKind::Press` filtering; `key_event_to_key_id`
+  (byte-equal to legacy `keys::parse_key_id` canonical strings — modifier order
+  shift, ctrl, alt, super). Never crossterm's async `EventStream`: its reader
+  parks in the global event lock without a timeout, stranding the resize path's
+  cursor-position replies until the next keypress (multi-second stalls, stuck
+  width).
 - `scheduler.rs` — codex FrameRequester pattern: coalesced redraw requests, ≤70/s frame
   cap, BSU/ESU (`?2026h`/`?2026l`) synchronized-output wrapping, idle silence.
 - `history.rs` — `HistorySink` over `Terminal::insert_before` + `scrolling-regions`;
@@ -86,6 +91,17 @@ multiplexer already committed. Real terminals (kitty/iTerm2/Terminal.app) do not
 the primary screen this way. Consequence for testing: assert resize/scrollback cleanliness
 on a **raw PTY** or **`TestBackend`**, never `tmux capture-pane -S -` — see
 `docs/user-test-patterns.md` Knowledge Persistence.
+
+## Upstream inline shrink wipe (known residual, ratatui 0.30.2)
+
+On a horizontal **shrink**, ratatui 0.30.2's inline-viewport resize recompute resets the
+viewport target to the screen top (`next_area.y = 0`) and issues a full-screen clear
+(`clear_region(ClearType::All)`) before re-anchoring — blanking the visible region. This is
+upstream ratatui behaviour, not an rt defect, and it is deliberately not worked around. With
+the bounded-poll pump keeping resize cursor queries answerable, a **widen** re-lays-out
+cleanly at the new width; a **narrow** still blanks the visible screen. The transcript
+already committed to native scrollback above survives (only the visible region is wiped;
+Terminal.app's ED 2 erase does not push the wiped rows into scrollback).
 
 ## Testing note
 

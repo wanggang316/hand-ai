@@ -71,9 +71,11 @@ pub fn effective_size(cols: u16, rows: u16) -> (u16, u16) {
 /// A [`Backend`] wrapper that keeps rendering alive on degenerate terminals.
 ///
 /// It substitutes the 80x24 fallback geometry whenever the wrapped backend
-/// reports a zero-sized or unqueryable size/window-size, and treats a failed
-/// cursor-position query as the origin. Every other operation is forwarded
-/// unchanged.
+/// reports a zero-sized or unqueryable size/window-size, and — **only on such
+/// a degenerate terminal** — treats a failed cursor-position query as the
+/// origin. On a live, sized terminal a cursor failure propagates: masking it
+/// would silently re-anchor the inline viewport at row 0, over the transcript
+/// (the resize regression). Every other operation is forwarded unchanged.
 #[derive(Debug)]
 pub struct FallbackSizeBackend<B> {
     inner: B,
@@ -101,6 +103,21 @@ impl<B> FallbackSizeBackend<B> {
     }
 }
 
+impl<B> FallbackSizeBackend<B>
+where
+    B: Backend<Error = io::Error>,
+{
+    /// Whether the wrapped backend reports degenerate (zero or unqueryable)
+    /// geometry — the headless-PTY marker, the same signal
+    /// [`effective_size`] keys the 80x24 substitution on.
+    fn degenerate_geometry(&self) -> bool {
+        self.inner
+            .size()
+            .map(|size| size.width == 0 || size.height == 0)
+            .unwrap_or(true)
+    }
+}
+
 impl<B> Backend for FallbackSizeBackend<B>
 where
     B: Backend<Error = io::Error>,
@@ -123,9 +140,18 @@ where
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
-        // A cursor-position query can go unanswered on a headless PTY; treat
-        // that as the origin rather than propagating the failure.
-        Ok(self.inner.get_cursor_position().unwrap_or(Position::ORIGIN))
+        match self.inner.get_cursor_position() {
+            Ok(position) => Ok(position),
+            // Key the substitution on the same signal the size fallback uses:
+            // zero/unqueryable geometry marks a headless PTY whose cursor
+            // query legitimately goes unanswered — the origin keeps rendering
+            // alive there. On a live, sized terminal a failed query is a real
+            // fault: masking it as the origin would anchor the inline viewport
+            // at row 0, over the transcript, and home `Terminal::clear` to the
+            // screen top, so propagate it.
+            Err(_) if self.degenerate_geometry() => Ok(Position::ORIGIN),
+            Err(err) => Err(err),
+        }
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
