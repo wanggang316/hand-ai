@@ -30,7 +30,7 @@ pub const FALLBACK_COLS: u16 = 80;
 /// be queried.
 pub const FALLBACK_ROWS: u16 = 24;
 
-/// Height of the inline viewport, in rows.
+/// Default height of the inline viewport, in rows.
 ///
 /// Under the fixed-max-viewport strategy (ratatui#984 workaround B), the inline
 /// viewport is reserved once at the *tallest* the bottom area can ever be —
@@ -41,6 +41,12 @@ pub const FALLBACK_ROWS: u16 = 24;
 /// the interior layout changes and the freed rows repaint blank, so there is no
 /// scrollback leak or ghost row. See [`crate::rt::view`] for the geometry core
 /// and the rejected alternatives.
+///
+/// The one controlled exception to "the height never changes" is
+/// [`set_inline_viewport_height`]: while a modal overlay panel is mounted the
+/// driver rebuilds the terminal taller (erase-first, so the change is
+/// ghost-free) and rebuilds it back to this default on unmount. Every other
+/// grow/shrink still happens *inside* the fixed height.
 pub const INLINE_VIEWPORT_ROWS: u16 = crate::rt::view::MAX_VIEWPORT_ROWS;
 
 /// Environment variable that forces the kitty keyboard-enhancement push even
@@ -368,6 +374,94 @@ where
     B: Backend,
 {
     terminal.clear()
+}
+
+/// Rebuild the inline viewport at a new height, in place, over the same backend.
+///
+/// ratatui bakes the inline height into `Viewport::Inline(rows)` when the
+/// `Terminal` is built and exposes no runtime setter — the constraint the whole
+/// fixed-max strategy works around (see [`INLINE_VIEWPORT_ROWS`]). This is the
+/// controlled exception: a cheap, infrequent, erase-first rebuild for the one
+/// case that genuinely needs a different height — the modal overlay panel,
+/// which grows the viewport at mount and shrinks it back at unmount.
+///
+/// The sequence, in the order that makes it ghost- and leak-free:
+///
+/// 1. **Erase first.** [`clear_viewport_region`] wipes from the old viewport
+///    origin to the end of the screen, so the rebuild's room-making
+///    (`append_lines`) can only ever scroll committed transcript rows or blank
+///    rows into scrollback — never live viewport cells (the M1 shrink-erase
+///    invariant, applied to a height change).
+/// 2. **Park the cursor** at the row the new viewport's top must land on:
+///    `old_top + (old_height − rows)` for a shrink, so the viewport keeps its
+///    **bottom edge** pinned (the box + footer do not jump when an overlay
+///    closes); `old_top` for a grow, so the viewport extends downward into the
+///    just-erased region and, when the screen runs out of room, ratatui scrolls
+///    the transcript up naturally — exactly what happens at session start.
+/// 3. **Rebuild.** The backend is moved out (`replacement` is left in the old
+///    terminal's husk, which sees at most a drop-time cursor restore) and a
+///    fresh `Terminal` is built over it with `Viewport::Inline(rows)`, which
+///    re-anchors at the parked cursor.
+///
+/// The rebuilt terminal starts with fresh buffers, so the next draw repaints
+/// the full viewport; `insert_before` history commits and the resize/erase
+/// paths continue to work unchanged (they key off the viewport area, which the
+/// rebuild re-derives).
+///
+/// # Errors
+///
+/// Propagates any backend error from the erase, the cursor park, or the
+/// rebuild. If the rebuild itself fails, the terminal is left over
+/// `replacement` with its old viewport state; a caller should treat that as
+/// fatal for the drawing session (the scheduler propagates the error and its
+/// teardown erase/restore paths still run).
+pub fn set_inline_viewport_height<B: Backend>(
+    terminal: &mut Terminal<B>,
+    replacement: B,
+    rows: u16,
+) -> Result<(), B::Error> {
+    let rows = rows.max(1);
+    let old = terminal.get_frame().area();
+    let screen = terminal.size()?;
+
+    // Erase before anything can scroll: only blank or transcript rows may spill
+    // through the rebuild.
+    clear_viewport_region(terminal)?;
+
+    // Bottom-pinned park row (top-pinned when growing, where the saturating_sub
+    // yields zero), clamped onto the screen for a shrink that follows a
+    // terminal resize the tracked geometry has not caught up with yet.
+    let park = old
+        .y
+        .saturating_add(old.height.saturating_sub(rows))
+        .min(screen.height.saturating_sub(1));
+    terminal.set_cursor_position(Position::new(0, park))?;
+
+    let backend = std::mem::replace(terminal.backend_mut(), replacement);
+    *terminal = Terminal::with_options(
+        backend,
+        TerminalOptions {
+            viewport: Viewport::Inline(rows),
+        },
+    )?;
+    Ok(())
+}
+
+/// [`set_inline_viewport_height`] for the live stdout [`SessionTerminal`].
+///
+/// Supplies the replacement backend (another stdout-backed
+/// [`FallbackSizeBackend`], so even the husk's drop-time cursor restore goes to
+/// the same terminal) and keeps the caller's code free of backend plumbing.
+///
+/// # Errors
+///
+/// Propagates the I/O error from [`set_inline_viewport_height`].
+pub fn set_session_viewport_height(terminal: &mut SessionTerminal, rows: u16) -> io::Result<()> {
+    set_inline_viewport_height(
+        terminal,
+        FallbackSizeBackend::new(CrosstermBackend::new(io::stdout())),
+        rows,
+    )
 }
 
 /// A [`Terminal`] wrapper that erases the inline viewport region exactly once,

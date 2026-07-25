@@ -50,5 +50,5 @@ pub use scheduler::{
 pub use view::{
     BORDER_ROWS, BottomGeometry, FocusView, HandleOutcome, LOADER_ROWS, MAX_INPUT_ROWS,
     MAX_VIEWPORT_ROWS, MIN_INPUT_ROWS, RtComponent, TerminalSize, bottom_area_geometry,
-    clamp_input_rows,
+    bottom_area_geometry_within, clamp_input_rows,
 };

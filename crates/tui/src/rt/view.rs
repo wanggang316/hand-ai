@@ -26,6 +26,16 @@
 //! row count, whether the loader is showing, and the terminal height, it decides
 //! how tall the *active* bottom area is and how it partitions into loader / input
 //! rows. It reads no terminal state, so it is unit-tested without a live backend.
+//!
+//! Strategy B has one controlled exception (the M6 decision-log revision):
+//! while a modal overlay panel is mounted, the driver rebuilds the terminal
+//! taller via
+//! [`set_inline_viewport_height`](crate::rt::session::set_inline_viewport_height)
+//! — an erase-first rebuild that avoids the leak family strategy A was rejected
+//! for — and lays the bottom area out inside the grown viewport with
+//! [`bottom_area_geometry_within`], which takes the *actual* viewport height
+//! instead of clamping to [`MAX_VIEWPORT_ROWS`]. On unmount the viewport
+//! shrinks back and everything above holds again.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -152,7 +162,34 @@ pub fn bottom_area_geometry(
     terminal_height: u16,
 ) -> BottomGeometry {
     // The fixed viewport can never be taller than the terminal itself.
-    let viewport_height = MAX_VIEWPORT_ROWS.min(terminal_height.max(1));
+    bottom_area_geometry_within(
+        input_rows,
+        loader_visible,
+        width,
+        MAX_VIEWPORT_ROWS.min(terminal_height.max(1)),
+    )
+}
+
+/// [`bottom_area_geometry`] against an explicit viewport height, without the
+/// [`MAX_VIEWPORT_ROWS`] clamp.
+///
+/// The fixed-max callers derive their height budget from the terminal size and
+/// go through [`bottom_area_geometry`]; this variant exists for the one caller
+/// whose viewport is *taller* than the fixed maximum — the driver laying the
+/// bottom area out inside a viewport grown for the modal overlay panel (built
+/// via
+/// [`set_inline_viewport_height`](crate::rt::session::set_inline_viewport_height)).
+/// `viewport_rows` is the caller's real frame height (already bounded by the
+/// terminal), so the active area still bottom-anchors against it and a short
+/// pane still trims the interior instead of overflowing.
+#[must_use]
+pub fn bottom_area_geometry_within(
+    input_rows: u16,
+    loader_visible: bool,
+    width: u16,
+    viewport_rows: u16,
+) -> BottomGeometry {
+    let viewport_height = viewport_rows.max(1);
 
     let input_rows = clamp_input_rows(input_rows);
     let loader_rows = if loader_visible { LOADER_ROWS } else { 0 };

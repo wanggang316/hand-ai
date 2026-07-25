@@ -21,7 +21,7 @@
 
 use hand_tui::rt::view::{
     BORDER_ROWS, LOADER_ROWS, MAX_INPUT_ROWS, MAX_VIEWPORT_ROWS, MIN_INPUT_ROWS,
-    bottom_area_geometry, clamp_input_rows,
+    bottom_area_geometry, bottom_area_geometry_within, clamp_input_rows,
 };
 use ratatui::backend::TestBackend;
 use ratatui::widgets::{Block, Paragraph};
@@ -44,6 +44,40 @@ fn input_rows_clamp_into_one_to_eight() {
     // The ceiling holds: growing past 8 rows does not enlarge the box.
     assert_eq!(clamp_input_rows(MAX_INPUT_ROWS), MAX_INPUT_ROWS);
     assert_eq!(clamp_input_rows(MAX_INPUT_ROWS + 5), MAX_INPUT_ROWS);
+}
+
+#[test]
+fn geometry_within_matches_the_fixed_max_delegation() {
+    // `bottom_area_geometry` is exactly the `_within` variant against the
+    // fixed-max clamp, so every existing caller is byte-identical.
+    for rows in MIN_INPUT_ROWS..=MAX_INPUT_ROWS {
+        for &loader in &[false, true] {
+            assert_eq!(
+                bottom_area_geometry(rows, loader, WIDTH, TALL),
+                bottom_area_geometry_within(rows, loader, WIDTH, MAX_VIEWPORT_ROWS),
+                "delegation must be exact at rows={rows} loader={loader}",
+            );
+        }
+    }
+}
+
+#[test]
+fn geometry_within_bottom_anchors_inside_a_viewport_taller_than_the_fixed_max() {
+    // The overlay-panel case: the driver grows the inline viewport past
+    // MAX_VIEWPORT_ROWS and the bottom area must anchor against the *grown*
+    // height (box glued to the viewport bottom, the whole band above it free
+    // for the panel) instead of being clamped back to the fixed max.
+    let grown: u16 = 19;
+    let g = bottom_area_geometry_within(1, false, WIDTH, grown);
+    assert_eq!(g.viewport_height, grown);
+    let expected_active = BORDER_ROWS + 1;
+    assert_eq!(g.active.height, expected_active);
+    assert_eq!(
+        g.active.y,
+        grown - expected_active,
+        "the active box bottom-anchors against the grown viewport"
+    );
+    assert_eq!(g.active.bottom(), grown, "no gap below the box");
 }
 
 #[test]
