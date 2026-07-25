@@ -40,7 +40,8 @@ async fn test_groq_chat_completion() {
     let client = Client::new();
 
     // Get model (Groq uses OpenAICompletions API which is registered by default)
-    let model = get_model("groq", "llama-3.1-8b-instant").expect("Model not found: groq/llama-3.1-8b-instant");
+    let model = get_model("groq", "llama-3.1-8b-instant")
+        .expect("Model not found: groq/llama-3.1-8b-instant");
 
     // Create context
     let context = Context {
@@ -126,7 +127,8 @@ async fn test_groq_complete_simple() {
 
     let client = Client::new();
 
-    let model = get_model("groq", "llama-3.1-8b-instant").expect("Model not found: groq/llama-3.1-8b-instant");
+    let model = get_model("groq", "llama-3.1-8b-instant")
+        .expect("Model not found: groq/llama-3.1-8b-instant");
 
     let context = Context {
         system_prompt: None,

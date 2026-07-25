@@ -158,11 +158,14 @@ struct ModelsDevData {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 fn to_number(v: Option<&serde_json::Value>) -> f64 {
+    // Negative prices are upstream sentinels for "dynamically priced"
+    // (e.g. router pseudo-models); clamp to 0 = "unknown price".
     match v {
         Some(serde_json::Value::Number(n)) => n.as_f64().unwrap_or(0.0),
         Some(serde_json::Value::String(s)) => s.parse().unwrap_or(0.0),
         _ => 0.0,
     }
+    .max(0.0)
 }
 
 fn cost(input: f64, output: f64, cache_read: f64, cache_write: f64) -> Cost {
@@ -222,26 +225,32 @@ async fn fetch_openrouter_models(client: &reqwest::Client) -> Vec<Model> {
         } else {
             input_text()
         };
+        // OpenRouter reports `-1` for dynamically-priced router pseudo-models
+        // (`openrouter/auto`); clamp negatives to 0 = "unknown price".
         let pricing = m.pricing.as_ref();
         let input_cost = pricing
             .and_then(|p| p.prompt.as_ref())
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0)
+            .max(0.0)
             * 1_000_000.0;
         let output_cost = pricing
             .and_then(|p| p.completion.as_ref())
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0)
+            .max(0.0)
             * 1_000_000.0;
         let cache_read_cost = pricing
             .and_then(|p| p.input_cache_read.as_ref())
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0)
+            .max(0.0)
             * 1_000_000.0;
         let cache_write_cost = pricing
             .and_then(|p| p.input_cache_write.as_ref())
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.0)
+            .max(0.0)
             * 1_000_000.0;
         let compat = openrouter_compat(&m.id);
         models.push(Model {
