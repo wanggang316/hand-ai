@@ -1,4 +1,5 @@
-//! Integration tests for the fuzzy matcher.
+//! Integration tests for the tokenized substring matcher (the module
+//! keeps its historical `fuzzy` name).
 
 use hand_tui::{FuzzyMatch, fuzzy_filter, fuzzy_match};
 
@@ -21,16 +22,17 @@ fn case_insensitive_matching() {
 }
 
 #[test]
-fn order_is_required() {
-    assert!(fuzzy_match("abc", "aXbXc").is_some());
-    assert!(fuzzy_match("abc", "cba").is_none());
+fn tokens_must_be_contiguous_substrings() {
+    // Subsequence-era behaviour: "abc" used to match "aXbXc" via
+    // scattered chars. Tokens are contiguous substrings now.
+    assert!(fuzzy_match("abc", "aXbXc").is_none());
+    assert!(fuzzy_match("abc", "xxabc").is_some());
 }
 
 #[test]
-fn consecutive_outscores_scattered() {
-    let consecutive = fuzzy_match("foo", "foobar").unwrap();
-    let scattered = fuzzy_match("foo", "f_o_o_bar").unwrap();
-    assert!(consecutive.score > scattered.score);
+fn token_order_in_target_is_irrelevant() {
+    assert!(fuzzy_match("world hello", "hello world").is_some());
+    assert!(fuzzy_match("foo bar", "foobar").is_some());
 }
 
 #[test]
