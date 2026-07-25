@@ -749,6 +749,52 @@ mod tests {
     }
 
     #[test]
+    fn tight_band_popup_follows_a_deep_selection() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use hand_tui::rt::components::{EditorBorder, PathEntry, PathProvider};
+        use hand_tui::rt::events::RtKey;
+        use std::sync::Arc as StdArc;
+
+        // Ten candidates against a band shorter than the popup's desired rows:
+        // the idle layout leaves 6 rows above the box (viewport 11 − active 5),
+        // so the 8-row window is clamped to 6. A selection between the band
+        // height and the desired cap used to be clipped out of the drawn rows
+        // (invisible highlight, lagging scroll) — the drawn window must follow
+        // the selection at the band's real height.
+        let provider = StdArc::new(PathProvider::new(
+            (0..10)
+                .map(|i| PathEntry::file(format!("f{i}.txt")))
+                .collect(),
+        ));
+        let editor: SharedEditor = Arc::new(Mutex::new(
+            Editor::new()
+                .border(EditorBorder::None)
+                .with_autocomplete_provider(provider),
+        ));
+        type_into(&editor, "@f");
+        {
+            let mut ed = lock_editor(&editor);
+            for _ in 0..7 {
+                ed.handle_key(&RtKey {
+                    key_id: Some("down".to_string()),
+                    raw: KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                });
+            }
+            assert_eq!(ed.autocomplete().selected_index(), 7, "walked to row 7");
+        }
+
+        let loader = Loader::new(LOADER_MESSAGE);
+        let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
+        draw_frame(&mut terminal, &editor, &loader, false);
+
+        let painted = buffer_text(&terminal);
+        assert!(
+            painted.contains("▸ f7.txt"),
+            "the highlighted candidate must be drawn in the tight band, got:\n{painted}"
+        );
+    }
+
+    #[test]
     fn no_autocomplete_popup_paints_when_closed() {
         // With no completable context, the popup is closed and the driver paints no
         // candidate band — the box + footer are the only chrome.

@@ -449,20 +449,46 @@ impl Autocomplete {
         }
     }
 
+    /// The scroll offset actually drawn for a `rows`-tall window: the stored
+    /// offset, re-clamped so the selection sits inside `[offset, offset + rows)`.
+    ///
+    /// The stored offset tracks a [`MAX_VISIBLE`]-row window (the drawn height is
+    /// not knowable at key time), but a host may hand `render` a shorter band —
+    /// the rt driver arbitrates the strip above the input box against the loader
+    /// and footer. Without this clamp a selection between the band height and
+    /// [`MAX_VISIBLE`] is clipped out of the drawn rows while the popup still
+    /// believes it is visible: an invisible indicator and scrolling that lags by
+    /// several presses. Requires `rows >= 1` (render guards the empty area).
+    fn effective_offset(&self, rows: usize) -> usize {
+        // Never over-scroll past the tail: a window taller than the remainder
+        // pulls back so every drawn row holds a candidate.
+        let mut offset = self.scroll.min(self.items.len().saturating_sub(rows));
+        if self.selected < offset {
+            offset = self.selected;
+        } else if self.selected >= offset + rows {
+            offset = self.selected + 1 - rows;
+        }
+        offset
+    }
+
     /// Paint the popup into `area`, top-aligned, showing at most [`MAX_VISIBLE`]
-    /// rows of the scroll window. The selected row is painted reversed; other
-    /// rows carry a leading space where the indicator sits. Nothing is painted
-    /// when the popup is closed or the area is empty.
+    /// rows of the scroll window — re-anchored so the selected row is always
+    /// inside the *drawn* window, even when `area` is shorter than
+    /// [`MAX_VISIBLE`] (see [`effective_offset`](Self::effective_offset)). The
+    /// selected row is painted reversed; other rows carry a leading space where
+    /// the indicator sits. Nothing is painted when the popup is closed or the
+    /// area is empty.
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         if self.items.is_empty() || area.is_empty() {
             return;
         }
         let width = area.width as usize;
         let rows = (area.height as usize).min(self.visible_rows());
-        let end = (self.scroll + rows).min(self.items.len());
+        let scroll = self.effective_offset(rows);
+        let end = (scroll + rows).min(self.items.len());
         let mut lines: Vec<Line> = Vec::with_capacity(rows);
-        for (offset, item) in self.items[self.scroll..end].iter().enumerate() {
-            let abs = self.scroll + offset;
+        for (offset, item) in self.items[scroll..end].iter().enumerate() {
+            let abs = scroll + offset;
             let selected = abs == self.selected;
             let indicator = if selected { "▸ " } else { "  " };
             // Reserve the indicator columns before truncating the label.
@@ -701,5 +727,110 @@ mod tests {
         ac.close();
         assert!(!ac.is_visible());
         assert!(ac.selected().is_none());
+    }
+
+    // --- render-time scroll follow at the drawn height -----------------------
+
+    /// Render the popup into a `height`-row buffer and collect each row's text.
+    fn drawn_rows(ac: &Autocomplete, height: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, 20, height);
+        let mut buf = Buffer::empty(area);
+        ac.render(area, &mut buf);
+        (0..height)
+            .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn short_area_window_follows_the_selection_immediately() {
+        // 10 candidates drawn into a 5-row band (shorter than MAX_VISIBLE): the
+        // highlighted row stays drawn at every step, and once the selection hits
+        // the drawn edge the window advances one row per press — no invisible
+        // indicator, no lagging scroll.
+        let mut ac = popup(10);
+        for step in 1..10usize {
+            ac.select_next();
+            let rows = drawn_rows(&ac, 5);
+            let sel = format!("▸ item{}", ac.selected_index());
+            assert!(
+                rows.iter().any(|r| r.contains(&sel)),
+                "step {step}: {sel:?} must be drawn: {rows:?}"
+            );
+            if step >= 5 {
+                // Selection past the drawn edge: the window's top row tracks it
+                // one-for-one (top = selected - (height - 1)).
+                let top = format!("item{}", step - 4);
+                assert!(
+                    rows[0].contains(&top),
+                    "step {step}: window top must be {top:?}: {rows:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn short_area_up_scrolls_back_and_selection_stays_drawn() {
+        // Walk to the tail, then back up: the drawn window follows the selection
+        // in both directions at the 5-row height, ending re-anchored at the top.
+        let mut ac = popup(10);
+        for _ in 0..9 {
+            ac.select_next();
+        }
+        for step in 1..=9usize {
+            ac.select_prev();
+            let rows = drawn_rows(&ac, 5);
+            let sel = format!("▸ item{}", ac.selected_index());
+            assert!(
+                rows.iter().any(|r| r.contains(&sel)),
+                "up step {step}: {sel:?} must be drawn: {rows:?}"
+            );
+        }
+        assert!(
+            drawn_rows(&ac, 5)[0].contains("▸ item0"),
+            "back at the top, the window is anchored at the first row"
+        );
+    }
+
+    #[test]
+    fn tall_area_draws_every_row_and_never_scrolls() {
+        // An area taller than the candidate count draws the whole list at every
+        // selection position — the window never scrolls.
+        let mut ac = popup(3);
+        for _ in 0..7 {
+            ac.select_next();
+            let rows = drawn_rows(&ac, 6);
+            for i in 0..3 {
+                assert!(
+                    rows.iter().any(|r| r.contains(&format!("item{i}"))),
+                    "item{i} must be drawn: {rows:?}"
+                );
+            }
+            let sel = format!("▸ item{}", ac.selected_index());
+            assert!(
+                rows.iter().any(|r| r.contains(&sel)),
+                "{sel:?} must be drawn: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_visible_height_matches_the_stored_window() {
+        // At exactly MAX_VISIBLE rows the render-time clamp is a no-op: the drawn
+        // window is the stored one, so the historical behaviour is unchanged.
+        let mut ac = popup(20);
+        for _ in 0..MAX_VISIBLE + 3 {
+            ac.select_next();
+        }
+        let rows = drawn_rows(&ac, MAX_VISIBLE as u16);
+        let top = format!("item{}", ac.scroll_offset());
+        let sel = format!("▸ item{}", ac.selected_index());
+        assert!(
+            rows[0].contains(&top),
+            "top row is the stored offset: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains(&sel)),
+            "selection drawn: {rows:?}"
+        );
     }
 }
