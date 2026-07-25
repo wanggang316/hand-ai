@@ -21,9 +21,10 @@
 //! `Arc<Mutex<…>>` (like the editor), and the shared piece is a `Send` handle to it.
 //! [`SelectorController`] is that `Send`-bounded trait; the driver never needs the
 //! M1 stack to cross a task boundary, so the M1 `?Send` contract is untouched (no rt
-//! seam required). The M1 stack is still reused for *rendering*: the scheduler
-//! builds a throwaway local stack each frame to get pixel-identical dim + border +
-//! clear placement.
+//! seam required). Rendering is the scheduler's own: it snapshots the selector's
+//! lines each frame and paints them as a bordered panel glued directly above the
+//! input box (the M6 layout — full frame width, never floating, never overlapping
+//! the box or footer, transcript untouched above).
 //!
 //! # The mount protocol (construct-in, channel-out)
 //!
@@ -34,7 +35,7 @@
 //! 2. **emits exactly one outcome** on that channel when the user confirms (Enter)
 //!    or cancels (Esc), then raises its [`DoneSignal`] so the runtime unmounts it.
 //!
-//! The driver [`mount`]s it as a centered, modal, dimmed, bordered overlay, watches
+//! The driver [`mount`]s it as a modal, bordered panel above the input box, watches
 //! the outcome channel, applies the result to the live session, and commits a
 //! status line — the same shape the legacy selectors used, now on the rt runtime.
 //!
@@ -44,7 +45,8 @@
 //! editor, and does not fall through — so typing drives the selector's filter, never
 //! the chat editor (VAL-OVERLAY-005). Overlays live only in the draw/input layer:
 //! the turn runner and event applier are untouched, so a turn that is streaming when
-//! a selector opens keeps streaming underneath the dimmed dialog (VAL-OVERLAY-009).
+//! a selector opens keeps streaming — its commits settle into scrollback beneath the
+//! panel — while it is up (VAL-OVERLAY-009).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};

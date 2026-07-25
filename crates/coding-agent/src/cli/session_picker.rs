@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 
 use crate::core::error::CodingAgentError;
 use crate::core::session_manager::SessionInfo;
-use crate::modes::interactive::rt_driver::input::{draw_overlay, overlay_interior_width};
+use crate::modes::interactive::rt_driver::input::{draw_overlay_panel, overlay_interior_width};
 use crate::modes::interactive::rt_driver::overlay::{
     self, SelectorController, SharedOverlay, new_done_signal, new_shared_overlay,
 };
@@ -159,11 +159,12 @@ fn outcome_path(outcome: SessionOutcome) -> Option<PathBuf> {
 
 /// Spawn the standalone picker's frame scheduler.
 ///
-/// The draw closure paints only the mounted selector as a centered, dimmed,
-/// bordered modal dialog over an empty viewport — reusing the driver's
-/// [`draw_overlay`] so the placement is pixel-identical to the `/resume` overlay.
-/// Wrapped in [`EraseOnDrop`] so the viewport region is wiped when the scheduler
-/// task ends, leaving no orphan dialog before the guard restores.
+/// The draw closure paints only the mounted selector as a full-width, bordered
+/// panel anchored to the bottom of the otherwise-empty viewport — reusing the
+/// driver's [`draw_overlay_panel`] so the look matches the `/resume` overlay
+/// (the M6 panel layout, minus the input box the driver glues it to). Wrapped
+/// in [`EraseOnDrop`] so the viewport region is wiped when the scheduler task
+/// ends, leaving no orphan panel before the guard restores.
 fn spawn_picker_scheduler(
     terminal: SessionTerminal,
     overlays: SharedOverlay,
@@ -176,16 +177,14 @@ fn spawn_picker_scheduler(
         };
         // The standalone CLI picker has no interactive DriverState, so it
         // renders on the default (historical) palette.
-        let overlay_lines = overlays.render_lines(
-            width,
-            &crate::modes::interactive::theme::ThemePalette::default(),
-        );
+        let palette = crate::modes::interactive::theme::ThemePalette::default();
+        let overlay_lines = overlays.render_lines(width, &palette);
         let mut stdout = std::io::stdout();
         draw_synchronized(&mut stdout, |_w| {
             terminal.draw(|frame| {
                 if let Some(lines) = overlay_lines.clone() {
                     let area = frame.area();
-                    draw_overlay(frame.buffer_mut(), area, lines);
+                    draw_overlay_panel(frame.buffer_mut(), area, area.bottom(), lines, &palette);
                 }
             })?;
             Ok(())

@@ -8,14 +8,20 @@
 //!    redraws the viewport;
 //! 2. wipes the old-width viewport on a backend size change so a resize never
 //!    spills a stale-width fragment into scrollback (M1 resize invariant);
-//! 3. lays the fixed-max inline bottom area out with
-//!    [`bottom_area_geometry`]`.offset_y(frame.area().y)` (M1 FIX-2: the viewport
-//!    origin drifts down as scrollback fills), then renders the bordered box
-//!    around the editor only (borderless — the box is the driver's), the
-//!    optional working-loader row in an unbordered row directly *above* the box
-//!    (M2 [`Loader`]), and the two-line footer view-model in an unbordered band
-//!    *below* it;
-//! 4. drives the hardware cursor from the editor's reported caret.
+//! 3. rebuilds the inline viewport taller while a modal overlay is mounted (the
+//!    M6 revision of the fixed-height decision: grow at mount so panel + box +
+//!    footer fit, shrink back at unmount — both through the erase-first
+//!    [`set_session_viewport_height`] primitive, so the height change is
+//!    ghost-free and leak-free);
+//! 4. lays the inline bottom area out with
+//!    [`bottom_area_geometry_within`]`.offset_y(frame.area().y)` (M1 FIX-2: the
+//!    viewport origin drifts down as scrollback fills), then renders the
+//!    bordered box around the editor only (borderless — the box is the
+//!    driver's), the optional working-loader row in an unbordered row directly
+//!    *above* the box (M2 [`Loader`]), the two-line footer view-model in an
+//!    unbordered band *below* it, and — while a selector is mounted — the
+//!    bordered overlay panel glued directly above the box (M6);
+//! 5. drives the hardware cursor from the editor's reported caret.
 //!
 //! This mirrors the rt demo's scheduler/draw split exactly; the only differences
 //! are the concrete components (M2 [`Editor`] + [`Loader`] + the footer view-model
@@ -28,12 +34,14 @@ use std::sync::{Arc, Mutex};
 use hand_tui::rt::components::{DEFAULT_SPINNER_FRAMES, Editor, Loader};
 use hand_tui::rt::history::{HistorySink, wrap_lines};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
-use hand_tui::rt::session::{EraseOnDrop, SessionTerminal, clear_viewport_region};
+use hand_tui::rt::session::{
+    EraseOnDrop, SessionTerminal, clear_viewport_region, set_session_viewport_height,
+};
 use hand_tui::rt::view::{
-    BORDER_ROWS, LOADER_ROWS, MAX_VIEWPORT_ROWS, RtComponent, bottom_area_geometry,
+    BORDER_ROWS, LOADER_ROWS, MAX_VIEWPORT_ROWS, RtComponent, bottom_area_geometry_within,
 };
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
@@ -55,6 +63,17 @@ const FOOTER_ROWS: u16 = 2;
 /// editor row for the caret. On a tiny pane the footer band collapses before
 /// the box is ever squeezed below this.
 const MIN_BOX_ROWS: u16 = 3;
+
+/// The smallest useful overlay panel: the top + bottom border rows plus one
+/// content row. With less band than this above the box, the panel is dropped
+/// for the frame rather than squeezing the box or the footer (the
+/// footer-collapse degradation spirit).
+const MIN_PANEL_ROWS: u16 = 3;
+
+/// Rows of transcript kept visible above a viewport grown for the overlay
+/// panel: a mounted selector may claim most of the terminal, never the whole
+/// screen.
+const OVERLAY_TRANSCRIPT_MARGIN: u16 = 2;
 
 /// Spawn the frame scheduler over the session terminal.
 ///
@@ -78,6 +97,12 @@ pub fn spawn_scheduler(
     // reaches the input loop) and the old-width viewport is erased before
     // anything autoresizes and spills.
     let mut last_size: Option<ratatui::layout::Size> = None;
+    // The height the inline viewport is currently built at. The default is the
+    // fixed-max bottom-UI ceiling the session terminal was constructed with;
+    // while a modal overlay is mounted the viewport is rebuilt taller so
+    // panel + box + footer fit (the M6 revision of the fixed-height decision)
+    // and rebuilt back at unmount — see `desired_viewport_rows`.
+    let mut viewport_rows: u16 = hand_tui::rt::session::INLINE_VIEWPORT_ROWS;
 
     // The working-loader shown in the unbordered row directly above the box while
     // a turn streams. Owned by the draw closure (not shared): it is toggled
@@ -116,8 +141,8 @@ pub fn spawn_scheduler(
                 loader_message: guard.loader_message.clone(),
                 preview,
                 // A modal selector owns focus; the editor caret is hidden while an
-                // overlay is up so the hardware cursor does not blink under the
-                // dimmed dialog.
+                // overlay is up so the hardware cursor does not blink inside the
+                // collapsed box under the panel.
                 overlay_open: overlay_lines.is_some(),
                 overlay_lines,
                 palette,
@@ -152,6 +177,27 @@ pub fn spawn_scheduler(
         }
         last_size = current_size;
 
+        // M6 overlay panel: rebuild the inline viewport when the mounted
+        // selector needs a taller bottom area, when it just closed, or when a
+        // resize invalidated the grown height. The primitive erases first, so
+        // the height change never ghosts or leaks; the ratchet inside
+        // `desired_viewport_rows` keeps mid-overlay filtering from thrashing
+        // rebuilds. The real backend height is preferred over the tracked one
+        // so a resize storm cannot momentarily over-grow.
+        let terminal_rows = current_size.map_or(snapshot.size.rows, |size| size.height);
+        let target = desired_viewport_rows(
+            viewport_rows,
+            snapshot
+                .overlay_lines
+                .as_ref()
+                .map(|lines| lines.len().min(u16::MAX as usize) as u16),
+            terminal_rows,
+        );
+        if target != viewport_rows {
+            set_session_viewport_height(&mut terminal, target)?;
+            viewport_rows = target;
+        }
+
         // Commit finished chat blocks into native scrollback BEFORE the draw.
         // Each block is one `insert_before`; the sink autoresizes then pre-wraps
         // to the current width, so a block committed right after a resize wraps
@@ -169,20 +215,12 @@ pub fn spawn_scheduler(
         let editor = &editor;
         let loader = &loader;
         draw_synchronized(&mut stdout, |w| {
-            terminal.draw(|frame| {
-                draw(frame, &snapshot, editor, loader, &footer_view);
-                // Layer the mounted selector over the base viewport, full-frame, so a
-                // centered modal dialog dims the whole transcript + bottom UI beneath
-                // it. Built as a throwaway local M1 OverlayStack each frame (the
-                // ?Send stack never crosses the task boundary) so the dim + border +
-                // clear + anchor placement is pixel-identical to the M1 contract. The
-                // whole viewport repaints each frame, so closing the overlay leaves no
-                // dim residue or ghost border (VAL-OVERLAY-001 / -008).
-                if let Some(lines) = snapshot.overlay_lines.clone() {
-                    let area = frame.area();
-                    draw_overlay(frame.buffer_mut(), area, lines);
-                }
-            })?;
+            // `draw` paints the whole frame, including the mounted selector's
+            // bordered panel glued above the box (the panel placement needs the
+            // box geometry, so it lives inside `draw` rather than as a separate
+            // layer). The whole viewport repaints each frame, so closing the
+            // overlay leaves no ghost border (VAL-OVERLAY-008).
+            terminal.draw(|frame| draw(frame, &snapshot, editor, loader, &footer_view))?;
             // Flush any raw terminal control sequences (OSC 133 prompt marks,
             // OSC 9;4 progress) AFTER the viewport draw but INSIDE the sync
             // block, on this terminal-owning task — the same raw-emission
@@ -238,8 +276,8 @@ struct StateSnapshot {
     /// always visible.
     preview: Vec<Line<'static>>,
     /// Whether a modal overlay (a selector) is currently mounted. While it is, the
-    /// editor caret is suppressed so the hardware cursor is not stranded under the
-    /// dimmed dialog.
+    /// editor caret is suppressed so the hardware cursor is not stranded in the
+    /// collapsed box under the panel.
     overlay_open: bool,
     /// The mounted selector's interior render lines this frame, or `None` when no
     /// overlay is open. Captured as a `Send` `Vec<Line>` so the draw closure paints
@@ -281,15 +319,31 @@ fn draw(
         (ed.desired_height(probe).max(1), ed.popup_row_count())
     };
 
-    // The footer renders BELOW the box, so its rows come out of the fixed
-    // viewport budget before the box is laid out: the geometry sees a height
-    // reduced by the footer band and bottom-anchors the box against it, leaving
-    // the band glued under the box's bottom border. On a tiny pane the footer
-    // collapses (partially, then fully) before the box shrinks below border +
-    // one editor row, so the caret always keeps a home.
-    let viewport_budget = MAX_VIEWPORT_ROWS.min(state.size.rows.max(1));
+    // The footer renders BELOW the box, so its rows come out of the viewport
+    // budget before the box is laid out: the geometry sees a height reduced by
+    // the footer band and bottom-anchors the box against it, leaving the band
+    // glued under the box's bottom border. On a tiny pane the footer collapses
+    // (partially, then fully) before the box shrinks below border + one editor
+    // row, so the caret always keeps a home. The budget is the frame's own
+    // height: normally the fixed max clamped to the terminal, and — while a
+    // modal overlay is mounted — the taller viewport the scheduler rebuilt for
+    // the panel.
+    let viewport_budget = area.height.max(1);
     let footer_rows = FOOTER_ROWS.min(viewport_budget.saturating_sub(MIN_BOX_ROWS));
     let box_budget = viewport_budget.saturating_sub(footer_rows);
+
+    // While a modal overlay is mounted, its bordered panel replaces the whole
+    // band above the box for the duration:
+    // - the selector owns every key (LIFO modal capture), so the autocomplete
+    //   popup can never open mid-overlay — the popup band is simply skipped;
+    // - the loader row and the streaming preview yield the band to the panel
+    //   (the turn keeps streaming: commits keep settling into scrollback
+    //   underneath) and both resume the moment the overlay closes;
+    // - the box collapses to a single editor row (the editor is frozen and its
+    //   caret hidden anyway), which keeps the panel budget deterministic —
+    //   panel + collapsed box + footer is exactly what the grown viewport
+    //   reserved.
+    let overlay_open = state.overlay_open;
 
     // While streaming, the loader occupies one unbordered row directly ABOVE the
     // box's top border (the box wraps only the editor). Reserving that row here
@@ -299,31 +353,40 @@ fn draw(
     // loader-free one. The `.max(1)` keeps the caret's single editor row on a
     // tiny pane; when even the reserved row then has no room, the loader yields
     // below rather than squeezing the editor.
-    let loader_reserve = if state.loader { LOADER_ROWS } else { 0 };
-    let editor_rows = editor_rows.min(
-        box_budget
-            .saturating_sub(BORDER_ROWS)
-            .saturating_sub(loader_reserve)
-            .max(1),
-    );
+    let loader_reserve = if state.loader && !overlay_open {
+        LOADER_ROWS
+    } else {
+        0
+    };
+    let editor_rows = if overlay_open {
+        1
+    } else {
+        editor_rows.min(
+            box_budget
+                .saturating_sub(BORDER_ROWS)
+                .saturating_sub(loader_reserve)
+                .max(1),
+        )
+    };
 
-    // Lay the fixed-max bottom area out inside the viewport, then translate every
-    // rect down by `area.y` so the bottom UI paints at the viewport's real rows —
+    // Lay the bottom area out inside the viewport, then translate every rect
+    // down by `area.y` so the bottom UI paints at the viewport's real rows —
     // not absolute row 0, which drifts off-screen once `insert_before` moves the
     // viewport down (the "box vanishes after a big block" bug). This is the M1
     // FIX-2 offset_y invariant. `loader_visible` is hard-false: the geometry's
     // interior loader slot is retired — the loader row lives above the box now.
     let geometry =
-        bottom_area_geometry(editor_rows, false, area.width, box_budget).offset_y(area.y);
+        bottom_area_geometry_within(editor_rows, false, area.width, box_budget).offset_y(area.y);
 
     // Arbitrate the blank band above the box (viewport origin → box top): while
     // streaming the loader claims the band's bottom row, glued to the top border
     // — unless the popup needs the space. The popup wins and the loader yields
     // for the frame (the same degradation spirit as the footer's collapse), so
-    // the two never overlap and the order stays popup < loader < box.
+    // the two never overlap and the order stays popup < loader < box. A mounted
+    // overlay panel supersedes both (see the band rule above).
     let band = geometry.active.y.saturating_sub(area.y);
     let popup_leaves_room = popup_wanted == 0 || band >= popup_wanted.saturating_add(LOADER_ROWS);
-    let loader_rows = if state.loader && band >= LOADER_ROWS && popup_leaves_room {
+    let loader_rows = if state.loader && !overlay_open && band >= LOADER_ROWS && popup_leaves_room {
         LOADER_ROWS
     } else {
         0
@@ -333,8 +396,11 @@ fn draw(
     // and the active box (between the viewport origin and whichever is higher),
     // so the in-flight assistant partial grows in place without touching
     // scrollback. When the preview is taller than the band, its tail is shown so
-    // the newest tokens stay visible.
-    draw_stream_preview(frame, &state.preview, area, geometry.active, loader_rows);
+    // the newest tokens stay visible. The panel owns the band while an overlay
+    // is mounted.
+    if !overlay_open {
+        draw_stream_preview(frame, &state.preview, area, geometry.active, loader_rows);
+    }
 
     // The bordered box occupies only the active area; rows above it (freed by a
     // collapse) stay blank and repaint clear each frame. The border colours from
@@ -378,7 +444,12 @@ fn draw(
     {
         let ed = lock_editor(editor);
         ed.render(editor_rect, frame.buffer_mut());
-        draw_autocomplete_popup(frame.buffer_mut(), &ed, area, geometry.active, loader_rows);
+        // The popup band is skipped outright while a modal overlay is mounted:
+        // the selector consumes every key, so no completable context can even
+        // arise, and the band belongs to the panel.
+        if !overlay_open {
+            draw_autocomplete_popup(frame.buffer_mut(), &ed, area, geometry.active, loader_rows);
+        }
         // Disambiguate: the `RtComponent::cursor` (viewport-local `Option<Position>`)
         // over the inherent `Editor::cursor` (the `(line, col)` accessor). The
         // component caret is already anchored at `editor_rect` (its render area).
@@ -405,82 +476,107 @@ fn draw(
         let lines = render_footer_lines(footer, footer_rect.width, &state.palette);
         Paragraph::new(Text::from(lines)).render(footer_rect, frame.buffer_mut());
     }
+
+    // The mounted selector's bordered panel, glued directly above the box's top
+    // border — painted last so it owns its band outright. The stack order while
+    // an overlay is up is fixed: transcript (above the viewport) → panel → box
+    // → footer, with no overlap and no floating (the M6 layout).
+    if let Some(lines) = state.overlay_lines.clone() {
+        draw_overlay_panel(
+            frame.buffer_mut(),
+            area,
+            geometry.active.y,
+            lines,
+            &state.palette,
+        );
+    }
 }
 
-/// The interior width an overlay dialog gives its content, for the current
-/// viewport columns: a centered dialog spans ~60% of the width (bounded to a sane
-/// minimum), minus the two border columns. The scheduler measures the mounted
-/// selector's render lines against this so wrapping matches the box it paints into.
+/// The interior width the overlay panel gives the mounted selector's lines, for
+/// the current viewport columns: the panel spans the full frame width — its
+/// edges aligned with the input box below it — minus the two border columns.
+/// The scheduler measures the mounted selector's render lines against this so
+/// wrapping matches the panel it paints into.
 pub(crate) fn overlay_interior_width(cols: u16) -> u16 {
-    dialog_outer_width(cols).saturating_sub(2).max(1)
+    cols.saturating_sub(2).max(1)
 }
 
-/// The outer width of a centered dialog overlay for `cols` viewport columns: ~60%,
-/// floored at a readable minimum, clamped to the viewport.
-fn dialog_outer_width(cols: u16) -> u16 {
-    let sixty = (cols as u32 * 3 / 5) as u16;
-    sixty.max(40).min(cols.max(1))
-}
-
-/// Paint the mounted selector's `lines` as a centered, dimmed, bordered modal
-/// dialog over the already-drawn base buffer (VAL-OVERLAY-001).
+/// The inline-viewport height the scheduler wants this frame.
 ///
-/// Placement reuses the M1 pure geometry
-/// [`anchor_rect`](hand_tui::rt::overlay::anchor_rect): the dialog is sized to hold
-/// its content (~60% wide, tall enough for the lines plus the two border rows) and
-/// Center-anchored, and `anchor_rect` clamps an oversized box into the viewport — so
-/// a tiny pane (40×10) keeps the border on-frame without wrapping (VAL-OVERLAY-020).
-/// The dim + bordered-clear passes mirror the M1 [`OverlayStack::render`] contract
-/// (dim every base cell outside the box, `Clear` the footprint, draw the border,
-/// paint the content inside). A selector's list can be taller than the M1 stack's
-/// fixed 7-row dialog, so the box is sized here rather than through the stack's
-/// private heuristic — the only reason this does not call `OverlayStack::render`
-/// directly. Because the whole viewport repaints each frame, closing the overlay
-/// later leaves no dim residue or ghost border (VAL-OVERLAY-008).
-pub(crate) fn draw_overlay(
+/// With no overlay mounted this is always the fixed-max default
+/// ([`MAX_VIEWPORT_ROWS`]) — closing a selector shrinks the viewport back. With
+/// an overlay mounted, the panel needs its content plus two border rows, on top
+/// of the collapsed box and the footer band; that total is clamped between the
+/// default (never shrink below it — a short selector simply fits inside) and
+/// the terminal height minus a couple of transcript rows
+/// ([`OVERLAY_TRANSCRIPT_MARGIN`]) so the panel can never claim the whole
+/// screen. On a pane too short to grow at all, the cap floors at the default
+/// and the panel clamps *itself* into the band instead (the small-terminal
+/// rule: the panel shrinks first, the box and footer never move out).
+///
+/// The `.max(current)` is a mid-overlay ratchet: filtering a selector narrows
+/// its list every keystroke, and shrinking the viewport to chase it would
+/// rebuild the terminal per key. Growing is immediate (a backspace that
+/// re-widens the list gets its rows back); shrinking waits for the unmount —
+/// except when the terminal itself shrank, where the cap re-clamps downward.
+fn desired_viewport_rows(
+    current: u16,
+    overlay_content_rows: Option<u16>,
+    terminal_rows: u16,
+) -> u16 {
+    let Some(content) = overlay_content_rows else {
+        return MAX_VIEWPORT_ROWS;
+    };
+    let cap = terminal_rows
+        .saturating_sub(OVERLAY_TRANSCRIPT_MARGIN)
+        .max(MAX_VIEWPORT_ROWS);
+    let needed = content
+        .saturating_add(BORDER_ROWS)
+        .saturating_add(MIN_BOX_ROWS)
+        .saturating_add(FOOTER_ROWS)
+        .clamp(MAX_VIEWPORT_ROWS, cap);
+    needed.max(current).min(cap)
+}
+
+/// Paint the mounted selector's `lines` as a bordered panel glued directly
+/// above the box's top border (`box_top`), spanning the full frame width so its
+/// edges align with the input box below (the M6 overlay layout).
+///
+/// The panel's height is its content plus the two border rows, clamped to the
+/// band between the viewport origin and the box top — it can never overlap the
+/// box or the footer, and it never floats. The scheduler normally grows the
+/// viewport so the band fits the whole list (see [`desired_viewport_rows`]); on
+/// a pane too short for that the panel clamps into whatever band exists and the
+/// selector's own list window scrolls inside it. With less band than
+/// [`MIN_PANEL_ROWS`] the panel is dropped for the frame rather than squeezing
+/// the box. The transcript above is left untouched — no background dim: the
+/// panel covers no content, so there is nothing to recede. Because the whole
+/// viewport repaints each frame, closing the overlay leaves no ghost border
+/// (VAL-OVERLAY-008).
+pub(crate) fn draw_overlay_panel(
     buf: &mut ratatui::buffer::Buffer,
     area: Rect,
+    box_top: u16,
     lines: Vec<Line<'static>>,
+    palette: &ThemePalette,
 ) {
-    use hand_tui::rt::overlay::{OverlayAnchor, OverlayMargin, anchor_rect};
-    use ratatui::layout::Size;
-    use ratatui::style::Modifier;
-    use ratatui::widgets::{Block, Clear};
+    use ratatui::widgets::Clear;
 
-    if area.width == 0 || area.height == 0 {
+    let band = box_top.saturating_sub(area.y);
+    if area.width == 0 || band < MIN_PANEL_ROWS {
         return;
     }
+    let height = (lines.len().min(u16::MAX as usize) as u16)
+        .saturating_add(BORDER_ROWS)
+        .clamp(MIN_PANEL_ROWS, band);
+    let rect = Rect::new(area.x, box_top.saturating_sub(height), area.width, height);
 
-    // Desired outer box: ~60% wide (min 40, clamped), tall enough for the content
-    // plus the two border rows. `anchor_rect` size-clamps both to the viewport.
-    let outer_w = dialog_outer_width(area.width);
-    let outer_h = (lines.len() as u16).saturating_add(2).max(3);
-    let rect = anchor_rect(
-        Size::new(outer_w, outer_h),
-        area,
-        OverlayAnchor::Center,
-        OverlayMargin::uniform(0),
-        true,
-    );
-
-    // Dim every base cell outside the dialog so the background recedes but stays
-    // legible (mirrors the M1 `dim_outside` pass).
-    let dim = Style::default().add_modifier(Modifier::DIM);
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            let inside =
-                x >= rect.left() && x < rect.right() && y >= rect.top() && y < rect.bottom();
-            if !inside && let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_style(dim);
-            }
-        }
-    }
-
-    // Clear the footprint so no base content bleeds through, draw the border, and
-    // paint the content into the interior. `Paragraph` clips content wider/taller
-    // than the interior, so the border never overflows.
+    // Clear the footprint so nothing bleeds through, draw the border (coloured
+    // from the palette like the box below, so the two read as one chrome), and
+    // paint the content into the interior. `Paragraph` clips content
+    // wider/taller than the interior, so the border never overflows.
     Clear.render(rect, buf);
-    let block = Block::bordered().border_style(Style::default().fg(Color::DarkGray));
+    let block = Block::bordered().border_style(Style::default().fg(palette.border));
     let interior = block.inner(rect);
     block.render(rect, buf);
     Paragraph::new(Text::from(lines)).render(interior, buf);
@@ -1089,7 +1185,7 @@ mod tests {
         }
     }
 
-    // --- Overlay dialog rendering (VAL-OVERLAY-001 / -020) ----------------
+    // --- Overlay panel rendering (M6: panel above the input box) -----------
 
     use ratatui::buffer::Buffer;
     use ratatui::style::Modifier;
@@ -1112,10 +1208,31 @@ mod tests {
         false
     }
 
+    /// The buffer rows whose cells include the given glyph, in row order — used
+    /// to tell the panel's border rows from the box's.
+    fn rows_with(terminal: &Terminal<TestBackend>, glyph: &str) -> Vec<u16> {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        let mut rows = Vec::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y))
+                    && cell.symbol() == glyph
+                {
+                    rows.push(y);
+                    break;
+                }
+            }
+        }
+        rows
+    }
+
     #[test]
-    fn overlay_renders_a_centered_bordered_dimmed_dialog() {
-        // VAL-OVERLAY-001: the mounted selector paints a bordered box, centered, with
-        // the surrounding base cells dimmed and its own content crisp.
+    fn overlay_panel_renders_bordered_content_glued_to_its_anchor() {
+        // The mounted selector paints as a full-width bordered panel whose
+        // bottom edge touches the anchor row (the box top in the driver), with
+        // crisp content inside and nothing at or below the anchor touched —
+        // and no background dim: the panel covers no transcript.
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::filled(area, ratatui::buffer::Cell::new("."));
         let lines = vec![
@@ -1123,20 +1240,21 @@ mod tests {
             Line::from("→ claude-sonnet [anthropic]"),
             Line::from("  gpt-4o [openai]"),
         ];
+        let box_top = 18;
 
-        draw_overlay(&mut buf, area, lines);
+        draw_overlay_panel(&mut buf, area, box_top, lines, &ThemePalette::default());
 
-        // The dialog drew a border.
-        assert!(has_border(&buf), "a bordered dialog box must be painted");
-
-        // A base cell in the far corner (outside the centered box) is dimmed; the
-        // box interior is not.
-        let corner = buf.cell((0, 0)).unwrap();
-        assert!(
-            corner.modifier.contains(Modifier::DIM),
-            "cells outside the dialog are dimmed"
+        assert!(has_border(&buf), "a bordered panel must be painted");
+        // Panel = 3 content rows + 2 border rows, bottom glued to the anchor:
+        // top border row 13, bottom border row 17, full frame width.
+        assert_eq!(buf.cell((0, 13)).unwrap().symbol(), "┌");
+        assert_eq!(buf.cell((79, 13)).unwrap().symbol(), "┐");
+        assert_eq!(
+            buf.cell((0, 17)).unwrap().symbol(),
+            "└",
+            "the panel's bottom border sits directly above the box top"
         );
-        // The dialog content is present and crisp.
+        // The content is crisp inside the interior.
         let text: String = {
             let mut s = String::new();
             for y in area.y..area.y + area.height {
@@ -1150,40 +1268,79 @@ mod tests {
             s
         };
         assert!(text.contains("claude-sonnet"), "content painted: {text}");
+        // Nothing at/below the anchor (the box's rows) is touched, and the rows
+        // above the panel keep their base cells undimmed — the transcript dim
+        // is gone with the centered dialog.
+        assert_eq!(buf.cell((0, 18)).unwrap().symbol(), ".");
+        let above = buf.cell((0, 0)).unwrap();
+        assert_eq!(above.symbol(), ".");
+        assert!(
+            !above.modifier.contains(Modifier::DIM),
+            "no dim pass over the base"
+        );
     }
 
     #[test]
-    fn overlay_clamps_into_a_tiny_40x10_pane_without_overflowing() {
-        // VAL-OVERLAY-020: on a small 40×10 pane the box is size-clamped to the
-        // viewport, so the border stays on-frame and nothing writes past the edges.
+    fn overlay_panel_clamps_into_a_tiny_band_without_overflowing() {
+        // VAL-OVERLAY-020 spirit: with a band shorter than the content, the
+        // panel clamps to the band — the border stays on-frame, nothing writes
+        // at or past the anchor, and the selector's own list window handles the
+        // reduced interior.
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::filled(area, ratatui::buffer::Cell::new(" "));
-        // A tall content list (more rows than the pane) forces the height clamp.
+        // A tall content list (more rows than the band) forces the height clamp.
         let lines: Vec<Line<'static>> = (0..20).map(|i| Line::from(format!("model-{i}"))).collect();
+        let box_top = 5;
 
-        draw_overlay(&mut buf, area, lines);
+        draw_overlay_panel(&mut buf, area, box_top, lines, &ThemePalette::default());
 
-        assert!(has_border(&buf), "the clamped dialog still has a border");
-        // The buffer is exactly 40×10 — the render never panicked or wrote out of
-        // bounds (TestBackend/Buffer would panic on an out-of-range cell write).
+        assert!(has_border(&buf), "the clamped panel still has a border");
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().symbol(),
+            "┌",
+            "the clamped panel takes the whole band"
+        );
+        assert_eq!(
+            buf.cell((0, 4)).unwrap().symbol(),
+            "└",
+            "the bottom border stays glued to the box top"
+        );
         assert_eq!(buf.area, area, "no overflow past the tiny pane");
     }
 
     #[test]
-    fn overlay_on_a_zero_sized_area_is_a_silent_noop() {
-        // VAL-OVERLAY-020 (0×0 dialog layer): a degenerate viewport renders nothing
-        // rather than panicking.
+    fn overlay_panel_on_a_degenerate_band_is_a_silent_noop() {
+        // A zero-sized viewport renders nothing rather than panicking.
         let area = Rect::new(0, 0, 0, 0);
         let mut buf = Buffer::empty(area);
-        draw_overlay(&mut buf, area, vec![Line::from("x")]);
+        draw_overlay_panel(
+            &mut buf,
+            area,
+            0,
+            vec![Line::from("x")],
+            &ThemePalette::default(),
+        );
         assert_eq!(buf.area.width, 0);
+
+        // A band shorter than MIN_PANEL_ROWS drops the panel for the frame —
+        // the box and footer are never squeezed to make room.
+        let area = Rect::new(0, 0, 20, 8);
+        let mut buf = Buffer::filled(area, ratatui::buffer::Cell::new("."));
+        draw_overlay_panel(
+            &mut buf,
+            area,
+            MIN_PANEL_ROWS - 1,
+            vec![Line::from("x")],
+            &ThemePalette::default(),
+        );
+        assert!(!has_border(&buf), "no panel in a band below the minimum");
     }
 
     #[test]
-    fn a_full_frame_layers_the_overlay_over_the_base_which_keeps_rendering() {
-        // VAL-OVERLAY-009: an open overlay is layered over the base viewport, and the
-        // base (footer, and any streaming preview) keeps rendering underneath the
-        // dimmed dialog — the overlay is a draw-layer concern only.
+    fn a_full_frame_glues_the_panel_above_the_box_with_the_footer_clear() {
+        // VAL-OVERLAY-009: the panel is part of the frame paint. It sits glued
+        // above the box top, spans the frame width, and the footer below stays
+        // fully legible — never covered, never dimmed.
         let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
         let loader = Loader::new(LOADER_MESSAGE);
         let mut terminal = fixed_viewport(80, MAX_VIEWPORT_ROWS);
@@ -1204,21 +1361,190 @@ mod tests {
             ..FooterViewModel::default()
         };
         terminal
-            .draw(|frame| {
-                draw(frame, &snapshot, &editor, &loader, &footer);
-                if let Some(lines) = snapshot.overlay_lines.clone() {
-                    let area = frame.area();
-                    draw_overlay(frame.buffer_mut(), area, lines);
-                }
-            })
+            .draw(|frame| draw(frame, &snapshot, &editor, &loader, &footer))
             .expect("draw one frame");
 
         let text = buffer_text(&terminal);
-        // The overlay content is on top.
         assert!(text.contains("claude-sonnet"), "overlay content: {text}");
-        // The base footer still rendered underneath (it was drawn before the overlay
-        // and only dimmed, not erased).
-        assert!(text.contains("base-model"), "base keeps rendering: {text}");
+        assert!(text.contains("base-model"), "footer legible: {text}");
+
+        // Row order: panel top < content < panel bottom, panel bottom + 1 ==
+        // box top (glued, no overlap), footer below the box bottom.
+        let opens = rows_with(&terminal, "┌");
+        let closes = rows_with(&terminal, "└");
+        assert_eq!(opens.len(), 2, "panel + box top borders: {opens:?}");
+        assert_eq!(closes.len(), 2, "panel + box bottom borders: {closes:?}");
+        let (panel_top, box_top) = (opens[0], opens[1]);
+        let (panel_bottom, box_bottom) = (closes[0], closes[1]);
+        let content_row = row_of(&terminal, "claude-sonnet").expect("panel content row");
+        assert!(panel_top < content_row && content_row < panel_bottom);
+        assert_eq!(
+            panel_bottom + 1,
+            box_top,
+            "the panel is glued directly above the box"
+        );
+        let footer_row = row_of(&terminal, "base-model").expect("footer stats row");
+        assert!(footer_row > box_bottom, "footer below the box, uncovered");
+        // Full width: the panel's corners land on the frame's first and last
+        // columns, aligned with the box below.
+        assert_eq!(edge_cols(&terminal, panel_top), vec![0, width - 1]);
+        assert_eq!(edge_cols(&terminal, box_top), vec![0, width - 1]);
+    }
+
+    #[test]
+    fn small_pane_panel_clamps_while_box_and_footer_stay_intact() {
+        // 40x10 pane: too short to grow (the desired height floors at the
+        // default), so the panel clamps into the band above the box while the
+        // box and footer keep every row they had.
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        let loader = Loader::new(LOADER_MESSAGE);
+        let mut terminal = fixed_viewport(40, 10);
+        let lines: Vec<Line<'static>> = (0..8).map(|i| Line::from(format!("item-{i}"))).collect();
+        let snapshot = StateSnapshot {
+            size: TerminalSize::new(40, 10),
+            loader: false,
+            loader_message: None,
+            preview: Vec::new(),
+            overlay_open: true,
+            overlay_lines: Some(lines),
+            palette: ThemePalette::default(),
+        };
+        terminal
+            .draw(|frame| draw(frame, &snapshot, &editor, &loader, &probe_footer()))
+            .expect("draw one frame");
+
+        let opens = rows_with(&terminal, "┌");
+        let closes = rows_with(&terminal, "└");
+        assert_eq!(opens.len(), 2, "panel + box painted: {opens:?}");
+        assert_eq!(
+            closes[0] + 1,
+            opens[1],
+            "the clamped panel stays glued to the box top"
+        );
+        // The clamped interior still shows the head of the list.
+        assert!(
+            buffer_text(&terminal).contains("item-0"),
+            "the clamped panel shows list rows"
+        );
+        // Box + footer intact inside the 10-row pane: the footer's two rows sit
+        // below the box bottom and inside the frame.
+        let cwd_row = row_of(&terminal, "/tmp/proj").expect("cwd row painted");
+        let stats_row = row_of(&terminal, "test-model").expect("stats row painted");
+        assert_eq!(cwd_row, closes[1] + 1, "footer glued below the box");
+        assert!(stats_row < 10, "everything fits the 10-row pane");
+    }
+
+    #[test]
+    fn desired_viewport_rows_budgets_panel_box_footer_with_cap_and_ratchet() {
+        // Closed → always the fixed default (closing a selector shrinks back).
+        assert_eq!(desired_viewport_rows(21, None, 24), MAX_VIEWPORT_ROWS);
+        // Open: content + panel borders + collapsed box + footer.
+        assert_eq!(desired_viewport_rows(MAX_VIEWPORT_ROWS, Some(14), 24), 21);
+        // Capped at the terminal height minus the transcript margin.
+        assert_eq!(desired_viewport_rows(MAX_VIEWPORT_ROWS, Some(30), 24), 22);
+        // A short selector never shrinks the viewport below the default.
+        assert_eq!(
+            desired_viewport_rows(MAX_VIEWPORT_ROWS, Some(1), 24),
+            MAX_VIEWPORT_ROWS
+        );
+        // On a pane too short to grow, the default holds — the panel clamps
+        // itself into the band instead (the small-terminal rule).
+        assert_eq!(
+            desired_viewport_rows(MAX_VIEWPORT_ROWS, Some(14), 10),
+            MAX_VIEWPORT_ROWS
+        );
+        // Mid-overlay ratchet: filtering the list down never shrinks (no
+        // rebuild churn per keystroke)…
+        assert_eq!(desired_viewport_rows(21, Some(2), 24), 21);
+        // …but a terminal shrink re-clamps a grown viewport downward.
+        assert_eq!(desired_viewport_rows(21, Some(14), 16), 14);
+    }
+
+    #[test]
+    fn overlay_mount_grows_the_viewport_and_unmount_shrinks_it_back_ghost_free() {
+        use hand_tui::rt::session::set_inline_viewport_height;
+
+        // The scheduler's rebuild sequence against a TestBackend: mount grows
+        // the inline viewport to the desired height, the panel then has room
+        // for the selector's whole window; unmount shrinks it back with the
+        // bottom edge pinned and leaves no panel residue anywhere on screen.
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        let loader = Loader::new(LOADER_MESSAGE);
+        let footer = probe_footer();
+        let mut terminal = fixed_viewport(60, 24);
+        assert_eq!(terminal.get_frame().area().height, MAX_VIEWPORT_ROWS);
+
+        // Mount: 8 content rows → panel 10 → panel + box + footer = 15.
+        let lines: Vec<Line<'static>> = (0..8).map(|i| Line::from(format!("item-{i}"))).collect();
+        let target = desired_viewport_rows(MAX_VIEWPORT_ROWS, Some(lines.len() as u16), 24);
+        assert_eq!(target, 15, "panel(10) + collapsed box(3) + footer(2)");
+        set_inline_viewport_height(&mut terminal, TestBackend::new(1, 1), target)
+            .expect("grow the viewport at mount");
+        assert_eq!(terminal.get_frame().area().height, target);
+
+        let snapshot = StateSnapshot {
+            size: TerminalSize::new(60, 24),
+            loader: false,
+            loader_message: None,
+            preview: Vec::new(),
+            overlay_open: true,
+            overlay_lines: Some(lines),
+            palette: ThemePalette::default(),
+        };
+        terminal
+            .draw(|frame| draw(frame, &snapshot, &editor, &loader, &footer))
+            .expect("draw the open frame");
+
+        // The grown band fits the whole list — every row is visible at once.
+        let text = buffer_text(&terminal);
+        for i in 0..8 {
+            assert!(
+                text.contains(&format!("item-{i}")),
+                "row {i} visible: {text}"
+            );
+        }
+        let opens = rows_with(&terminal, "┌");
+        let closes = rows_with(&terminal, "└");
+        assert_eq!(
+            closes[0] + 1,
+            opens[1],
+            "panel glued above the box in the grown viewport"
+        );
+
+        // Unmount: shrink back to the default, bottom edge pinned.
+        let shrink = desired_viewport_rows(target, None, 24);
+        assert_eq!(shrink, MAX_VIEWPORT_ROWS);
+        set_inline_viewport_height(&mut terminal, TestBackend::new(1, 1), shrink)
+            .expect("shrink the viewport at unmount");
+        let area = terminal.get_frame().area();
+        assert_eq!(
+            area.y,
+            target - MAX_VIEWPORT_ROWS,
+            "the shrunk viewport keeps its bottom edge pinned"
+        );
+
+        let closed = StateSnapshot {
+            size: TerminalSize::new(60, 24),
+            loader: false,
+            loader_message: None,
+            preview: Vec::new(),
+            overlay_open: false,
+            overlay_lines: None,
+            palette: ThemePalette::default(),
+        };
+        terminal
+            .draw(|frame| draw(frame, &closed, &editor, &loader, &footer))
+            .expect("draw the closed frame");
+
+        // Ghost-free close: no panel content or extra border anywhere on the
+        // whole screen — the erase-first shrink wiped the grown band.
+        let after = buffer_text(&terminal);
+        assert!(!after.contains("item-"), "no panel residue: {after}");
+        assert_eq!(
+            rows_with(&terminal, "┌").len(),
+            1,
+            "only the box border remains after close"
+        );
     }
 
     // --- Active-area box geometry (M3 polish: box border alignment) --------
@@ -1579,19 +1905,20 @@ mod tests {
     }
 
     #[test]
-    fn overlay_over_stream_dims_base_while_the_stream_keeps_rendering() {
-        // VAL-CROSS-002 (draw-layer slice): while a turn streams, opening an
-        // overlay dims the base but the streaming loader + preview keep rendering
-        // underneath it — the overlay is a pure draw layer, it never pauses the
-        // turn. (The Esc-closes-overlay / Esc-cancels-turn key routing is covered
-        // by the input-loop cancel path; here we pin the render invariant.)
+    fn overlay_replaces_the_loader_band_and_streaming_chrome_resumes_on_close() {
+        // VAL-CROSS-002 (draw-layer slice): while a turn streams, a mounted
+        // overlay's panel replaces the loader/preview band entirely — the turn
+        // itself never pauses (its commits keep settling into scrollback, a
+        // path independent of this draw layout) — and the loader + preview
+        // chrome resume the moment the overlay closes. There is no background
+        // dim anymore: the panel covers no content.
         let editor: SharedEditor = Arc::new(Mutex::new(
             Editor::new().border(hand_tui::rt::components::EditorBorder::None),
         ));
         let mut loader = Loader::new(LOADER_MESSAGE);
         loader.set_active(true);
         let mut terminal = fixed_viewport(80, MAX_VIEWPORT_ROWS);
-        let snapshot = StateSnapshot {
+        let open = StateSnapshot {
             size: TerminalSize::new(80, MAX_VIEWPORT_ROWS),
             loader: true,
             loader_message: None,
@@ -1602,27 +1929,48 @@ mod tests {
         };
         let footer = FooterViewModel::default();
         terminal
-            .draw(|frame| {
-                draw(frame, &snapshot, &editor, &loader, &footer);
-                if let Some(lines) = snapshot.overlay_lines.clone() {
-                    let area = frame.area();
-                    draw_overlay(frame.buffer_mut(), area, lines);
-                }
-            })
-            .expect("draw one frame");
+            .draw(|frame| draw(frame, &open, &editor, &loader, &footer))
+            .expect("draw the open frame");
 
-        let buf = terminal.backend().buffer();
-        // The overlay is layered on top.
         let text = buffer_text(&terminal);
+        assert!(text.contains("claude-sonnet"), "panel on top: {text}");
         assert!(
-            text.contains("claude-sonnet"),
-            "overlay content on top: {text}"
+            !text.contains(LOADER_MESSAGE),
+            "the loader yields its band to the panel: {text}"
         );
-        // A corner base cell (outside the centered dialog) is dimmed.
+        assert!(
+            !text.contains("streaming reply"),
+            "the preview yields its band to the panel: {text}"
+        );
+        let buf = terminal.backend().buffer();
         let corner = buf.cell((0, buf.area.height - 1)).unwrap();
         assert!(
-            corner.modifier.contains(Modifier::DIM),
-            "base cells outside the overlay dim while the stream runs underneath"
+            !corner.modifier.contains(Modifier::DIM),
+            "no base dim under the panel layout"
+        );
+
+        // Close the overlay mid-stream: the loader row and preview return on
+        // the very next frame.
+        let closed = StateSnapshot {
+            overlay_open: false,
+            overlay_lines: None,
+            ..open
+        };
+        terminal
+            .draw(|frame| draw(frame, &closed, &editor, &loader, &footer))
+            .expect("draw the closed frame");
+        let after = buffer_text(&terminal);
+        assert!(
+            after.contains(LOADER_MESSAGE),
+            "the loader resumes when the overlay closes: {after}"
+        );
+        assert!(
+            after.contains("streaming reply"),
+            "the preview resumes when the overlay closes: {after}"
+        );
+        assert!(
+            !after.contains("claude-sonnet"),
+            "no panel residue after close: {after}"
         );
     }
 
