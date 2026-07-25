@@ -1431,6 +1431,15 @@ impl AgentSession {
         &self.model_registry
     }
 
+    /// Re-snapshot the model registry's catalog: reload `models.json` plus
+    /// the in-process catalog (which a background
+    /// `model::refresh_from_remote` may have hot-swapped mid-session), and
+    /// replay registered providers on top. Synchronous local-disk reload
+    /// only — never the network. See [`ModelRegistry::refresh`].
+    pub fn refresh_model_registry(&mut self) {
+        self.model_registry.refresh();
+    }
+
     /// Slash commands contributed by every registered extension, paired with
     /// the contributing extension. Used by the slash-command dispatcher to
     /// resolve a `/foo` invocation to the right extension. The list is built

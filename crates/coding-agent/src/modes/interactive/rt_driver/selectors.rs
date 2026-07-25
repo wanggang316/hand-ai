@@ -75,6 +75,10 @@ pub async fn open_model_selector(
     footer: &SharedFooter,
     requester: &FrameRequester,
 ) {
+    // Re-snapshot the registry first so a catalog hot-swapped mid-session by
+    // the background rolling-release refresh shows up in this list.
+    // Synchronous local reload only — never the network.
+    session.refresh_model_registry();
     let all_models = session.model_registry().all().to_vec();
     let scoped_models = resolve_scoped_models(session, &all_models);
     let current = session.model().clone();
@@ -480,6 +484,10 @@ pub fn apply_model_pattern(
 ) {
     use crate::core::model_resolver::{ParseModelPatternOptions, parse_model_pattern_full};
 
+    // Same re-snapshot as the `/model` dialog: a pattern typed mid-session
+    // must resolve against the freshest catalog the background refresh
+    // installed, not the construction-time snapshot.
+    session.refresh_model_registry();
     let all_models = session.model_registry().all().to_vec();
     let parsed =
         parse_model_pattern_full(pattern, &all_models, ParseModelPatternOptions::permissive());

@@ -45,7 +45,10 @@ pub use models::{
 };
 
 // Re-export from catalog_refresh
-pub use catalog_refresh::{RefreshError, RefreshOutcome, load_cached_catalog, refresh_from_remote};
+pub use catalog_refresh::{
+    DEFAULT_CATALOG_URL, RefreshError, RefreshOutcome, load_cached_catalog, refresh_from_remote,
+    resolve_catalog_url,
+};
 
 // Re-export from api_registry
 pub use api_registry::{

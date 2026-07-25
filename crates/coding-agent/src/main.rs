@@ -97,6 +97,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Prime the model catalog before ANY mode resolves a model: install the
+    // locally cached catalog synchronously (local IO only), then refresh from
+    // the rolling release in the background. Placed after the `--offline`
+    // handling above so `HAND_OFFLINE` suppresses the remote fetch. Never
+    // blocks startup on the network.
+    hand_coding_agent::core::model_registry::prime_model_catalog();
+    timings::time("catalog_prime");
+
     // `hand config` launches the rt-native resource-configuration selector: a
     // one-shot TUI over the resolved resources, with immediate checkbox feedback and
     // a clean Esc / Ctrl+C exit that restores the terminal to cooked state.
