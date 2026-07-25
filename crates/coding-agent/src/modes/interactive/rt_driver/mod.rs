@@ -14,9 +14,11 @@
 //!
 //! - **`std::process::exit`** — the legacy driver hard-exited the process on
 //!   quit / slash-quit because a graceful teardown hung on `tokio::io::stdin`'s
-//!   uncancellable blocking thread. The rt input pump drives crossterm's
-//!   `EventStream` (cancellable), so every exit path now converges on one
-//!   teardown that drops the scheduler, restores the terminal, and returns.
+//!   uncancellable blocking thread. The rt input pump is a bounded-poll
+//!   crossterm reader that watches a shutdown flag (it exits within one poll
+//!   interval — see `hand_tui::rt::events`), so every exit path now converges
+//!   on one teardown that drops the scheduler, restores the terminal, and
+//!   returns.
 //! - **`StopHandle(*const Tui)`** — a `Send`/`Sync` newtype over a raw pointer
 //!   used to call `tui.stop()` from a background task. There is no such handle
 //!   here: quitting is a plain `break` out of the input loop.
@@ -36,8 +38,9 @@
 //!   two-line renderer, rebuilt from session state after each turn.
 //! - [`input`] — the editor component wiring (M2 [`Editor`](hand_tui::rt::components::Editor),
 //!   borderless / no-placeholder hand-chat style) and the bottom-area draw.
-//!   Slash-command dispatch mounts on this task; `@`-mention path autocomplete is
-//!   installed on the editor from [`mention`] at construction.
+//!   Slash-command dispatch mounts on this task; the composite completion
+//!   provider from [`autocomplete`] (slash commands on `/`, cwd paths from
+//!   [`mention`] on `@`) is installed on the editor at construction.
 //! - [`chat`] — [`ChatUpdate`](super::event_dispatch::ChatUpdate) → scrollback
 //!   [`Line`]s. *Seam:* the message components (markdown, thinking, bash, tool
 //!   cards) replace the flat text arms here without touching the commit path.
@@ -58,6 +61,7 @@
 //! `.offset_y(frame.area().y)` (the M1 FIX-2 invariant: the viewport origin
 //! drifts down as `insert_before` fills scrollback).
 
+pub mod autocomplete;
 pub mod bash;
 pub mod chat;
 pub mod chrome;
@@ -250,14 +254,16 @@ impl InteractiveMode {
         // The chat editor: borderless, no placeholder — the hand chat-input style.
         // The driver's own bottom-area geometry supplies the bordered box, so the
         // editor paints text only. History seeds the recall buffer from prior
-        // user turns so Up/Down recall survives a resume. The `@`-mention provider
-        // snapshots the cwd file tree so typing `@<prefix>` opens the path-completion
-        // popup; it answers the `@` trigger only, leaving slash dispatch untouched.
+        // user turns so Up/Down recall survives a resume. The composite
+        // autocomplete provider serves both triggers through the editor's single
+        // slot: `/` completes the registered slash commands from the registry and
+        // `@` opens path completion over the cwd snapshot the mention source
+        // walks at construction.
         let editor: SharedEditor = Arc::new(Mutex::new(
             Editor::new()
                 .border(EditorBorder::None)
                 .with_history(recall_history(&session))
-                .with_autocomplete_provider(mention::build_mention_provider(&cwd)),
+                .with_autocomplete_provider(autocomplete::build_editor_provider(&cwd)),
         ));
         // Footer view-model — built from session state so every field (cwd, git
         // branch, model id/provider, thinking level, context %, usage) is visible
@@ -514,8 +520,9 @@ async fn run_input_loop(args: RunInputArgs<'_>) {
 
     loop {
         // Two clean-exit signals converge here besides the explicit quit below:
-        //   - the event channel closing (`None`): the pump reached EventStream
-        //     EOF (stdin closed) and dropped its sender — the plain EOF exit.
+        //   - the event channel closing (`None`): the pump's bounded-poll read
+        //     errored at input EOF (stdin closed) and dropped its sender — the
+        //     plain EOF exit.
         //   - a SIGHUP: a closing PTY master, routed here so it exits cleanly
         //     with the terminal restored rather than terminating raw.
         let event = tokio::select! {
@@ -3034,5 +3041,89 @@ mod tests {
             !slash_editor.autocomplete_visible(),
             "the `@`-mention provider is inert on the `/` trigger"
         );
+    }
+
+    /// Installing the composite provider gives the editor BOTH triggers: `/mo`
+    /// opens the popup with the registry's `/model` entry and Tab splices
+    /// `/model ` (trailing space, ready for the argument); `@<prefix>` still
+    /// opens path completion; and plain typing neither opens the popup nor
+    /// disturbs the normal Enter submit.
+    #[test]
+    fn composite_provider_completes_slash_commands_and_keeps_both_triggers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+
+        let char_key = |c: char| RtKey {
+            key_id: Some(c.to_string()),
+            raw: KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        };
+        let named_key = |id: &str, code: KeyCode| RtKey {
+            key_id: Some(id.to_string()),
+            raw: KeyEvent::new(code, KeyModifiers::NONE),
+        };
+
+        // `/mo` opens the completion index with the registry's /model row.
+        let mut editor = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(autocomplete::build_editor_provider(dir.path()));
+        for c in "/mo".chars() {
+            editor.handle_key(&char_key(c));
+        }
+        assert!(editor.autocomplete_visible(), "/mo opens the popup");
+        let labels: Vec<&str> = editor
+            .autocomplete()
+            .items()
+            .iter()
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.starts_with("/model")),
+            "popup surfaces /model: {labels:?}"
+        );
+
+        // Tab accepts the highlighted candidate: the buffer lands `/model `
+        // (trailing space — the user keeps typing the pattern) and the popup
+        // closes.
+        editor.handle_key(&named_key("tab", KeyCode::Tab));
+        assert_eq!(editor.text(), "/model ");
+        assert!(!editor.autocomplete_visible(), "accept closes the popup");
+
+        // A bare `/` lists the commands (bounded by the popup's own row cap).
+        let mut bare = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(autocomplete::build_editor_provider(dir.path()));
+        bare.handle_key(&char_key('/'));
+        assert!(bare.autocomplete_visible(), "bare `/` lists the commands");
+
+        // `@` path completion still works through the same composite slot.
+        let mut at_editor = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(autocomplete::build_editor_provider(dir.path()));
+        for c in "@READM".chars() {
+            at_editor.handle_key(&char_key(c));
+        }
+        assert!(at_editor.autocomplete_visible(), "@READM opens the popup");
+        assert!(
+            at_editor
+                .autocomplete()
+                .items()
+                .iter()
+                .any(|i| i.label == "README.md"),
+            "path completion routes through the composite"
+        );
+
+        // Plain typing is a non-trigger context: the popup stays closed and
+        // Enter submits the buffer verbatim.
+        let mut plain = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(autocomplete::build_editor_provider(dir.path()));
+        for c in "hello".chars() {
+            plain.handle_key(&char_key(c));
+        }
+        assert!(!plain.autocomplete_visible(), "no trigger, no popup");
+        plain.handle_key(&named_key("enter", KeyCode::Enter));
+        assert_eq!(plain.take_submit().as_deref(), Some("hello"));
     }
 }

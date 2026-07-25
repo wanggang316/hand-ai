@@ -18,7 +18,9 @@
 //!
 //! The returned provider answers the `@` trigger only: it is inert on the `/`
 //! trigger (returns nothing), so slash-command dispatch and ordinary typing are
-//! unaffected — only an `@<prefix>` token under the caret opens the popup.
+//! unaffected — only an `@<prefix>` token under the caret opens the popup. The
+//! `/` trigger is served by the slash-command source in [`super::autocomplete`],
+//! which composes this provider into the editor's single provider slot.
 
 use std::path::Path;
 use std::sync::Arc;
