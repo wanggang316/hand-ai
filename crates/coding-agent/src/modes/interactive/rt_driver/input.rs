@@ -10,9 +10,10 @@
 //!    spills a stale-width fragment into scrollback (M1 resize invariant);
 //! 3. lays the fixed-max inline bottom area out with
 //!    [`bottom_area_geometry`]`.offset_y(frame.area().y)` (M1 FIX-2: the viewport
-//!    origin drifts down as scrollback fills), then renders the bordered box, the
-//!    optional working-loader row (M2 [`Loader`]), the editor (borderless — the
-//!    box is the driver's), and the two-line footer view-model;
+//!    origin drifts down as scrollback fills), then renders the bordered box
+//!    around the editor only (borderless — the box is the driver's), the
+//!    optional working-loader row (M2 [`Loader`]) inside it, and the two-line
+//!    footer view-model in an unbordered band *below* the box;
 //! 4. drives the hardware cursor from the editor's reported caret.
 //!
 //! This mirrors the rt demo's scheduler/draw split exactly; the only differences
@@ -27,7 +28,7 @@ use hand_tui::rt::components::{DEFAULT_SPINNER_FRAMES, Editor, Loader};
 use hand_tui::rt::history::{HistorySink, wrap_lines};
 use hand_tui::rt::scheduler::{FrameRequester, FrameScheduler, draw_synchronized};
 use hand_tui::rt::session::{EraseOnDrop, SessionTerminal, clear_viewport_region};
-use hand_tui::rt::view::{RtComponent, bottom_area_geometry};
+use hand_tui::rt::view::{MAX_VIEWPORT_ROWS, RtComponent, bottom_area_geometry};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Text};
@@ -41,10 +42,17 @@ use crate::modes::interactive::theme::ThemePalette;
 /// The static message the working-loader shows while a turn streams.
 const LOADER_MESSAGE: &str = "Working…";
 
-/// Rows the footer view-model occupies inside the bottom box (the cwd line + the
-/// stats line). Reserved from the input body so the editor keeps its full desired
-/// height above the footer.
+/// Rows the footer view-model occupies in the unbordered band *below* the
+/// bordered box (the cwd line + the stats line). Reserved from the fixed
+/// viewport budget before the box is laid out, so the footer sits glued under
+/// the box's bottom border and the box wraps only the editor (and the
+/// streaming loader row).
 const FOOTER_ROWS: u16 = 2;
+
+/// The smallest useful bordered box: the top + bottom border rows plus one
+/// editor row for the caret. On a tiny pane the footer band collapses before
+/// the box is ever squeezed below this.
+const MIN_BOX_ROWS: u16 = 3;
 
 /// Spawn the frame scheduler over the session terminal.
 ///
@@ -239,8 +247,9 @@ struct StateSnapshot {
     palette: ThemePalette,
 }
 
-/// Paint one frame: the bordered bottom box, the optional working-loader row, the
-/// editor, and the two-line footer — laid out inside the fixed inline viewport.
+/// Paint one frame: the bordered bottom box (wrapping only the editor and the
+/// optional working-loader row) and the two-line footer in the unbordered band
+/// below it — laid out inside the fixed inline viewport.
 fn draw(
     frame: &mut ratatui::Frame,
     state: &StateSnapshot,
@@ -266,19 +275,27 @@ fn draw(
         ed.desired_height(probe).max(1)
     };
 
-    // The geometry's input body must hold the editor's desired rows *plus* the
-    // footer rows, so the footer sits below a full-height editor rather than
-    // stealing from it. (The geometry clamps the total to the 1..=8 band and to
-    // the pane height, so a tiny pane trims the footer/editor gracefully.)
-    let input_rows = editor_rows.saturating_add(FOOTER_ROWS);
+    // The footer renders BELOW the box, so its rows come out of the fixed
+    // viewport budget before the box is laid out: the geometry sees a height
+    // reduced by the footer band and bottom-anchors the box against it, leaving
+    // the band glued under the box's bottom border. On a tiny pane the footer
+    // collapses (partially, then fully) before the box shrinks below border +
+    // one editor row, so the caret always keeps a home.
+    let viewport_budget = MAX_VIEWPORT_ROWS.min(state.size.rows.max(1));
+    let footer_rows = FOOTER_ROWS.min(viewport_budget.saturating_sub(MIN_BOX_ROWS));
 
     // Lay the fixed-max bottom area out inside the viewport, then translate every
     // rect down by `area.y` so the bottom UI paints at the viewport's real rows —
     // not absolute row 0, which drifts off-screen once `insert_before` moves the
     // viewport down (the "box vanishes after a big block" bug). This is the M1
     // FIX-2 offset_y invariant.
-    let geometry = bottom_area_geometry(input_rows, state.loader, area.width, state.size.rows)
-        .offset_y(area.y);
+    let geometry = bottom_area_geometry(
+        editor_rows,
+        state.loader,
+        area.width,
+        viewport_budget.saturating_sub(footer_rows),
+    )
+    .offset_y(area.y);
 
     // The live streaming preview paints in the blank band ABOVE the active box
     // (between the viewport origin and the box's top), so the in-flight assistant
@@ -300,9 +317,9 @@ fn draw(
         loader.render(inset(loader_rect), frame.buffer_mut());
     }
 
-    // Split the input interior into the editor rows (the top) and the footer rows
-    // (the bottom `FOOTER_ROWS`).
-    let (editor_rect, footer_rect) = split_editor_footer(inset(geometry.input));
+    // The box interior below the loader is the editor's alone — the footer no
+    // longer shares it.
+    let editor_rect = inset(geometry.input);
 
     // Render the editor and drive the hardware cursor from its reported caret.
     // When a modal overlay is open it owns focus, so the editor caret is suppressed
@@ -312,9 +329,10 @@ fn draw(
     // box, but the driver's inline geometry gives the editor a rect sized to
     // exactly the box height — so that band is zero rows and the popup never
     // paints. The driver owns the surrounding box, so it paints the popup itself,
-    // in a reserved band *above* the box (space below is the viewport's bottom
-    // edge; above it is the blank band the box is anchored over). This keeps the
-    // popup clear of the footer (inside the box) and of scrollback (below it).
+    // in a reserved band *above* the box (below the box sit the footer band and
+    // the viewport's bottom edge; above it is the blank band the box is anchored
+    // over). This keeps the popup clear of the footer (below the box) and of
+    // scrollback (above the viewport).
     {
         let ed = lock_editor(editor);
         ed.render(editor_rect, frame.buffer_mut());
@@ -329,8 +347,18 @@ fn draw(
         }
     }
 
-    // The two-line footer view-model, rendered into the reserved footer rows.
+    // The two-line footer view-model, rendered into the unbordered band directly
+    // below the box's bottom border. Inset to the box's interior columns so the
+    // footer text lines up with the editor text above it, and intersected with
+    // the frame so a size mismatch can never paint past the viewport.
     // `Paragraph` clips a line wider than the rect, so a narrow pane never spills.
+    let footer_rect = inset(Rect::new(
+        area.x,
+        geometry.active.bottom(),
+        area.width,
+        footer_rows,
+    ))
+    .intersection(area);
     if footer_rect.height > 0 {
         let lines = render_footer_lines(footer, footer_rect.width, &state.palette);
         Paragraph::new(Text::from(lines)).render(footer_rect, frame.buffer_mut());
@@ -480,26 +508,6 @@ fn draw_autocomplete_popup(
     editor.autocomplete().render(popup, buf);
 }
 
-/// Split a bottom-area body rect into the editor (the top rows) and the footer
-/// (the bottom [`FOOTER_ROWS`] rows).
-///
-/// The editor always keeps at least one row for its caret: the footer only claims
-/// the rows left over above a single editor row. On a body of height `h`, the
-/// footer takes `min(FOOTER_ROWS, h - 1)` rows from the bottom (0 when `h <= 1`),
-/// so a tiny pane collapses the footer before it ever starves the editor.
-fn split_editor_footer(body: Rect) -> (Rect, Rect) {
-    let footer_rows = FOOTER_ROWS.min(body.height.saturating_sub(1));
-    let editor_rows = body.height.saturating_sub(footer_rows);
-    let editor = Rect::new(body.x, body.y, body.width, editor_rows);
-    let footer = Rect::new(
-        body.x,
-        body.y.saturating_add(editor_rows),
-        body.width,
-        footer_rows,
-    );
-    (editor, footer)
-}
-
 /// Inset a rect by one column on each side so content sits inside the box's
 /// left/right border rather than overwriting it. Height is left unchanged.
 fn inset(rect: Rect) -> Rect {
@@ -516,36 +524,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_editor_footer_reserves_footer_rows_at_the_bottom() {
-        let body = Rect::new(1, 5, 40, 5);
-        let (editor, footer) = split_editor_footer(body);
-        // The bottom FOOTER_ROWS go to the footer; the rest to the editor.
-        assert_eq!(editor, Rect::new(1, 5, 40, 3));
-        assert_eq!(footer, Rect::new(1, 8, 40, FOOTER_ROWS));
-    }
-
-    #[test]
-    fn split_editor_footer_single_row_gives_editor_all_and_empty_footer() {
-        let body = Rect::new(1, 5, 40, 1);
-        let (editor, footer) = split_editor_footer(body);
-        assert_eq!(editor, body, "editor keeps its one row");
-        assert_eq!(
-            footer.height, 0,
-            "footer collapses before starving the editor"
-        );
-    }
-
-    #[test]
-    fn split_editor_footer_two_rows_leaves_editor_one_and_footer_one() {
-        // With only two rows, the editor keeps one and the footer gets the other,
-        // never taking both FOOTER_ROWS at the editor's expense.
-        let body = Rect::new(1, 5, 40, 2);
-        let (editor, footer) = split_editor_footer(body);
-        assert_eq!(editor.height, 1, "editor never starved below one row");
-        assert_eq!(footer.height, 1);
-    }
-
-    #[test]
     fn inset_trims_two_columns_and_keeps_height() {
         let r = Rect::new(0, 3, 20, 2);
         assert_eq!(inset(r), Rect::new(1, 3, 18, 2));
@@ -560,7 +538,7 @@ mod tests {
     // --- Loader slot lifecycle (VAL-CHAT-003 / VAL-COMPAT-008) --------------
 
     use hand_tui::rt::components::Editor;
-    use hand_tui::rt::view::{MAX_VIEWPORT_ROWS, TerminalSize};
+    use hand_tui::rt::view::TerminalSize;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::{TerminalOptions, Viewport};
@@ -601,6 +579,24 @@ mod tests {
         loader: &Loader,
         streaming: bool,
     ) {
+        draw_frame_with_footer(
+            terminal,
+            editor,
+            loader,
+            streaming,
+            &FooterViewModel::default(),
+        );
+    }
+
+    /// Like [`draw_frame`], but with a caller-supplied footer view-model so a
+    /// layout test can locate recognizable footer text in the buffer.
+    fn draw_frame_with_footer(
+        terminal: &mut Terminal<TestBackend>,
+        editor: &SharedEditor,
+        loader: &Loader,
+        streaming: bool,
+        footer: &FooterViewModel,
+    ) {
         let width = terminal.get_frame().area().width;
         let height = terminal.get_frame().area().height;
         let snapshot = StateSnapshot {
@@ -612,10 +608,28 @@ mod tests {
             overlay_lines: None,
             palette: ThemePalette::default(),
         };
-        let footer = FooterViewModel::default();
         terminal
-            .draw(|frame| draw(frame, &snapshot, editor, loader, &footer))
+            .draw(|frame| draw(frame, &snapshot, editor, loader, footer))
             .expect("draw one frame");
+    }
+
+    /// The first buffer row whose text contains `needle`, for row-order
+    /// assertions (top border < editor < bottom border < footer).
+    fn row_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<u16> {
+        let buf = terminal.backend().buffer();
+        let area = buf.area;
+        for y in area.y..area.y + area.height {
+            let mut row = String::new();
+            for x in area.x..area.x + area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    row.push_str(cell.symbol());
+                }
+            }
+            if row.contains(needle) {
+                return Some(y);
+            }
+        }
+        None
     }
 
     /// Type `s` into a shared editor, one char per keystroke, so the autocomplete
@@ -665,6 +679,21 @@ mod tests {
             painted.contains("README.md"),
             "the popup candidate must paint above the box, got:\n{painted}"
         );
+
+        // Row order: the popup stays above the box's top border while the footer
+        // sits below its bottom border — the two can never collide.
+        let (top, bottom) = border_rows(&terminal);
+        let popup_row = row_of(&terminal, "README.md").expect("popup candidate row");
+        assert!(
+            popup_row < top,
+            "popup paints above the box top border (row {popup_row} < {top})"
+        );
+        let footer_row = row_of(&terminal, "no-model").expect("footer stats row");
+        assert!(
+            footer_row > bottom,
+            "footer sits below the box bottom border (row {footer_row} > {bottom}), \
+             clear of the popup"
+        );
     }
 
     #[test]
@@ -709,41 +738,153 @@ mod tests {
         );
     }
 
-    #[test]
-    fn footer_fields_render_in_the_active_box() {
-        // The footer view-model's fields paint into the reserved footer rows so
-        // they are visible from the first frame, before any turn.
-        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
-        let loader = Loader::new(LOADER_MESSAGE);
-        let mut terminal = fixed_viewport(80, MAX_VIEWPORT_ROWS);
-
-        let width = terminal.get_frame().area().width;
-        let height = terminal.get_frame().area().height;
-        let snapshot = StateSnapshot {
-            size: TerminalSize::new(width, height),
-            loader: false,
-            loader_message: None,
-            preview: Vec::new(),
-            overlay_open: false,
-            overlay_lines: None,
-            palette: ThemePalette::default(),
-        };
-        let footer = FooterViewModel {
+    /// A footer view-model with recognizable cwd / branch / model text for the
+    /// bottom-layout tests.
+    fn probe_footer() -> FooterViewModel {
+        FooterViewModel {
             cwd: "/tmp/proj".to_string(),
             git_branch: Some("tmp".to_string()),
             model_id: "test-model".to_string(),
             context_window: 100_000,
             context_percent: Some(1.0),
             ..FooterViewModel::default()
-        };
-        terminal
-            .draw(|frame| draw(frame, &snapshot, &editor, &loader, &footer))
-            .expect("draw one frame");
+        }
+    }
+
+    #[test]
+    fn footer_fields_render_below_the_box_bottom_border() {
+        // The footer view-model's fields paint into the unbordered band BELOW
+        // the box's bottom border (the cwd line first, the stats line beneath),
+        // visible from the first frame, before any turn.
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        let loader = Loader::new(LOADER_MESSAGE);
+        let mut terminal = fixed_viewport(80, MAX_VIEWPORT_ROWS);
+        draw_frame_with_footer(&mut terminal, &editor, &loader, false, &probe_footer());
 
         let text = buffer_text(&terminal);
         assert!(text.contains("/tmp/proj"), "cwd missing: {text}");
         assert!(text.contains("(tmp)"), "branch missing: {text}");
         assert!(text.contains("test-model"), "model id missing: {text}");
+
+        // Row order: top border < bottom border < cwd line < stats line — the
+        // footer lives outside the box, glued directly under it.
+        let (top, bottom) = border_rows(&terminal);
+        let cwd_row = row_of(&terminal, "/tmp/proj").expect("cwd row painted");
+        let stats_row = row_of(&terminal, "test-model").expect("stats row painted");
+        assert!(top < bottom, "a bordered box is painted");
+        assert_eq!(
+            cwd_row,
+            bottom + 1,
+            "the cwd line sits directly below the box's bottom border"
+        );
+        assert_eq!(
+            stats_row,
+            bottom + 2,
+            "the stats line sits below the cwd line"
+        );
+    }
+
+    #[test]
+    fn the_box_wraps_only_the_editor_and_the_footer_stays_glued_below() {
+        use hand_tui::rt::components::EditorBorder;
+
+        // The bordered box is exactly the editor rows + the two border rows; it
+        // grows and shrinks with the editor while the footer band stays glued
+        // below the bottom border (the box bottom stays anchored above it).
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new().border(EditorBorder::None)));
+        let loader = Loader::new(LOADER_MESSAGE);
+        let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
+        let footer = probe_footer();
+
+        // One-row editor: box height 3 (1 editor row + 2 border rows).
+        draw_frame_with_footer(&mut terminal, &editor, &loader, false, &footer);
+        let (top1, bottom1) = border_rows(&terminal);
+        assert_eq!(
+            bottom1 - top1,
+            2,
+            "empty editor: box is 1 editor + 2 border rows"
+        );
+        assert_eq!(
+            row_of(&terminal, "/tmp/proj").expect("cwd row"),
+            bottom1 + 1,
+            "footer glued below the box"
+        );
+
+        // Three-row editor: the box grows upward to 5 rows, bottom anchored.
+        lock_editor(&editor).set_text("alpha\nbravo\ncharlie");
+        draw_frame_with_footer(&mut terminal, &editor, &loader, false, &footer);
+        let (top2, bottom2) = border_rows(&terminal);
+        assert_eq!(
+            bottom2 - top2,
+            4,
+            "3-row editor: box is 3 editor + 2 border rows"
+        );
+        assert_eq!(
+            bottom2, bottom1,
+            "the box bottom stays anchored above the footer"
+        );
+        let alpha_row = row_of(&terminal, "alpha").expect("editor content row");
+        assert!(
+            top2 < alpha_row && alpha_row < bottom2,
+            "editor content renders inside the box (row {alpha_row} in {top2}..{bottom2})"
+        );
+        assert_eq!(
+            row_of(&terminal, "/tmp/proj").expect("cwd row"),
+            bottom2 + 1,
+            "footer still glued below after the grow"
+        );
+
+        // Shrink back: the box collapses with the editor, footer unmoved.
+        lock_editor(&editor).set_text("");
+        draw_frame_with_footer(&mut terminal, &editor, &loader, false, &footer);
+        let (top3, bottom3) = border_rows(&terminal);
+        assert_eq!(bottom3 - top3, 2, "box shrinks back with the editor");
+        assert_eq!(
+            row_of(&terminal, "/tmp/proj").expect("cwd row"),
+            bottom3 + 1,
+            "footer still glued below after the shrink"
+        );
+    }
+
+    #[test]
+    fn max_editor_growth_keeps_box_plus_footer_within_the_viewport_budget() {
+        use hand_tui::rt::components::EditorBorder;
+
+        // At the editor's maximum auto-grow (and with the loader row streaming),
+        // the box is trimmed so box + footer never exceed the fixed viewport
+        // height — the footer's last row stays inside MAX_VIEWPORT_ROWS.
+        for &streaming in &[false, true] {
+            let editor: SharedEditor =
+                Arc::new(Mutex::new(Editor::new().border(EditorBorder::None)));
+            let tall: String = (0..10)
+                .map(|i| format!("line-{i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            lock_editor(&editor).set_text(&tall);
+            let mut loader = Loader::new(LOADER_MESSAGE);
+            loader.set_active(streaming);
+            let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
+            draw_frame_with_footer(&mut terminal, &editor, &loader, streaming, &probe_footer());
+
+            let (top, bottom) = border_rows(&terminal);
+            assert_eq!(
+                top, 0,
+                "the box top reaches the viewport origin at max growth (streaming={streaming})"
+            );
+            let cwd_row = row_of(&terminal, "/tmp/proj").expect("cwd row painted");
+            let stats_row = row_of(&terminal, "test-model").expect("stats row painted");
+            assert_eq!(
+                cwd_row,
+                bottom + 1,
+                "footer below the box (streaming={streaming})"
+            );
+            assert_eq!(stats_row, bottom + 2);
+            assert!(
+                stats_row < MAX_VIEWPORT_ROWS,
+                "the whole bottom area fits the fixed viewport budget \
+                 (stats row {stats_row} < {MAX_VIEWPORT_ROWS}, streaming={streaming})"
+            );
+        }
     }
 
     // --- Overlay dialog rendering (VAL-OVERLAY-001 / -020) ----------------
