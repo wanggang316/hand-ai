@@ -182,6 +182,27 @@ pub fn wrap_lines(lines: &[Line<'_>], width: u16) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// Display width of one logical [`Line`] in terminal columns.
+///
+/// Sums grapheme-cluster widths with the exact convention [`wrap_lines`] packs
+/// rows by (east-asian wide = 2 columns, ZWJ/VS16 sequences at base width,
+/// regional indicators pinned to 2), so a caller that pads a row to a target
+/// width agrees column-for-column with how this module would wrap that row.
+///
+/// ```
+/// use hand_tui::rt::history::line_display_width;
+/// use ratatui::text::Line;
+///
+/// assert_eq!(line_display_width(&Line::from("hi")), 2);
+/// assert_eq!(line_display_width(&Line::from("你好")), 4); // CJK: 2 columns each
+/// ```
+#[must_use]
+pub fn line_display_width(line: &Line<'_>) -> usize {
+    line.styled_graphemes(Style::default())
+        .map(|g| grapheme_width(g.symbol))
+        .sum()
+}
+
 /// Commits finalized content into the terminal's native scrollback, above the
 /// live inline viewport.
 ///

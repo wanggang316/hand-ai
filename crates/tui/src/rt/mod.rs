@@ -38,7 +38,7 @@ pub use events::{
     RtInputEvent, RtKey, key_event_to_key_id, run_event_loop, should_dispatch, spawn_event_pump,
     translate_event,
 };
-pub use history::{HistorySink, wrap_lines};
+pub use history::{HistorySink, line_display_width, wrap_lines};
 pub use overlay::{
     Overlay, OverlayAnchor, OverlayHandle, OverlayId, OverlayMargin, OverlayOptions, OverlayStack,
     anchor_rect,

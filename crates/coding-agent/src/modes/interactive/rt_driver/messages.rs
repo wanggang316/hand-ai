@@ -33,6 +33,7 @@
 
 use hand_tui::rt::components::syntax_highlight::default_markdown_theme;
 use hand_tui::rt::components::{MarkdownTheme, render_markdown};
+use hand_tui::rt::history::{line_display_width, wrap_lines};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -54,11 +55,17 @@ fn body_theme() -> MarkdownTheme {
 ///
 /// Structure fidelity is the contract: each *input* line (split on `\n`) is
 /// rendered as its own logical row, so a multi-line prompt keeps its shape and
-/// markdown soft-wrapping never merges two input lines into one. Every row —
-/// the one-column left/right padding included — carries the palette's
-/// user-message background tint so the bubble reads as one continuous
-/// background block, and text takes the palette's contrasting user-message
-/// foreground so it stays legible on the tint.
+/// markdown soft-wrapping never merges two input lines into one. An input line
+/// wider than the bubble interior pre-wraps through the history committer's own
+/// display-width math ([`wrap_lines`]), and every resulting visual row — the
+/// one-column left/right padding included — is filled to exactly `width`
+/// display columns and carries the palette's user-message background tint, so
+/// the bubble reads as one continuous background block. Measuring by display
+/// columns (not `char` count) keeps wide graphemes (CJK, emoji) from pushing a
+/// row past the edge, where the committer's re-wrap would split it into a
+/// full-width row plus a padding-only stub — the "patchy bubble" artifact.
+/// Text takes the palette's contrasting user-message foreground so it stays
+/// legible on the tint.
 ///
 /// `width` is the render width; a body line is rendered as plain styled text
 /// (not markdown-parsed) so a lone `#` or `-` in a prompt is echoed verbatim
@@ -70,23 +77,27 @@ pub fn user_bubble_lines(text: &str, width: u16, palette: &ThemePalette) -> Vec<
     let user_bg = palette.user_message_bg;
     let bg = Style::default().bg(user_bg);
     let body = Style::default().bg(user_bg).fg(palette.user_message_text);
-    let pad_cols = usize::from(width.max(2)).saturating_sub(2);
+    let interior = width.max(2) - 2;
+    let pad_cols = usize::from(interior);
 
     // A blank tinted row pads the top and bottom of the bubble; interior rows
-    // are the body text, one per input line, indented one column and tinted.
+    // are the body text, one visual row per wrapped input-line row, indented
+    // one column and tinted.
     let blank = || Line::from(Span::styled(" ".repeat(width.into()), bg));
 
     let mut lines = vec![blank()];
     for input_line in text.split('\n') {
-        // Left pad, body, right-fill to the width so the tint reaches the edge.
-        let visible = input_line.chars().count();
-        let right_fill = pad_cols.saturating_sub(visible);
-        let spans = vec![
-            Span::styled(" ".to_string(), bg),
-            Span::styled(input_line.to_string(), body),
-            Span::styled(" ".repeat(right_fill + 1), bg),
-        ];
-        lines.push(Line::from(spans));
+        // Pre-wrap the styled body to the interior width, then left pad and
+        // right-fill each visual row to `width` by *display* columns so the
+        // tint reaches the edge exactly — never short of it, never past it.
+        let styled = Line::from(Span::styled(input_line.to_string(), body));
+        for row in wrap_lines(&[styled], interior) {
+            let right_fill = pad_cols.saturating_sub(line_display_width(&row));
+            let mut spans = vec![Span::styled(" ".to_string(), bg)];
+            spans.extend(row.spans);
+            spans.push(Span::styled(" ".repeat(right_fill + 1), bg));
+            lines.push(Line::from(spans));
+        }
     }
     lines.push(blank());
     lines
@@ -372,19 +383,78 @@ mod tests {
     #[test]
     fn user_bubble_body_line_fills_to_width() {
         // The body row spans the full width so the tint reaches the right edge,
-        // not just the length of the text.
+        // not just the length of the text. Measured in *display* columns — the
+        // unit the terminal paints in — not Unicode scalar count.
         let width = 30u16;
         let lines = user_bubble_lines("short", width, &pal());
         let body = lines
             .iter()
             .find(|l| text_of(l).contains("short"))
             .expect("body row");
-        let body_width: usize = body.spans.iter().map(|s| s.content.chars().count()).sum();
         assert_eq!(
-            body_width,
+            line_display_width(body),
             usize::from(width),
             "row fills the tint to width"
         );
+        // The ASCII row keeps the exact legacy shape: one left pad column, the
+        // body, right fill to the edge — byte-identical to the pre-fix render.
+        assert_eq!(text_of(body), format!(" short{}", " ".repeat(24)));
+    }
+
+    #[test]
+    fn user_bubble_cjk_rows_fill_exact_display_width() {
+        // CJK graphemes are two columns wide. Padding must be sized by display
+        // width, so every bubble row lands at exactly `width` columns and the
+        // committer's pre-wrap (`wrap_lines`) passes it through row-for-row —
+        // no overflow stub carrying only padding (the "patchy bubble" bug).
+        let width = 20u16;
+        let lines = user_bubble_lines("你好", width, &pal());
+        let rewrapped = wrap_lines(&lines, width);
+        assert_eq!(
+            rewrapped.len(),
+            lines.len(),
+            "the committer's re-wrap must not split any bubble row"
+        );
+        for line in &lines {
+            assert_eq!(
+                line_display_width(line),
+                usize::from(width),
+                "every row fills the tint edge to edge: {line:?}"
+            );
+            assert!(
+                line.spans
+                    .iter()
+                    .all(|s| s.style.bg == Some(pal().user_message_bg)),
+                "every span carries the bubble tint: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_bubble_long_cjk_line_wraps_into_full_width_tinted_rows() {
+        // An input line wider than the bubble interior wraps into continuation
+        // rows, and *every* one of them — continuations included — is padded
+        // and tinted to the full width.
+        let width = 10u16; // interior = 8 columns → 4 CJK graphemes per row
+        let lines = user_bubble_lines("汉字宽度测试很长", width, &pal());
+        assert_eq!(
+            lines.len(),
+            4,
+            "two blank rows + two wrapped body rows: {lines:?}"
+        );
+        for line in &lines {
+            assert_eq!(
+                line_display_width(line),
+                usize::from(width),
+                "continuation rows fill to width too: {line:?}"
+            );
+            assert!(
+                line.spans
+                    .iter()
+                    .all(|s| s.style.bg == Some(pal().user_message_bg)),
+                "continuation rows stay tinted: {line:?}"
+            );
+        }
     }
 
     #[test]
