@@ -403,6 +403,15 @@ async fn stream_assistant_response(
         }
     }
 
+    // Single cancellation surface: hand the run's cancel token to the model
+    // layer as the stream `signal`. The stream itself then terminates with an
+    // aborted terminal event when the caller aborts, so the event loop below
+    // is a plain `while let` rather than a second `select!` racing the same
+    // stream. Nesting a `select!` over a stream that internally selects on its
+    // SSE leaf can intermittently strand a wakeup during long reasoning-token
+    // gaps, hanging the turn; a single consumer avoids that shape entirely.
+    stream_opts.base.signal = Some(cancel.clone());
+
     if cancel.is_cancelled() {
         let aborted = synthesize_aborted_message(&config.model, "Aborted before request");
         let msg = Message::Assistant(aborted.clone());
@@ -426,32 +435,11 @@ async fn stream_assistant_response(
     let mut final_message: Option<AssistantMessage> = None;
     let mut emitted_start = false;
 
-    loop {
-        let next = tokio::select! {
-            _ = cancel.cancelled() => {
-                // Drop the stream and synthesize an aborted message.
-                let aborted =
-                    synthesize_aborted_message(&config.model, "Aborted by caller");
-                if emitted_start {
-                    if let Some(last) = context.messages.last_mut() {
-                        *last = Message::Assistant(aborted.clone());
-                    }
-                } else {
-                    context.messages.push(Message::Assistant(aborted.clone()));
-                    emit(AgentEvent::MessageStart {
-                        message: Message::Assistant(aborted.clone()),
-                    });
-                }
-                emit(AgentEvent::MessageEnd {
-                    message: Message::Assistant(aborted.clone()),
-                });
-                return Ok(Message::Assistant(aborted));
-            }
-            event = stream.next() => event,
-        };
-
-        let Some(event) = next else { break };
-
+    // Plain consumer. Cancellation is honored by the stream itself (via
+    // `stream_opts.base.signal`, wired above): on abort it yields a terminal
+    // `Error { reason: Aborted, .. }`, which the `Error` arm below turns into a
+    // balanced MessageStart/MessageEnd pair and an aborted assistant message.
+    while let Some(event) = stream.next().await {
         match &event {
             AssistantMessageEvent::Start { partial } => {
                 let msg = Message::Assistant(partial.clone());
