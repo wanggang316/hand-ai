@@ -438,8 +438,20 @@ fn settings_hint_footer_shown_when_enabled() {
     let rows = all_rows(&render(&list, 60, 12));
     assert!(
         rows.iter()
-            .any(|r| r.contains("Enter/Space to change") && r.contains("Esc to cancel")),
+            .any(|r| r.contains("⇥ change") && r.contains("esc close")),
         "hint footer missing: {rows:?}"
+    );
+}
+
+#[test]
+fn settings_hint_footer_text_is_overridable() {
+    let list = SettingsList::new(setting_entries())
+        .show_hint(true)
+        .hint_text("custom hint line");
+    let rows = all_rows(&render(&list, 60, 12));
+    assert!(
+        rows.iter().any(|r| r.contains("custom hint line")),
+        "overridden hint missing: {rows:?}"
     );
 }
 
@@ -468,6 +480,19 @@ fn settings_enter_cycles_enum() {
     assert_eq!(list.entries()[0].value.to_string(), "auto");
     list.handle_key(&named("enter", KeyCode::Enter));
     assert_eq!(list.entries()[0].value.to_string(), "dark");
+}
+
+#[test]
+fn settings_tab_cycles_enum_forward_and_shift_tab_back() {
+    let mut list = SettingsList::new(setting_entries());
+    // Tab steps the theme enum forward: dark -> light -> auto.
+    list.handle_key(&named("tab", KeyCode::Tab));
+    assert_eq!(list.entries()[0].value.to_string(), "light");
+    list.handle_key(&named("tab", KeyCode::Tab));
+    assert_eq!(list.entries()[0].value.to_string(), "auto");
+    // Shift+Tab steps back: auto -> light.
+    list.handle_key(&named("shift+tab", KeyCode::BackTab));
+    assert_eq!(list.entries()[0].value.to_string(), "light");
 }
 
 #[test]

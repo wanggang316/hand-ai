@@ -2,7 +2,7 @@
 //!
 //! The rt-native counterpart to the legacy `SettingsListComponent`. It paints
 //! styled [`Line`]s into a ratatui [`Buffer`] and consumes structured
-//! [`RtKey`]s. Each entry is a key and a typed [`SettingValue`]; Enter/Space
+//! [`RtKey`]s. Each entry is a key and a typed [`SettingValue`]; Tab/Enter/Space
 //! edits it in place — a bool flips, an enum cycles, and a string/number opens an
 //! inline editor with a visible caret.
 //!
@@ -12,14 +12,17 @@
 //!   and last entry — they do not wrap. This is the deliberate counterpart to
 //!   [`SelectList`](super::SelectList), whose navigation *wraps* (Decision Log:
 //!   the two lists disagree on end behaviour on purpose).
-//! - **Edit semantics.** Enter/Space on a bool toggles it; on an enum cycles to
-//!   the next choice (wrapping the choice list); on a string/number opens the
-//!   inline editor pre-filled with the current value. While editing, printable
-//!   keys and Backspace mutate the buffer, Enter commits, and Escape discards.
-//!   Committing a number that does not parse silently keeps the old value.
+//! - **Edit semantics.** Tab cycles the selected entry **forward** (a bool
+//!   toggles, an enum steps to the next choice, wrapping); Shift+Tab cycles
+//!   **backward**. Enter/Space keep the same forward-cycle behaviour for a
+//!   bool/enum, and on a string/number open the inline editor pre-filled with
+//!   the current value. While editing, printable keys and Backspace mutate the
+//!   buffer, Enter commits, and Escape discards. Committing a number that does
+//!   not parse silently keeps the old value.
 //! - **Chrome.** When the list overflows its window a `(n/total)` counter line is
 //!   shown; the focused entry's description renders below the list; and a footer
-//!   hint `Enter/Space to change · Esc to cancel` renders last. Each is opt-in.
+//!   hint (default `⇥ change · esc close`, overridable via
+//!   [`hint_text`](SettingsList::hint_text)) renders last. Each is opt-in.
 //! - **Empty.** An empty entry list renders a "(no settings)" hint.
 //!
 //! The caret is reported through [`RtComponent::cursor`] so the host cursor lands
@@ -108,6 +111,8 @@ pub struct SettingsList {
     scroll_offset: usize,
     /// Whether to render the footer hint line.
     show_hint: bool,
+    /// Overrides the default footer hint text when set.
+    hint_text: Option<String>,
     /// Whether to render the focused entry's description below the list.
     show_description: bool,
     /// The (x, y) of the caret within the render area while editing; `None`
@@ -127,15 +132,35 @@ impl SettingsList {
             max_visible: None,
             scroll_offset: 0,
             show_hint: false,
+            hint_text: None,
             show_description: false,
             caret: std::cell::Cell::new(None),
         }
+    }
+
+    /// Start with `idx` selected (clamped to the entry range) rather than the
+    /// first row — used to restore the cursor after a second-level picker
+    /// returns to the list.
+    #[must_use]
+    pub fn selected(mut self, idx: usize) -> Self {
+        self.selected = idx.min(self.entries.len().saturating_sub(1));
+        self.clamp_scroll();
+        self
     }
 
     /// Limit the number of rows shown before scrolling kicks in.
     #[must_use]
     pub fn max_visible(mut self, max_visible: usize) -> Self {
         self.max_visible = Some(max_visible.max(1));
+        self.clamp_scroll();
+        self
+    }
+
+    /// Override the footer hint text (only shown when [`show_hint`](Self::show_hint)
+    /// is set).
+    #[must_use]
+    pub fn hint_text(mut self, text: impl Into<String>) -> Self {
+        self.hint_text = Some(text.into());
         self
     }
 
@@ -221,6 +246,30 @@ impl SettingsList {
                     self.editing = true;
                 }
             }
+        }
+    }
+
+    /// Cycle the selected entry's value one step: a bool toggles, an enum steps
+    /// `forward` (or backward) wrapping the choice list. A string/number is left
+    /// untouched — those edit through [`activate`](Self::activate)'s inline
+    /// editor, not the Tab cycle.
+    fn cycle(&mut self, forward: bool) {
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            return;
+        };
+        match &mut entry.value {
+            SettingValue::Bool(b) => *b = !*b,
+            SettingValue::Enum { choices, selected } => {
+                let len = choices.len();
+                if len > 0 {
+                    *selected = if forward {
+                        (*selected + 1) % len
+                    } else {
+                        (*selected + len - 1) % len
+                    };
+                }
+            }
+            SettingValue::String(_) | SettingValue::Number(_) => {}
         }
     }
 
@@ -348,8 +397,9 @@ impl RtComponent for SettingsList {
         // Footer hint.
         if self.show_hint {
             lines.push(Line::raw(""));
+            let hint = self.hint_text.as_deref().unwrap_or("⇥ change · esc close");
             lines.push(Line::from(Span::styled(
-                "  Enter/Space to change · Esc to cancel",
+                format!("  {hint}"),
                 Style::default().add_modifier(Modifier::DIM),
             )));
         }
@@ -374,6 +424,14 @@ impl RtComponent for SettingsList {
             }
             "down" | "ctrl+j" => {
                 self.next();
+                HandleOutcome::Consumed
+            }
+            "tab" => {
+                self.cycle(true);
+                HandleOutcome::Consumed
+            }
+            "shift+tab" => {
+                self.cycle(false);
                 HandleOutcome::Consumed
             }
             "enter" | "space" => {
@@ -502,6 +560,44 @@ mod tests {
         list.handle_key(&named("down", KeyCode::Down));
         list.handle_key(&named("space", KeyCode::Char(' '))); // bool: true -> false
         assert_eq!(list.entries()[1].value, SettingValue::Bool(false));
+    }
+
+    #[test]
+    fn tab_cycles_enum_forward_and_shift_tab_backward() {
+        let mut list = SettingsList::new(entries());
+        // Tab on the enum row steps forward: dark -> light.
+        list.handle_key(&named("tab", KeyCode::Tab));
+        assert_eq!(list.entries()[0].value.to_string(), "light");
+        // Wrapping forward: light -> dark.
+        list.handle_key(&named("tab", KeyCode::Tab));
+        assert_eq!(list.entries()[0].value.to_string(), "dark");
+        // Shift+Tab steps backward, wrapping: dark -> light.
+        list.handle_key(&named("shift+tab", KeyCode::BackTab));
+        assert_eq!(list.entries()[0].value.to_string(), "light");
+    }
+
+    #[test]
+    fn tab_toggles_bool_and_leaves_string_untouched() {
+        let mut list = SettingsList::new(entries());
+        list.handle_key(&named("down", KeyCode::Down)); // bool row
+        list.handle_key(&named("tab", KeyCode::Tab));
+        assert_eq!(list.entries()[1].value, SettingValue::Bool(false));
+        // Tab on a string row is a no-op (it edits via Enter, not the cycle).
+        for _ in 0..2 {
+            list.handle_key(&named("down", KeyCode::Down));
+        }
+        list.handle_key(&named("tab", KeyCode::Tab));
+        assert!(!list.is_editing(), "Tab must not open the inline editor");
+        assert_eq!(list.entries()[3].value, SettingValue::String("gpt".into()));
+    }
+
+    #[test]
+    fn selected_builder_restores_the_cursor_row() {
+        let list = SettingsList::new(entries()).selected(2);
+        assert_eq!(list.selected_index(), 2);
+        // Out-of-range clamps to the last entry.
+        let list = SettingsList::new(entries()).selected(99);
+        assert_eq!(list.selected_index(), 3);
     }
 
     #[test]

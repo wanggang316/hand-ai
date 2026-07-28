@@ -3,17 +3,28 @@
 //! [`SettingsList`](hand_tui::rt::components::SettingsList).
 //!
 //! It is a [`SelectorController`] that **embeds the M2 `SettingsList`** for the
-//! interactive state machine (clamp navigation, toggle a bool / cycle an enum /
+//! interactive state machine (clamp navigation, Tab-cycle a bool / enum /
 //! inline-edit a string) and layers the driver semantics on top:
 //!
 //! - the top three rows show the **merged effective defaults**
 //!   (`default_provider` / `default_model` / `default_thinking_level`) so a
 //!   project override is *visible* here (VAL-OVERLAY-036 — the pinned UAT #16
 //!   regression); the driver builds those entries from `settings().current()`;
-//! - the **first change persists** immediately and closes the dialog
-//!   (VAL-OVERLAY-013): the selector watches the list's values around each key and
-//!   emits a [`SettingsOutcome::Changed`] the moment one diverges, then raises its
-//!   [`DoneSignal`](super::overlay::DoneSignal);
+//! - **each change persists but the dialog stays open** (VAL-OVERLAY-013): Tab
+//!   cycles the highlighted enum/bool, and the moment a value diverges the
+//!   selector emits a [`SettingsOutcome::Changed`] and **re-snapshots** — it does
+//!   *not* raise its [`DoneSignal`](super::overlay::DoneSignal), so the user can
+//!   keep adjusting rows without reopening. The driver persists each change
+//!   quietly (footer live, no status spam);
+//! - the two **big-list rows** (`default_provider` / `default_model`) can't be
+//!   Tab-cycled — a catalog carries dozens of providers and hundreds of models —
+//!   so Enter/Tab on them emits [`SettingsOutcome::OpenProviderPicker`] /
+//!   [`SettingsOutcome::OpenModelPicker`] and raises the done flag, handing off to
+//!   a **second-level picker** the driver mounts in place (returning to this
+//!   dialog afterwards);
+//! - **Enter on a normal row confirms and closes** — it never mutates a value
+//!   (Tab/Shift+Tab own that), so the footer's `↵ select` never lies about Enter
+//!   changing the highlighted enum;
 //! - **Esc** closes with [`SettingsOutcome::Closed`] — the driver lands the
 //!   specific `[/settings closed]` line, *not* the generic "cancelled" (the
 //!   VAL-OVERLAY-004 exception).
@@ -44,13 +55,22 @@ use crate::modes::interactive::theme::ThemePalette;
 /// always fits; the overlay clips anything past the dialog interior.
 const RENDER_ROWS: u16 = 24;
 
-/// The outcome the selector emits on its channel — exactly one per open.
+/// An outcome the selector emits on its channel. Unlike the one-shot pickers,
+/// the settings dialog stays open across value changes, so it may emit **many**
+/// [`Changed`](SettingsOutcome::Changed) before a terminal
+/// [`Closed`](SettingsOutcome::Closed) / picker hand-off.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettingsOutcome {
     /// The user changed a setting: its id (the entry key) and the post-change
-    /// string value. The driver persists it and closes the dialog
+    /// string value. The driver persists it quietly and the dialog stays open
     /// (VAL-OVERLAY-013).
     Changed { id: String, value: String },
+    /// Enter/Tab on the `default_model` row — the driver opens the model
+    /// second-level picker, then re-mounts this dialog.
+    OpenModelPicker,
+    /// Enter/Tab on the `default_provider` row — the driver opens the provider
+    /// second-level picker, then re-mounts this dialog.
+    OpenProviderPicker,
     /// The user pressed Esc — the dialog closes with the specific
     /// `[/settings closed]` line (VAL-OVERLAY-004 exception), not the generic
     /// cancelled path.
@@ -99,11 +119,27 @@ impl SettingsSelector {
         done: DoneSignal,
         nav: NavKeys,
     ) -> Self {
+        Self::with_nav_at(entries, tx, done, nav, 0)
+    }
+
+    /// Like [`with_nav`](Self::with_nav) but starts with row `selected`
+    /// highlighted — the driver uses this to restore the cursor after a
+    /// second-level picker returns to the dialog.
+    #[must_use]
+    pub fn with_nav_at(
+        entries: Vec<SettingEntry>,
+        tx: mpsc::UnboundedSender<SettingsOutcome>,
+        done: DoneSignal,
+        nav: NavKeys,
+        selected: usize,
+    ) -> Self {
         let snapshot = snapshot_of(&entries);
         let list = SettingsList::new(entries)
             .max_visible(10)
             .show_description(true)
-            .show_hint(true);
+            .show_hint(true)
+            .hint_text("⇥ change · ↵ select · esc close")
+            .selected(selected);
         Self {
             list,
             snapshot,
@@ -113,30 +149,41 @@ impl SettingsSelector {
         }
     }
 
+    /// The index of the highlighted row (into the entry list) — the driver reads
+    /// it when a picker hand-off fires so it can restore the cursor on re-mount.
+    #[must_use]
+    pub fn selected_index(&self) -> usize {
+        self.list.selected_index()
+    }
+
     /// The entries the dialog is showing (test/introspection aid).
     #[must_use]
     pub fn entries(&self) -> &[SettingEntry] {
         self.list.entries()
     }
 
-    /// Emit the first `(id, value)` that diverged from the snapshot, if any. On a
-    /// change this returns `true` so the caller closes the dialog — the first
-    /// change persists and the overlay unmounts (VAL-OVERLAY-013).
-    fn emit_first_change(&mut self) -> bool {
+    /// Emit the `(id, value)` of the row that just diverged from the snapshot, if
+    /// any, then **re-snapshot** so the next keystroke is compared afresh. The
+    /// dialog stays open across changes (VAL-OVERLAY-013), so re-snapshotting is
+    /// what keeps a second change on a *different* row from re-reporting the first
+    /// one. A single keystroke mutates only the highlighted row, so at most one
+    /// row can diverge here.
+    fn emit_first_change(&mut self) {
+        let mut changed = None;
         for (idx, entry) in self.list.entries().iter().enumerate() {
             let new_value = value_string(&entry.value);
             if let Some((id, old)) = self.snapshot.get(idx)
                 && id == &entry.key
                 && old != &new_value
             {
-                let _ = self.tx.send(SettingsOutcome::Changed {
-                    id: entry.key.clone(),
-                    value: new_value,
-                });
-                return true;
+                changed = Some((entry.key.clone(), new_value));
+                break;
             }
         }
-        false
+        if let Some((id, value)) = changed {
+            let _ = self.tx.send(SettingsOutcome::Changed { id, value });
+            self.snapshot = snapshot_of(self.list.entries());
+        }
     }
 
     /// Render the embedded list into a scratch buffer and lift each painted row
@@ -161,16 +208,37 @@ impl SelectorController for SettingsSelector {
     }
 
     fn handle_key(&mut self, key: &RtKey) -> HandleOutcome {
+        let id = key.key_id.as_deref();
+
         // The cancel key (default Esc, remappable via `select-cancel`) while *not*
         // inline-editing closes the whole dialog with the specific `[/settings
         // closed]` outcome (VAL-OVERLAY-004 exception). While editing, an Esc only
         // discards the edit buffer, so let it fall through to the list.
-        if key
-            .key_id
-            .as_deref()
-            .is_some_and(|id| self.nav.is_cancel(id))
-            && !self.list.is_editing()
+        if id.is_some_and(|id| self.nav.is_cancel(id)) && !self.list.is_editing() {
+            let _ = self.tx.send(SettingsOutcome::Closed);
+            self.done.store(true, Ordering::SeqCst);
+            return HandleOutcome::Consumed;
+        }
+
+        // An activation gesture (Enter / Tab / Shift+Tab) on a big-list row hands
+        // off to a second-level picker instead of cycling in place: raise done so
+        // the driver swaps this overlay for the picker, then re-mounts. Guarded to
+        // the non-editing state so it can never fire mid-edit.
+        if !self.list.is_editing()
+            && matches!(id, Some("enter" | "tab" | "shift+tab"))
+            && let Some(entry) = self.list.selected_entry()
+            && let Some(outcome) = picker_outcome_for(&entry.key)
         {
+            let _ = self.tx.send(outcome);
+            self.done.store(true, Ordering::SeqCst);
+            return HandleOutcome::Consumed;
+        }
+
+        // Enter on a normal (non-picker) row **confirms and closes** — it must
+        // never change a value (Tab / Shift+Tab are the only change gestures, so
+        // the footer's `↵ select` stays honest). Guarded to non-editing so an
+        // inline string/number edit still commits with Enter via the list below.
+        if id == Some("enter") && !self.list.is_editing() {
             let _ = self.tx.send(SettingsOutcome::Closed);
             self.done.store(true, Ordering::SeqCst);
             return HandleOutcome::Consumed;
@@ -179,16 +247,27 @@ impl SelectorController for SettingsSelector {
         // Drive the embedded list, then detect whether this key changed a value.
         self.list.handle_key(key);
 
-        // A toggle/cycle/commit that changed a value persists and closes the dialog.
-        // While the inline editor is still open (a string/number mid-edit), no
-        // change has committed yet, so nothing is emitted until Enter commits it.
-        if !self.list.is_editing() && self.emit_first_change() {
-            self.done.store(true, Ordering::SeqCst);
+        // A toggle/cycle/commit that changed a value persists, but the dialog
+        // stays open (VAL-OVERLAY-013) so the user can keep adjusting rows. While
+        // the inline editor is still open (a string/number mid-edit), no change
+        // has committed yet, so nothing is emitted until Enter commits it.
+        if !self.list.is_editing() {
+            self.emit_first_change();
         }
 
         // A modal selector owns every key so none reaches the editor beneath
         // (VAL-OVERLAY-005).
         HandleOutcome::Consumed
+    }
+}
+
+/// The second-level picker outcome for a big-list row key, or `None` for a
+/// normal in-place-cyclable row.
+fn picker_outcome_for(key: &str) -> Option<SettingsOutcome> {
+    match key {
+        "default_provider" => Some(SettingsOutcome::OpenProviderPicker),
+        "default_model" => Some(SettingsOutcome::OpenModelPicker),
+        _ => None,
     }
 }
 
@@ -270,16 +349,14 @@ mod tests {
     }
 
     /// Entries mirroring the production shape: the three merged-default rows
-    /// first (provider and thinking level as cycle enums seeded at the effective
-    /// value, the model as an editable string) then a toggle and an enum.
+    /// first (provider and model are display-only strings whose activation opens
+    /// a second-level picker; thinking level is a cycle enum seeded at the
+    /// effective value) then a toggle and an enum.
     fn entries() -> Vec<SettingEntry> {
         vec![
             SettingEntry::new(
                 "default_provider",
-                SettingValue::Enum {
-                    choices: vec!["anthropic".into(), "openai".into()],
-                    selected: 0,
-                },
+                SettingValue::String("anthropic".into()),
                 "Effective default provider.",
             ),
             SettingEntry::new(
@@ -364,10 +441,10 @@ mod tests {
         );
     }
 
-    // --- first change persists + closes (VAL-OVERLAY-013) -----------------
+    // --- each change persists but the dialog stays open (VAL-OVERLAY-013) --
 
     #[test]
-    fn first_toggle_emits_change_and_raises_done() {
+    fn toggling_a_bool_emits_change_and_stays_open() {
         let (mut sel, mut rx, done) = selector();
         // Move to the bool row (index 3) and toggle it.
         for _ in 0..3 {
@@ -379,10 +456,10 @@ mod tests {
             "navigation must not emit a change"
         );
 
-        sel.handle_key(&key_id("enter", KeyCode::Enter)); // toggle bool true->false
+        sel.handle_key(&key_id("tab", KeyCode::Tab)); // toggle bool true->false
         assert!(
-            done.load(Ordering::SeqCst),
-            "first change closes the dialog"
+            !done.load(Ordering::SeqCst),
+            "a change keeps the dialog open"
         );
         match drain(&mut rx) {
             Some(SettingsOutcome::Changed { id, value }) => {
@@ -394,13 +471,14 @@ mod tests {
     }
 
     #[test]
-    fn cycling_an_enum_emits_change() {
-        let (mut sel, mut rx, _done) = selector();
-        // Move to the enum row (index 4) and cycle it.
+    fn tab_cycles_an_enum_and_stays_open() {
+        let (mut sel, mut rx, done) = selector();
+        // Move to the theme enum row (index 4) and cycle it with Tab.
         for _ in 0..4 {
             sel.handle_key(&key_id("down", KeyCode::Down));
         }
-        sel.handle_key(&key_id("enter", KeyCode::Enter)); // dark -> light
+        sel.handle_key(&key_id("tab", KeyCode::Tab)); // dark -> light
+        assert!(!done.load(Ordering::SeqCst), "a change keeps the dialog open");
         match drain(&mut rx) {
             Some(SettingsOutcome::Changed { id, value }) => {
                 assert_eq!(id, "theme");
@@ -410,40 +488,124 @@ mod tests {
         }
     }
 
-    // --- the default_* enum rows cycle on Enter (the m6 enum-select fix) ---
-
     #[test]
-    fn cycling_the_thinking_row_emits_the_next_ladder_value() {
+    fn tab_walks_the_thinking_ladder_across_multiple_changes() {
+        // The dialog stays open, so a second Tab on the same row must report the
+        // *next* value — the re-snapshot after each emit is what makes this work.
         let (mut sel, mut rx, done) = selector();
-        // Down to the thinking row (index 2) and cycle it: high -> xhigh.
         sel.handle_key(&key_id("down", KeyCode::Down));
-        sel.handle_key(&key_id("down", KeyCode::Down));
-        sel.handle_key(&key_id("enter", KeyCode::Enter));
-        assert!(
-            done.load(Ordering::SeqCst),
-            "first change closes the dialog"
+        sel.handle_key(&key_id("down", KeyCode::Down)); // thinking row (index 2)
+
+        sel.handle_key(&key_id("tab", KeyCode::Tab)); // high -> xhigh
+        assert_eq!(
+            drain(&mut rx),
+            Some(SettingsOutcome::Changed {
+                id: "default_thinking_level".into(),
+                value: "xhigh".into(),
+            })
         );
-        match drain(&mut rx) {
-            Some(SettingsOutcome::Changed { id, value }) => {
-                assert_eq!(id, "default_thinking_level");
-                assert_eq!(value, "xhigh", "the next ladder rung after high");
-            }
-            other => panic!("expected Changed, got {other:?}"),
-        }
+        sel.handle_key(&key_id("tab", KeyCode::Tab)); // xhigh -> max
+        assert_eq!(
+            drain(&mut rx),
+            Some(SettingsOutcome::Changed {
+                id: "default_thinking_level".into(),
+                value: "max".into(),
+            })
+        );
+        // Shift+Tab steps back: max -> xhigh.
+        sel.handle_key(&key_id("shift+tab", KeyCode::BackTab));
+        assert_eq!(
+            drain(&mut rx),
+            Some(SettingsOutcome::Changed {
+                id: "default_thinking_level".into(),
+                value: "xhigh".into(),
+            })
+        );
+        assert!(!done.load(Ordering::SeqCst), "cycling never closes the dialog");
     }
 
     #[test]
-    fn cycling_the_provider_row_emits_a_provider_id() {
+    fn changing_two_rows_reports_each_row_once() {
+        // After the first change the snapshot is refreshed, so changing a second
+        // row reports *that* row — never a stale re-report of the first.
         let (mut sel, mut rx, _done) = selector();
-        // The provider row is the first, already selected: Enter cycles it.
-        sel.handle_key(&key_id("enter", KeyCode::Enter)); // anthropic -> openai
-        match drain(&mut rx) {
-            Some(SettingsOutcome::Changed { id, value }) => {
-                assert_eq!(id, "default_provider");
-                assert_eq!(value, "openai");
-            }
-            other => panic!("expected Changed, got {other:?}"),
+        for _ in 0..3 {
+            sel.handle_key(&key_id("down", KeyCode::Down));
         }
+        sel.handle_key(&key_id("tab", KeyCode::Tab)); // auto_compact true->false
+        assert_eq!(
+            drain(&mut rx),
+            Some(SettingsOutcome::Changed {
+                id: "auto_compact".into(),
+                value: "false".into(),
+            })
+        );
+        sel.handle_key(&key_id("down", KeyCode::Down)); // theme row
+        sel.handle_key(&key_id("tab", KeyCode::Tab)); // dark -> light
+        assert_eq!(
+            drain(&mut rx),
+            Some(SettingsOutcome::Changed {
+                id: "theme".into(),
+                value: "light".into(),
+            })
+        );
+    }
+
+    // --- big-list rows hand off to a second-level picker ------------------
+
+    #[test]
+    fn enter_on_provider_row_opens_the_provider_picker() {
+        let (mut sel, mut rx, done) = selector();
+        // The provider row is the first, already selected.
+        sel.handle_key(&key_id("enter", KeyCode::Enter));
+        assert!(
+            done.load(Ordering::SeqCst),
+            "a picker hand-off raises done so the driver can swap overlays"
+        );
+        assert_eq!(drain(&mut rx), Some(SettingsOutcome::OpenProviderPicker));
+    }
+
+    #[test]
+    fn tab_on_model_row_opens_the_model_picker() {
+        let (mut sel, mut rx, done) = selector();
+        sel.handle_key(&key_id("down", KeyCode::Down)); // model row (index 1)
+        sel.handle_key(&key_id("tab", KeyCode::Tab));
+        assert!(done.load(Ordering::SeqCst), "picker hand-off raises done");
+        assert_eq!(drain(&mut rx), Some(SettingsOutcome::OpenModelPicker));
+    }
+
+    #[test]
+    fn provider_row_never_inline_edits_or_reports_a_change() {
+        // Enter on the display-only provider string must open the picker, not the
+        // inline editor, and must not emit a Changed for it.
+        let (mut sel, mut rx, _done) = selector();
+        sel.handle_key(&key_id("enter", KeyCode::Enter));
+        assert_eq!(drain(&mut rx), Some(SettingsOutcome::OpenProviderPicker));
+        assert!(drain(&mut rx).is_none(), "no trailing Changed");
+    }
+
+    #[test]
+    fn enter_on_a_value_row_confirms_and_closes_without_changing_it() {
+        // The user's complaint: Enter on the thinking enum used to *cycle* it.
+        // Now Enter never mutates a value — it confirms and closes (Tab is the
+        // only change gesture), so the footer's `↵ select` stays honest.
+        let (mut sel, mut rx, done) = selector();
+        sel.handle_key(&key_id("down", KeyCode::Down));
+        sel.handle_key(&key_id("down", KeyCode::Down)); // thinking row (index 2)
+        let before = sel.entries()[2].value.to_string();
+
+        sel.handle_key(&key_id("enter", KeyCode::Enter));
+        assert!(done.load(Ordering::SeqCst), "Enter closes the dialog");
+        assert_eq!(
+            drain(&mut rx),
+            Some(SettingsOutcome::Closed),
+            "Enter on a value row confirms-and-closes, not a Changed"
+        );
+        assert_eq!(
+            sel.entries()[2].value.to_string(),
+            before,
+            "Enter must not cycle the value"
+        );
     }
 
     #[test]
@@ -456,6 +618,16 @@ mod tests {
             "navigation keeps the dialog open"
         );
         assert!(drain(&mut rx).is_none(), "navigation emits nothing");
+    }
+
+    // --- cursor restore after a picker hand-off ---------------------------
+
+    #[test]
+    fn with_nav_at_restores_the_cursor_row() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let done = super::super::overlay::new_done_signal();
+        let sel = SettingsSelector::with_nav_at(entries(), tx, done, NavKeys::default(), 2);
+        assert_eq!(sel.selected_index(), 2);
     }
 
     // --- Esc closes with the specific outcome (VAL-OVERLAY-004 exception) --

@@ -27,7 +27,6 @@ use model::{Model, ThinkingLevel};
 use tokio::sync::mpsc;
 
 use crate::core::agent_session::AgentSession;
-use crate::core::model_registry::ModelRegistry;
 use crate::core::session_manager::{SessionInfo, SessionManager};
 use crate::core::settings::{Settings, SettingsScope, ThemeSetting, ThinkingLevelSetting};
 use crate::modes::interactive::slash_commands::SlashCommandAction;
@@ -37,6 +36,8 @@ use std::sync::atomic::Ordering;
 use super::chat;
 use super::footer::{TokenUsageSummary, build_footer_view};
 use super::keys::NavKeys;
+use super::login::build_provider_rows;
+use super::login_provider_picker::{LoginProviderOutcome, LoginProviderPicker};
 use super::model_selector::{ModelOutcome, ModelSelector};
 use super::overlay::{self, DoneSignal, SelectorController, SharedOverlay};
 use super::replay::replay_blocks;
@@ -261,20 +262,24 @@ pub fn apply_theme(
     }
 }
 
-/// Open the `/settings` selector overlay (M2 [`SettingsList`]) and, on the first
-/// change, persist it and close (VAL-OVERLAY-013 / VAL-OVERLAY-036 /
-/// VAL-OVERLAY-004 exception).
+/// Open the `/settings` selector overlay (M2 [`SettingsList`]) and drive it until
+/// the user closes it (VAL-OVERLAY-013 / VAL-OVERLAY-036 / VAL-OVERLAY-004
+/// exception).
 ///
-/// Builds the entries from the **merged effective settings** — the three
-/// `default_*` rows first so a project override is visible — mounts the
-/// [`SettingsSelector`], then awaits its single outcome:
+/// The dialog is **long-lived**: Tab cycles the highlighted enum/bool and each
+/// change persists *quietly* (footer live, no status spam) while the dialog stays
+/// open, so this is a loop rather than a single await. It:
 ///
-/// - **Changed{id, value}** — `apply_setting_by_id` + `save` persist the change to
-///   the Global layer, the footer rebuilds (a thinking-level change reflects), and
-///   the `[settings: <id> = <value>]` status line lands. The dialog is already
-///   closed (the first change closes it).
-/// - **Closed** — Esc lands the specific `[/settings closed]` line (not a generic
-///   cancel — the VAL-OVERLAY-004 exception).
+/// - rebuilds the entries from the **merged effective settings** each (re)mount —
+///   the three `default_*` rows first so a project override is visible;
+/// - **Changed{id, value}** — `apply_settings_change` persists to the Global layer
+///   and rebuilds the footer, quietly; the dialog stays open;
+/// - **OpenModelPicker / OpenProviderPicker** — Enter/Tab on a big-list row hands
+///   off to a second-level picker ([`pick_default_model`] / [`pick_default_provider`]);
+///   its pick persists, then the settings dialog **re-mounts** with the cursor
+///   restored to the row the hand-off fired from;
+/// - **Closed** — Esc lands the specific `[/settings closed]` line (the
+///   VAL-OVERLAY-004 exception) and returns.
 // One over the lint's ceiling: the resolved `nav` snapshot joins the existing
 // overlay-mount + session-apply parameter set. Grouping them into a context struct
 // would ripple through the whole selector-open family for no readability gain here.
@@ -289,29 +294,178 @@ pub async fn open_settings_selector(
     requester: &FrameRequester,
     nav: NavKeys,
 ) {
-    let provider_ids = provider_choice_ids(session.model_registry());
-    let entries = build_settings_entries(session.settings().current(), &provider_ids);
+    // The row to highlight on the next (re)mount — restored after a picker
+    // hand-off so the cursor returns to the provider/model row it fired from.
+    let mut selected_row = 0usize;
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<SettingsOutcome>();
+    loop {
+        let entries = build_settings_entries(session.settings().current());
+        let (tx, mut rx) = mpsc::unbounded_channel::<SettingsOutcome>();
+        done.store(false, Ordering::SeqCst);
+        let selector =
+            SettingsSelector::with_nav_at(entries, tx, done.clone(), nav.clone(), selected_row);
+        // Keep a typed handle so the selected row can be read back on hand-off,
+        // while the overlay holds the same instance behind the trait object.
+        let selector = Arc::new(Mutex::new(selector));
+        let controller: Arc<Mutex<dyn SelectorController>> = selector.clone();
+        overlay::mount(overlay, requester, controller, done.clone());
+
+        // Drain outcomes while this mount is up: a `Changed` persists and keeps the
+        // dialog open; a picker hand-off / Esc / teardown ends this mount's loop.
+        let jump = loop {
+            match rx.recv().await {
+                Some(SettingsOutcome::Changed { id, value }) => {
+                    apply_settings_change(
+                        session, cwd, &id, &value, state, footer, requester, true,
+                    );
+                }
+                Some(SettingsOutcome::OpenModelPicker) => break PickerJump::Model,
+                Some(SettingsOutcome::OpenProviderPicker) => break PickerJump::Provider,
+                Some(SettingsOutcome::Closed) => break PickerJump::Closed,
+                None => break PickerJump::Teardown,
+            }
+        };
+
+        // Snapshot the row the hand-off fired from so the re-mount restores it.
+        selected_row = selector
+            .lock()
+            .expect("settings selector poisoned")
+            .selected_index();
+
+        match jump {
+            PickerJump::Model => {
+                pick_default_model(session, cwd, overlay, done, state, footer, requester).await;
+            }
+            PickerJump::Provider => {
+                pick_default_provider(session, cwd, overlay, done, state, footer, requester).await;
+            }
+            PickerJump::Closed => {
+                commit_status(state, requester, "[/settings closed]");
+                return;
+            }
+            PickerJump::Teardown => {
+                overlay::close(overlay, requester);
+                return;
+            }
+        }
+        // A picker hand-off falls through to the top of the loop, re-mounting the
+        // settings dialog with `selected_row` restored.
+    }
+}
+
+/// What ended a settings-dialog mount: a second-level picker hand-off, the user
+/// closing it, or a mid-dialog teardown.
+enum PickerJump {
+    /// Enter/Tab on `default_model` — open the model second-level picker.
+    Model,
+    /// Enter/Tab on `default_provider` — open the provider second-level picker.
+    Provider,
+    /// Esc — close the dialog with the `[/settings closed]` line.
+    Closed,
+    /// The channel closed with no outcome (teardown mid-dialog).
+    Teardown,
+}
+
+/// Open the model second-level picker (reusing the `/model` [`ModelSelector`])
+/// scoped to setting the **default** model. On a pick, persist `default_model`;
+/// the caller re-mounts the settings dialog afterwards. Cancel returns to the
+/// settings dialog unchanged.
+#[allow(clippy::too_many_arguments)]
+async fn pick_default_model(
+    session: &mut AgentSession,
+    cwd: &Path,
+    overlay: &SharedOverlay,
+    done: &DoneSignal,
+    state: &Arc<Mutex<DriverState>>,
+    footer: &SharedFooter,
+    requester: &FrameRequester,
+) {
+    session.refresh_model_registry();
+    let all_models = session.model_registry().all().to_vec();
+    let scoped_models = resolve_scoped_models(session, &all_models);
+    // Seed the cursor at the current default_model if it resolves to a catalog
+    // model; otherwise start unseeded (a custom / unset default).
+    let current = session
+        .settings()
+        .current()
+        .default_model
+        .clone()
+        .and_then(|id| all_models.iter().find(|m| m.id == id).cloned());
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<ModelOutcome>();
     done.store(false, Ordering::SeqCst);
-    let selector = SettingsSelector::with_nav(entries, tx, done.clone(), nav);
+    let selector = ModelSelector::new(current, all_models, scoped_models, tx, done.clone());
     let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(selector));
-
     overlay::mount(overlay, requester, controller, done.clone());
 
     match rx.recv().await {
-        Some(SettingsOutcome::Changed { id, value }) => {
-            apply_settings_change(session, cwd, &id, &value, state, footer, requester);
+        Some(ModelOutcome::Selected(model)) => {
+            apply_settings_change(
+                session,
+                cwd,
+                "default_model",
+                &model.id,
+                state,
+                footer,
+                requester,
+                false,
+            );
         }
-        Some(SettingsOutcome::Closed) => {
-            commit_status(state, requester, "[/settings closed]");
-        }
+        // Cancel: leave the default unchanged; the caller re-mounts settings.
+        Some(ModelOutcome::Cancelled) => {}
         None => overlay::close(overlay, requester),
     }
 }
 
-/// Persist one settings change (Global scope), rebuild the footer, and land the
-/// status line. A rejected write takes the red-banner route.
+/// Open the provider second-level picker (reusing the `/login` [`LoginProviderPicker`])
+/// scoped to setting the **default** provider. On a pick, persist
+/// `default_provider`; the caller re-mounts the settings dialog afterwards.
+#[allow(clippy::too_many_arguments)]
+async fn pick_default_provider(
+    session: &mut AgentSession,
+    cwd: &Path,
+    overlay: &SharedOverlay,
+    done: &DoneSignal,
+    state: &Arc<Mutex<DriverState>>,
+    footer: &SharedFooter,
+    requester: &FrameRequester,
+) {
+    let rows = build_provider_rows(session);
+    if rows.is_empty() {
+        commit_status(state, requester, "[/settings: no providers available]");
+        return;
+    }
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<LoginProviderOutcome>();
+    done.store(false, Ordering::SeqCst);
+    let picker = LoginProviderPicker::new("Select the default provider", rows, tx, done.clone());
+    let controller: Arc<Mutex<dyn SelectorController>> = Arc::new(Mutex::new(picker));
+    overlay::mount(overlay, requester, controller, done.clone());
+
+    match rx.recv().await {
+        Some(LoginProviderOutcome::Selected(id)) => {
+            apply_settings_change(
+                session,
+                cwd,
+                "default_provider",
+                &id,
+                state,
+                footer,
+                requester,
+                false,
+            );
+        }
+        Some(LoginProviderOutcome::Cancelled) => {}
+        None => overlay::close(overlay, requester),
+    }
+}
+
+/// Persist one settings change (Global scope) and rebuild the footer. A rejected
+/// write takes the red-banner route. When `quiet` is set (the live Tab-cycle path)
+/// the success `[settings: …]` status line is suppressed so rapid cycling never
+/// spams scrollback — the footer already reflects the change; an explicit
+/// second-level pick passes `quiet = false` for a one-line confirmation.
+#[allow(clippy::too_many_arguments)]
 fn apply_settings_change(
     session: &mut AgentSession,
     cwd: &Path,
@@ -320,6 +474,7 @@ fn apply_settings_change(
     state: &Arc<Mutex<DriverState>>,
     footer: &SharedFooter,
     requester: &FrameRequester,
+    quiet: bool,
 ) {
     let settings = session.settings_mut();
     let result = settings
@@ -336,7 +491,9 @@ fn apply_settings_change(
                     .set_show_images(session.settings().current().terminal.show_images());
             }
             refresh_footer(session, cwd, state, footer, requester);
-            commit_status(state, requester, &format!("[settings: {id} = {value}]"));
+            if !quiet {
+                commit_status(state, requester, &format!("[settings: {id} = {value}]"));
+            }
         }
         Err(e) => commit_error(state, requester, &format!("[settings failed: {e}]")),
     }
@@ -349,24 +506,10 @@ fn apply_settings_change(
 const THINKING_LEVEL_CHOICES: [&str; 7] =
     ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/// The unique provider ids in the registry's catalog, sorted — the same source
-/// the `/login` picker rows draw from, so the `/settings` provider choices track
-/// the live catalog (custom `models.json` providers included).
-fn provider_choice_ids(registry: &ModelRegistry) -> Vec<String> {
-    let mut ids: Vec<String> = registry
-        .all()
-        .iter()
-        .map(|m| m.provider.as_str().to_string())
-        .collect();
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
 /// An enum setting seeded at `current` within `choices`. A `current` that is not
 /// in the list (a custom provider, the `(unset)` placeholder) is **prepended** so
 /// the merged effective value is always the visible seed (VAL-OVERLAY-036) and
-/// the first Enter cycles off it onto a real choice.
+/// the first Tab cycles off it onto a real choice.
 fn enum_seeded_at(current: String, mut choices: Vec<String>) -> SettingValue {
     let selected = match choices.iter().position(|c| *c == current) {
         Some(idx) => idx,
@@ -382,17 +525,17 @@ fn enum_seeded_at(current: String, mut choices: Vec<String>) -> SettingValue {
 ///
 /// The three `default_*` rows come first so a project override is visible
 /// (VAL-OVERLAY-036, the issue #16 UAT regression). `default_provider` and
-/// `default_thinking_level` are **Enum** rows — Enter cycles the live provider
-/// catalog / the fixed thinking ladder, seeded at the merged effective value (an
-/// unknown or `(unset)` value is prepended so the seed stays representable).
-/// `default_model` stays a text edit: a catalog can carry hundreds of models, so
-/// picking happens in `/model` instead. The editable toggles/enums follow. Every
-/// id here is one
+/// `default_model` are **display-only String** rows — their choice sets (the
+/// live provider catalog / hundreds of models) are too large for a Tab cycle, so
+/// activating them hands off to a second-level picker instead. Only
+/// `default_thinking_level` stays an inline **Enum** ladder, seeded at the merged
+/// effective value (an unknown or `(unset)` value is prepended so the seed stays
+/// representable). The editable toggles/enums follow. Every id here is one
 /// [`apply_setting_by_id`](crate::core::settings::SettingsManager::apply_setting_by_id)
 /// accepts, so a change always round-trips.
 ///
 /// [`apply_setting_by_id`]: crate::core::settings::SettingsManager::apply_setting_by_id
-fn build_settings_entries(merged: &Settings, provider_ids: &[String]) -> Vec<SettingEntry> {
+fn build_settings_entries(merged: &Settings) -> Vec<SettingEntry> {
     let provider = merged
         .default_provider
         .clone()
@@ -409,13 +552,13 @@ fn build_settings_entries(merged: &Settings, provider_ids: &[String]) -> Vec<Set
         // The merged effective defaults, first, so a project override is visible.
         SettingEntry::new(
             "default_provider",
-            enum_seeded_at(provider, provider_ids.to_vec()),
-            "Effective default provider (global + project merged).",
+            SettingValue::String(provider),
+            "Effective default provider (global + project merged). ↵ pick.",
         ),
         SettingEntry::new(
             "default_model",
             SettingValue::String(model),
-            "Effective default model (global + project merged). Pick interactively via /model.",
+            "Effective default model (global + project merged). ↵ pick.",
         ),
         SettingEntry::new(
             "default_thinking_level",
@@ -1361,14 +1504,13 @@ mod tests {
         merged.default_model = Some("claude-opus-4-7".to_string());
         merged.default_thinking_level = Some(ThinkingLevelSetting::High);
 
-        let providers = vec!["anthropic".to_string(), "openai".to_string()];
-        let entries = build_settings_entries(&merged, &providers);
+        let entries = build_settings_entries(&merged);
         // The three default-* rows come first, in order.
         assert_eq!(entries[0].key, "default_provider");
         assert_eq!(entries[1].key, "default_model");
         assert_eq!(entries[2].key, "default_thinking_level");
-        // Their effective (merged) values are visible (the enum rows display
-        // their seeded choice).
+        // Their effective (merged) values are visible (provider/model as display
+        // strings, thinking as its seeded enum choice).
         assert_eq!(entries[0].value.to_string(), "anthropic");
         assert_eq!(entries[1].value.to_string(), "claude-opus-4-7");
         assert_eq!(entries[2].value.to_string(), "high");
@@ -1379,11 +1521,10 @@ mod tests {
         use crate::core::settings::Settings;
 
         // A truly empty merged view (no provider/model/thinking set) shows the
-        // `(unset)` placeholder for each default row — the enum rows prepend it so
-        // the seed is representable.
+        // `(unset)` placeholder for each default row — provider/model as strings,
+        // the thinking enum prepends it so the seed is representable.
         let merged = Settings::default();
-        let providers = vec!["anthropic".to_string()];
-        let entries = build_settings_entries(&merged, &providers);
+        let entries = build_settings_entries(&merged);
         assert_eq!(entries[0].value.to_string(), "(unset)");
         assert_eq!(entries[1].value.to_string(), "(unset)");
         assert_eq!(entries[2].value.to_string(), "(unset)");
@@ -1416,7 +1557,7 @@ mod tests {
         let mut merged = Settings::defaults();
         merged.default_thinking_level = Some(ThinkingLevelSetting::Medium);
 
-        let entries = build_settings_entries(&merged, &[]);
+        let entries = build_settings_entries(&merged);
         let SettingValue::Enum { choices, selected } = &entries[2].value else {
             panic!(
                 "default_thinking_level must be an enum, got {:?}",
@@ -1431,54 +1572,36 @@ mod tests {
     }
 
     #[test]
-    fn settings_provider_enum_prepends_an_unknown_current_value() {
+    fn settings_provider_and_model_are_display_only_picker_rows() {
         use crate::core::settings::Settings;
 
-        // A merged provider that is not in the catalog (a custom models.json
-        // provider removed since, say) still seeds: it is prepended.
+        // Both big-list rows are display-only strings: their choice sets (the
+        // live provider catalog / hundreds of models) are too large to Tab-cycle,
+        // so activating them hands off to a second-level picker. The row shows the
+        // current merged value verbatim (a custom provider included).
         let mut merged = Settings::defaults();
         merged.default_provider = Some("custom-proxy".to_string());
+        merged.default_model = Some("claude-opus-4-7".to_string());
 
-        let providers = vec!["anthropic".to_string(), "openai".to_string()];
-        let entries = build_settings_entries(&merged, &providers);
-        let SettingValue::Enum { choices, selected } = &entries[0].value else {
-            panic!(
-                "default_provider must be an enum, got {:?}",
-                entries[0].value
-            );
-        };
-        assert_eq!(choices[0], "custom-proxy", "unknown current is prepended");
-        assert_eq!(*selected, 0, "and it is the seed");
-        assert_eq!(
-            &choices[1..],
-            &["anthropic", "openai"],
-            "catalog ids follow"
+        let entries = build_settings_entries(&merged);
+        assert!(
+            matches!(entries[0].value, SettingValue::String(_)),
+            "default_provider is a display-only string, got {:?}",
+            entries[0].value
         );
-    }
-
-    #[test]
-    fn settings_default_model_stays_text_pointing_at_model_command() {
-        use crate::core::settings::Settings;
-
-        // A catalog can carry hundreds of models — cycling is unusable, so the
-        // model row stays a text edit and its description points at /model.
-        let merged = Settings::defaults();
-        let entries = build_settings_entries(&merged, &[]);
+        assert_eq!(entries[0].value.to_string(), "custom-proxy");
         assert!(
             matches!(entries[1].value, SettingValue::String(_)),
-            "default_model stays a string edit"
+            "default_model is a display-only string, got {:?}",
+            entries[1].value
         );
-        assert!(
-            entries[1].description.contains("/model"),
-            "description points at /model: {}",
-            entries[1].description
-        );
+        assert_eq!(entries[1].value.to_string(), "claude-opus-4-7");
     }
 
     /// The end-to-end enum-cycle path: entries built from the merged view, the
-    /// dialog cycles `default_thinking_level` one rung (`high` → `xhigh`), and the
-    /// emitted change persists through `apply_settings_change` — the same
-    /// first-change-persists route every settings edit takes (VAL-OVERLAY-013).
+    /// dialog Tab-cycles `default_thinking_level` one rung (`high` → `xhigh`), and
+    /// the emitted change persists through `apply_settings_change` — the
+    /// each-change-persists route every settings edit takes (VAL-OVERLAY-013).
     #[tokio::test]
     async fn cycling_thinking_in_the_dialog_persists_the_next_ladder_value() {
         use crate::core::settings::{Settings, SettingsManager};
@@ -1487,7 +1610,7 @@ mod tests {
 
         let mut merged = Settings::defaults();
         merged.default_thinking_level = Some(ThinkingLevelSetting::High);
-        let entries = build_settings_entries(&merged, &["anthropic".to_string()]);
+        let entries = build_settings_entries(&merged);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut sel = SettingsSelector::new(entries, tx, overlay::new_done_signal());
@@ -1495,10 +1618,10 @@ mod tests {
             key_id: Some(id.to_string()),
             raw: KeyEvent::new(code, KeyModifiers::NONE),
         };
-        // Down to the thinking row (index 2), Enter cycles high -> xhigh.
+        // Down to the thinking row (index 2), Tab cycles high -> xhigh.
         sel.handle_key(&key("down", KeyCode::Down));
         sel.handle_key(&key("down", KeyCode::Down));
-        sel.handle_key(&key("enter", KeyCode::Enter));
+        sel.handle_key(&key("tab", KeyCode::Tab));
         let Ok(SettingsOutcome::Changed { id, value }) = rx.try_recv() else {
             panic!("cycling the thinking row must emit a change");
         };
@@ -1527,6 +1650,7 @@ mod tests {
             &state,
             &footer,
             &req,
+            false,
         );
 
         assert_eq!(
@@ -1599,7 +1723,7 @@ mod tests {
         use crate::core::settings::Settings;
 
         let merged = Settings::defaults();
-        let entries = build_settings_entries(&merged, &[]);
+        let entries = build_settings_entries(&merged);
         let show = entries
             .iter()
             .find(|e| e.key == "show_images")
@@ -1644,6 +1768,7 @@ mod tests {
             &state,
             &footer,
             &req,
+            false,
         );
         assert!(
             !lock_state(&state).show_images(),
@@ -1658,6 +1783,7 @@ mod tests {
             &state,
             &footer,
             &req,
+            false,
         );
         assert!(
             lock_state(&state).show_images(),
