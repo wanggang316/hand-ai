@@ -50,6 +50,96 @@ pub struct ExtensionManifest {
     /// builds tools in code via `Extension::custom_tools()`).
     #[serde(default)]
     pub custom_tools: Vec<CustomToolSpec>,
+    /// Tier 2 only: per-hook RPC budgets. Ignored for Tier 1 (an
+    /// in-process extension cannot be timed out without cancelling its
+    /// future, which the trait does not promise is safe).
+    #[serde(default)]
+    pub timeouts: ExtensionTimeouts,
+}
+
+/// Per-hook RPC budgets for a Tier 2 extension, in milliseconds.
+///
+/// Every hook is a blocking request/response over the child's stdio,
+/// serialized behind one mutex, so a child that never answers would
+/// otherwise hang the session with no user-visible recovery path. Each RPC
+/// gets a budget; blowing it kills the child and disables the extension for
+/// the rest of the session rather than paying the timeout again on every
+/// later call.
+///
+/// In `extension.toml`:
+///
+/// ```toml
+/// [timeouts]
+/// before-tool-call-ms = 5000
+/// after-tool-call-ms = 2000
+/// on-before-tool-call-timeout = "cancel"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ExtensionTimeouts {
+    /// Budget for `on_before_tool_call`. Blocking — the agent loop waits on
+    /// the verdict — so the default is generous but finite.
+    #[serde(default = "default_before_tool_call_ms")]
+    pub before_tool_call_ms: u64,
+    /// Budget for `on_after_tool_call`. Observational: the result is
+    /// already produced, so abandoning it is safe and the budget is tighter.
+    #[serde(default = "default_after_tool_call_ms")]
+    pub after_tool_call_ms: u64,
+    /// Budget for `on_load` / `on_shutdown`.
+    #[serde(default = "default_lifecycle_ms")]
+    pub lifecycle_ms: u64,
+    /// Budget for user-initiated work — custom tool execution and slash
+    /// commands. These legitimately take longer than a hook, so the budget
+    /// is much larger.
+    #[serde(default = "default_invoke_ms")]
+    pub invoke_ms: u64,
+    /// What a `before_tool_call` timeout resolves to. Defaults to
+    /// [`TimeoutPolicy::Cancel`]: a security-shaped extension that times
+    /// out and silently allows the call is the dangerous default.
+    #[serde(default)]
+    pub on_before_tool_call_timeout: TimeoutPolicy,
+}
+
+fn default_before_tool_call_ms() -> u64 {
+    5_000
+}
+
+fn default_after_tool_call_ms() -> u64 {
+    2_000
+}
+
+fn default_lifecycle_ms() -> u64 {
+    5_000
+}
+
+fn default_invoke_ms() -> u64 {
+    30_000
+}
+
+impl Default for ExtensionTimeouts {
+    fn default() -> Self {
+        Self {
+            before_tool_call_ms: default_before_tool_call_ms(),
+            after_tool_call_ms: default_after_tool_call_ms(),
+            lifecycle_ms: default_lifecycle_ms(),
+            invoke_ms: default_invoke_ms(),
+            on_before_tool_call_timeout: TimeoutPolicy::default(),
+        }
+    }
+}
+
+/// What a blocking hook's timeout means for the tool call it was guarding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimeoutPolicy {
+    /// Fail closed: block the tool call. The default — an extension that
+    /// declared `before_tool_call` was registered to have an opinion, and a
+    /// missing opinion is not consent.
+    #[default]
+    Cancel,
+    /// Fail open: let the tool call through. For extensions that only
+    /// observe or annotate.
+    Continue,
 }
 
 /// Which extension hooks/contributions the extension provides.
@@ -318,6 +408,14 @@ pub enum ExtensionError {
         #[source]
         source: ManifestError,
     },
+    #[error("extension {extension} exceeded its {timeout_ms}ms budget for {hook}")]
+    Timeout {
+        extension: String,
+        hook: &'static str,
+        timeout_ms: u64,
+    },
+    #[error("extension {extension} is disabled for this session: {reason}")]
+    Disabled { extension: String, reason: String },
     #[error("Tier 2 RPC error in {extension}: {source}")]
     Rpc {
         extension: String,
@@ -389,6 +487,7 @@ mod tests {
                 env: Default::default(),
                 slash_commands: Vec::new(),
                 custom_tools: Vec::new(),
+                timeouts: Default::default(),
             },
         };
         let cx = ctx();

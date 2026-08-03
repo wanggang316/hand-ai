@@ -162,6 +162,7 @@ mod tests {
             env: Default::default(),
             slash_commands: Vec::new(),
             custom_tools: Vec::new(),
+            timeouts: Default::default(),
         }
     }
 

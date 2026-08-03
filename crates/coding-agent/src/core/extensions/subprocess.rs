@@ -20,12 +20,22 @@
 //!
 //! # Per-hook timeouts
 //!
-//! Not implemented in v1. A misbehaving extension can deadlock a session.
-//! T3.5 will optionally add timeouts.
+//! Every RPC runs under a budget from `manifest.timeouts` (see
+//! [`crate::core::extensions::api::ExtensionTimeouts`]). A child that blows
+//! its budget is killed and the extension is marked unhealthy: later hooks
+//! return [`ExtensionError::Disabled`] immediately instead of paying the
+//! timeout again, and the chain treats that as `Continue`. Killing rather
+//! than re-using the child also avoids reading a late response as the answer
+//! to the next question.
+//!
+//! A `before_tool_call` timeout resolves per
+//! [`crate::core::extensions::api::TimeoutPolicy`] — `Cancel` by default, so
+//! a guard that stops answering blocks the call instead of silently allowing
+//! it.
 
 use crate::core::extensions::api::{
     Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision, SlashCommandSpec,
-    ToolCallEvent, ToolResultEvent,
+    TimeoutPolicy, ToolCallEvent, ToolResultEvent,
 };
 use crate::core::extensions::manifest::load_manifest;
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
@@ -36,6 +46,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use tokio::io::BufReader;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
@@ -186,6 +198,10 @@ pub(crate) struct SubprocessInner {
     /// JSON parsing, [`SubprocessExtension::new`] returns an error and the
     /// extension does not load.
     parsed_tool_schemas: std::collections::HashMap<String, serde_json::Value>,
+    /// Set once a hook blows its budget. The child is killed and every later
+    /// RPC short-circuits with [`ExtensionError::Disabled`] — one slow
+    /// extension must not cost the session a full timeout per tool call.
+    unhealthy: AtomicBool,
 }
 
 struct SubprocessHandle {
@@ -220,6 +236,7 @@ impl SubprocessExtension {
                 extension_dir,
                 child: Mutex::new(None),
                 parsed_tool_schemas,
+                unhealthy: AtomicBool::new(false),
             }),
         })
     }
@@ -242,6 +259,30 @@ fn event_data_dir(event: &ExtensionEventOut) -> Option<&Path> {
         ExtensionEventOut::ExecuteSlashCommand { context, .. } => context,
     };
     Some(dto.data_dir.as_path())
+}
+
+/// The RPC surfaces a Tier 2 extension exposes, each with its own budget.
+#[derive(Debug, Clone, Copy)]
+enum Hook {
+    Load,
+    Shutdown,
+    BeforeToolCall,
+    AfterToolCall,
+    CustomTool,
+    SlashCommand,
+}
+
+impl Hook {
+    fn name(self) -> &'static str {
+        match self {
+            Hook::Load => "on_load",
+            Hook::Shutdown => "on_shutdown",
+            Hook::BeforeToolCall => "on_before_tool_call",
+            Hook::AfterToolCall => "on_after_tool_call",
+            Hook::CustomTool => "custom_tool",
+            Hook::SlashCommand => "slash_command",
+        }
+    }
 }
 
 impl SubprocessInner {
@@ -318,6 +359,89 @@ impl SubprocessInner {
         })
     }
 
+    /// Budget for a named hook, from the manifest's `[timeouts]` table.
+    ///
+    /// The child is lazy-spawned, so the first hook of a session pays the
+    /// spawn out of its own budget. The defaults leave ample room for that;
+    /// a manifest that tightens them should keep it in mind.
+    fn budget(&self, hook: Hook) -> Duration {
+        let t = &self.manifest.timeouts;
+        Duration::from_millis(match hook {
+            Hook::BeforeToolCall => t.before_tool_call_ms,
+            Hook::AfterToolCall => t.after_tool_call_ms,
+            Hook::Load | Hook::Shutdown => t.lifecycle_ms,
+            Hook::CustomTool | Hook::SlashCommand => t.invoke_ms,
+        })
+    }
+
+    /// Send one event and read one response under `budget`.
+    ///
+    /// Short-circuits if a previous hook already timed out. On timeout the
+    /// child is killed, the extension is disabled for the rest of the
+    /// session, and [`ExtensionError::Timeout`] is returned — callers decide
+    /// what that means for the hook they were serving.
+    async fn rpc_hook(
+        &self,
+        event: ExtensionEventOut,
+        hook: Hook,
+    ) -> Result<ExtensionEventIn, ExtensionError> {
+        self.rpc_within(event, self.budget(hook), hook.name()).await
+    }
+
+    async fn rpc_within(
+        &self,
+        event: ExtensionEventOut,
+        budget: Duration,
+        hook: &'static str,
+    ) -> Result<ExtensionEventIn, ExtensionError> {
+        if self.unhealthy.load(Ordering::Acquire) {
+            return Err(ExtensionError::Disabled {
+                extension: self.manifest.name.clone(),
+                reason: "a previous hook exceeded its timeout budget".to_string(),
+            });
+        }
+
+        match tokio::time::timeout(budget, self.rpc(event)).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                self.disable_after_timeout(hook, budget).await;
+                Err(ExtensionError::Timeout {
+                    extension: self.manifest.name.clone(),
+                    hook,
+                    timeout_ms: budget.as_millis() as u64,
+                })
+            }
+        }
+    }
+
+    /// Mark the extension unhealthy and kill its child.
+    ///
+    /// The timed-out RPC future has already been dropped, so its guard on
+    /// `child` is released; the bounded re-acquire is belt and braces for a
+    /// concurrent caller holding it, and `kill_on_drop` reaps the child in
+    /// that case anyway.
+    async fn disable_after_timeout(&self, hook: &'static str, budget: Duration) {
+        self.unhealthy.store(true, Ordering::Release);
+        tracing::warn!(
+            extension = %self.manifest.name,
+            hook,
+            timeout_ms = budget.as_millis() as u64,
+            "subprocess extension exceeded its budget; killing the child and \
+             disabling it for this session"
+        );
+        match tokio::time::timeout(Duration::from_secs(1), self.child.lock()).await {
+            Ok(mut guard) => {
+                if let Some(mut handle) = guard.take() {
+                    let _ = handle.child.kill().await;
+                }
+            }
+            Err(_) => tracing::warn!(
+                extension = %self.manifest.name,
+                "could not take the child lock to kill it; relying on kill_on_drop"
+            ),
+        }
+    }
+
     /// Send one event and read one response. Spawns the subprocess if it
     /// is not already running.
     async fn rpc(&self, event: ExtensionEventOut) -> Result<ExtensionEventIn, ExtensionError> {
@@ -370,7 +494,7 @@ impl Extension for SubprocessExtension {
     async fn on_load(&self, cx: &ExtensionContext) -> Result<(), ExtensionError> {
         let response = self
             .inner
-            .rpc(ExtensionEventOut::OnLoad { context: cx.into() })
+            .rpc_hook(ExtensionEventOut::OnLoad { context: cx.into() }, Hook::Load)
             .await?;
         match response {
             ExtensionEventIn::Ok | ExtensionEventIn::Continue => Ok(()),
@@ -391,7 +515,10 @@ impl Extension for SubprocessExtension {
         // shutdown must not block session teardown.
         let _ = self
             .inner
-            .rpc(ExtensionEventOut::OnShutdown { context: cx.into() })
+            .rpc_hook(
+                ExtensionEventOut::OnShutdown { context: cx.into() },
+                Hook::Shutdown,
+            )
             .await;
         let mut guard = self.inner.child.lock().await;
         if let Some(mut handle) = guard.take() {
@@ -407,13 +534,30 @@ impl Extension for SubprocessExtension {
         cx: &ExtensionContext,
         event: &ToolCallEvent,
     ) -> Result<HookDecision, ExtensionError> {
-        let response = self
+        let response = match self
             .inner
-            .rpc(ExtensionEventOut::OnBeforeToolCall {
-                context: cx.into(),
-                event: event.into(),
-            })
-            .await?;
+            .rpc_hook(
+                ExtensionEventOut::OnBeforeToolCall {
+                    context: cx.into(),
+                    event: event.into(),
+                },
+                Hook::BeforeToolCall,
+            )
+            .await
+        {
+            Ok(response) => response,
+            // A guard that stops answering must not silently allow the call:
+            // resolve the timeout per the manifest's policy, fail-closed by
+            // default. Any other error (including a later "disabled" skip)
+            // stays an error and the chain logs it and continues.
+            Err(err @ ExtensionError::Timeout { .. }) => {
+                return match self.inner.manifest.timeouts.on_before_tool_call_timeout {
+                    TimeoutPolicy::Cancel => Ok(HookDecision::Cancel(err.to_string())),
+                    TimeoutPolicy::Continue => Err(err),
+                };
+            }
+            Err(err) => return Err(err),
+        };
         match response {
             ExtensionEventIn::Continue => Ok(HookDecision::Continue),
             ExtensionEventIn::Cancel { reason } => Ok(HookDecision::Cancel(reason)),
@@ -440,10 +584,13 @@ impl Extension for SubprocessExtension {
     ) -> Result<(), ExtensionError> {
         let response = self
             .inner
-            .rpc(ExtensionEventOut::OnAfterToolCall {
-                context: cx.into(),
-                event: event.into(),
-            })
+            .rpc_hook(
+                ExtensionEventOut::OnAfterToolCall {
+                    context: cx.into(),
+                    event: event.into(),
+                },
+                Hook::AfterToolCall,
+            )
             .await?;
         match response {
             ExtensionEventIn::Ok | ExtensionEventIn::Continue => Ok(()),
@@ -508,12 +655,15 @@ impl Extension for SubprocessExtension {
                             data_dir,
                         };
                         let result = match inner
-                            .rpc(ExtensionEventOut::ExecuteCustomTool {
-                                context: (&cx).into(),
-                                tool_name: tool_name.clone(),
-                                arguments: ctx.args,
-                                call_id: ctx.tool_call_id.clone(),
-                            })
+                            .rpc_hook(
+                                ExtensionEventOut::ExecuteCustomTool {
+                                    context: (&cx).into(),
+                                    tool_name: tool_name.clone(),
+                                    arguments: ctx.args,
+                                    call_id: ctx.tool_call_id.clone(),
+                                },
+                                Hook::CustomTool,
+                            )
                             .await
                         {
                             Ok(ExtensionEventIn::ToolResult { content, is_error }) => {
@@ -559,11 +709,14 @@ impl Extension for SubprocessExtension {
     ) -> Result<String, ExtensionError> {
         let response = self
             .inner
-            .rpc(ExtensionEventOut::ExecuteSlashCommand {
-                context: cx.into(),
-                command_name: name.to_string(),
-                args: args.to_string(),
-            })
+            .rpc_hook(
+                ExtensionEventOut::ExecuteSlashCommand {
+                    context: cx.into(),
+                    command_name: name.to_string(),
+                    args: args.to_string(),
+                },
+                Hook::SlashCommand,
+            )
             .await?;
         match response {
             ExtensionEventIn::SlashResult { output, error } => {
@@ -720,6 +873,7 @@ mod tests {
             env: Default::default(),
             slash_commands: Vec::new(),
             custom_tools: Vec::new(),
+            timeouts: Default::default(),
         }
     }
 
@@ -804,6 +958,144 @@ exec = ["/bin/true"]
         let inner = ext.inner_for_test();
         let guard = inner.child.lock().await;
         assert!(guard.is_none(), "child handle cleared on shutdown");
+    }
+
+    // -- Per-hook timeouts ---------------------------------------------------
+
+    /// Manifest for a fixture with a deliberately tiny before-tool-call
+    /// budget, so the test does not have to wait out a realistic one.
+    fn make_impatient_manifest(
+        name: &str,
+        exec: Vec<String>,
+        policy: TimeoutPolicy,
+    ) -> ExtensionManifest {
+        let mut manifest = make_manifest(name, exec);
+        manifest.timeouts = crate::core::extensions::api::ExtensionTimeouts {
+            before_tool_call_ms: 150,
+            after_tool_call_ms: 150,
+            lifecycle_ms: 150,
+            invoke_ms: 150,
+            on_before_tool_call_timeout: policy,
+        };
+        manifest
+    }
+
+    /// A fixture that never answers in time: the hook resolves within the
+    /// budget, fails closed, and the child is killed rather than left to
+    /// hang the next call.
+    #[tokio::test]
+    async fn hook_timeout_fails_closed_and_disables_the_extension() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(
+            dir.path(),
+            r#"
+  sleep 30
+  printf '{"type":"continue"}\n'
+"#,
+        );
+        let manifest = make_impatient_manifest(
+            "sleeper",
+            vec![script.to_string_lossy().into_owned()],
+            TimeoutPolicy::Cancel,
+        );
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let started = std::time::Instant::now();
+        let decision = ext
+            .on_before_tool_call(&ctx(), &tool_call_event())
+            .await
+            .expect("timeout resolves to a decision, not an error");
+        let elapsed = started.elapsed();
+
+        match decision {
+            HookDecision::Cancel(reason) => assert!(
+                reason.contains("budget"),
+                "cancel reason should name the budget, got {reason:?}"
+            ),
+            other => panic!("expected Cancel on timeout, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "hook must resolve at the budget, not at the child's pace (took {elapsed:?})"
+        );
+
+        // The child is killed rather than reused: a late response must never
+        // be read as the answer to the next question.
+        let inner = ext.inner_for_test();
+        assert!(
+            inner.child.lock().await.is_none(),
+            "child handle cleared after a timeout"
+        );
+
+        // The next call is not blocked by the first one's timeout — the
+        // extension is skipped outright.
+        let started = std::time::Instant::now();
+        let err = ext
+            .on_before_tool_call(&ctx(), &tool_call_event())
+            .await
+            .expect_err("a disabled extension reports rather than decides");
+        assert!(
+            matches!(err, ExtensionError::Disabled { .. }),
+            "expected Disabled, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "a disabled extension must not pay the budget again"
+        );
+    }
+
+    /// With `on-before-tool-call-timeout = "continue"` the timeout is an
+    /// error instead — the chain logs it and lets the call through.
+    #[tokio::test]
+    async fn hook_timeout_can_be_configured_to_fail_open() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(
+            dir.path(),
+            r#"
+  sleep 30
+  printf '{"type":"continue"}\n'
+"#,
+        );
+        let manifest = make_impatient_manifest(
+            "sleeper-open",
+            vec![script.to_string_lossy().into_owned()],
+            TimeoutPolicy::Continue,
+        );
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let err = ext
+            .on_before_tool_call(&ctx(), &tool_call_event())
+            .await
+            .expect_err("fail-open surfaces the timeout as an error");
+        assert!(
+            matches!(err, ExtensionError::Timeout { hook, .. } if hook == "on_before_tool_call"),
+            "expected a Timeout for on_before_tool_call, got {err:?}"
+        );
+    }
+
+    /// An extension that answers inside the default budgets is unaffected —
+    /// no regression on the existing happy path.
+    #[tokio::test]
+    async fn extension_within_budget_is_unaffected() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(dir.path(), r#"  printf '{"type":"continue"}\n'"#);
+        let manifest = make_manifest("prompt", vec![script.to_string_lossy().into_owned()]);
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        for _ in 0..3 {
+            let decision = ext
+                .on_before_tool_call(&ctx(), &tool_call_event())
+                .await
+                .expect("rpc ok");
+            assert!(
+                matches!(decision, HookDecision::Continue),
+                "unexpected decision: {decision:?}"
+            );
+        }
+        let _ = ext.on_shutdown(&ctx()).await;
     }
 
     #[tokio::test]

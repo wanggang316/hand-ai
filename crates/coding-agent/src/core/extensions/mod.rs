@@ -11,8 +11,8 @@ pub mod subprocess;
 
 pub use api::{
     Extension, ExtensionCapabilities, ExtensionContext, ExtensionContextFactory, ExtensionError,
-    ExtensionManifest, HookDecision, ManifestError, SlashCommandSpec, ToolCallEvent,
-    ToolResultEvent,
+    ExtensionManifest, ExtensionTimeouts, HookDecision, ManifestError, SlashCommandSpec,
+    TimeoutPolicy, ToolCallEvent, ToolResultEvent,
 };
 pub use manifest::load_manifest;
 pub use registry::builtin_tier1_extensions;

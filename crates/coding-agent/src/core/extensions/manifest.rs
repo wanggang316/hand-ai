@@ -74,6 +74,42 @@ version = "0.1"
     }
 
     #[test]
+    fn timeouts_default_when_absent() {
+        let raw = r#"
+name = "foo"
+version = "0.1"
+"#;
+        let manifest = parse_manifest_str(raw).expect("manifest parses");
+        assert_eq!(manifest.timeouts.before_tool_call_ms, 5_000);
+        assert_eq!(manifest.timeouts.after_tool_call_ms, 2_000);
+        assert_eq!(
+            manifest.timeouts.on_before_tool_call_timeout,
+            crate::core::extensions::api::TimeoutPolicy::Cancel,
+            "a blocking hook that stops answering must fail closed by default"
+        );
+    }
+
+    #[test]
+    fn timeouts_table_overrides_per_hook_budgets() {
+        let raw = r#"
+name = "foo"
+version = "0.1"
+
+[timeouts]
+before-tool-call-ms = 250
+on-before-tool-call-timeout = "continue"
+"#;
+        let manifest = parse_manifest_str(raw).expect("manifest parses");
+        assert_eq!(manifest.timeouts.before_tool_call_ms, 250);
+        // Unspecified budgets keep their defaults.
+        assert_eq!(manifest.timeouts.after_tool_call_ms, 2_000);
+        assert_eq!(
+            manifest.timeouts.on_before_tool_call_timeout,
+            crate::core::extensions::api::TimeoutPolicy::Continue
+        );
+    }
+
+    #[test]
     fn parses_manifest_with_all_fields() {
         let raw = r#"
 name = "kitchen-sink"
