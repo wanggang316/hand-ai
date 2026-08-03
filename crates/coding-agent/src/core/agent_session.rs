@@ -2836,10 +2836,7 @@ mod tests {
         let cx = session.extension_context_for("foo");
         assert_eq!(
             cx.data_dir,
-            base.path()
-                .join("extensions")
-                .join("foo")
-                .join("data")
+            base.path().join("extensions").join("foo").join("data")
         );
         assert!(
             !cwd.path().join(".hand").join("extensions").exists(),
@@ -3027,8 +3024,7 @@ mod tests {
             Some("test".into()),
         );
 
-        let mut session =
-            AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
         let ext = PromptExt::new(
             "scrubber",
             true,
@@ -3052,7 +3048,11 @@ mod tests {
             prompts.lock().unwrap()
         );
         assert!(
-            !prompts.lock().unwrap().iter().any(|p| p.contains("hunter2")),
+            !prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("hunter2")),
             "the raw prompt must not reach the model"
         );
     }
@@ -3071,8 +3071,7 @@ mod tests {
             Some("test".into()),
         );
 
-        let mut session =
-            AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
         session.register_extension(PromptExt::new(
             "guard",
             true,
@@ -3109,8 +3108,7 @@ mod tests {
             Some("test".into()),
         );
 
-        let mut session =
-            AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
         let ext = PromptExt::new("unsubscribed", false, HookDecision::Cancel("nope".into()));
         session.register_extension(ext.clone());
 

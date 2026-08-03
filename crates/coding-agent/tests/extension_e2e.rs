@@ -367,7 +367,9 @@ done
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(dst.join("main.sh")).unwrap().permissions();
+        let mut perms = std::fs::metadata(dst.join("main.sh"))
+            .unwrap()
+            .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(dst.join("main.sh"), perms).unwrap();
     }
@@ -440,7 +442,10 @@ async fn session_drives_tier2_lifecycle_and_reaps_the_child() {
         .trim()
         .parse()
         .expect("pid parses");
-    assert!(process_alive(pid), "child should be running before shutdown");
+    assert!(
+        process_alive(pid),
+        "child should be running before shutdown"
+    );
 
     session.shutdown_extensions().await;
 

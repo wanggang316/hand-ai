@@ -468,9 +468,9 @@ mod tests {
             self.calls.lock().unwrap().push(event.clone());
             let path = event.arguments.get("path").and_then(|v| v.as_str());
             match path {
-                Some(p) if !p.starts_with("/workspace") => {
-                    Ok(HookDecision::Cancel(format!("path {p} is outside /workspace")))
-                }
+                Some(p) if !p.starts_with("/workspace") => Ok(HookDecision::Cancel(format!(
+                    "path {p} is outside /workspace"
+                ))),
                 _ => Ok(HookDecision::Continue),
             }
         }
@@ -539,7 +539,11 @@ mod tests {
         }
 
         let guard_calls = guard.calls.lock().unwrap();
-        assert_eq!(guard_calls.len(), 2, "guard is re-consulted after a replace");
+        assert_eq!(
+            guard_calls.len(),
+            2,
+            "guard is re-consulted after a replace"
+        );
         assert_eq!(
             guard_calls[1].arguments,
             serde_json::json!({"path": "/etc/passwd"}),
@@ -813,10 +817,7 @@ mod tests {
         // The extension ahead of the rewrite sees the final text too.
         assert_eq!(
             *scrubber.seen.lock().unwrap(),
-            vec![
-                "token=hunter2".to_string(),
-                "token=[redacted]".to_string()
-            ]
+            vec!["token=hunter2".to_string(), "token=[redacted]".to_string()]
         );
         assert_eq!(
             auditor.seen.lock().unwrap().last().map(String::as_str),
@@ -827,7 +828,11 @@ mod tests {
     #[tokio::test]
     async fn user_message_cancel_wins() {
         let a = PromptExt::new("a", true, vec![HookDecision::Continue]);
-        let b = PromptExt::new("b", true, vec![HookDecision::Cancel("contains a secret".into())]);
+        let b = PromptExt::new(
+            "b",
+            true,
+            vec![HookDecision::Cancel("contains a secret".into())],
+        );
         let exts: Vec<Arc<dyn Extension>> = vec![a, b];
 
         match dispatch_user_message(&exts, &ctx(), &prompt("hi")).await {
