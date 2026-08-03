@@ -188,8 +188,13 @@ impl AgentSessionRuntime {
     /// `fork`, `import_from_jsonl`) that are still pending parity. Exposed
     /// here so the controller can re-dispatch a follow-up task that wires
     /// them up without changing the runtime's structural shape again.
+    ///
+    /// The outgoing session's extensions are shut down before it is
+    /// dropped, so a replace has the same lifecycle guarantees as a
+    /// [`Self::dispose`].
     #[allow(dead_code)] // used by pending parity work in lifecycle methods.
-    pub(crate) fn apply(&mut self, result: CreateAgentSessionRuntimeResult) {
+    pub(crate) async fn apply(&mut self, result: CreateAgentSessionRuntimeResult) {
+        self.session.shutdown_extensions().await;
         self.session = result.session;
         self.services = result.services;
         self.diagnostics = result.diagnostics;
@@ -204,20 +209,22 @@ impl AgentSessionRuntime {
 
     /// Tear down the current runtime.
     ///
-    /// The TS reference emits a `session_shutdown` extension event and runs
-    /// a host-supplied `beforeSessionInvalidate` callback before dropping
-    /// the session. Those hooks need extension/host parity that is not yet
-    /// in tree, so for now this is a thin wrapper around dropping the
-    /// session by-move.
-    // TODO(parity): emit `session_shutdown` and run `before_session_invalidate`.
-    pub fn dispose(self) {
+    /// Runs `on_shutdown` for every loaded extension before the session is
+    /// dropped, so extensions get to flush state and Tier 2 children are
+    /// killed here instead of lingering until the host process exits.
+    ///
+    /// A host-supplied `before_session_invalidate` callback is still
+    /// missing; it needs host parity that is not yet in tree.
+    // TODO(parity): run `before_session_invalidate`.
+    pub async fn dispose(self) {
         let Self {
-            session,
+            mut session,
             services,
             create_runtime,
             diagnostics,
             model_fallback_message,
         } = self;
+        session.shutdown_extensions().await;
         drop(session);
         drop(services);
         drop(create_runtime);
