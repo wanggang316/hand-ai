@@ -56,6 +56,21 @@ impl SessionSetup {
     /// caller can keep reading other fields (`continue_session`, `fork`,
     /// `resume`, `no_session`, ...).
     pub fn resolve(args: &Args) -> Result<Self, CodingAgentError> {
+        Self::resolve_with_settings(args, None)
+    }
+
+    /// [`Self::resolve`], but against caller-supplied settings layers.
+    ///
+    /// `None` loads the real layers (`<cwd>/.hand/settings.yaml` plus
+    /// `~/.hand/agent/settings.yaml`) — what the binary does. Tests pass
+    /// `Some(_)` to stay hermetic: `resolve` merges the *developer's* global
+    /// settings, so assertions about defaults would otherwise depend on
+    /// whoever runs them (a machine with `default-thinking-level` set fails
+    /// tests that CI passes).
+    pub(crate) fn resolve_with_settings(
+        args: &Args,
+        settings: Option<crate::core::settings::SettingsManager>,
+    ) -> Result<Self, CodingAgentError> {
         // Working directory: explicit `--cwd`, else current dir, else ".".
         let cwd = args
             .cwd
@@ -103,7 +118,10 @@ impl SessionSetup {
         // inference path (issue #18 reproduction: `--model
         // openrouter/openai/gpt-4o-mini` would silently land on
         // anthropic because the "baked default" beat the slash).
-        let settings_manager = crate::core::settings::SettingsManager::from_cwd(&cwd).ok();
+        let settings_manager = match settings {
+            Some(manager) => Some(manager),
+            None => crate::core::settings::SettingsManager::from_cwd(&cwd).ok(),
+        };
         let settings_provider: Option<String> = settings_manager.as_ref().and_then(|m| {
             m.project_layer()
                 .default_provider
@@ -525,20 +543,55 @@ pub(crate) fn create_selected_tools(cwd: &Path, tool_list: &str) -> Vec<AgentToo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::settings::SettingsManager;
     use clap::Parser;
+
+    /// Resolve without inheriting the settings of whoever runs the tests.
+    ///
+    /// `SessionSetup::resolve` merges the real `~/.hand/agent/settings.yaml`,
+    /// so a developer with `default-thinking-level` or `default-provider`
+    /// set fails assertions that hold on a clean machine (and in CI).
+    ///
+    /// Tests that are *about* settings pin one layer instead, via
+    /// [`resolve_with_project_settings`] or [`resolve_with_global_settings`].
+    /// Injecting the layers keeps them hermetic without mutating `HOME`,
+    /// which is process-global and would race every sibling test that reads
+    /// it.
+    fn resolve_isolated(args: &Args) -> Result<SessionSetup, CodingAgentError> {
+        SessionSetup::resolve_with_settings(args, Some(SettingsManager::in_memory()))
+    }
+
+    /// Resolve with only the project layer under `cwd`. The global layer is
+    /// genuinely absent rather than the developer's, so what the test wrote
+    /// into `<cwd>/.hand/settings.yaml` is the whole configuration.
+    fn resolve_with_project_settings(
+        args: &Args,
+        cwd: &Path,
+    ) -> Result<SessionSetup, CodingAgentError> {
+        let manager = SettingsManager::from_paths(None, Some(cwd.join(".hand/settings.yaml")))
+            .expect("project settings load");
+        SessionSetup::resolve_with_settings(args, Some(manager))
+    }
+
+    /// Resolve with only the global layer under `home`, i.e.
+    /// `<home>/.hand/agent/settings.yaml`. Lets a test reproduce a
+    /// user-configured global default without borrowing the developer's.
+    fn resolve_with_global_settings(
+        args: &Args,
+        home: &Path,
+    ) -> Result<SessionSetup, CodingAgentError> {
+        let manager =
+            SettingsManager::from_paths(Some(home.join(".hand/agent/settings.yaml")), None)
+                .expect("global settings load");
+        SessionSetup::resolve_with_settings(args, Some(manager))
+    }
 
     #[test]
     fn resolves_default_args() {
-        // Hermetic: `stream_options.reasoning` must come out None by
-        // default, but a developer machine whose real
-        // `~/.hand/agent/settings.yaml` sets `default-thinking-level`
-        // would poison the assertion. Point HOME at an empty tempdir.
-        let home = tempfile::TempDir::new().expect("home");
-        let _home = HomeGuard::set(home.path());
         let cwd = tempfile::TempDir::new().expect("cwd");
         let args = Args::try_parse_from(["hand", "--cwd", cwd.path().to_str().unwrap()])
             .expect("default parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         // Default tool list should match the full built-in set.
         let default_len = tools::create_default_tools(&setup.cwd).len();
         assert_eq!(setup.agent_tools.len(), default_len);
@@ -550,7 +603,7 @@ mod tests {
     #[test]
     fn no_tools_empties_tool_list() {
         let args = Args::try_parse_from(["hand", "--no-tools"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(setup.agent_tools.is_empty());
     }
 
@@ -562,7 +615,7 @@ mod tests {
     fn unknown_provider_returns_descriptive_error() {
         let args = Args::try_parse_from(["hand", "--provider", "nonexistent", "--model", "fake"])
             .expect("parse");
-        let result = SessionSetup::resolve(&args);
+        let result = resolve_isolated(&args);
         let err = match result {
             Ok(_) => panic!("must reject unknown provider"),
             Err(e) => e,
@@ -585,7 +638,7 @@ mod tests {
     #[test]
     fn no_session_flag_propagates_to_config() {
         let args = Args::try_parse_from(["hand", "--no-session"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(setup.no_session, "setup must carry the flag");
         let cfg = setup.to_config(None);
         assert!(cfg.no_session, "to_config must propagate the flag");
@@ -600,7 +653,7 @@ mod tests {
     fn api_key_flag_populates_stream_options() {
         let args =
             Args::try_parse_from(["hand", "--api-key", "sk-test-override-12345"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert_eq!(
             setup.stream_options.base.api_key.as_deref(),
             Some("sk-test-override-12345"),
@@ -626,7 +679,7 @@ mod tests {
         .unwrap();
 
         let args = Args::try_parse_from(["hand", "--cwd", cwd.to_str().unwrap()]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_with_project_settings(&args, cwd).expect("resolve");
 
         assert_eq!(
             setup.model.provider.as_str(),
@@ -661,7 +714,7 @@ mod tests {
             "openai",
         ])
         .expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_with_project_settings(&args, cwd).expect("resolve");
         assert_eq!(
             setup.model.provider.as_str(),
             "openai",
@@ -677,12 +730,6 @@ mod tests {
     /// slash-routing path.
     #[test]
     fn slashed_model_with_provider_prefix_routes_to_provider_no_cli_flag() {
-        // Hermetic: an empty temp HOME so a developer machine's real
-        // `~/.hand/agent/settings.yaml` (e.g. `default-provider: zai`)
-        // cannot leak into the global settings layer and poison the
-        // routing under test.
-        let home = tempfile::TempDir::new().expect("home");
-        let _home = HomeGuard::set(home.path());
         let tmp = tempfile::TempDir::new().expect("tmp");
         let args = Args::try_parse_from([
             "hand",
@@ -692,7 +739,7 @@ mod tests {
             "openrouter/openai/gpt-4o-mini",
         ])
         .expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert_eq!(
             setup.model.provider.as_str(),
             "openrouter",
@@ -707,8 +754,8 @@ mod tests {
     /// layer carrying `default-provider: zai` made `--model
     /// openrouter/openai/gpt-4o-mini` route to zai — the settings default
     /// was applied before the pattern prefix was parsed, so the same
-    /// command behaved differently across machines. The temp HOME here
-    /// reproduces that poisoned shape hermetically.
+    /// command behaved differently across machines. The injected global
+    /// layer below reproduces that poisoned shape hermetically.
     #[test]
     fn model_provider_prefix_beats_settings_default_provider() {
         let home = tempfile::TempDir::new().expect("home");
@@ -718,7 +765,6 @@ mod tests {
             "default-provider: zai\n",
         )
         .unwrap();
-        let _home = HomeGuard::set(home.path());
 
         let cwd = tempfile::TempDir::new().expect("cwd");
         let args = Args::try_parse_from([
@@ -729,7 +775,7 @@ mod tests {
             "openrouter/openai/gpt-4o-mini",
         ])
         .expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_with_global_settings(&args, home.path()).expect("resolve");
         assert_eq!(
             setup.model.provider.as_str(),
             "openrouter",
@@ -752,7 +798,6 @@ mod tests {
             "default-provider: zai\n",
         )
         .unwrap();
-        let _home = HomeGuard::set(home.path());
 
         let cwd = tempfile::TempDir::new().expect("cwd");
         let args = Args::try_parse_from([
@@ -763,12 +808,43 @@ mod tests {
             "unknownvendor/imaginary-model-zzz",
         ])
         .expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_with_global_settings(&args, home.path()).expect("resolve");
         assert_eq!(
             setup.model.provider.as_str(),
             "zai",
             "unknown first segment must fall through to settings default-provider, got {}",
             setup.model.provider.as_str()
+        );
+    }
+
+    /// The isolation the tests above rely on: injected settings *replace*
+    /// the layers on disk rather than merging with them. Without this,
+    /// every assertion about a default silently depends on the settings of
+    /// whoever runs the suite.
+    #[test]
+    fn injected_settings_replace_the_layers_on_disk() {
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let cwd = tmp.path();
+        std::fs::create_dir_all(cwd.join(".hand")).unwrap();
+        std::fs::write(
+            cwd.join(".hand/settings.yaml"),
+            "default-thinking-level: high\n",
+        )
+        .unwrap();
+
+        let args = Args::try_parse_from(["hand", "--cwd", cwd.to_str().unwrap()]).expect("parse");
+
+        let injected = resolve_isolated(&args).expect("resolve");
+        assert!(
+            injected.stream_options.reasoning.is_none(),
+            "injected settings must shadow the on-disk layer"
+        );
+
+        let from_disk = resolve_with_project_settings(&args, cwd).expect("resolve");
+        assert_eq!(
+            from_disk.stream_options.reasoning,
+            Some(model::types::ThinkingLevel::High),
+            "the on-disk project layer is still readable when asked for"
         );
     }
 
@@ -785,7 +861,7 @@ mod tests {
         )
         .unwrap();
         let args = Args::try_parse_from(["hand", "--cwd", cwd.to_str().unwrap()]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_with_project_settings(&args, cwd).expect("resolve");
         assert!(
             setup.model.id.contains("opus-4-7") || setup.model.id.contains("opus-4.7"),
             "settings default-model must drive model id, got {}",
@@ -796,7 +872,7 @@ mod tests {
     #[test]
     fn default_args_persist_sessions() {
         let args = Args::try_parse_from(["hand"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(!setup.no_session);
         let cfg = setup.to_config(None);
         assert!(!cfg.no_session);
@@ -808,7 +884,7 @@ mod tests {
     #[test]
     fn no_context_files_flag_propagates() {
         let args = Args::try_parse_from(["hand", "--no-context-files"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(setup.no_context_files);
         let cfg = setup.to_config(None);
         assert!(cfg.no_context_files);
@@ -817,7 +893,7 @@ mod tests {
     #[test]
     fn default_loads_context_files() {
         let args = Args::try_parse_from(["hand"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(!setup.no_context_files);
         let cfg = setup.to_config(None);
         assert!(!cfg.no_context_files);
@@ -831,7 +907,7 @@ mod tests {
     fn session_dir_flag_propagates() {
         let args =
             Args::try_parse_from(["hand", "--session-dir", "/tmp/custom-sessions"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert_eq!(
             setup.session_dir.as_deref(),
             Some(std::path::Path::new("/tmp/custom-sessions")),
@@ -857,7 +933,7 @@ mod tests {
         assert!(!bogus.exists());
         let bogus_str = bogus.to_string_lossy().into_owned();
         let args = Args::try_parse_from(["hand", "--cwd", &bogus_str]).expect("parse");
-        match SessionSetup::resolve(&args) {
+        match resolve_isolated(&args) {
             Ok(_) => panic!("bogus --cwd must fail fast"),
             Err(e) => {
                 let msg = e.to_string();
@@ -873,7 +949,7 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let file_str = file.to_string_lossy().into_owned();
         let args = Args::try_parse_from(["hand", "--cwd", &file_str]).expect("parse");
-        match SessionSetup::resolve(&args) {
+        match resolve_isolated(&args) {
             Ok(_) => panic!("--cwd <file> must fail fast"),
             Err(e) => assert!(e.to_string().contains("--cwd")),
         }
@@ -889,7 +965,7 @@ mod tests {
         let cwd = tmp.path().to_string_lossy().into_owned();
         let args =
             Args::try_parse_from(["hand", "--workspace-sessions", "--cwd", &cwd]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         let expected = tmp.path().join(".hand").join("sessions");
         assert_eq!(setup.session_dir.as_deref(), Some(expected.as_path()));
         let cfg = setup.to_config(None);
@@ -912,7 +988,7 @@ mod tests {
             &cwd,
         ])
         .expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert_eq!(
             setup.session_dir.as_deref(),
             Some(std::path::Path::new("/tmp/explicit-wins"))
@@ -967,7 +1043,7 @@ mod tests {
             "third directive",
         ])
         .expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         let guidelines = setup.custom_guidelines.expect("guidelines must be Some");
         assert!(
             guidelines.contains("first directive"),
@@ -987,7 +1063,7 @@ mod tests {
     #[test]
     fn no_append_system_prompt_produces_none() {
         let args = Args::try_parse_from(["hand"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(setup.custom_guidelines.is_none());
     }
 
@@ -1003,7 +1079,7 @@ mod tests {
             "   ",
         ])
         .expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(setup.custom_guidelines.is_none());
     }
 
@@ -1026,7 +1102,7 @@ mod tests {
     #[test]
     fn no_skills_flag_propagates() {
         let args = Args::try_parse_from(["hand", "--no-skills"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(setup.no_skills);
         let cfg = setup.to_config(None);
         assert!(cfg.no_skills);
@@ -1035,7 +1111,7 @@ mod tests {
     #[test]
     fn default_discovers_skills() {
         let args = Args::try_parse_from(["hand"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(!setup.no_skills);
         let cfg = setup.to_config(None);
         assert!(!cfg.no_skills);
@@ -1044,7 +1120,7 @@ mod tests {
     #[test]
     fn default_session_dir_is_none() {
         let args = Args::try_parse_from(["hand"]).expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve");
+        let setup = resolve_isolated(&args).expect("resolve");
         assert!(setup.session_dir.is_none());
     }
 
@@ -1059,47 +1135,11 @@ mod tests {
             "deepseek/deepseek-v4-flash",
         ])
         .expect("parse");
-        let setup = SessionSetup::resolve(&args).expect("resolve known provider");
+        let setup = resolve_isolated(&args).expect("resolve known provider");
         assert_eq!(
             setup.model.provider.as_str(),
             "openrouter",
             "explicit --provider must NOT cross over to native deepseek even when openrouter lacks the model"
         );
-    }
-
-    /// Serialize `HOME` mutation and restore it on drop so a test never
-    /// leaks env state onto a sibling. `SettingsManager::from_cwd` and
-    /// `AuthStorage::new` both root at `dirs::home_dir()` (i.e. `$HOME`),
-    /// so pointing HOME at a tempdir is what makes these tests hermetic
-    /// — a developer's real `~/.hand/agent/settings.yaml` must never
-    /// leak into the global settings layer under test.
-    struct HomeGuard {
-        prev: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl HomeGuard {
-        fn set(home: &Path) -> Self {
-            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var_os("HOME");
-            // SAFETY: LOCK is held for the guard's lifetime, serializing env mutation.
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-            Self { prev, _lock: lock }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: LOCK is still held (we own the guard).
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("HOME", v),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
     }
 }
