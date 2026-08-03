@@ -6,7 +6,7 @@
 //!
 //! See ADR-001 and Phase 3 task T3.3a for the design.
 
-use super::api::{Extension, ExtensionContext, HookDecision, ToolCallEvent, ToolResultEvent};
+use super::api::{Extension, ExtensionContextFactory, HookDecision, ToolCallEvent, ToolResultEvent};
 use std::sync::Arc;
 
 /// How many passes over the chain `dispatch_before_tool_call` will make before
@@ -59,7 +59,7 @@ pub(crate) const MAX_BEFORE_TOOL_CALL_ROUNDS: usize = 3;
 ///   converge.
 pub(crate) async fn dispatch_before_tool_call(
     extensions: &[Arc<dyn Extension>],
-    cx: &ExtensionContext,
+    contexts: &ExtensionContextFactory,
     event: &ToolCallEvent,
 ) -> HookDecision {
     let mut working = event.clone();
@@ -69,7 +69,8 @@ pub(crate) async fn dispatch_before_tool_call(
         let mut replaced_this_round = false;
 
         for ext in extensions {
-            let decision = match ext.on_before_tool_call(cx, &working).await {
+            let cx = contexts.for_extension(&ext.manifest().name);
+            let decision = match ext.on_before_tool_call(&cx, &working).await {
                 Ok(d) => d,
                 Err(err) => {
                     tracing::warn!(
@@ -126,11 +127,12 @@ pub(crate) async fn dispatch_before_tool_call(
 /// hooks are observational only.
 pub(crate) async fn dispatch_after_tool_call(
     extensions: &[Arc<dyn Extension>],
-    cx: &ExtensionContext,
+    contexts: &ExtensionContextFactory,
     event: &ToolResultEvent,
 ) {
     for ext in extensions {
-        if let Err(err) = ext.on_after_tool_call(cx, event).await {
+        let cx = contexts.for_extension(&ext.manifest().name);
+        if let Err(err) = ext.on_after_tool_call(&cx, event).await {
             tracing::warn!(
                 extension = %ext.manifest().name,
                 error = %err,
@@ -144,7 +146,7 @@ pub(crate) async fn dispatch_after_tool_call(
 mod tests {
     use super::*;
     use crate::core::extensions::api::{
-        Extension, ExtensionCapabilities, ExtensionError, ExtensionManifest,
+        Extension, ExtensionCapabilities, ExtensionContext, ExtensionError, ExtensionManifest,
     };
     use async_trait::async_trait;
     use std::path::PathBuf;
@@ -163,12 +165,12 @@ mod tests {
         }
     }
 
-    fn ctx() -> ExtensionContext {
-        ExtensionContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test-session".into(),
-            data_dir: PathBuf::from("/tmp/data"),
-        }
+    fn ctx() -> ExtensionContextFactory {
+        ExtensionContextFactory::new(
+            PathBuf::from("/tmp"),
+            "test-session",
+            PathBuf::from("/tmp/.hand/extensions"),
+        )
     }
 
     fn event(args: serde_json::Value) -> ToolCallEvent {
@@ -565,6 +567,69 @@ mod tests {
         assert_eq!(a.before_calls.lock().unwrap().len(), 1);
         assert_eq!(b.before_calls.lock().unwrap().len(), 1);
         assert_eq!(c.before_calls.lock().unwrap().len(), 1);
+    }
+
+    /// Each extension is handed its own context, stamped with its own
+    /// manifest name — two extensions never share a `data_dir`.
+    #[tokio::test]
+    async fn each_extension_gets_its_own_context() {
+        struct ContextRecorder {
+            manifest: ExtensionManifest,
+            seen: Mutex<Vec<PathBuf>>,
+        }
+
+        #[async_trait]
+        impl Extension for ContextRecorder {
+            fn manifest(&self) -> &ExtensionManifest {
+                &self.manifest
+            }
+
+            async fn on_before_tool_call(
+                &self,
+                cx: &ExtensionContext,
+                _event: &ToolCallEvent,
+            ) -> Result<HookDecision, ExtensionError> {
+                self.seen.lock().unwrap().push(cx.data_dir.clone());
+                Ok(HookDecision::Continue)
+            }
+
+            async fn on_after_tool_call(
+                &self,
+                cx: &ExtensionContext,
+                _event: &ToolResultEvent,
+            ) -> Result<(), ExtensionError> {
+                self.seen.lock().unwrap().push(cx.data_dir.clone());
+                Ok(())
+            }
+        }
+
+        let a = Arc::new(ContextRecorder {
+            manifest: manifest("alpha"),
+            seen: Mutex::new(Vec::new()),
+        });
+        let b = Arc::new(ContextRecorder {
+            manifest: manifest("beta"),
+            seen: Mutex::new(Vec::new()),
+        });
+
+        let exts: Vec<Arc<dyn Extension>> = vec![a.clone(), b.clone()];
+        let _ = dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
+        dispatch_after_tool_call(&exts, &ctx(), &result_event()).await;
+
+        assert_eq!(
+            *a.seen.lock().unwrap(),
+            vec![
+                PathBuf::from("/tmp/.hand/extensions/alpha/data"),
+                PathBuf::from("/tmp/.hand/extensions/alpha/data"),
+            ]
+        );
+        assert_eq!(
+            *b.seen.lock().unwrap(),
+            vec![
+                PathBuf::from("/tmp/.hand/extensions/beta/data"),
+                PathBuf::from("/tmp/.hand/extensions/beta/data"),
+            ]
+        );
     }
 
     // -- Tests for dispatch_after_tool_call ----------------------------------

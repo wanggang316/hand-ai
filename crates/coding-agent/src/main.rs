@@ -662,8 +662,11 @@ async fn handle_slash_command(
             for (spec, ext) in session.collected_slash_commands() {
                 registry.register_extension_command(spec, ext);
             }
-            let cx = session.extension_context();
-            match registry.dispatch_extension_command(bare, args, &cx).await {
+            let contexts = session.extension_context_factory();
+            match registry
+                .dispatch_extension_command(bare, args, &contexts)
+                .await
+            {
                 Ok(Some(output)) => {
                     println!("{}", output);
                 }

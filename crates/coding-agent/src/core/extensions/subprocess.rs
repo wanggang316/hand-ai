@@ -480,6 +480,7 @@ impl Extension for SubprocessExtension {
         let mut tools = Vec::with_capacity(self.inner.manifest.custom_tools.len());
         let frozen_cwd = cx.cwd.clone();
         let frozen_session_id = cx.session_id.clone();
+        let frozen_data_dir = cx.data_dir.clone();
         for spec in &self.inner.manifest.custom_tools {
             let inner = self.inner.clone();
             let tool_name = spec.name.clone();
@@ -491,18 +492,20 @@ impl Extension for SubprocessExtension {
                 .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
             let cwd = frozen_cwd.clone();
             let session_id = frozen_session_id.clone();
+            let data_dir = frozen_data_dir.clone();
 
             let execute: ToolExecuteFn = Box::new(move |ctx: ToolExecuteCtx| {
                 let inner = inner.clone();
                 let tool_name = tool_name.clone();
                 let cwd = cwd.clone();
                 let session_id = session_id.clone();
+                let data_dir = data_dir.clone();
                 let fut: BoxFuture<'static, Result<ToolResult, hand_agent::types::ToolError>> =
                     Box::pin(async move {
                         let cx = ExtensionContext {
                             cwd,
                             session_id,
-                            data_dir: inner.extension_dir.join("data"),
+                            data_dir,
                         };
                         let result = match inner
                             .rpc(ExtensionEventOut::ExecuteCustomTool {

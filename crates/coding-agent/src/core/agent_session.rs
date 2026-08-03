@@ -6,7 +6,8 @@
 use crate::core::compaction;
 use crate::core::error::CodingAgentError;
 use crate::core::extensions::api::{
-    Extension, ExtensionContext, HookDecision, SlashCommandSpec, ToolCallEvent, ToolResultEvent,
+    Extension, ExtensionContext, ExtensionContextFactory, HookDecision, SlashCommandSpec,
+    ToolCallEvent, ToolResultEvent,
 };
 use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_before_tool_call};
 use crate::core::extensions::registry::builtin_tier1_extensions;
@@ -557,7 +558,7 @@ impl AgentSession {
             (None, None)
         } else {
             let extensions: Arc<Vec<Arc<dyn Extension>>> = Arc::new(self.extensions.clone());
-            let cx = Arc::new(self.extension_context());
+            let cx = Arc::new(self.extension_context_factory());
             (
                 Some(build_before_tool_call_hook(extensions.clone(), cx.clone())),
                 Some(build_after_tool_call_hook(extensions, cx)),
@@ -1451,27 +1452,38 @@ impl AgentSession {
     /// extensions return tools backed by Rust closures; Tier 2 extensions
     /// return tools whose execute fn drives an RPC into the subprocess.
     pub fn collected_custom_tools(&self) -> Vec<AgentTool> {
-        let cx = self.extension_context();
+        let contexts = self.extension_context_factory();
         let mut out = Vec::new();
         for ext in &self.extensions {
-            out.extend(ext.custom_tools(&cx));
+            out.extend(ext.custom_tools(&contexts.for_extension(&ext.manifest().name)));
         }
         out
     }
 
-    /// Build the [`ExtensionContext`] passed to hooks for this session.
+    /// Factory for the per-extension [`ExtensionContext`] values handed to
+    /// this session's hooks, custom tools, and slash commands.
     ///
-    /// `data_dir` is computed as `<cwd>/.hand/extensions/<unspecified>/data/`
-    /// at the session level — extensions get a per-extension subdirectory
-    /// resolved when they're invoked. For now we surface the session-wide
-    /// root so callers and tests can verify it's well-formed; lazy creation
-    /// of the per-extension subdir lands in T3.4.
-    pub fn extension_context(&self) -> ExtensionContext {
-        ExtensionContext {
-            cwd: self.config.cwd.clone(),
-            session_id: self.session_manager.id().to_string(),
-            data_dir: self.config.cwd.join(".hand").join("extensions"),
-        }
+    /// The data root is `<base_dir>/extensions` when the host pinned a
+    /// [`AgentSessionConfig::base_dir`] — a GUI embedder keeps extension
+    /// state in its own app-data directory rather than inside whatever
+    /// repository the user pointed the agent at — and `<cwd>/.hand/extensions`
+    /// otherwise, which is where the CLI has always put it.
+    pub fn extension_context_factory(&self) -> ExtensionContextFactory {
+        let root = match &self.config.base_dir {
+            Some(base) => base.clone(),
+            None => self.config.cwd.join(".hand"),
+        };
+        ExtensionContextFactory::new(
+            self.config.cwd.clone(),
+            self.session_manager.id().to_string(),
+            root.join("extensions"),
+        )
+    }
+
+    /// Build the [`ExtensionContext`] for one named extension. Shorthand for
+    /// `extension_context_factory().for_extension(name)`.
+    pub fn extension_context_for(&self, name: &str) -> ExtensionContext {
+        self.extension_context_factory().for_extension(name)
     }
 
     /// Generate a compaction summary using the LLM.
@@ -1608,7 +1620,7 @@ fn drain_queue(queue: &Mutex<Vec<Message>>, mode: QueueMode) -> Vec<Message> {
 /// rewriting in hand-agent.
 fn build_before_tool_call_hook(
     extensions: Arc<Vec<Arc<dyn Extension>>>,
-    cx: Arc<ExtensionContext>,
+    cx: Arc<ExtensionContextFactory>,
 ) -> hand_agent::types::BeforeToolCallHook {
     Arc::new(
         move |ctx: BeforeToolCallContext<'_>,
@@ -1649,7 +1661,7 @@ fn build_before_tool_call_hook(
 /// rewrite it — so the hook always returns `None`.
 fn build_after_tool_call_hook(
     extensions: Arc<Vec<Arc<dyn Extension>>>,
-    cx: Arc<ExtensionContext>,
+    cx: Arc<ExtensionContextFactory>,
 ) -> hand_agent::types::AfterToolCallHook {
     Arc::new(
         move |ctx: AfterToolCallContext<'_>,
@@ -2504,14 +2516,71 @@ mod tests {
     #[test]
     fn extension_context_returns_well_formed_values() {
         let session = AgentSession::in_memory(test_model(), vec![]);
-        let cx = session.extension_context();
+        let cx = session.extension_context_for("foo");
 
         assert!(!cx.session_id.is_empty(), "session id must not be empty");
         assert!(!cx.cwd.as_os_str().is_empty(), "cwd must not be empty");
         assert!(
-            cx.data_dir.ends_with("extensions"),
-            "data_dir should be rooted at .hand/extensions, got {:?}",
+            cx.data_dir.ends_with("extensions/foo/data"),
+            "data_dir should be the extension's own slot, got {:?}",
             cx.data_dir
+        );
+    }
+
+    /// Every extension gets its own directory: two extensions writing
+    /// `state.json` must not collide.
+    #[test]
+    fn extension_context_is_per_extension() {
+        let session = AgentSession::in_memory(test_model(), vec![]);
+        let foo = session.extension_context_for("foo");
+        let bar = session.extension_context_for("bar");
+
+        assert_ne!(foo.data_dir, bar.data_dir);
+        assert!(foo.data_dir.ends_with("foo/data"));
+        assert!(bar.data_dir.ends_with("bar/data"));
+    }
+
+    /// With no `base_dir`, extension state stays where the CLI has always
+    /// put it: `<cwd>/.hand/extensions/<name>/data`.
+    #[test]
+    fn extension_data_dir_falls_back_to_cwd_when_no_base_dir() {
+        let cwd = TempDir::new().unwrap();
+        let cfg = test_config(cwd.path().to_path_buf());
+        let session = AgentSession::new(cfg, vec![]).expect("session creates");
+
+        let cx = session.extension_context_for("foo");
+        assert_eq!(
+            cx.data_dir,
+            cwd.path()
+                .join(".hand")
+                .join("extensions")
+                .join("foo")
+                .join("data")
+        );
+    }
+
+    /// An embedder that pinned `base_dir` (a Tauri app-data dir, say) keeps
+    /// extension state out of the user's repository entirely — and nothing
+    /// is created under `cwd` just by resolving the path.
+    #[test]
+    fn extension_data_dir_honors_base_dir() {
+        let base = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let mut cfg = test_config(cwd.path().to_path_buf());
+        cfg.base_dir = Some(base.path().to_path_buf());
+        let session = AgentSession::new(cfg, vec![]).expect("session creates under base_dir");
+
+        let cx = session.extension_context_for("foo");
+        assert_eq!(
+            cx.data_dir,
+            base.path()
+                .join("extensions")
+                .join("foo")
+                .join("data")
+        );
+        assert!(
+            !cwd.path().join(".hand").join("extensions").exists(),
+            "resolving an extension data dir must not write into the workspace"
         );
     }
 

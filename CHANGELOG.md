@@ -15,6 +15,7 @@ read this file. Add new entries above the previous version with a
 ### Fixed
 
 - Models served over the Anthropic Messages API (Anthropic's own models, MiniMax, and any provider whose base URL points at an `/anthropic` gateway) stream their reply as it is produced instead of buffering the whole response and delivering it in one burst when the turn ends; interrupting such a turn now keeps the text already streamed ([#135](https://github.com/wanggang316/hand-ai/issues/135))
+- Extension data directories are per extension and honor the host's `base_dir`: an extension now gets `<base_dir or cwd/.hand>/extensions/<name>/data` instead of one shared `<cwd>/.hand/extensions` for everybody. Embedders that pin `base_dir` no longer have extension state written into the user's repository ([#132](https://github.com/wanggang316/hand-ai/issues/132))
 - Extension chain: a `Replace` verdict now re-runs the whole `before_tool_call` chain from the head, so an extension registered ahead of a rewriter re-inspects the arguments that actually reach the tool. The chain is bounded to three passes and cancels the call if it never converges ([#133](https://github.com/wanggang316/hand-ai/issues/133))
 
 ## [0.3.1] - 2026-07-22

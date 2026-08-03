@@ -141,9 +141,92 @@ pub struct ExtensionContext {
     pub cwd: PathBuf,
     /// Identifier of the current session. Stable for a session's lifetime.
     pub session_id: String,
-    /// The extension's own slot in `~/.hand/extensions/<name>/data/` (or
-    /// equivalent) for persistent state. Created lazily.
+    /// This extension's private slot for persistent state, and nobody
+    /// else's: `<data root>/<extension name>/data/`. The root is the host's
+    /// data directory when it pinned one (`AgentSessionConfig::base_dir`),
+    /// else `<cwd>/.hand/`. Created lazily — the host does not mkdir it
+    /// until something is about to write there.
     pub data_dir: PathBuf,
+}
+
+/// Session-level inputs from which a per-extension [`ExtensionContext`] is
+/// derived.
+///
+/// The context handed to a hook differs per extension in exactly one field
+/// (`data_dir`), so the host holds one factory per session and stamps the
+/// extension's identity in at dispatch time. This keeps two extensions from
+/// sharing a directory — and silently clobbering each other's `state.json`.
+#[derive(Clone, Debug)]
+pub struct ExtensionContextFactory {
+    cwd: PathBuf,
+    session_id: String,
+    data_root: PathBuf,
+}
+
+impl ExtensionContextFactory {
+    /// `data_root` is the directory that holds every extension's private
+    /// slot, i.e. `<base_dir or cwd/.hand>/extensions`.
+    pub fn new(
+        cwd: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        data_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            cwd: cwd.into(),
+            session_id: session_id.into(),
+            data_root: data_root.into(),
+        }
+    }
+
+    /// Working directory shared by every extension in this session.
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    /// Session identifier shared by every extension in this session.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Root under which per-extension data directories are allocated.
+    pub fn data_root(&self) -> &std::path::Path {
+        &self.data_root
+    }
+
+    /// Build the context for one extension. `name` comes from the
+    /// extension's manifest and is sanitized into a single path segment, so
+    /// a hand-written Tier 1 manifest cannot escape the data root.
+    pub fn for_extension(&self, name: &str) -> ExtensionContext {
+        ExtensionContext {
+            cwd: self.cwd.clone(),
+            session_id: self.session_id.clone(),
+            data_dir: self.data_root.join(sanitize_segment(name)).join("data"),
+        }
+    }
+}
+
+/// Reduce an extension name to one safe path segment.
+///
+/// Tier 2 names are already validated to `[a-z0-9_-]+` by the manifest
+/// loader; Tier 1 manifests are hand-written Rust and get no such check, so
+/// anything outside that set (including `/`, `\`, and `..`) is folded to
+/// `_`.
+fn sanitize_segment(name: &str) -> String {
+    let mapped: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if mapped.is_empty() {
+        "_unnamed".to_string()
+    } else {
+        mapped
+    }
 }
 
 /// The Tier 1 extension trait.
@@ -336,6 +419,35 @@ mod tests {
 
         assert!(ext.slash_commands().is_empty());
         assert!(ext.custom_tools(&cx).is_empty());
+    }
+
+    #[test]
+    fn factory_gives_each_extension_its_own_data_dir() {
+        let factory =
+            ExtensionContextFactory::new("/work", "sess-1", PathBuf::from("/state/extensions"));
+        let foo = factory.for_extension("foo");
+        let bar = factory.for_extension("bar");
+
+        assert_eq!(foo.data_dir, PathBuf::from("/state/extensions/foo/data"));
+        assert_eq!(bar.data_dir, PathBuf::from("/state/extensions/bar/data"));
+        assert_ne!(foo.data_dir, bar.data_dir);
+        assert_eq!(foo.cwd, PathBuf::from("/work"));
+        assert_eq!(foo.session_id, "sess-1");
+    }
+
+    #[test]
+    fn factory_sanitizes_names_into_one_path_segment() {
+        let factory =
+            ExtensionContextFactory::new("/work", "sess-1", PathBuf::from("/state/extensions"));
+
+        assert_eq!(
+            factory.for_extension("../../etc").data_dir,
+            PathBuf::from("/state/extensions/______etc/data")
+        );
+        assert_eq!(
+            factory.for_extension("").data_dir,
+            PathBuf::from("/state/extensions/_unnamed/data")
+        );
     }
 
     #[test]
