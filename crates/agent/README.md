@@ -130,6 +130,12 @@ agent.set_before_tool_call(Some(Box::new(|ctx| {
 })));
 ```
 
+`before_tool_call` can block a call (`block` + `reason`) or rewrite what it
+executes (`replace_args`). A replacement is re-validated against the tool's
+JSON Schema before the tool runs, and the transcript keeps the model's
+original arguments — the rewrite records what the host allowed, not what the
+model asked for.
+
 ## Tools
 
 Define tools using `AgentTool`:

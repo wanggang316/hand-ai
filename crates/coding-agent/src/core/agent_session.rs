@@ -1777,12 +1777,12 @@ fn drain_queue(queue: &Mutex<Vec<Message>>, mode: QueueMode) -> Vec<Message> {
 /// Build a `BeforeToolCallHook` that fans the tool-call event out to
 /// every registered extension and aggregates their decisions.
 ///
-/// NOTE: after the merge with origin/main, hand-agent's
-/// [`BeforeToolCallResult`] dropped its `replace_args` field. The Tier-1
-/// hook chain still emits [`HookDecision::Replace(args)`] but we can no
-/// longer forward it to the agent loop — the rewrite is logged and
-/// downgraded to `Continue` until a follow-up re-introduces argument
-/// rewriting in hand-agent.
+/// The three decisions map onto [`BeforeToolCallResult`] directly:
+/// `Continue` returns `None` (nothing to override), `Cancel` blocks the
+/// call with the extension's reason, and `Replace` hands the agent loop the
+/// rewritten arguments — which the loop re-validates against the tool's
+/// schema before executing. The transcript keeps the model's original tool
+/// call; the rewrite describes what the host let it do.
 fn build_before_tool_call_hook(
     extensions: Arc<Vec<Arc<dyn Extension>>>,
     cx: Arc<ExtensionContextFactory>,
@@ -1802,18 +1802,15 @@ fn build_before_tool_call_hook(
                 let decision = dispatch_before_tool_call(&extensions, &cx, &event).await;
                 match decision {
                     HookDecision::Continue => None,
-                    HookDecision::Replace(_args) => {
-                        tracing::warn!(
-                            tool = %event.tool_name,
-                            "extension requested arg rewrite (HookDecision::Replace) but \
-                             hand-agent::BeforeToolCallResult no longer supports it; \
-                             treating as Continue. Re-enable by restoring replace_args."
-                        );
-                        None
-                    }
+                    HookDecision::Replace(args) => Some(BeforeToolCallResult {
+                        block: false,
+                        reason: None,
+                        replace_args: Some(args),
+                    }),
                     HookDecision::Cancel(reason) => Some(BeforeToolCallResult {
                         block: true,
                         reason: Some(reason),
+                        replace_args: None,
                     }),
                 }
             })
@@ -3441,17 +3438,10 @@ mod tests {
         );
     }
 
-    /// F23 regression (post-merge): a `HookDecision::Replace(args)` from a
-    /// Tier-1 extension is currently downgraded to `Continue` (with a
-    /// warning) because hand-agent's `BeforeToolCallResult` no longer
-    /// carries `replace_args` after the merge with origin/main. This test
-    /// pins the contract: send_message still succeeds, the tool observes
-    /// the model's ORIGINAL args, and no panic / unwind escapes.
-    ///
-    /// When `replace_args` is restored upstream this test should flip to
-    /// asserting the rewritten args are observed.
+    /// A `HookDecision::Replace(args)` from a Tier-1 extension reaches the
+    /// tool: the tool executes the rewritten arguments, not the model's.
     #[tokio::test]
-    async fn replace_args_currently_downgrades_to_continue() {
+    async fn replace_args_reaches_the_tool() {
         let client = model::Client::new();
         client.registry.register(
             Api::OpenAICompletions,
@@ -3496,8 +3486,99 @@ mod tests {
         let captured = observed.lock().unwrap().clone();
         assert_eq!(
             captured,
-            Some(serde_json::json!({"original": true})),
-            "with replace_args removed upstream, tool observes the model's original args"
+            Some(serde_json::json!({"replaced": true})),
+            "the tool must run the arguments the extension chain settled on"
+        );
+
+        // The transcript still records what the model asked for — the
+        // rewrite describes what the host allowed, not what the model said.
+        let asked: Vec<serde_json::Value> = session
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::Assistant(a) => Some(a),
+                _ => None,
+            })
+            .flat_map(|a| a.content.iter())
+            .filter_map(|block| match block {
+                model::AssistantContentBlock::ToolCall(tc) => Some(tc.arguments.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, vec![serde_json::json!({"original": true})]);
+    }
+
+    /// A rewrite that violates the tool's schema is rejected instead of
+    /// being handed to the tool: the call fails with an error result and
+    /// the tool is never entered.
+    #[tokio::test]
+    async fn replace_args_violating_the_schema_is_rejected() {
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(ToolThenTextProvider {
+                tool_name: "echo".into(),
+                args: serde_json::json!({"message": "hello"}),
+                invocation: AtomicUsize::new(0),
+            }),
+            Some("test".into()),
+        );
+
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entered_for_tool = entered.clone();
+        let echo_tool = AgentTool::simple(
+            "echo",
+            "Echoes a message",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "message": { "type": "string" } },
+                "required": ["message"]
+            }),
+            "Echo",
+            move |_call_id, _args| {
+                let entered = entered_for_tool.clone();
+                async move {
+                    entered.store(true, Ordering::SeqCst);
+                    hand_agent::types::ToolResult::text("echoed")
+                }
+            },
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![echo_tool], client);
+        session.register_extension(RecordingExt::new(
+            "rewriter",
+            // `message` is required and must be a string.
+            HookDecision::Replace(serde_json::json!({"message": 42})),
+        ));
+
+        session
+            .send_message("call echo")
+            .await
+            .expect("the turn survives a rejected rewrite");
+
+        assert!(
+            !entered.load(Ordering::SeqCst),
+            "the tool must not run with arguments its schema rejects"
+        );
+        let results: Vec<String> = session
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::ToolResult(tr) => Some(tr),
+                _ => None,
+            })
+            .flat_map(|tr| tr.content.iter())
+            .filter_map(|c| match c {
+                model::ToolResultContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            results
+                .iter()
+                .any(|t| t.contains("Invalid replacement arguments")),
+            "the model should see why the call failed, got {results:?}"
         );
     }
 

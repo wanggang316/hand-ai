@@ -320,6 +320,19 @@ pub struct BeforeToolCallResult {
     pub block: bool,
     /// Reason shown in the error result when blocked.
     pub reason: Option<String>,
+    /// Replacement arguments for this call. `Some(args)` swaps what the
+    /// tool actually executes with; `None` keeps the arguments the model
+    /// produced. Ignored when `block` is true.
+    ///
+    /// The replacement is re-validated against the tool's JSON Schema, so a
+    /// hook cannot smuggle a shape the tool never agreed to accept — an
+    /// invalid rewrite fails the call rather than reaching the tool.
+    ///
+    /// The transcript keeps the model's original tool call: the assistant
+    /// message records what the model asked for, and the rewrite describes
+    /// what the host let it do. The `after_tool_call` hook sees the
+    /// effective arguments.
+    pub replace_args: Option<serde_json::Value>,
 }
 
 /// Partial override returned from `after_tool_call`.

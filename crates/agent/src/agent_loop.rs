@@ -846,6 +846,7 @@ async fn prepare_tool_call<'a>(
     }
 
     // before_tool_call hook.
+    let mut prepared_args = prepared_args;
     if let Some(hook) = &config.before_tool_call {
         let ctx = BeforeToolCallContext {
             assistant_message,
@@ -853,16 +854,31 @@ async fn prepare_tool_call<'a>(
             args: &prepared_args,
             context,
         };
-        if let Some(before_result) = hook(ctx, cancel.clone()).await
-            && before_result.block
-        {
-            let reason = before_result
-                .reason
-                .unwrap_or_else(|| "Tool execution was blocked".into());
-            return ToolCallPreparation::Immediate {
-                result: ToolResult::error(reason),
-                is_error: true,
-            };
+        if let Some(before_result) = hook(ctx, cancel.clone()).await {
+            if before_result.block {
+                let reason = before_result
+                    .reason
+                    .unwrap_or_else(|| "Tool execution was blocked".into());
+                return ToolCallPreparation::Immediate {
+                    result: ToolResult::error(reason),
+                    is_error: true,
+                };
+            }
+            if let Some(replacement) = before_result.replace_args {
+                // Re-validate: a rewrite is host-supplied, not model-supplied,
+                // and the tool's schema contract holds either way. Failing
+                // here beats handing the tool a shape it never agreed to.
+                if let Err(msg) = validate_tool_args(tool, &replacement) {
+                    return ToolCallPreparation::Immediate {
+                        result: ToolResult::error(format!(
+                            "Invalid replacement arguments for tool '{}': {msg}",
+                            tool.name
+                        )),
+                        is_error: true,
+                    };
+                }
+                prepared_args = replacement;
+            }
         }
     }
 
