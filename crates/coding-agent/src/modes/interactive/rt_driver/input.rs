@@ -45,6 +45,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Widget};
 
+use super::chrome;
 use super::footer::{FooterViewModel, render_footer_lines};
 use super::overlay::SharedOverlay;
 use super::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_footer, lock_state};
@@ -58,6 +59,13 @@ const LOADER_MESSAGE: &str = "Working…";
 /// viewport budget before the box is laid out, so the footer sits glued under
 /// the box's bottom border and the box wraps only the editor.
 const FOOTER_ROWS: u16 = 2;
+
+/// Rows the persistent key-hint line occupies in the bottom chrome, directly
+/// below the box's bottom border and above the footer. Guidance chrome, so it
+/// yields first on a short pane (shown only when box + footer already fit with a
+/// spare row) and is hidden under a modal overlay, whose panel carries its own
+/// hint and owns input.
+const HINT_ROWS: u16 = 1;
 
 /// The smallest useful bordered box: the top + bottom border rows plus one
 /// editor row for the caret. On a tiny pane the footer band collapses before
@@ -330,7 +338,22 @@ fn draw(
     // the panel.
     let viewport_budget = area.height.max(1);
     let footer_rows = FOOTER_ROWS.min(viewport_budget.saturating_sub(MIN_BOX_ROWS));
-    let box_budget = viewport_budget.saturating_sub(footer_rows);
+    // The key-hint line sits between the box and the footer. It is guidance, so
+    // it yields first: shown only when the box (at its minimum) and the full
+    // footer already fit with a spare row, and never while a modal overlay is
+    // mounted (the panel carries its own hint and owns input, so the main input
+    // hint would be misleading). Its row comes out of the box budget just like
+    // the footer's, so the box bottom-anchors above hint + footer.
+    let hint_rows = if !state.overlay_open
+        && viewport_budget >= MIN_BOX_ROWS.saturating_add(footer_rows).saturating_add(HINT_ROWS)
+    {
+        HINT_ROWS
+    } else {
+        0
+    };
+    let box_budget = viewport_budget
+        .saturating_sub(footer_rows)
+        .saturating_sub(hint_rows);
 
     // While a modal overlay is mounted, its bordered panel replaces the whole
     // band above the box for the duration:
@@ -460,14 +483,34 @@ fn draw(
         }
     }
 
+    // The persistent key-hint line, in the unbordered row directly below the
+    // box's bottom border and above the footer. Inset to the box's interior
+    // columns like the footer so the glyphs column-align with the editor text.
+    // Skipped when `hint_rows` is 0 (short pane or a mounted overlay), where the
+    // footer simply moves up to the box.
+    if hint_rows > 0 {
+        let hint_rect = inset(Rect::new(
+            area.x,
+            geometry.active.bottom(),
+            area.width,
+            hint_rows,
+        ))
+        .intersection(area);
+        if hint_rect.height > 0 {
+            Paragraph::new(Text::from(chrome::key_hint_line(&state.palette)))
+                .render(hint_rect, frame.buffer_mut());
+        }
+    }
+
     // The two-line footer view-model, rendered into the unbordered band directly
-    // below the box's bottom border. Inset to the box's interior columns so the
-    // footer text lines up with the editor text above it, and intersected with
-    // the frame so a size mismatch can never paint past the viewport.
-    // `Paragraph` clips a line wider than the rect, so a narrow pane never spills.
+    // below the key-hint row (or the box's bottom border when the hint is
+    // hidden). Inset to the box's interior columns so the footer text lines up
+    // with the editor text above it, and intersected with the frame so a size
+    // mismatch can never paint past the viewport. `Paragraph` clips a line wider
+    // than the rect, so a narrow pane never spills.
     let footer_rect = inset(Rect::new(
         area.x,
-        geometry.active.bottom(),
+        geometry.active.bottom().saturating_add(hint_rows),
         area.width,
         footer_rows,
     ))
@@ -1054,20 +1097,27 @@ mod tests {
         assert!(text.contains("(tmp)"), "branch missing: {text}");
         assert!(text.contains("test-model"), "model id missing: {text}");
 
-        // Row order: top border < bottom border < cwd line < stats line — the
-        // footer lives outside the box, glued directly under it.
+        // Row order: top border < bottom border < key-hint line < cwd line <
+        // stats line — the key-hint row and footer live outside the box, glued
+        // directly under it in that order.
         let (top, bottom) = border_rows(&terminal);
+        let hint_row = row_of(&terminal, "send").expect("hint row painted");
         let cwd_row = row_of(&terminal, "/tmp/proj").expect("cwd row painted");
         let stats_row = row_of(&terminal, "test-model").expect("stats row painted");
         assert!(top < bottom, "a bordered box is painted");
         assert_eq!(
-            cwd_row,
+            hint_row,
             bottom + 1,
-            "the cwd line sits directly below the box's bottom border"
+            "the key-hint line sits directly below the box's bottom border"
+        );
+        assert_eq!(
+            cwd_row,
+            bottom + 2,
+            "the cwd line sits below the key-hint line"
         );
         assert_eq!(
             stats_row,
-            bottom + 2,
+            bottom + 3,
             "the stats line sits below the cwd line"
         );
     }
@@ -1077,8 +1127,10 @@ mod tests {
         use hand_tui::rt::components::EditorBorder;
 
         // The bordered box is exactly the editor rows + the two border rows; it
-        // grows and shrinks with the editor while the footer band stays glued
-        // below the bottom border (the box bottom stays anchored above it).
+        // grows and shrinks with the editor while the key-hint row and footer band
+        // stay glued below the bottom border (the box bottom stays anchored above
+        // them). The cwd line sits two rows below the box bottom: the key-hint row
+        // is between them.
         let editor: SharedEditor = Arc::new(Mutex::new(Editor::new().border(EditorBorder::None)));
         let loader = Loader::new(LOADER_MESSAGE);
         let mut terminal = fixed_viewport(60, MAX_VIEWPORT_ROWS);
@@ -1093,9 +1145,14 @@ mod tests {
             "empty editor: box is 1 editor + 2 border rows"
         );
         assert_eq!(
-            row_of(&terminal, "/tmp/proj").expect("cwd row"),
+            row_of(&terminal, "send").expect("hint row"),
             bottom1 + 1,
-            "footer glued below the box"
+            "key-hint glued directly below the box"
+        );
+        assert_eq!(
+            row_of(&terminal, "/tmp/proj").expect("cwd row"),
+            bottom1 + 2,
+            "footer glued below the key-hint row"
         );
 
         // Three-row editor: the box grows upward to 5 rows, bottom anchored.
@@ -1109,7 +1166,7 @@ mod tests {
         );
         assert_eq!(
             bottom2, bottom1,
-            "the box bottom stays anchored above the footer"
+            "the box bottom stays anchored above the hint + footer"
         );
         let alpha_row = row_of(&terminal, "alpha").expect("editor content row");
         assert!(
@@ -1118,19 +1175,19 @@ mod tests {
         );
         assert_eq!(
             row_of(&terminal, "/tmp/proj").expect("cwd row"),
-            bottom2 + 1,
-            "footer still glued below after the grow"
+            bottom2 + 2,
+            "footer still glued below the hint row after the grow"
         );
 
-        // Shrink back: the box collapses with the editor, footer unmoved.
+        // Shrink back: the box collapses with the editor, hint + footer unmoved.
         lock_editor(&editor).set_text("");
         draw_frame_with_footer(&mut terminal, &editor, &loader, false, &footer);
         let (top3, bottom3) = border_rows(&terminal);
         assert_eq!(bottom3 - top3, 2, "box shrinks back with the editor");
         assert_eq!(
             row_of(&terminal, "/tmp/proj").expect("cwd row"),
-            bottom3 + 1,
-            "footer still glued below after the shrink"
+            bottom3 + 2,
+            "footer still glued below the hint row after the shrink"
         );
     }
 
@@ -1139,8 +1196,8 @@ mod tests {
         use hand_tui::rt::components::EditorBorder;
 
         // At the editor's maximum auto-grow the box is trimmed so loader + box +
-        // footer never exceed the fixed viewport height — the footer's last row
-        // stays inside MAX_VIEWPORT_ROWS, and while streaming the loader row
+        // hint + footer never exceed the fixed viewport height — the stats (last)
+        // row stays inside MAX_VIEWPORT_ROWS, and while streaming the loader row
         // still has its home directly above the box top.
         for &streaming in &[false, true] {
             let editor: SharedEditor =
@@ -1169,14 +1226,20 @@ mod tests {
             } else {
                 assert_eq!(top, 0, "idle max growth reaches the viewport origin");
             }
+            let hint_row = row_of(&terminal, "send").expect("hint row painted");
             let cwd_row = row_of(&terminal, "/tmp/proj").expect("cwd row painted");
             let stats_row = row_of(&terminal, "test-model").expect("stats row painted");
             assert_eq!(
-                cwd_row,
+                hint_row,
                 bottom + 1,
-                "footer below the box (streaming={streaming})"
+                "key-hint directly below the box (streaming={streaming})"
             );
-            assert_eq!(stats_row, bottom + 2);
+            assert_eq!(
+                cwd_row,
+                bottom + 2,
+                "footer below the hint row (streaming={streaming})"
+            );
+            assert_eq!(stats_row, bottom + 3);
             assert!(
                 stats_row < MAX_VIEWPORT_ROWS,
                 "the whole bottom area fits the fixed viewport budget \
