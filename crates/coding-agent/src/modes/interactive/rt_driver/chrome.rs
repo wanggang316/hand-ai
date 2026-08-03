@@ -107,13 +107,8 @@ fn hint_action_style(palette: &ThemePalette) -> Style {
 }
 
 /// Build the welcome-header scrollback lines: a title line
-/// (`hand v<version> <provider>/<model>`) and a trailing blank so the header
-/// does not crowd the first chat entry.
-///
-/// The key-hint row is no longer part of the header — it renders persistently in
-/// the bottom chrome directly below the input box (see [`key_hint_line`]), so the
-/// gestures sit with the box they describe instead of being stranded at the top
-/// of scrollback where they scroll away.
+/// (`hand v<version> <provider>/<model>`), a key-hint line, and a trailing blank
+/// so the header does not crowd the first chat entry.
 ///
 /// Pure over `(provider, model, version)` so the exact rendered text is asserted
 /// in a unit test without a live session.
@@ -130,21 +125,6 @@ pub fn welcome_header_lines(
         Span::styled(format!("   {provider}/{model}"), title_dim_style()),
     ]);
 
-    vec![title, Line::default()]
-}
-
-/// Build the persistent key-hint line, drawn in the bottom chrome directly below
-/// the input box: every advertised key glyph paired with its action, ` · `
-/// separated (`↵ send · ⇧↵ newline · …`). The dim glyphs and palette-coloured
-/// actions match the look the welcome header used to carry.
-///
-/// Kept next to the input (not in the welcome header) so the gestures stay
-/// on-screen with the box they describe. The advertised set is [`KEY_HINTS`],
-/// the same honest list [`advertised_hint_keys`] cross-checks against the real
-/// bindings (VAL-CHAT-007). Pure so the exact text is asserted without a live
-/// session.
-#[must_use]
-pub fn key_hint_line(palette: &ThemePalette) -> Line<'static> {
     let mut hint_spans: Vec<Span<'static>> = Vec::new();
     for (i, hint) in KEY_HINTS.iter().enumerate() {
         if i > 0 {
@@ -156,7 +136,8 @@ pub fn key_hint_line(palette: &ThemePalette) -> Line<'static> {
             hint_action_style(palette),
         ));
     }
-    Line::from(hint_spans)
+
+    vec![title, Line::from(hint_spans), Line::default()]
 }
 
 /// The set of keys the welcome hint advertises, as canonical lower-case ids. The
@@ -448,19 +429,12 @@ mod tests {
     }
 
     #[test]
-    fn welcome_header_renders_title_and_blank() {
-        // The hint row moved to the bottom chrome (see `key_hint_line`); the
-        // header is now just the title and a trailing blank.
+    fn welcome_header_renders_title_hint_and_blank() {
         let lines = welcome_header_lines("openai", "mock-model", "1.2.3", &pal());
-        assert_eq!(lines.len(), 2, "title + trailing blank");
+        assert_eq!(lines.len(), 3, "title + hint + trailing blank");
         assert_eq!(text_of(&lines[0]), "hand v1.2.3   openai/mock-model");
-        assert!(text_of(&lines[1]).is_empty(), "trailing line is blank");
-    }
-
-    #[test]
-    fn key_hint_line_lists_every_advertised_key() {
-        // The persistent bottom hint lists every advertised key and its action.
-        let hint = text_of(&key_hint_line(&pal()));
+        // The hint row lists every advertised key and its action.
+        let hint = text_of(&lines[1]);
         for h in KEY_HINTS {
             assert!(hint.contains(h.key), "hint missing key {}: {hint:?}", h.key);
             assert!(
@@ -469,6 +443,7 @@ mod tests {
                 h.action
             );
         }
+        assert!(text_of(&lines[2]).is_empty(), "trailing line is blank");
     }
 
     #[test]
