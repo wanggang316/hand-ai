@@ -552,11 +552,11 @@ impl AgentSession {
         // Idempotent, so this is a no-op on every turn after the first.
         self.load_extensions().await;
 
-        // Let extensions see the prompt before the transcript does. A
-        // `Cancel` aborts the turn with nothing persisted; a `Replace`
-        // rewrites what both the transcript and the model receive.
-        // The turn has not started yet, so a cancel here leaves no state to
-        // unwind — `is_streaming` is still false and nothing is persisted.
+        // Let extensions see the prompt before the transcript does: a
+        // `Replace` rewrites what both the transcript and the model
+        // receive, a `Cancel` aborts the turn. Cancelling here leaves no
+        // state to unwind — the turn has not started, `is_streaming` is
+        // still false, and nothing has been persisted.
         let text = self.dispatch_user_message_hook(text).await?;
         let user_msg = Message::User(build_user_message(&text, images));
 
