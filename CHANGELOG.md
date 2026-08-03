@@ -10,6 +10,12 @@ The `/changelog` slash command and the M5.4 startup auto-display both
 read this file. Add new entries above the previous version with a
 `## [X.Y.Z] - YYYY-MM-DD` header — the parser only accepts that shape.
 
+## [Unreleased]
+
+### Fixed
+
+- Models served over the Anthropic Messages API (Anthropic's own models, MiniMax, and any provider whose base URL points at an `/anthropic` gateway) stream their reply as it is produced instead of buffering the whole response and delivering it in one burst when the turn ends; interrupting such a turn now keeps the text already streamed ([#135](https://github.com/wanggang316/hand-ai/issues/135))
+
 ## [0.3.1] - 2026-07-22
 
 ### Added
