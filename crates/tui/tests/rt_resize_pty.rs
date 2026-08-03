@@ -70,6 +70,11 @@ fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
 }
 
 /// Open a PTY pair at the given geometry.
+// `libc::openpty`'s `winp` is `*mut winsize` on macOS but `*const winsize` on
+// Linux, so `&mut winsize` is required to compile on macOS yet reads as an
+// unnecessary `mut` to clippy on Linux. Allow the lint rather than drop the
+// `mut` (which would break the macOS build).
+#[allow(clippy::unnecessary_mut_passed)]
 fn open_pty(cols: u16, rows: u16) -> (OwnedFd, OwnedFd) {
     let mut master: libc::c_int = 0;
     let mut slave: libc::c_int = 0;
