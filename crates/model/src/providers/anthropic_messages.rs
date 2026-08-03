@@ -83,13 +83,13 @@ fn stream_anthropic_messages_with_reasoning(
     reasoning: Option<ThinkingLevel>,
 ) -> impl futures::Stream<Item = AssistantMessageEvent> + Send + 'static {
     async_stream::stream! {
-        let result = stream_anthropic_inner(model, context, options, reasoning).await;
-        match result {
-            Ok(events) => {
-                for event in events {
-                    yield event;
-                }
-            }
+        use futures::StreamExt;
+
+        // Setup failures (missing key, transport error before the response
+        // headers, non-2xx) happen before a single byte of the body is
+        // available, so they still surface as one Error event.
+        let response = match send_anthropic_request(&model, &context, &options, reasoning).await {
+            Ok(r) => r,
             Err(e) => {
                 let error_msg = AssistantMessage {
                     role: "assistant".to_string(),
@@ -109,18 +109,78 @@ fn stream_anthropic_messages_with_reasoning(
                     reason: StopReason::Error,
                     error: error_msg,
                 };
+                return;
             }
+        };
+
+        // Consume the body incrementally and yield each SSE event as its
+        // bytes land. Reading the whole body first (`response.text()`)
+        // collapses the entire turn into one burst at t_end — no typewriter
+        // output for embedding hosts, and a cancelled turn delivers nothing
+        // at all because none of the deltas ever left this function.
+        let mut parser = SseParser::new(&model);
+        let mut byte_stream = response.bytes_stream();
+        // Buffer bytes rather than a decoded String: a multi-byte UTF-8
+        // character can straddle a chunk boundary, and lossy-decoding each
+        // chunk on arrival would replace its halves with U+FFFD. Split on
+        // newlines first, decode whole lines after.
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut transport_error: Option<String> = None;
+        let mut stopped = false;
+
+        'outer: while let Some(chunk) = byte_stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    transport_error = Some(e.to_string());
+                    break 'outer;
+                }
+            };
+            buffer.extend_from_slice(&chunk);
+
+            while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=pos).collect();
+                match parser.feed_line(&String::from_utf8_lossy(&line), &model) {
+                    Feed::Events(events) => {
+                        for event in events {
+                            yield event;
+                        }
+                    }
+                    Feed::Stop => {
+                        stopped = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        // A body whose last line has no trailing newline still carries an
+        // event; the previous `str::lines()` pass surfaced it, so feed the
+        // remainder here too.
+        if !stopped
+            && !buffer.is_empty()
+            && let Feed::Events(events) = parser.feed_line(&String::from_utf8_lossy(&buffer), &model)
+        {
+            for event in events {
+                yield event;
+            }
+        }
+
+        for event in parser.finalize(&model, transport_error) {
+            yield event;
         }
     }
 }
 
-/// Inner streaming implementation that collects events.
-async fn stream_anthropic_inner(
-    model: Model,
-    context: Context,
-    options: Option<StreamOptions>,
+/// Build and send the request, returning the response once its headers are
+/// in and the status is known good. The body is left untouched so the
+/// caller can consume it incrementally.
+async fn send_anthropic_request(
+    model: &Model,
+    context: &Context,
+    options: &Option<StreamOptions>,
     reasoning: Option<ThinkingLevel>,
-) -> Result<Vec<AssistantMessageEvent>, String> {
+) -> Result<reqwest::Response, String> {
     let api_key = options
         .as_ref()
         .and_then(|o| o.api_key.clone())
@@ -140,7 +200,7 @@ async fn stream_anthropic_inner(
         .unwrap_or(model.max_tokens.min(32000) as u32);
 
     // Build request body
-    let body = build_request_body(&model, &context, max_tokens, reasoning, &options)?;
+    let body = build_request_body(model, context, max_tokens, reasoning, options)?;
 
     // Build headers
     let mut headers = HeaderMap::new();
@@ -165,7 +225,7 @@ async fn stream_anthropic_inner(
         .tools
         .as_ref()
         .is_some_and(|tools| !tools.is_empty());
-    if has_tools && !crate::transform::supports_eager_tool_input_streaming(&model) {
+    if has_tools && !crate::transform::supports_eager_tool_input_streaming(model) {
         betas.push("fine-grained-tool-streaming-2025-05-14");
     }
     // Adaptive-thinking models (Opus 4.6+, Sonnet 4.6) interleave
@@ -184,7 +244,7 @@ async fn stream_anthropic_inner(
     }
 
     // Add custom headers from options
-    if let Some(opts) = &options
+    if let Some(opts) = options
         && let Some(custom_headers) = &opts.headers
     {
         for (key, value) in custom_headers {
@@ -222,9 +282,11 @@ async fn stream_anthropic_inner(
                 headers_map.insert(name.as_str().to_string(), v.to_string());
             }
         }
-        on_response(status, headers_map, &model);
+        on_response(status, headers_map, model);
     }
 
+    // Error responses are small and terminal — reading them in full is
+    // exactly what we want, unlike the success path.
     if !response.status().is_success() {
         let status = response.status();
         let body = response
@@ -234,8 +296,7 @@ async fn stream_anthropic_inner(
         return Err(format!("Anthropic API error ({}): {}", status, body));
     }
 
-    // Parse SSE stream
-    parse_sse_stream(response, &model).await
+    Ok(response)
 }
 
 // =============================================================================
@@ -817,439 +878,498 @@ fn sanitize_surrogates(text: &str) -> String {
 // SSE Response Parsing
 // =============================================================================
 
-/// Parse SSE stream from Anthropic API response.
-async fn parse_sse_stream(
-    response: reqwest::Response,
-    model: &Model,
-) -> Result<Vec<AssistantMessageEvent>, String> {
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    parse_sse_body(&body, model)
+/// Outcome of feeding one SSE line to [`SseParser::feed_line`].
+enum Feed {
+    /// Events produced by the line — empty for comments, blank lines and
+    /// anything that isn't a decodable `data:` payload.
+    Events(Vec<AssistantMessageEvent>),
+    /// `data: [DONE]` sentinel: stop feeding, run finalization.
+    Stop,
 }
 
-/// Synchronous body parser split out so it is unit-testable without
-/// stubbing a `reqwest::Response`.
-fn parse_sse_body(body: &str, model: &Model) -> Result<Vec<AssistantMessageEvent>, String> {
-    let mut events = Vec::new();
-    let mut output = AssistantMessage {
-        role: "assistant".to_string(),
-        content: vec![],
-        api: Api::AnthropicMessages,
-        provider: model.provider,
-        model: model.id.clone(),
-        usage: crate::types::Usage::default(),
-        stop_reason: StopReason::Stop,
-        error_message: None,
-        timestamp: current_timestamp_ms(),
-        response_model: None,
-        response_id: None,
-        diagnostics: None,
-    };
+/// Stateful parser for the Anthropic Messages SSE stream.
+///
+/// Fed one SSE line at a time so the provider can emit events while the
+/// response body is still arriving. The unit tests drive the same parser
+/// over fixture bodies via [`parse_sse_body`], so the streaming path and
+/// the tested path cannot drift.
+struct SseParser {
+    output: AssistantMessage,
+    content_blocks: HashMap<usize, ContentBlockState>,
+    current_stop_reason: StopReason,
+    saw_message_start: bool,
+    saw_message_stop: bool,
+    /// Whether a `Done` or `Error` event has already been emitted.
+    emitted_terminal: bool,
+}
 
-    let mut content_blocks: HashMap<usize, ContentBlockState> = HashMap::new();
-    let mut current_stop_reason = StopReason::Stop;
-    let mut saw_message_start = false;
-    let mut saw_message_stop = false;
+impl SseParser {
+    fn new(model: &Model) -> Self {
+        Self {
+            output: AssistantMessage {
+                role: "assistant".to_string(),
+                content: vec![],
+                api: Api::AnthropicMessages,
+                provider: model.provider,
+                model: model.id.clone(),
+                usage: crate::types::Usage::default(),
+                stop_reason: StopReason::Stop,
+                error_message: None,
+                timestamp: current_timestamp_ms(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+            },
+            content_blocks: HashMap::new(),
+            current_stop_reason: StopReason::Stop,
+            saw_message_start: false,
+            saw_message_stop: false,
+            emitted_terminal: false,
+        }
+    }
 
-    for line in body.lines() {
+    /// Feed one line of the SSE body.
+    fn feed_line(&mut self, line: &str, model: &Model) -> Feed {
         let line = line.trim();
         if line.is_empty() || line.starts_with(':') {
-            continue;
+            return Feed::Events(Vec::new());
         }
-        if let Some(data) = line.strip_prefix("data: ") {
-            if data == "[DONE]" {
-                break;
-            }
+        let Some(data) = line.strip_prefix("data: ") else {
+            return Feed::Events(Vec::new());
+        };
+        if data == "[DONE]" {
+            return Feed::Stop;
+        }
+        let Ok(event) = serde_json::from_str::<Value>(data) else {
+            return Feed::Events(Vec::new());
+        };
+        Feed::Events(self.dispatch(&event, model))
+    }
 
-            let event: Value = match serde_json::from_str(data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
+    /// Apply a single decoded SSE event to the accumulated message.
+    fn dispatch(&mut self, event: &Value, model: &Model) -> Vec<AssistantMessageEvent> {
+        let mut events: Vec<AssistantMessageEvent> = Vec::new();
+        let output = &mut self.output;
+        let content_blocks = &mut self.content_blocks;
 
-            let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-            match event_type {
-                "message_start" => {
-                    saw_message_start = true;
-                    if let Some(msg) = event.get("message") {
-                        // Parse usage from message_start
-                        if let Some(usage) = msg.get("usage") {
-                            output.usage.input = usage
-                                .get("input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            output.usage.cache_read = usage
-                                .get("cache_read_input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            output.usage.cache_write = usage
-                                .get("cache_creation_input_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                        }
-
-                        // Parse model from response
-                        if let Some(m) = msg.get("model").and_then(|v| v.as_str()) {
-                            output.model = m.to_string();
-                        }
-
-                        // Capture the provider-assigned response id
-                        // (`msg_...`) so callers can correlate this
-                        // assistant turn with Anthropic's own logging
-                        // / observability — and so downstream tooling
-                        // can replay the exact response when needed.
-                        if let Some(id) = msg.get("id").and_then(|v| v.as_str())
-                            && !id.is_empty()
-                            && output.response_id.is_none()
-                        {
-                            output.response_id = Some(id.to_string());
-                        }
-                    }
-
-                    events.push(AssistantMessageEvent::Start {
-                        partial: output.clone(),
-                    });
-                }
-
-                "content_block_start" => {
-                    let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let content_block = event.get("content_block").unwrap_or(&Value::Null);
-                    let block_type = content_block
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    match block_type {
-                        "text" => {
-                            let text = content_block
-                                .get("text")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let text_content = TextContent::new(&text);
-                            content_blocks
-                                .insert(index, ContentBlockState::Text(text_content.clone()));
-                            output
-                                .content
-                                .push(AssistantContentBlock::Text(text_content));
-                            events.push(AssistantMessageEvent::TextStart {
-                                content_index: index as u32,
-                                partial: output.clone(),
-                            });
-                        }
-                        "thinking" => {
-                            let thinking = content_block
-                                .get("thinking")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let thinking_content = ThinkingContent::new(&thinking);
-                            content_blocks.insert(
-                                index,
-                                ContentBlockState::Thinking(thinking_content.clone()),
-                            );
-                            output
-                                .content
-                                .push(AssistantContentBlock::Thinking(thinking_content));
-                            events.push(AssistantMessageEvent::ThinkingStart {
-                                content_index: index as u32,
-                                partial: output.clone(),
-                            });
-                        }
-                        "redacted_thinking" => {
-                            let data = content_block
-                                .get("data")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let mut thinking_content = ThinkingContent::new("[Reasoning redacted]");
-                            thinking_content.thinking_signature = Some(data);
-                            thinking_content.redacted = Some(true);
-                            content_blocks.insert(
-                                index,
-                                ContentBlockState::Thinking(thinking_content.clone()),
-                            );
-                            output
-                                .content
-                                .push(AssistantContentBlock::Thinking(thinking_content));
-                            events.push(AssistantMessageEvent::ThinkingStart {
-                                content_index: index as u32,
-                                partial: output.clone(),
-                            });
-                        }
-                        "tool_use" => {
-                            let id = content_block
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let name = content_block
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let tool_call = ToolCall::new(&id, &name, serde_json::json!({}));
-                            content_blocks.insert(
-                                index,
-                                ContentBlockState::ToolCall(tool_call.clone(), String::new()),
-                            );
-                            output
-                                .content
-                                .push(AssistantContentBlock::ToolCall(tool_call));
-                            events.push(AssistantMessageEvent::ToolCallStart {
-                                content_index: index as u32,
-                                partial: output.clone(),
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-
-                "content_block_delta" => {
-                    let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let delta = event.get("delta").unwrap_or(&Value::Null);
-                    let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-                    match delta_type {
-                        "text_delta" => {
-                            let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                            if let Some(ContentBlockState::Text(tc)) =
-                                content_blocks.get_mut(&index)
-                            {
-                                tc.text.push_str(text);
-                            }
-                            // Update the content block in output
-                            if let Some(AssistantContentBlock::Text(tc)) =
-                                output.content.get_mut(index)
-                            {
-                                tc.text.push_str(text);
-                            }
-                            events.push(AssistantMessageEvent::TextDelta {
-                                content_index: index as u32,
-                                delta: text.to_string(),
-                                partial: output.clone(),
-                            });
-                        }
-                        "thinking_delta" => {
-                            let thinking =
-                                delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
-                            if let Some(ContentBlockState::Thinking(tc)) =
-                                content_blocks.get_mut(&index)
-                            {
-                                tc.thinking.push_str(thinking);
-                            }
-                            if let Some(AssistantContentBlock::Thinking(tc)) =
-                                output.content.get_mut(index)
-                            {
-                                tc.thinking.push_str(thinking);
-                            }
-                            events.push(AssistantMessageEvent::ThinkingDelta {
-                                content_index: index as u32,
-                                delta: thinking.to_string(),
-                                partial: output.clone(),
-                            });
-                        }
-                        "signature_delta" => {
-                            let signature = delta
-                                .get("signature")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            if let Some(ContentBlockState::Thinking(tc)) =
-                                content_blocks.get_mut(&index)
-                            {
-                                let existing =
-                                    tc.thinking_signature.get_or_insert_with(String::new);
-                                existing.push_str(signature);
-                            }
-                            if let Some(AssistantContentBlock::Thinking(tc)) =
-                                output.content.get_mut(index)
-                            {
-                                let existing =
-                                    tc.thinking_signature.get_or_insert_with(String::new);
-                                existing.push_str(signature);
-                            }
-                        }
-                        "input_json_delta" => {
-                            let partial_json = delta
-                                .get("partial_json")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            if let Some(ContentBlockState::ToolCall(_, args_buf)) =
-                                content_blocks.get_mut(&index)
-                            {
-                                args_buf.push_str(partial_json);
-                            }
-                            events.push(AssistantMessageEvent::ToolCallDelta {
-                                content_index: index as u32,
-                                delta: partial_json.to_string(),
-                                partial: output.clone(),
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-
-                "content_block_stop" => {
-                    let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-
-                    if let Some(block_state) = content_blocks.remove(&index) {
-                        match block_state {
-                            ContentBlockState::Text(tc) => {
-                                // Update final state
-                                if let Some(AssistantContentBlock::Text(out_tc)) =
-                                    output.content.get_mut(index)
-                                {
-                                    *out_tc = tc.clone();
-                                }
-                                events.push(AssistantMessageEvent::TextEnd {
-                                    content_index: index as u32,
-                                    content: tc.text,
-                                    partial: output.clone(),
-                                });
-                            }
-                            ContentBlockState::Thinking(tc) => {
-                                if let Some(AssistantContentBlock::Thinking(out_tc)) =
-                                    output.content.get_mut(index)
-                                {
-                                    *out_tc = tc.clone();
-                                }
-                                events.push(AssistantMessageEvent::ThinkingEnd {
-                                    content_index: index as u32,
-                                    content: tc.thinking,
-                                    partial: output.clone(),
-                                });
-                            }
-                            ContentBlockState::ToolCall(mut tc, args_buf) => {
-                                // Final parse of accumulated JSON. Models
-                                // sometimes emit raw control bytes or invalid
-                                // backslash escapes inside `input_json_delta`
-                                // payloads; fall back to the repair pass so
-                                // we don't silently drop the entire tool call
-                                // to `{}`.
-                                if !args_buf.is_empty() {
-                                    tc.arguments =
-                                        crate::transform::parse_json_with_repair(&args_buf)
-                                            .unwrap_or(serde_json::json!({}));
-                                }
-                                if let Some(AssistantContentBlock::ToolCall(out_tc)) =
-                                    output.content.get_mut(index)
-                                {
-                                    out_tc.arguments = tc.arguments.clone();
-                                    out_tc.name = tc.name.clone();
-                                }
-                                events.push(AssistantMessageEvent::ToolCallEnd {
-                                    content_index: index as u32,
-                                    tool_call: tc,
-                                    partial: output.clone(),
-                                });
-                            }
-                        }
-                    }
-                }
-
-                "message_delta" => {
-                    if let Some(delta) = event.get("delta") {
-                        let stop_reason_str = delta.get("stop_reason").and_then(|v| v.as_str());
-                        current_stop_reason = match stop_reason_str {
-                            Some("end_turn") => StopReason::Stop,
-                            Some("max_tokens") => StopReason::Length,
-                            Some("tool_use") => StopReason::ToolUse,
-                            Some("stop_sequence") => StopReason::Stop,
-                            Some("refusal") | Some("sensitive") => StopReason::Error,
-                            _ => StopReason::Stop,
-                        };
-                    }
-
-                    // Update usage from message_delta
-                    if let Some(usage) = event.get("usage") {
-                        if let Some(output_tokens) =
-                            usage.get("output_tokens").and_then(|v| v.as_u64())
-                        {
-                            output.usage.output = output_tokens;
-                        }
-                        if let Some(cache_read) = usage
+        match event_type {
+            "message_start" => {
+                self.saw_message_start = true;
+                if let Some(msg) = event.get("message") {
+                    // Parse usage from message_start
+                    if let Some(usage) = msg.get("usage") {
+                        output.usage.input = usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        output.usage.cache_read = usage
                             .get("cache_read_input_tokens")
                             .and_then(|v| v.as_u64())
-                        {
-                            output.usage.cache_read = cache_read;
-                        }
-                        if let Some(cache_write) = usage
+                            .unwrap_or(0);
+                        output.usage.cache_write = usage
                             .get("cache_creation_input_tokens")
                             .and_then(|v| v.as_u64())
-                        {
-                            output.usage.cache_write = cache_write;
-                        }
-                        output.usage.total_tokens = output.usage.input
-                            + output.usage.output
-                            + output.usage.cache_read
-                            + output.usage.cache_write;
+                            .unwrap_or(0);
+                    }
+
+                    // Parse model from response
+                    if let Some(m) = msg.get("model").and_then(|v| v.as_str()) {
+                        output.model = m.to_string();
+                    }
+
+                    // Capture the provider-assigned response id
+                    // (`msg_...`) so callers can correlate this
+                    // assistant turn with Anthropic's own logging
+                    // / observability — and so downstream tooling
+                    // can replay the exact response when needed.
+                    if let Some(id) = msg.get("id").and_then(|v| v.as_str())
+                        && !id.is_empty()
+                        && output.response_id.is_none()
+                    {
+                        output.response_id = Some(id.to_string());
                     }
                 }
 
-                "message_stop" => {
-                    saw_message_stop = true;
-                    // Final message
-                    output.stop_reason = current_stop_reason;
-
-                    // Calculate cost
-                    crate::models::calculate_cost(model, &mut output.usage);
-
-                    events.push(AssistantMessageEvent::Done {
-                        reason: current_stop_reason,
-                        message: output.clone(),
-                    });
-                }
-
-                "error" => {
-                    let error_msg = event
-                        .get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown error")
-                        .to_string();
-                    output.stop_reason = StopReason::Error;
-                    output.error_message = Some(error_msg);
-                    events.push(AssistantMessageEvent::Error {
-                        reason: StopReason::Error,
-                        error: output.clone(),
-                    });
-                }
-
-                _ => {}
+                events.push(AssistantMessageEvent::Start {
+                    partial: output.clone(),
+                });
             }
+
+            "content_block_start" => {
+                let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let content_block = event.get("content_block").unwrap_or(&Value::Null);
+                let block_type = content_block
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                match block_type {
+                    "text" => {
+                        let text = content_block
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let text_content = TextContent::new(&text);
+                        content_blocks.insert(index, ContentBlockState::Text(text_content.clone()));
+                        output
+                            .content
+                            .push(AssistantContentBlock::Text(text_content));
+                        events.push(AssistantMessageEvent::TextStart {
+                            content_index: index as u32,
+                            partial: output.clone(),
+                        });
+                    }
+                    "thinking" => {
+                        let thinking = content_block
+                            .get("thinking")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let thinking_content = ThinkingContent::new(&thinking);
+                        content_blocks
+                            .insert(index, ContentBlockState::Thinking(thinking_content.clone()));
+                        output
+                            .content
+                            .push(AssistantContentBlock::Thinking(thinking_content));
+                        events.push(AssistantMessageEvent::ThinkingStart {
+                            content_index: index as u32,
+                            partial: output.clone(),
+                        });
+                    }
+                    "redacted_thinking" => {
+                        let data = content_block
+                            .get("data")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let mut thinking_content = ThinkingContent::new("[Reasoning redacted]");
+                        thinking_content.thinking_signature = Some(data);
+                        thinking_content.redacted = Some(true);
+                        content_blocks
+                            .insert(index, ContentBlockState::Thinking(thinking_content.clone()));
+                        output
+                            .content
+                            .push(AssistantContentBlock::Thinking(thinking_content));
+                        events.push(AssistantMessageEvent::ThinkingStart {
+                            content_index: index as u32,
+                            partial: output.clone(),
+                        });
+                    }
+                    "tool_use" => {
+                        let id = content_block
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = content_block
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let tool_call = ToolCall::new(&id, &name, serde_json::json!({}));
+                        content_blocks.insert(
+                            index,
+                            ContentBlockState::ToolCall(tool_call.clone(), String::new()),
+                        );
+                        output
+                            .content
+                            .push(AssistantContentBlock::ToolCall(tool_call));
+                        events.push(AssistantMessageEvent::ToolCallStart {
+                            content_index: index as u32,
+                            partial: output.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            "content_block_delta" => {
+                let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let delta = event.get("delta").unwrap_or(&Value::Null);
+                let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+                match delta_type {
+                    "text_delta" => {
+                        let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(ContentBlockState::Text(tc)) = content_blocks.get_mut(&index) {
+                            tc.text.push_str(text);
+                        }
+                        // Update the content block in output
+                        if let Some(AssistantContentBlock::Text(tc)) = output.content.get_mut(index)
+                        {
+                            tc.text.push_str(text);
+                        }
+                        events.push(AssistantMessageEvent::TextDelta {
+                            content_index: index as u32,
+                            delta: text.to_string(),
+                            partial: output.clone(),
+                        });
+                    }
+                    "thinking_delta" => {
+                        let thinking = delta.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
+                        if let Some(ContentBlockState::Thinking(tc)) =
+                            content_blocks.get_mut(&index)
+                        {
+                            tc.thinking.push_str(thinking);
+                        }
+                        if let Some(AssistantContentBlock::Thinking(tc)) =
+                            output.content.get_mut(index)
+                        {
+                            tc.thinking.push_str(thinking);
+                        }
+                        events.push(AssistantMessageEvent::ThinkingDelta {
+                            content_index: index as u32,
+                            delta: thinking.to_string(),
+                            partial: output.clone(),
+                        });
+                    }
+                    "signature_delta" => {
+                        let signature = delta
+                            .get("signature")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if let Some(ContentBlockState::Thinking(tc)) =
+                            content_blocks.get_mut(&index)
+                        {
+                            let existing = tc.thinking_signature.get_or_insert_with(String::new);
+                            existing.push_str(signature);
+                        }
+                        if let Some(AssistantContentBlock::Thinking(tc)) =
+                            output.content.get_mut(index)
+                        {
+                            let existing = tc.thinking_signature.get_or_insert_with(String::new);
+                            existing.push_str(signature);
+                        }
+                    }
+                    "input_json_delta" => {
+                        let partial_json = delta
+                            .get("partial_json")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if let Some(ContentBlockState::ToolCall(_, args_buf)) =
+                            content_blocks.get_mut(&index)
+                        {
+                            args_buf.push_str(partial_json);
+                        }
+                        events.push(AssistantMessageEvent::ToolCallDelta {
+                            content_index: index as u32,
+                            delta: partial_json.to_string(),
+                            partial: output.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            "content_block_stop" => {
+                let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+                if let Some(block_state) = content_blocks.remove(&index) {
+                    match block_state {
+                        ContentBlockState::Text(tc) => {
+                            // Update final state
+                            if let Some(AssistantContentBlock::Text(out_tc)) =
+                                output.content.get_mut(index)
+                            {
+                                *out_tc = tc.clone();
+                            }
+                            events.push(AssistantMessageEvent::TextEnd {
+                                content_index: index as u32,
+                                content: tc.text,
+                                partial: output.clone(),
+                            });
+                        }
+                        ContentBlockState::Thinking(tc) => {
+                            if let Some(AssistantContentBlock::Thinking(out_tc)) =
+                                output.content.get_mut(index)
+                            {
+                                *out_tc = tc.clone();
+                            }
+                            events.push(AssistantMessageEvent::ThinkingEnd {
+                                content_index: index as u32,
+                                content: tc.thinking,
+                                partial: output.clone(),
+                            });
+                        }
+                        ContentBlockState::ToolCall(mut tc, args_buf) => {
+                            // Final parse of accumulated JSON. Models
+                            // sometimes emit raw control bytes or invalid
+                            // backslash escapes inside `input_json_delta`
+                            // payloads; fall back to the repair pass so
+                            // we don't silently drop the entire tool call
+                            // to `{}`.
+                            if !args_buf.is_empty() {
+                                tc.arguments = crate::transform::parse_json_with_repair(&args_buf)
+                                    .unwrap_or(serde_json::json!({}));
+                            }
+                            if let Some(AssistantContentBlock::ToolCall(out_tc)) =
+                                output.content.get_mut(index)
+                            {
+                                out_tc.arguments = tc.arguments.clone();
+                                out_tc.name = tc.name.clone();
+                            }
+                            events.push(AssistantMessageEvent::ToolCallEnd {
+                                content_index: index as u32,
+                                tool_call: tc,
+                                partial: output.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            "message_delta" => {
+                if let Some(delta) = event.get("delta") {
+                    let stop_reason_str = delta.get("stop_reason").and_then(|v| v.as_str());
+                    self.current_stop_reason = match stop_reason_str {
+                        Some("end_turn") => StopReason::Stop,
+                        Some("max_tokens") => StopReason::Length,
+                        Some("tool_use") => StopReason::ToolUse,
+                        Some("stop_sequence") => StopReason::Stop,
+                        Some("refusal") | Some("sensitive") => StopReason::Error,
+                        _ => StopReason::Stop,
+                    };
+                }
+
+                // Update usage from message_delta
+                if let Some(usage) = event.get("usage") {
+                    if let Some(output_tokens) = usage.get("output_tokens").and_then(|v| v.as_u64())
+                    {
+                        output.usage.output = output_tokens;
+                    }
+                    if let Some(cache_read) = usage
+                        .get("cache_read_input_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
+                        output.usage.cache_read = cache_read;
+                    }
+                    if let Some(cache_write) = usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                    {
+                        output.usage.cache_write = cache_write;
+                    }
+                    output.usage.total_tokens = output.usage.input
+                        + output.usage.output
+                        + output.usage.cache_read
+                        + output.usage.cache_write;
+                }
+            }
+
+            "message_stop" => {
+                self.saw_message_stop = true;
+                // Final message
+                output.stop_reason = self.current_stop_reason;
+
+                // Calculate cost
+                crate::models::calculate_cost(model, &mut output.usage);
+
+                self.emitted_terminal = true;
+                events.push(AssistantMessageEvent::Done {
+                    reason: self.current_stop_reason,
+                    message: output.clone(),
+                });
+            }
+
+            "error" => {
+                let error_msg = event
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Unknown error")
+                    .to_string();
+                output.stop_reason = StopReason::Error;
+                output.error_message = Some(error_msg);
+                self.emitted_terminal = true;
+                events.push(AssistantMessageEvent::Error {
+                    reason: StopReason::Error,
+                    error: output.clone(),
+                });
+            }
+
+            _ => {}
+        }
+
+        events
+    }
+
+    /// Close out the stream and emit whatever terminal event the body
+    /// itself did not provide. `transport_error` carries the failure when
+    /// the body stopped arriving mid-flight.
+    fn finalize(
+        mut self,
+        model: &Model,
+        transport_error: Option<String>,
+    ) -> Vec<AssistantMessageEvent> {
+        // The connection broke while the body was still streaming. Report
+        // the cause on the partial message; when the terminal event already
+        // went out there is nothing left to truncate.
+        if let Some(err) = transport_error
+            && !self.emitted_terminal
+        {
+            let message = if self.saw_message_start {
+                format!("Anthropic stream ended before message_stop: {}", err)
+            } else {
+                format!("Anthropic stream error: {}", err)
+            };
+            self.output.stop_reason = StopReason::Error;
+            self.output.error_message = Some(message);
+            crate::models::calculate_cost(model, &mut self.output.usage);
+            return vec![AssistantMessageEvent::Error {
+                reason: StopReason::Error,
+                error: self.output,
+            }];
+        }
+
+        // A stream that opened with `message_start` but closed before
+        // `message_stop` is an incomplete response — the upstream's
+        // connection dropped mid-message. Surfacing it as a successful
+        // partial silently truncates the assistant turn. Promote to an
+        // Error event so callers can retry or fail loudly.
+        if self.saw_message_start && !self.saw_message_stop {
+            self.output.stop_reason = StopReason::Error;
+            self.output.error_message =
+                Some("Anthropic stream ended before message_stop".to_string());
+            crate::models::calculate_cost(model, &mut self.output.usage);
+            return vec![AssistantMessageEvent::Error {
+                reason: StopReason::Error,
+                error: self.output,
+            }];
+        }
+
+        // If no Done event was emitted, emit one
+        if !self.emitted_terminal {
+            self.output.stop_reason = self.current_stop_reason;
+            crate::models::calculate_cost(model, &mut self.output.usage);
+            return vec![AssistantMessageEvent::Done {
+                reason: self.current_stop_reason,
+                message: self.output,
+            }];
+        }
+
+        Vec::new()
+    }
+}
+
+/// Drive the parser over a complete SSE body.
+///
+/// Test-only: production streams feed [`SseParser`] line by line as the
+/// bytes arrive. Kept so fixture bodies can exercise the exact same
+/// parser without stubbing a `reqwest::Response`.
+#[cfg(test)]
+fn parse_sse_body(body: &str, model: &Model) -> Result<Vec<AssistantMessageEvent>, String> {
+    let mut parser = SseParser::new(model);
+    let mut events = Vec::new();
+    for line in body.lines() {
+        match parser.feed_line(line, model) {
+            Feed::Events(produced) => events.extend(produced),
+            Feed::Stop => break,
         }
     }
-
-    // A stream that opened with `message_start` but closed before
-    // `message_stop` is an incomplete response — the upstream's
-    // connection dropped mid-message. Surfacing it as a successful
-    // partial silently truncates the assistant turn. Promote to an
-    // Error event so callers can retry or fail loudly.
-    if saw_message_start && !saw_message_stop {
-        output.stop_reason = StopReason::Error;
-        output.error_message = Some("Anthropic stream ended before message_stop".to_string());
-        crate::models::calculate_cost(model, &mut output.usage);
-        events.push(AssistantMessageEvent::Error {
-            reason: StopReason::Error,
-            error: output,
-        });
-        return Ok(events);
-    }
-
-    // If no Done event was emitted, emit one
-    if !events.iter().any(|e| {
-        matches!(
-            e,
-            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
-        )
-    }) {
-        output.stop_reason = current_stop_reason;
-        crate::models::calculate_cost(model, &mut output.usage);
-        events.push(AssistantMessageEvent::Done {
-            reason: current_stop_reason,
-            message: output,
-        });
-    }
-
+    events.extend(parser.finalize(model, None));
     Ok(events)
 }
 
@@ -1296,6 +1416,69 @@ mod tests {
             headers: None,
             compat: None,
             thinking_level_map: None,
+        }
+    }
+
+    /// Feed the parser the opening lines of a stream — everything up to
+    /// but excluding the terminal events — and it must already have
+    /// produced the text delta. This is the parser-level half of the
+    /// incremental-streaming guarantee; `parity_anthropic_stream.rs`
+    /// covers the wire-level half.
+    #[test]
+    fn parser_emits_text_delta_before_the_stream_terminates() {
+        let model = test_model();
+        let mut parser = SseParser::new(&model);
+        let mut events = Vec::new();
+        for line in [
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}",
+        ] {
+            match parser.feed_line(line, &model) {
+                Feed::Events(produced) => events.extend(produced),
+                Feed::Stop => panic!("no [DONE] sentinel in this fixture"),
+            }
+        }
+
+        let deltas: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AssistantMessageEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["hi"], "delta must be out before the tail");
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+            )),
+            "no terminal event until the stream actually ends: {events:?}",
+        );
+    }
+
+    /// A body that stops arriving mid-flight (connection reset, proxy
+    /// timeout) is the same truncation the clean-EOF case covers, but the
+    /// transport cause is worth keeping — callers get both.
+    #[test]
+    fn parser_reports_transport_error_with_message_stop_context() {
+        let model = test_model();
+        let mut parser = SseParser::new(&model);
+        let _ = parser.feed_line(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}",
+            &model,
+        );
+        let events = parser.finalize(&model, Some("connection reset".to_string()));
+        match events.last().expect("terminal event") {
+            AssistantMessageEvent::Error { reason, error } => {
+                assert_eq!(*reason, StopReason::Error);
+                let message = error.error_message.as_deref().unwrap_or("");
+                assert!(
+                    message.contains("message_stop") && message.contains("connection reset"),
+                    "error must name the truncation and its cause: {message}",
+                );
+            }
+            other => panic!("expected Error event, got {other:?}"),
         }
     }
 
