@@ -478,7 +478,10 @@ mod tests {
             sel.handle_key(&key_id("down", KeyCode::Down));
         }
         sel.handle_key(&key_id("tab", KeyCode::Tab)); // dark -> light
-        assert!(!done.load(Ordering::SeqCst), "a change keeps the dialog open");
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "a change keeps the dialog open"
+        );
         match drain(&mut rx) {
             Some(SettingsOutcome::Changed { id, value }) => {
                 assert_eq!(id, "theme");
@@ -521,7 +524,10 @@ mod tests {
                 value: "xhigh".into(),
             })
         );
-        assert!(!done.load(Ordering::SeqCst), "cycling never closes the dialog");
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "cycling never closes the dialog"
+        );
     }
 
     #[test]
