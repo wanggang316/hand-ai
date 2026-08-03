@@ -7,9 +7,11 @@ use crate::core::compaction;
 use crate::core::error::CodingAgentError;
 use crate::core::extensions::api::{
     Extension, ExtensionContext, ExtensionContextFactory, HookDecision, SlashCommandSpec,
-    ToolCallEvent, ToolResultEvent,
+    ToolCallEvent, ToolResultEvent, UserMessageEvent,
 };
-use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_before_tool_call};
+use crate::core::extensions::dispatch::{
+    dispatch_after_tool_call, dispatch_before_tool_call, dispatch_user_message,
+};
 use crate::core::extensions::registry::builtin_tier1_extensions;
 use crate::core::model_registry::ModelRegistry;
 use crate::core::session_manager::{SessionBackend, SessionEntry, SessionManager};
@@ -546,7 +548,17 @@ impl AgentSession {
         text: &str,
         images: Option<Vec<ImageContent>>,
     ) -> Result<Vec<Message>, CodingAgentError> {
-        let user_msg = Message::User(build_user_message(text, images));
+        // Give every extension its one-time setup before any hook can fire.
+        // Idempotent, so this is a no-op on every turn after the first.
+        self.load_extensions().await;
+
+        // Let extensions see the prompt before the transcript does. A
+        // `Cancel` aborts the turn with nothing persisted; a `Replace`
+        // rewrites what both the transcript and the model receive.
+        // The turn has not started yet, so a cancel here leaves no state to
+        // unwind — `is_streaming` is still false and nothing is persisted.
+        let text = self.dispatch_user_message_hook(text).await?;
+        let user_msg = Message::User(build_user_message(&text, images));
 
         // Persist the user message
         self.session_manager.append_message(user_msg.clone())?;
@@ -564,10 +576,6 @@ impl AgentSession {
         // cancelled session will reconcile via `get_state` after their
         // own retry/abort logic, and the field has no safety impact.
         self.is_streaming = true;
-
-        // Give every extension its one-time setup before any hook can fire.
-        // Idempotent, so this is a no-op on every turn after the first.
-        self.load_extensions().await;
 
         // Snapshot the extension chain and per-session context so the hook
         // closures can own them as `'static` data captured by the `Box<dyn Fn>`.
@@ -1544,6 +1552,33 @@ impl AgentSession {
             }
         }
         self.extensions_loaded.iter_mut().for_each(|f| *f = false);
+    }
+
+    /// Run the `on_user_message` chain and resolve it to the prompt text
+    /// the turn should actually use.
+    ///
+    /// Returns `Err` when an extension cancelled the turn — the caller must
+    /// not persist the message or start the agent loop.
+    async fn dispatch_user_message_hook(&self, text: &str) -> Result<String, CodingAgentError> {
+        if self.extensions.is_empty() {
+            return Ok(text.to_string());
+        }
+        let event = UserMessageEvent {
+            text: text.to_string(),
+        };
+        let decision =
+            dispatch_user_message(&self.extensions, &self.extension_context_factory(), &event)
+                .await;
+        match decision {
+            HookDecision::Continue => Ok(text.to_string()),
+            HookDecision::Replace(value) => Ok(value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| text.to_string())),
+            HookDecision::Cancel(reason) => Err(CodingAgentError::Other(format!(
+                "message cancelled by extension: {reason}"
+            ))),
+        }
     }
 
     /// Extensions that failed `on_load`, as `(name, error)`. Populated by
@@ -2899,6 +2934,191 @@ mod tests {
         ) -> AssistantMessageEventStream<'static> {
             self.stream(model, context, options.map(|o| o.base))
         }
+    }
+
+    /// Mock provider that records the user text it was handed, so a test
+    /// can assert what the model actually received.
+    struct PromptRecordingProvider {
+        prompts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ApiProvider for PromptRecordingProvider {
+        fn stream(
+            &self,
+            _model: model::Model,
+            context: Context,
+            _options: Option<StreamOptions>,
+        ) -> AssistantMessageEventStream<'static> {
+            for msg in &context.messages {
+                if let Message::User(user) = msg {
+                    self.prompts
+                        .lock()
+                        .unwrap()
+                        .push(extract_user_message_text(&user.content));
+                }
+            }
+            Box::pin(async_stream::stream! {
+                let msg = assistant_text_message("ack");
+                yield AssistantMessageEvent::Start { partial: msg.clone() };
+                yield AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message: msg,
+                };
+            })
+        }
+
+        fn stream_simple(
+            &self,
+            model: model::Model,
+            context: Context,
+            options: Option<SimpleStreamOptions>,
+        ) -> AssistantMessageEventStream<'static> {
+            self.stream(model, context, options.map(|o| o.base))
+        }
+    }
+
+    /// A test extension for the user-message hook, gated on the capability
+    /// exactly as a real one would be.
+    struct PromptExt {
+        manifest: ExtensionManifest,
+        decision: HookDecision,
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl PromptExt {
+        fn new(name: &str, subscribed: bool, decision: HookDecision) -> Arc<Self> {
+            let mut manifest = ext_manifest(name);
+            manifest.capabilities.on_user_message = subscribed;
+            Arc::new(Self {
+                manifest,
+                decision,
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Extension for PromptExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn on_user_message(
+            &self,
+            _cx: &ExtensionContext,
+            event: &crate::core::extensions::api::UserMessageEvent,
+        ) -> Result<HookDecision, ExtensionError> {
+            self.seen.lock().unwrap().push(event.text.clone());
+            Ok(self.decision.clone())
+        }
+    }
+
+    /// A `Replace` from the user-message hook changes what both the
+    /// transcript and the model receive.
+    #[tokio::test]
+    async fn user_message_hook_replace_changes_what_the_model_receives() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PromptRecordingProvider {
+                prompts: prompts.clone(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let ext = PromptExt::new(
+            "scrubber",
+            true,
+            HookDecision::Replace(serde_json::json!("token=[redacted]")),
+        );
+        session.register_extension(ext.clone());
+
+        session
+            .send_message("token=hunter2")
+            .await
+            .expect("send_message succeeds");
+
+        assert_eq!(*ext.seen.lock().unwrap().first().unwrap(), "token=hunter2");
+        assert!(
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == "token=[redacted]"),
+            "model should receive the rewritten prompt, got {:?}",
+            prompts.lock().unwrap()
+        );
+        assert!(
+            !prompts.lock().unwrap().iter().any(|p| p.contains("hunter2")),
+            "the raw prompt must not reach the model"
+        );
+    }
+
+    /// A `Cancel` aborts the turn before anything is persisted and surfaces
+    /// the reason to the caller.
+    #[tokio::test]
+    async fn user_message_hook_cancel_aborts_the_turn() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PromptRecordingProvider {
+                prompts: prompts.clone(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        session.register_extension(PromptExt::new(
+            "guard",
+            true,
+            HookDecision::Cancel("prompt contains a secret".into()),
+        ));
+
+        let err = session
+            .send_message("token=hunter2")
+            .await
+            .expect_err("a cancelled prompt must not start a turn");
+        assert!(
+            err.to_string().contains("prompt contains a secret"),
+            "the reason should reach the user, got {err}"
+        );
+        assert!(
+            prompts.lock().unwrap().is_empty(),
+            "the model must not be called at all"
+        );
+        assert!(
+            session.messages().is_empty(),
+            "nothing may be persisted for a cancelled turn"
+        );
+    }
+
+    /// An extension that did not declare the capability is never consulted.
+    #[tokio::test]
+    async fn user_message_hook_respects_the_capability_flag() {
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(TextOnlyProvider {
+                reply: "ack".into(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let ext = PromptExt::new("unsubscribed", false, HookDecision::Cancel("nope".into()));
+        session.register_extension(ext.clone());
+
+        session
+            .send_message("hello")
+            .await
+            .expect("an unsubscribed extension cannot cancel the turn");
+        assert!(ext.seen.lock().unwrap().is_empty());
     }
 
     /// Mock provider: turn 1 emits a tool call, turn 2+ emit text and stop.

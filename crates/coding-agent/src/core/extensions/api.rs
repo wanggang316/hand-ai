@@ -146,6 +146,14 @@ pub enum TimeoutPolicy {
 ///
 /// All `false` by default. Set the booleans for what the extension implements
 /// so the host can avoid round-tripping events the extension doesn't care about.
+///
+/// # What the host gates on
+///
+/// `on_user_message` is the one flag the host *enforces*: the hook fires on
+/// every prompt, so it is dispatched only to extensions that ask for it.
+/// The tool-call hooks and the contribution flags are advisory — the host
+/// dispatches to whatever the trait implements and the manifest declares.
+/// `custom_provider` has no consumer in tree yet; declaring it is inert.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ExtensionCapabilities {
@@ -153,6 +161,8 @@ pub struct ExtensionCapabilities {
     pub before_tool_call: bool,
     #[serde(default)]
     pub after_tool_call: bool,
+    /// Whether this extension wants [`Extension::on_user_message`]. Gated:
+    /// an extension that does not declare it is never called.
     #[serde(default)]
     pub on_user_message: bool,
     /// Whether this extension contributes slash commands.
@@ -162,6 +172,10 @@ pub struct ExtensionCapabilities {
     #[serde(default)]
     pub custom_tools: bool,
     /// Whether this extension contributes a custom ApiProvider.
+    ///
+    /// Reserved: nothing in the host consumes it yet, so declaring it has
+    /// no effect. Kept in the schema so manifests written against it keep
+    /// parsing under `deny_unknown_fields`.
     #[serde(default)]
     pub custom_provider: bool,
 }
@@ -183,6 +197,16 @@ pub struct ToolResultEvent {
     pub call_id: String,
     pub success: bool,
     pub result: serde_json::Value,
+}
+
+/// Fired when the user submits a prompt, before it is appended to the
+/// transcript or sent to the model. Lets an extension lint, scrub, or
+/// rewrite the prompt — or refuse the turn outright.
+#[derive(Debug, Clone)]
+pub struct UserMessageEvent {
+    /// The raw prompt text as typed. Attachments (images) are not part of
+    /// the v1 event and are never rewritten.
+    pub text: String,
 }
 
 /// What an extension's `on_before_tool_call` decides.
@@ -342,6 +366,27 @@ pub trait Extension: Send + Sync {
     /// Called once when the session ends.
     async fn on_shutdown(&self, _cx: &ExtensionContext) -> Result<(), ExtensionError> {
         Ok(())
+    }
+
+    /// Called when the user submits a prompt, before it enters the
+    /// transcript. Default: no-op (Continue).
+    ///
+    /// Only dispatched to extensions whose manifest declares
+    /// `capabilities.on_user_message` — this hook runs on every turn, so
+    /// the host does not pay for extensions that don't want it.
+    ///
+    /// Decisions:
+    /// - `Continue` — the prompt is unchanged.
+    /// - `Replace(value)` — `value` must be a JSON string carrying the new
+    ///   prompt text; anything else is logged and treated as `Continue`.
+    /// - `Cancel(reason)` — the turn does not start, nothing is persisted,
+    ///   and `reason` is surfaced to the user.
+    async fn on_user_message(
+        &self,
+        _cx: &ExtensionContext,
+        _event: &UserMessageEvent,
+    ) -> Result<HookDecision, ExtensionError> {
+        Ok(HookDecision::Continue)
     }
 
     /// Called before each tool call. Default: no-op (Continue).

@@ -35,7 +35,7 @@
 
 use crate::core::extensions::api::{
     Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision, SlashCommandSpec,
-    TimeoutPolicy, ToolCallEvent, ToolResultEvent,
+    TimeoutPolicy, ToolCallEvent, ToolResultEvent, UserMessageEvent,
 };
 use crate::core::extensions::manifest::load_manifest;
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
@@ -61,6 +61,10 @@ pub enum ExtensionEventOut {
     },
     OnShutdown {
         context: ContextDto,
+    },
+    OnUserMessage {
+        context: ContextDto,
+        event: UserMessageDto,
     },
     OnBeforeToolCall {
         context: ContextDto,
@@ -132,6 +136,20 @@ impl From<&ExtensionContext> for ContextDto {
             cwd: cx.cwd.clone(),
             session_id: cx.session_id.clone(),
             data_dir: cx.data_dir.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMessageDto {
+    pub text: String,
+}
+
+impl From<&UserMessageEvent> for UserMessageDto {
+    fn from(event: &UserMessageEvent) -> Self {
+        UserMessageDto {
+            text: event.text.clone(),
         }
     }
 }
@@ -253,6 +271,7 @@ fn event_data_dir(event: &ExtensionEventOut) -> Option<&Path> {
     let dto = match event {
         ExtensionEventOut::OnLoad { context } => context,
         ExtensionEventOut::OnShutdown { context } => context,
+        ExtensionEventOut::OnUserMessage { context, .. } => context,
         ExtensionEventOut::OnBeforeToolCall { context, .. } => context,
         ExtensionEventOut::OnAfterToolCall { context, .. } => context,
         ExtensionEventOut::ExecuteCustomTool { context, .. } => context,
@@ -266,6 +285,7 @@ fn event_data_dir(event: &ExtensionEventOut) -> Option<&Path> {
 enum Hook {
     Load,
     Shutdown,
+    UserMessage,
     BeforeToolCall,
     AfterToolCall,
     CustomTool,
@@ -277,6 +297,7 @@ impl Hook {
         match self {
             Hook::Load => "on_load",
             Hook::Shutdown => "on_shutdown",
+            Hook::UserMessage => "on_user_message",
             Hook::BeforeToolCall => "on_before_tool_call",
             Hook::AfterToolCall => "on_after_tool_call",
             Hook::CustomTool => "custom_tool",
@@ -367,7 +388,7 @@ impl SubprocessInner {
     fn budget(&self, hook: Hook) -> Duration {
         let t = &self.manifest.timeouts;
         Duration::from_millis(match hook {
-            Hook::BeforeToolCall => t.before_tool_call_ms,
+            Hook::BeforeToolCall | Hook::UserMessage => t.before_tool_call_ms,
             Hook::AfterToolCall => t.after_tool_call_ms,
             Hook::Load | Hook::Shutdown => t.lifecycle_ms,
             Hook::CustomTool | Hook::SlashCommand => t.invoke_ms,
@@ -527,6 +548,41 @@ impl Extension for SubprocessExtension {
             let _ = handle.child.kill().await;
         }
         Ok(())
+    }
+
+    /// A user-message timeout surfaces as an error (the chain logs it and
+    /// lets the prompt through) rather than failing closed like the
+    /// tool-call hook: refusing the user's own prompt because an extension
+    /// hiccuped is worse than the leak it might have caught, and the
+    /// extension is disabled for the rest of the session either way.
+    async fn on_user_message(
+        &self,
+        cx: &ExtensionContext,
+        event: &UserMessageEvent,
+    ) -> Result<HookDecision, ExtensionError> {
+        let response = self
+            .inner
+            .rpc_hook(
+                ExtensionEventOut::OnUserMessage {
+                    context: cx.into(),
+                    event: event.into(),
+                },
+                Hook::UserMessage,
+            )
+            .await?;
+        match response {
+            ExtensionEventIn::Continue => Ok(HookDecision::Continue),
+            ExtensionEventIn::Cancel { reason } => Ok(HookDecision::Cancel(reason)),
+            ExtensionEventIn::Replace { arguments } => Ok(HookDecision::Replace(arguments)),
+            ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
+                name: self.inner.manifest.name.clone(),
+                message,
+            }),
+            _ => Err(ExtensionError::Custom {
+                name: self.inner.manifest.name.clone(),
+                message: "unexpected response shape for on_user_message".to_string(),
+            }),
+        }
     }
 
     async fn on_before_tool_call(
@@ -863,6 +919,10 @@ mod tests {
         script_path
     }
 
+    /// Manifest for the round-trip fixtures. The hook budgets are widened
+    /// well past the production defaults so a loaded CI box cannot turn a
+    /// wire-protocol test into a timeout test — the budgets themselves are
+    /// exercised by the dedicated timeout tests below.
     fn make_manifest(name: &str, exec: Vec<String>) -> ExtensionManifest {
         ExtensionManifest {
             name: name.to_string(),
@@ -873,7 +933,13 @@ mod tests {
             env: Default::default(),
             slash_commands: Vec::new(),
             custom_tools: Vec::new(),
-            timeouts: Default::default(),
+            timeouts: crate::core::extensions::api::ExtensionTimeouts {
+                before_tool_call_ms: 60_000,
+                after_tool_call_ms: 60_000,
+                lifecycle_ms: 60_000,
+                invoke_ms: 60_000,
+                on_before_tool_call_timeout: TimeoutPolicy::Cancel,
+            },
         }
     }
 
@@ -958,6 +1024,54 @@ exec = ["/bin/true"]
         let inner = ext.inner_for_test();
         let guard = inner.child.lock().await;
         assert!(guard.is_none(), "child handle cleared on shutdown");
+    }
+
+    /// Tier 2 round trip for the user-message hook: the child sees the raw
+    /// prompt and can rewrite it.
+    #[tokio::test]
+    async fn subprocess_user_message_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(
+            dir.path(),
+            r#"
+  case "$line" in
+    *on_user_message*token*) printf '{"type":"replace","arguments":"token=[redacted]"}\n' ;;
+    *on_user_message*) printf '{"type":"continue"}\n' ;;
+    *) printf '{"type":"ok"}\n' ;;
+  esac
+"#,
+        );
+        let mut manifest = make_manifest("scrubber", vec![script.to_string_lossy().into_owned()]);
+        manifest.capabilities.on_user_message = true;
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let decision = ext
+            .on_user_message(
+                &ctx(),
+                &UserMessageEvent {
+                    text: "token=hunter2".into(),
+                },
+            )
+            .await
+            .expect("rpc ok");
+        match decision {
+            HookDecision::Replace(v) => assert_eq!(v, serde_json::json!("token=[redacted]")),
+            other => panic!("expected Replace, got {other:?}"),
+        }
+
+        let decision = ext
+            .on_user_message(
+                &ctx(),
+                &UserMessageEvent {
+                    text: "hello".into(),
+                },
+            )
+            .await
+            .expect("rpc ok");
+        assert!(matches!(decision, HookDecision::Continue));
+
+        let _ = ext.on_shutdown(&ctx()).await;
     }
 
     // -- Per-hook timeouts ---------------------------------------------------
@@ -1075,8 +1189,8 @@ exec = ["/bin/true"]
         );
     }
 
-    /// An extension that answers inside the default budgets is unaffected —
-    /// no regression on the existing happy path.
+    /// An extension that answers inside its budget is unaffected — no
+    /// regression on the existing happy path.
     #[tokio::test]
     async fn extension_within_budget_is_unaffected() {
         let dir = TempDir::new().unwrap();

@@ -6,7 +6,10 @@
 //!
 //! See ADR-001 and Phase 3 task T3.3a for the design.
 
-use super::api::{Extension, ExtensionContextFactory, HookDecision, ToolCallEvent, ToolResultEvent};
+use super::api::{
+    Extension, ExtensionContextFactory, HookDecision, ToolCallEvent, ToolResultEvent,
+    UserMessageEvent,
+};
 use std::sync::Arc;
 
 /// How many passes over the chain `dispatch_before_tool_call` will make before
@@ -115,6 +118,96 @@ pub(crate) async fn dispatch_before_tool_call(
     );
     HookDecision::Cancel(format!(
         "extension chain did not converge on tool arguments after \
+         {MAX_BEFORE_TOOL_CALL_ROUNDS} rounds of rewriting"
+    ))
+}
+
+/// Dispatch `on_user_message` across an ordered chain of extensions.
+///
+/// Only extensions whose manifest declares `capabilities.on_user_message`
+/// are called — unlike the tool-call hooks, this one fires on every turn,
+/// so the host does not round-trip extensions that never asked for it.
+///
+/// Aggregation matches [`dispatch_before_tool_call`]: `Cancel` short-
+/// circuits and wins, a `Replace` re-runs the chain from the head so an
+/// extension ahead of the rewriter re-inspects the final text, errors are
+/// logged and treated as `Continue`, and the chain is bounded to
+/// [`MAX_BEFORE_TOOL_CALL_ROUNDS`] passes.
+///
+/// `Replace` must carry a JSON string; any other payload is a contract
+/// violation, logged and ignored.
+///
+/// The returned decision's `Replace` variant always holds a
+/// `serde_json::Value::String`.
+pub(crate) async fn dispatch_user_message(
+    extensions: &[Arc<dyn Extension>],
+    contexts: &ExtensionContextFactory,
+    event: &UserMessageEvent,
+) -> HookDecision {
+    let subscribed: Vec<&Arc<dyn Extension>> = extensions
+        .iter()
+        .filter(|ext| ext.manifest().capabilities.on_user_message)
+        .collect();
+    if subscribed.is_empty() {
+        return HookDecision::Continue;
+    }
+
+    let mut working = event.clone();
+    let mut replaced: Option<String> = None;
+
+    for _round in 0..MAX_BEFORE_TOOL_CALL_ROUNDS {
+        let mut replaced_this_round = false;
+
+        for ext in &subscribed {
+            let name = ext.manifest().name.clone();
+            let cx = contexts.for_extension(&name);
+            let decision = match ext.on_user_message(&cx, &working).await {
+                Ok(d) => d,
+                Err(err) => {
+                    tracing::warn!(
+                        extension = %name,
+                        error = %err,
+                        "extension on_user_message errored; treating as Continue"
+                    );
+                    HookDecision::Continue
+                }
+            };
+
+            match decision {
+                HookDecision::Continue => {}
+                HookDecision::Replace(value) => {
+                    let Some(text) = value.as_str() else {
+                        tracing::warn!(
+                            extension = %name,
+                            "on_user_message returned a non-string Replace payload; ignoring"
+                        );
+                        continue;
+                    };
+                    if text == working.text {
+                        continue;
+                    }
+                    working.text = text.to_string();
+                    replaced = Some(text.to_string());
+                    replaced_this_round = true;
+                }
+                HookDecision::Cancel(reason) => return HookDecision::Cancel(reason),
+            }
+        }
+
+        if !replaced_this_round {
+            return match replaced {
+                Some(text) => HookDecision::Replace(serde_json::Value::String(text)),
+                None => HookDecision::Continue,
+            };
+        }
+    }
+
+    tracing::warn!(
+        rounds = MAX_BEFORE_TOOL_CALL_ROUNDS,
+        "extension chain kept rewriting the user message; cancelling the turn"
+    );
+    HookDecision::Cancel(format!(
+        "extension chain did not converge on the user message after \
          {MAX_BEFORE_TOOL_CALL_ROUNDS} rounds of rewriting"
     ))
 }
@@ -631,6 +724,131 @@ mod tests {
                 PathBuf::from("/tmp/.hand/extensions/beta/data"),
             ]
         );
+    }
+
+    // -- Tests for dispatch_user_message -------------------------------------
+
+    /// A test extension for the user-message hook. `subscribed` controls
+    /// whether the manifest declares the capability.
+    struct PromptExt {
+        manifest: ExtensionManifest,
+        action: Mutex<Vec<HookDecision>>,
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl PromptExt {
+        fn new(name: &str, subscribed: bool, actions: Vec<HookDecision>) -> Arc<Self> {
+            let mut manifest = manifest(name);
+            manifest.capabilities.on_user_message = subscribed;
+            Arc::new(Self {
+                manifest,
+                action: Mutex::new(actions),
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Extension for PromptExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn on_user_message(
+            &self,
+            _cx: &ExtensionContext,
+            event: &UserMessageEvent,
+        ) -> Result<HookDecision, ExtensionError> {
+            self.seen.lock().unwrap().push(event.text.clone());
+            let mut actions = self.action.lock().unwrap();
+            if actions.is_empty() {
+                return Ok(HookDecision::Continue);
+            }
+            Ok(actions.remove(0))
+        }
+    }
+
+    fn prompt(text: &str) -> UserMessageEvent {
+        UserMessageEvent { text: text.into() }
+    }
+
+    #[tokio::test]
+    async fn user_message_hook_fires_once_with_the_raw_prompt() {
+        let ext = PromptExt::new("linter", true, vec![HookDecision::Continue]);
+        let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
+
+        let decision = dispatch_user_message(&exts, &ctx(), &prompt("hello world")).await;
+        assert!(matches!(decision, HookDecision::Continue));
+        assert_eq!(*ext.seen.lock().unwrap(), vec!["hello world".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn user_message_hook_skips_extensions_that_did_not_declare_it() {
+        let ext = PromptExt::new("silent", false, vec![HookDecision::Cancel("no".into())]);
+        let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
+
+        let decision = dispatch_user_message(&exts, &ctx(), &prompt("hello")).await;
+        assert!(matches!(decision, HookDecision::Continue));
+        assert!(
+            ext.seen.lock().unwrap().is_empty(),
+            "an extension that did not declare the capability must never be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_message_replace_rewrites_the_prompt_and_is_re_validated() {
+        let scrubber = PromptExt::new(
+            "scrubber",
+            true,
+            vec![HookDecision::Replace(serde_json::json!("token=[redacted]"))],
+        );
+        let auditor = PromptExt::new("auditor", true, vec![]);
+        let exts: Vec<Arc<dyn Extension>> = vec![scrubber.clone(), auditor.clone()];
+
+        let decision = dispatch_user_message(&exts, &ctx(), &prompt("token=hunter2")).await;
+        match decision {
+            HookDecision::Replace(v) => assert_eq!(v, serde_json::json!("token=[redacted]")),
+            other => panic!("expected Replace, got {other:?}"),
+        }
+        // The extension ahead of the rewrite sees the final text too.
+        assert_eq!(
+            *scrubber.seen.lock().unwrap(),
+            vec![
+                "token=hunter2".to_string(),
+                "token=[redacted]".to_string()
+            ]
+        );
+        assert_eq!(
+            auditor.seen.lock().unwrap().last().map(String::as_str),
+            Some("token=[redacted]")
+        );
+    }
+
+    #[tokio::test]
+    async fn user_message_cancel_wins() {
+        let a = PromptExt::new("a", true, vec![HookDecision::Continue]);
+        let b = PromptExt::new("b", true, vec![HookDecision::Cancel("contains a secret".into())]);
+        let exts: Vec<Arc<dyn Extension>> = vec![a, b];
+
+        match dispatch_user_message(&exts, &ctx(), &prompt("hi")).await {
+            HookDecision::Cancel(reason) => assert_eq!(reason, "contains a secret"),
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+    }
+
+    /// `Replace` on this hook carries prompt text; a non-string payload is a
+    /// contract violation and must not silently corrupt the prompt.
+    #[tokio::test]
+    async fn user_message_non_string_replace_is_ignored() {
+        let ext = PromptExt::new(
+            "confused",
+            true,
+            vec![HookDecision::Replace(serde_json::json!({"text": "nope"}))],
+        );
+        let exts: Vec<Arc<dyn Extension>> = vec![ext];
+
+        let decision = dispatch_user_message(&exts, &ctx(), &prompt("hi")).await;
+        assert!(matches!(decision, HookDecision::Continue));
     }
 
     // -- Tests for dispatch_after_tool_call ----------------------------------

@@ -336,6 +336,13 @@ exec = ["./main.sh"]
 
 [capabilities]
 after-tool-call = true
+
+# Widened past the production defaults so a loaded CI box cannot turn this
+# lifecycle test into a timeout test.
+[timeouts]
+lifecycle-ms = 60000
+before-tool-call-ms = 60000
+after-tool-call-ms = 60000
 "#,
     )
     .unwrap();
