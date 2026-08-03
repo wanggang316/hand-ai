@@ -1,0 +1,8 @@
+{
+	"name": "malformed",
+	"vars": { "pink": "#ff00ff" },
+	"colors": {
+		"accent": "pink",
+		"border": "#00ffff"
+	// truncated / syntactically broken on purpose: no closing braces,
+	// a comment (invalid JSON), and most required colour slots missing.

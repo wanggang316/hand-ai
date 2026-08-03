@@ -11,7 +11,7 @@ Rust-native tools for building AI agents and working with LLMs. A unified multi-
 | **[model](crates/model)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, Bedrock, etc.) |
 | **[hand-agent](crates/agent)** | Agent runtime with tool calling, steering, and event streaming |
 | **[hand-coding-agent](crates/coding-agent)** | Interactive terminal coding agent CLI |
-| **[hand-tui](crates/tui)** | Terminal UI component library with differential rendering |
+| **[hand-tui](crates/tui)** | Terminal UI component library built on [ratatui](https://github.com/ratatui/ratatui) (inline-viewport rendering) |
 | **[web-ui](crates/web-ui)** | Web UI (documentation placeholder) |
 | **[examples](examples)** | Workspace examples |
 

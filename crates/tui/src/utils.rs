@@ -152,18 +152,13 @@ pub fn visible_width(s: &str) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Extract a single ANSI/OSC/APC escape sequence starting at byte position
-/// `pos`. Returns `(code, byte_length)` if a valid sequence is parsed.
+/// `pos`. Returns the borrowed sequence slice and its byte length.
 ///
 /// Handles:
 /// - CSI sequences: `ESC [ ... <final>` where final is one of `m G K H J`
 /// - OSC sequences: `ESC ] ... BEL` or `ESC ] ... ESC \` (used by OSC 8
 ///   hyperlinks and OSC 133 prompt markers)
 /// - APC sequences: `ESC _ ... BEL` or `ESC _ ... ESC \` (cursor markers)
-pub fn extract_ansi_code(s: &str, pos: usize) -> Option<(String, usize)> {
-    extract_ansi_code_at(s, pos).map(|(slice, len)| (slice.to_string(), len))
-}
-
-/// Internal zero-allocation version returning a borrowed slice.
 fn extract_ansi_code_at(s: &str, pos: usize) -> Option<(&str, usize)> {
     let bytes = s.as_bytes();
     if pos >= bytes.len() || bytes[pos] != 0x1b {
@@ -246,24 +241,6 @@ pub fn strip_ansi(s: &str) -> String {
         i += ch.len_utf8();
     }
     out
-}
-
-// ---------------------------------------------------------------------------
-// Whitespace / punctuation classification
-// ---------------------------------------------------------------------------
-
-/// Whitespace classification used by wrap logic. Matches the
-/// regex-style `\s` predicate.
-pub fn is_whitespace_char(c: char) -> bool {
-    c.is_whitespace()
-}
-
-const PUNCTUATION_CHARS: &str = "(){}[]<>.,;:'\"!?+-=*/\\|&%^$#@~`";
-
-/// Punctuation classification used by wrap logic. Equivalent to the
-/// character class ``[(){}[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]``.
-pub fn is_punctuation_char(c: char) -> bool {
-    PUNCTUATION_CHARS.contains(c)
 }
 
 // ---------------------------------------------------------------------------
@@ -1166,255 +1143,6 @@ fn finalize_truncated(
 }
 
 // ---------------------------------------------------------------------------
-// Column slicing
-// ---------------------------------------------------------------------------
-
-/// Result of [`slice_with_width`]: the sliced text and its visible width.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlicedSegment {
-    pub text: String,
-    pub width: usize,
-}
-
-/// Extract a range of visible columns from `line`, preserving ANSI codes and
-/// honoring wide-character boundaries.
-///
-/// `strict = true` excludes a wide grapheme that would extend past the end of
-/// the requested range.
-pub fn slice_by_column(line: &str, start_col: usize, length: usize, strict: bool) -> String {
-    slice_with_width(line, start_col, length, strict).text
-}
-
-/// Like [`slice_by_column`] but also returns the visible width of the slice.
-pub fn slice_with_width(
-    line: &str,
-    start_col: usize,
-    length: usize,
-    strict: bool,
-) -> SlicedSegment {
-    if length == 0 {
-        return SlicedSegment {
-            text: String::new(),
-            width: 0,
-        };
-    }
-    let end_col = start_col + length;
-    let mut result = String::new();
-    let mut result_width = 0usize;
-    let mut current_col = 0usize;
-    let mut i = 0;
-    let mut pending_ansi = String::new();
-    let bytes = line.as_bytes();
-    let mut done = false;
-
-    while i < bytes.len() && !done {
-        if let Some((code, len)) = extract_ansi_code_at(line, i) {
-            if current_col >= start_col && current_col < end_col {
-                result.push_str(code);
-            } else if current_col < start_col {
-                pending_ansi.push_str(code);
-            }
-            i += len;
-            continue;
-        }
-
-        let mut text_end = i;
-        while text_end < bytes.len() {
-            if extract_ansi_code_at(line, text_end).is_some() {
-                break;
-            }
-            let ch = line[text_end..]
-                .chars()
-                .next()
-                .expect("non-empty remainder");
-            text_end += ch.len_utf8();
-        }
-
-        for g in line[i..text_end].graphemes(true) {
-            let w = grapheme_width(g);
-            let in_range = current_col >= start_col && current_col < end_col;
-            let fits = !strict || current_col + w <= end_col;
-            if in_range && fits {
-                if !pending_ansi.is_empty() {
-                    result.push_str(&pending_ansi);
-                    pending_ansi.clear();
-                }
-                result.push_str(g);
-                result_width += w;
-            }
-            current_col += w;
-            if current_col >= end_col {
-                done = true;
-                break;
-            }
-        }
-        i = text_end;
-    }
-
-    SlicedSegment {
-        text: result,
-        width: result_width,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Background + padding
-// ---------------------------------------------------------------------------
-
-/// Apply a background color to `line`, padding on the right with spaces so the
-/// total visible width equals `width`. The `bg` callback receives the padded
-/// content and returns the styled string (typically wrapping it with SGR
-/// background open + reset).
-pub fn apply_background_to_line(line: &str, width: usize, bg: impl Fn(&str) -> String) -> String {
-    let visible = visible_width(line);
-    let padding_needed = width.saturating_sub(visible);
-    let mut padded = line.to_string();
-    if padding_needed > 0 {
-        padded.push_str(&" ".repeat(padding_needed));
-    }
-    // Determine the bg open sequence so we can re-arm it after every inner
-    // `\x1b[0m`. We sample by calling the closure with an empty string —
-    // the result is `{open}{}{close}` so the open is the prefix up to where
-    // the empty content sits. See [`apply_background`] for the underlying
-    // motivation.
-    let sample = bg("");
-    let bg_open = extract_bg_open(&sample);
-    let restored = if bg_open.is_empty() {
-        padded
-    } else {
-        restore_bg_after_resets(&padded, bg_open)
-    };
-    bg(&restored)
-}
-
-/// Return the prefix of `sample` up to but excluding the trailing closer.
-///
-/// `bg("")` produces `{open}{close}` (e.g. `\x1b[44m\x1b[49m`); we need
-/// just the open so [`apply_background_to_line`] can splice it back in
-/// after each inner full-reset. If the close is a plain `\x1b[49m` /
-/// `\x1b[0m`, splitting on the first ESC after the open captures the
-/// boundary; otherwise we fall back to returning the whole sample (which
-/// is conservative — re-arming a slightly larger prefix is still
-/// idempotent because subsequent SGRs override prior state).
-fn extract_bg_open(sample: &str) -> &str {
-    // Find the last ESC index; everything before it is the open.
-    let bytes = sample.as_bytes();
-    let mut last_esc: Option<usize> = None;
-    for (i, b) in bytes.iter().enumerate() {
-        if *b == 0x1b {
-            last_esc = Some(i);
-        }
-    }
-    match last_esc {
-        Some(0) | None => sample,
-        Some(idx) => &sample[..idx],
-    }
-}
-
-// ---------------------------------------------------------------------------
-// extract_segments
-// ---------------------------------------------------------------------------
-
-/// Result of [`extract_segments`].
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ExtractedSegments {
-    pub before: String,
-    pub before_width: usize,
-    pub after: String,
-    pub after_width: usize,
-}
-
-/// Extract "before" and "after" segments from a line in a single pass.
-///
-/// Used for overlay compositing: we need the text before the overlay and the
-/// text after the overlay region. Styling state from before the overlay is
-/// inherited into `after` so that styling continues correctly past the overlay.
-pub fn extract_segments(
-    line: &str,
-    before_end: usize,
-    after_start: usize,
-    after_len: usize,
-    strict_after: bool,
-) -> ExtractedSegments {
-    let mut out = ExtractedSegments::default();
-    let mut current_col = 0usize;
-    let mut i = 0usize;
-    let mut pending_ansi_before = String::new();
-    let mut after_started = false;
-    let after_end = after_start + after_len;
-    let bytes = line.as_bytes();
-
-    let mut tracker = AnsiCodeTracker::new();
-
-    let done = |col: usize| -> bool {
-        if after_len == 0 {
-            col >= before_end
-        } else {
-            col >= after_end
-        }
-    };
-
-    while i < bytes.len() {
-        if let Some((code, len)) = extract_ansi_code_at(line, i) {
-            tracker.process(code);
-            if current_col < before_end {
-                pending_ansi_before.push_str(code);
-            } else if current_col >= after_start && current_col < after_end && after_started {
-                out.after.push_str(code);
-            }
-            i += len;
-            continue;
-        }
-
-        let mut text_end = i;
-        while text_end < bytes.len() {
-            if extract_ansi_code_at(line, text_end).is_some() {
-                break;
-            }
-            let ch = line[text_end..]
-                .chars()
-                .next()
-                .expect("non-empty remainder");
-            text_end += ch.len_utf8();
-        }
-
-        let mut early_break = false;
-        for g in line[i..text_end].graphemes(true) {
-            let w = grapheme_width(g);
-            if current_col < before_end {
-                if !pending_ansi_before.is_empty() {
-                    out.before.push_str(&pending_ansi_before);
-                    pending_ansi_before.clear();
-                }
-                out.before.push_str(g);
-                out.before_width += w;
-            } else if current_col >= after_start && current_col < after_end {
-                let fits = !strict_after || current_col + w <= after_end;
-                if fits {
-                    if !after_started {
-                        out.after.push_str(&tracker.active_codes());
-                        after_started = true;
-                    }
-                    out.after.push_str(g);
-                    out.after_width += w;
-                }
-            }
-            current_col += w;
-            if done(current_col) {
-                early_break = true;
-                break;
-            }
-        }
-        i = text_end;
-        if early_break {
-            break;
-        }
-    }
-
-    out
-}
-
-// ---------------------------------------------------------------------------
 // Normalize text for terminal output
 // ---------------------------------------------------------------------------
 
@@ -1468,14 +1196,8 @@ pub fn normalize_terminal_output(s: &str) -> Cow<'_, str> {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy helpers preserved for in-crate callers
+// Padding + width helpers
 // ---------------------------------------------------------------------------
-
-/// Display width of a single character. Convenience wrapper around
-/// [`UnicodeWidthChar`].
-pub fn char_width(ch: char) -> usize {
-    UnicodeWidthChar::width(ch).unwrap_or(0)
-}
 
 /// Pad `text` on the right with spaces so its visible width equals
 /// `target_width`. Returns the input unchanged if it already meets or exceeds
@@ -1534,60 +1256,6 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     }
     lines.push(current_line);
     lines
-}
-
-/// Apply a background color to a line, filling to `width` columns.
-///
-/// Legacy helper for callers that pre-format their `bg_code` and `reset` as
-/// strings rather than supplying a closure. For closure-based usage prefer
-/// [`apply_background_to_line`].
-///
-/// **Important:** if `line` contains an inline `\x1b[0m` (full attribute
-/// reset — emitted by virtually every styled span produced by chalk /
-/// markdown / pretty-printers), the bg is killed at that point and every
-/// subsequent column — including the right-pad we just added — paints on
-/// the terminal's default background, producing a white half-stripe inside
-/// the bubble. To keep the row uniform we replace every embedded
-/// full-reset with `\x1b[0m{bg_code}` so the bg re-arms after each inner
-/// span closes. The trailing closer is left to the caller (`reset`).
-pub fn apply_background(line: &str, width: usize, bg_code: &str, reset: &str) -> String {
-    let padded = pad_to_width(line, width);
-    let restored = restore_bg_after_resets(&padded, bg_code);
-    format!("{bg_code}{restored}{reset}")
-}
-
-/// Re-arm `bg_code` after every embedded `\x1b[0m` in `line`.
-///
-/// Pulled out of [`apply_background`] so unit tests can verify the
-/// behaviour without going through the full padding pipeline.
-fn restore_bg_after_resets(line: &str, bg_code: &str) -> String {
-    if bg_code.is_empty() {
-        return line.to_string();
-    }
-    const FULL_RESET: &str = "\x1b[0m";
-    if !line.contains(FULL_RESET) {
-        return line.to_string();
-    }
-    let mut out = String::with_capacity(line.len() + 16);
-    let mut rest = line;
-    while let Some(idx) = rest.find(FULL_RESET) {
-        let end = idx + FULL_RESET.len();
-        out.push_str(&rest[..end]);
-        out.push_str(bg_code);
-        rest = &rest[end..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Stub for paste-marker-aware grapheme segmentation. Currently yields plain
-/// graphemes ungrouped.
-//
-// TODO(M3.T2): implement paste-marker handling for the editor; this should
-// preserve OSC paste markers as zero-width markers around the pasted region
-// so the editor can detect contiguous paste content.
-pub fn segment_with_markers(s: &str) -> Vec<String> {
-    s.graphemes(true).map(|g| g.to_string()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1665,36 +1333,36 @@ mod tests {
         assert_eq!(visible_width("\x1b[1m你好world\x1b[0m"), 9);
     }
 
-    // --- extract_ansi_code -------------------------------------------------
+    // --- extract_ansi_code_at ----------------------------------------------
 
     #[test]
     fn extract_ansi_csi() {
-        let r = extract_ansi_code("\x1b[31mhi", 0).unwrap();
-        assert_eq!(r.0, "\x1b[31m");
-        assert_eq!(r.1, 5);
+        let (code, len) = extract_ansi_code_at("\x1b[31mhi", 0).unwrap();
+        assert_eq!(code, "\x1b[31m");
+        assert_eq!(len, 5);
     }
 
     #[test]
     fn extract_ansi_osc_bel() {
-        let r = extract_ansi_code("\x1b]8;;https://x\x07after", 0).unwrap();
-        assert_eq!(r.0, "\x1b]8;;https://x\x07");
+        let (code, _) = extract_ansi_code_at("\x1b]8;;https://x\x07after", 0).unwrap();
+        assert_eq!(code, "\x1b]8;;https://x\x07");
     }
 
     #[test]
     fn extract_ansi_osc_st() {
-        let r = extract_ansi_code("\x1b]8;;https://x\x1b\\after", 0).unwrap();
-        assert_eq!(r.0, "\x1b]8;;https://x\x1b\\");
+        let (code, _) = extract_ansi_code_at("\x1b]8;;https://x\x1b\\after", 0).unwrap();
+        assert_eq!(code, "\x1b]8;;https://x\x1b\\");
     }
 
     #[test]
     fn extract_ansi_apc() {
-        let r = extract_ansi_code("\x1b_marker\x07tail", 0).unwrap();
-        assert_eq!(r.0, "\x1b_marker\x07");
+        let (code, _) = extract_ansi_code_at("\x1b_marker\x07tail", 0).unwrap();
+        assert_eq!(code, "\x1b_marker\x07");
     }
 
     #[test]
     fn extract_ansi_returns_none_for_plain() {
-        assert!(extract_ansi_code("plain", 0).is_none());
+        assert!(extract_ansi_code_at("plain", 0).is_none());
     }
 
     // --- strip_ansi --------------------------------------------------------
@@ -2021,105 +1689,7 @@ mod tests {
         assert_eq!(count_close, 1);
     }
 
-    // --- slice_by_column ---------------------------------------------------
-
-    #[test]
-    fn slice_by_column_basic() {
-        assert_eq!(slice_by_column("hello world", 6, 5, false), "world");
-    }
-
-    #[test]
-    fn slice_by_column_with_ansi() {
-        let s = "\x1b[31mhello\x1b[0m world";
-        let r = slice_by_column(s, 0, 5, false);
-        assert_eq!(visible_width(&r), 5);
-        assert!(r.contains("\x1b[31m"));
-    }
-
-    #[test]
-    fn slice_by_column_strict_excludes_overflow_wide_char() {
-        // 界 is width 2; with strict, slicing [1, 2) must exclude it.
-        let r = slice_by_column("a界b", 1, 1, true);
-        assert_eq!(visible_width(&r), 0);
-    }
-
-    #[test]
-    fn slice_with_width_returns_width() {
-        let r = slice_with_width("hello", 1, 3, false);
-        assert_eq!(r.text, "ell");
-        assert_eq!(r.width, 3);
-    }
-
-    // --- extract_segments --------------------------------------------------
-
-    #[test]
-    fn extract_segments_plain() {
-        let r = extract_segments("hello world", 5, 6, 5, false);
-        assert_eq!(r.before, "hello");
-        assert_eq!(r.after, "world");
-    }
-
-    #[test]
-    fn extract_segments_inherits_styling_into_after() {
-        // Bold open before overlay; after segment should inherit bold.
-        let line = "\x1b[1mAAAAA\x1b[0m  BBBBB";
-        let r = extract_segments(line, 5, 7, 5, false);
-        assert!(r.after.contains("BBBBB"));
-        // The "after" segment starts with a styling reset (no codes left after \x1b[0m).
-        // So `after` should not start with a leftover bold opener.
-    }
-
-    // --- background / pad --------------------------------------------------
-
-    #[test]
-    fn apply_background_to_line_pads_and_styles() {
-        let r = apply_background_to_line("hi", 5, |s| format!("\x1b[44m{s}\x1b[0m"));
-        assert_eq!(r, "\x1b[44mhi   \x1b[0m");
-    }
-
-    // --- apply_background bg-restore -------------------------------------
-
-    /// Regression: every embedded `\x1b[0m` inside the wrapped content
-    /// must re-apply `bg_code`. Without that, the trailing padding spaces
-    /// paint on the terminal default background — visible to the user as
-    /// a half-width "white stripe" cutting through the bubble.
-    #[test]
-    fn apply_background_rearms_bg_after_inner_reset() {
-        let content = "\x1b[1mboldhi\x1b[0m"; // closes with full reset
-        let out = apply_background(content, 10, "\x1b[44m", "\x1b[49m");
-        // Outer open at the start.
-        assert!(out.starts_with("\x1b[44m"), "got: {out:?}");
-        // Inner full-reset must be followed immediately by the bg re-arm.
-        let after_reset = "\x1b[0m\x1b[44m";
-        assert!(
-            out.contains(after_reset),
-            "bg not re-armed after inner reset; got: {out:?}"
-        );
-        // The trailing padding (after the inner content closes) must
-        // therefore be styled by `\x1b[44m` — verified by the substring
-        // above, which is the only opportunity for the bg to apply to
-        // those padding spaces.
-        assert!(out.ends_with("\x1b[49m"));
-    }
-
-    #[test]
-    fn apply_background_without_inner_reset_unchanged() {
-        let out = apply_background("hi", 5, "\x1b[44m", "\x1b[0m");
-        // Same shape as before the fix — no spurious re-arm sequences.
-        assert_eq!(out, "\x1b[44mhi   \x1b[0m");
-    }
-
-    #[test]
-    fn restore_bg_after_resets_noop_when_no_reset() {
-        assert_eq!(super::restore_bg_after_resets("hello", "\x1b[44m"), "hello");
-    }
-
-    #[test]
-    fn restore_bg_after_resets_handles_multiple() {
-        let line = "a\x1b[0mb\x1b[0mc";
-        let out = super::restore_bg_after_resets(line, "\x1b[44m");
-        assert_eq!(out, "a\x1b[0m\x1b[44mb\x1b[0m\x1b[44mc");
-    }
+    // --- pad_to_width ------------------------------------------------------
 
     #[test]
     fn pad_to_width_short() {
@@ -2184,24 +1754,6 @@ mod tests {
         assert_eq!(visible_width(&out), visible_width(input));
     }
 
-    // --- whitespace / punctuation -----------------------------------------
-
-    #[test]
-    fn whitespace_classification() {
-        assert!(is_whitespace_char(' '));
-        assert!(is_whitespace_char('\t'));
-        assert!(!is_whitespace_char('a'));
-    }
-
-    #[test]
-    fn punctuation_classification() {
-        for c in "(){}[]<>.,;:'\"!?+-=*/\\|&%^$#@~`".chars() {
-            assert!(is_punctuation_char(c), "{c:?} should be punctuation");
-        }
-        assert!(!is_punctuation_char('a'));
-        assert!(!is_punctuation_char('0'));
-    }
-
     // --- legacy wrap_text --------------------------------------------------
 
     #[test]
@@ -2220,13 +1772,5 @@ mod tests {
             wrap_text("\x1b[31mhello\x1b[0m", 80),
             vec!["\x1b[31mhello\x1b[0m"]
         );
-    }
-
-    // --- char_width --------------------------------------------------------
-
-    #[test]
-    fn char_width_basic() {
-        assert_eq!(char_width('a'), 1);
-        assert_eq!(char_width('你'), 2);
     }
 }

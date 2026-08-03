@@ -1,0 +1,5 @@
+# Valid override: remap "copy last assistant message" from the default Ctrl+X
+# to Alt+C. Drives the VAL-COMPAT-001 "override applies verbatim" check: the
+# rt driver resolves CopyLastMessage's chord through the live app-layer table, so
+# after this file is loaded, Alt+C forwards `/copy` (and `/hotkeys` shows Alt+C).
+copy-last-message: alt+c

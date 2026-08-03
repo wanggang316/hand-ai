@@ -1,0 +1,7 @@
+# Invalid variant: two same-scope actions bound to one chord (Ctrl+Z). The chord
+# is disabled for BOTH actions (neither wins) with a yellow startup diagnostic
+# ("chord 'ctrl+z' bound to cancel, submit — disabled for all"), and each affected
+# action keeps its default. The app still starts (VAL-COMPAT-003), and /hotkeys
+# shows both as (disabled).
+submit: ctrl+z
+cancel: ctrl+z

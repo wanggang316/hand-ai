@@ -16,6 +16,29 @@ read this file. Add new entries above the previous version with a
 
 - Models served over the Anthropic Messages API (Anthropic's own models, MiniMax, and any provider whose base URL points at an `/anthropic` gateway) stream their reply as it is produced instead of buffering the whole response and delivering it in one burst when the turn ends; interrupting such a turn now keeps the text already streamed ([#135](https://github.com/wanggang316/hand-ai/issues/135))
 
+## [0.4.0] - 2026-07-25
+
+### Changed
+
+- The interactive `hand` TUI is rebuilt on [ratatui](https://github.com/ratatui/ratatui) + crossterm, replacing the previous hand-rolled string-diff renderer. It runs in an inline viewport (the chat scrolls in your terminal's native scrollback instead of an alternate screen) with synchronized-output frames, which fixes the flicker, stale-frame, and resize/scrollback-leak problems of the old stack. Terminal images (Kitty graphics / iTerm2), the Kitty keyboard protocol, overlays/toasts, the theme system, and user keybinding config are all preserved.
+
+### Added
+
+- `@`-path autocomplete in the chat editor: typing `@<prefix>` opens a completion popup of matching working-directory paths; Tab or Enter accepts the highlighted candidate (Enter only submits when the popup is closed).
+- Custom themes now recolour the UI: a `~/.hand/themes/<name>.json` theme named in settings (`theme: <name>`) is applied to the rendered interface; an unknown or malformed theme name falls back to the default palette with a startup notice instead of failing to start.
+- Terminal progress signalling: OSC `9;4` progress state (indeterminate while a turn runs, error on failure, cleared afterwards) and OSC `133` prompt marks around each turn, enabling terminal prompt-jump and taskbar progress where supported.
+- A custom `submit` keybinding (e.g. `submit: alt+enter`) is now honoured by the editor — the bound chord submits and the other Enter variants insert a newline.
+
+### Fixed
+
+- Inline `!command` bash output larger than 64 KiB is truncated in-view with a "Full output: <path>" footnote pointing at the on-disk capture; empty added/removed lines and unified-diff `+`/`-` rows in tool results are now colour-coded (green/red) correctly.
+- `/import <file>` replays the imported session into the transcript; `/login <unknown-provider>` reports a readable error instead of opening a dead credential dialog.
+
+### Known Issues
+
+- Inline `!command` bash renders a live header and loader while running but commits the command's output as a single finalized box on completion rather than streaming it chunk-by-chunk. This is because `AgentSession::run_bash` currently hard-codes `on_chunk = None`; per-chunk streaming needs a core-layer change deferred from this migration. Output is never lost — only its arrival is batched.
+- The `/model` scoped/all-models Tab toggle and `/scoped-models` reordering operate on a session subset, but populating that subset from persistent `enabled_models` configuration is not yet wired (session-only). Selecting a theme via `/theme` is limited to the built-in names (dark/light/high-contrast/system), which all render the default palette; visible recolouring is via custom theme JSON as above.
+
 ## [0.3.1] - 2026-07-22
 
 ### Added

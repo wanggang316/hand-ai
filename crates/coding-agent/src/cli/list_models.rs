@@ -423,10 +423,11 @@ mod tests {
     /// only fire when both exact and substring return nothing.
     #[test]
     fn pattern_falls_through_to_fuzzy_only_when_strict_passes_miss() {
-        // "gpO" matches neither provider exactly nor as a substring of
-        // "openai gpt-4o", but fuzzy `g-p-O` finds it.
+        // "gpt 4o" matches neither a provider exactly nor as a single
+        // substring of "openai gpt-4o" (the id joins them with a dash),
+        // but the tokenized pass finds both tokens as substrings.
         let models = vec![mk_model(Provider::OpenAI, "gpt-4o")];
-        let kept = filter_models_by_pattern(models, "gpO");
+        let kept = filter_models_by_pattern(models, "gpt 4o");
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, "gpt-4o");
     }

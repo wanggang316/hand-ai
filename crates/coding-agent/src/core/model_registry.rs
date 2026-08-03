@@ -331,6 +331,41 @@ pub struct ProviderConfigInputModel {
 }
 
 // =============================================================================
+// Startup catalog priming
+// =============================================================================
+
+/// Prime the process-wide model catalog at startup.
+///
+/// 1. Synchronously installs the locally cached catalog
+///    (`~/.hand-ai/models.json`, written by a previous remote refresh) when
+///    present and valid. Local IO only — sub-millisecond — so every
+///    [`ModelRegistry`] snapshot and model resolution taken afterwards sees
+///    the freshest known catalog without touching the network.
+/// 2. Spawns a background task that refreshes the catalog from the rolling
+///    release (ETag-aware) and hot-swaps the shared snapshot on success.
+///    `HAND_CATALOG_URL` overrides the URL, `HAND_OFFLINE` skips the fetch
+///    entirely, and every fetch error is swallowed — the previous catalog
+///    keeps serving, so startup never blocks on (or fails from) the network.
+///
+/// Call once, BEFORE the first model resolution / registry construction.
+/// The spawn is skipped when no tokio runtime is active (sync callers such
+/// as unit tests). Returns whether a cached catalog was installed.
+pub fn prime_model_catalog() -> bool {
+    let cached = model::load_cached_catalog();
+    if let Some(url) = model::resolve_catalog_url()
+        && let Ok(handle) = tokio::runtime::Handle::try_current()
+    {
+        handle.spawn(async move {
+            // Best-effort: an `Updated` outcome hot-swaps the in-process
+            // snapshot (visible to the next registry refresh) and writes the
+            // cache the next launch loads; `Unchanged` and errors are no-ops.
+            let _ = model::refresh_from_remote(&url).await;
+        });
+    }
+    cached
+}
+
+// =============================================================================
 // ModelRegistry
 // =============================================================================
 

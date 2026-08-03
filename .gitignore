@@ -32,3 +32,9 @@ Cargo.lock
 # Release verification scratch (install.sh writes these alongside
 # tarball downloads when re-verifying a release locally).
 *.sha256
+
+# FDD runtime state (per-plan working state, never committed)
+.harness-runtime/
+
+# User-test run artifacts (transient output dir from docs/user-test-patterns.md)
+tests/runs/

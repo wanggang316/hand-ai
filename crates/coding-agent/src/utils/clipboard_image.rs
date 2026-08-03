@@ -133,20 +133,11 @@ mod tests {
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
     }
 
-    /// Clipboard read, gated to macOS for the same reason as `clipboard.rs`:
-    /// Linux CI rarely has a display server, and Windows runners can race.
-    /// Even on macOS we tolerate `Unavailable` (no clipboard service in CI)
-    /// and `Ok(None)` (no image on the clipboard).
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn read_returns_none_or_image() {
-        if std::env::var_os("CI").is_some() {
-            return;
-        }
-        match read_clipboard_image() {
-            Ok(None) | Ok(Some(_)) => {}
-            Err(ClipboardImageError::Unavailable(_)) => {}
-            Err(other) => panic!("unexpected error: {other}"),
-        }
-    }
+    // The clipboard *read* itself (`read_clipboard_image` → `NSPasteboard` via
+    // `arboard`) has no hermetic test on purpose: touching the real pasteboard
+    // from arbitrary parallel test threads crashes the macOS process, and CI
+    // has no image on the clipboard to assert against. The decode/encode logic
+    // above and the paste-decision flow in
+    // `modes::interactive::rt_driver::clipboard` (which injects the read
+    // result) cover the behaviour that is ours to own.
 }

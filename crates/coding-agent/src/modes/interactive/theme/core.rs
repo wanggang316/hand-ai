@@ -234,12 +234,20 @@ pub enum ThemeError {
 /// A fully-resolved theme: the JSON colour entries have been expanded
 /// against `vars`, quantised for the active `ColorMode`, and pre-rendered
 /// to ANSI escape sequences.
+///
+/// Alongside the ANSI escapes we keep the *resolved* [`ResolvedColor`] for
+/// every slot (`fg_resolved` / `bg_resolved`). The legacy string paths use
+/// the ANSI maps; the rt renderer bridges the resolved values to
+/// [`ratatui::style::Color`] (see `ratatui_style`) so the same user theme
+/// drives both surfaces without re-parsing escape sequences.
 #[derive(Debug, Clone)]
 pub struct Theme {
     name: String,
     source_path: Option<String>,
     fg: HashMap<ThemeColor, String>,
     bg: HashMap<ThemeBg, String>,
+    fg_resolved: HashMap<ThemeColor, ResolvedColor>,
+    bg_resolved: HashMap<ThemeBg, ResolvedColor>,
     mode: ColorMode,
 }
 
@@ -260,16 +268,20 @@ impl Theme {
         let mode = mode.unwrap_or_else(detect_color_mode);
         let mut fg: HashMap<ThemeColor, String> = HashMap::new();
         let mut bg: HashMap<ThemeBg, String> = HashMap::new();
+        let mut fg_resolved: HashMap<ThemeColor, ResolvedColor> = HashMap::new();
+        let mut bg_resolved: HashMap<ThemeBg, ResolvedColor> = HashMap::new();
 
         let vars = parse_vars(&json.vars);
 
         for (color, raw) in fg_entries(&json.colors) {
             let resolved = resolve_color(raw, &vars)?;
             fg.insert(color, fg_ansi(&resolved, mode));
+            fg_resolved.insert(color, resolved);
         }
         for (bg_color, raw) in bg_entries(&json.colors) {
             let resolved = resolve_color(raw, &vars)?;
             bg.insert(bg_color, bg_ansi(&resolved, mode));
+            bg_resolved.insert(bg_color, resolved);
         }
 
         Ok(Theme {
@@ -277,6 +289,8 @@ impl Theme {
             source_path,
             fg,
             bg,
+            fg_resolved,
+            bg_resolved,
             mode,
         })
     }
@@ -325,6 +339,21 @@ impl Theme {
             .get(&bg)
             .map(String::as_str)
             .ok_or(ThemeError::UnknownBg(bg))
+    }
+
+    /// The resolved foreground colour for `color` (hex / palette index /
+    /// terminal-default). This is the mode-independent value the rt renderer
+    /// bridges to a [`ratatui::style::Color`]; the `Color256` quantisation is
+    /// re-applied at bridge time so a `256color` terminal still narrows.
+    pub fn fg_color(&self, color: ThemeColor) -> Result<&ResolvedColor, ThemeError> {
+        self.fg_resolved
+            .get(&color)
+            .ok_or(ThemeError::UnknownColor(color))
+    }
+
+    /// The resolved background colour for `bg`.
+    pub fn bg_color(&self, bg: ThemeBg) -> Result<&ResolvedColor, ThemeError> {
+        self.bg_resolved.get(&bg).ok_or(ThemeError::UnknownBg(bg))
     }
 
     /// Bold SGR wrapper (`\x1b[1m … \x1b[22m`).

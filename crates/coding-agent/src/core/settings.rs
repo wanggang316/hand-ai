@@ -584,14 +584,74 @@ pub enum SteeringMode {
 pub type FollowUpMode = SteeringMode;
 
 /// UI theme.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
+///
+/// The four built-in variants each map to a fixed kebab-case tag
+/// (`dark` / `light` / `high-contrast` / `system`). Any other non-empty
+/// string names a user theme and lands in [`ThemeSetting::Custom`], which
+/// the startup resolver hands to the theme loader (an unknown/corrupt custom
+/// theme falls back to the default palette rather than aborting the app).
+///
+/// Serialisation is by the bare tag string in both directions, so a
+/// `Custom("neon")` round-trips as `theme: neon` — matching the on-disk shape
+/// the loader reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ThemeSetting {
     #[default]
     Dark,
     Light,
     HighContrast,
     System,
+    /// A user theme, named by the bare string persisted under `theme:`.
+    Custom(String),
+}
+
+impl ThemeSetting {
+    /// The persistable tag for this theme — the four built-ins map to their
+    /// fixed kebab tags; a custom theme is its bare name.
+    #[must_use]
+    pub fn as_tag(&self) -> &str {
+        match self {
+            ThemeSetting::Dark => "dark",
+            ThemeSetting::Light => "light",
+            ThemeSetting::HighContrast => "high-contrast",
+            ThemeSetting::System => "system",
+            ThemeSetting::Custom(name) => name,
+        }
+    }
+
+    /// Parse a bare theme tag: the four known kebab tags map to their unit
+    /// variants; any other non-empty string becomes [`ThemeSetting::Custom`].
+    /// An empty string is rejected so a blank `theme:` value does not silently
+    /// name an unnameable custom theme.
+    fn from_tag(tag: &str) -> Result<Self, String> {
+        match tag {
+            "dark" => Ok(ThemeSetting::Dark),
+            "light" => Ok(ThemeSetting::Light),
+            "high-contrast" => Ok(ThemeSetting::HighContrast),
+            "system" => Ok(ThemeSetting::System),
+            "" => Err("theme name must not be empty".to_string()),
+            other => Ok(ThemeSetting::Custom(other.to_string())),
+        }
+    }
+}
+
+impl Serialize for ThemeSetting {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_tag())
+    }
+}
+
+impl<'de> Deserialize<'de> for ThemeSetting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let tag = String::deserialize(deserializer)?;
+        ThemeSetting::from_tag(&tag).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Default reasoning effort for thinking-capable models.
@@ -754,7 +814,7 @@ impl Settings {
 
     /// Effective theme — the merged value or [`ThemeSetting::Dark`] if unset.
     pub fn theme(&self) -> ThemeSetting {
-        self.theme.unwrap_or_default()
+        self.theme.clone().unwrap_or_default()
     }
 
     /// Effective session backend — the merged value or
@@ -1310,15 +1370,12 @@ impl SettingsManager {
         };
         match id {
             "theme" => {
-                let parsed = match value {
-                    "dark" => ThemeSetting::Dark,
-                    "light" => ThemeSetting::Light,
-                    "high-contrast" => ThemeSetting::HighContrast,
-                    "system" => ThemeSetting::System,
-                    other => {
-                        return Err(SettingsError::Other(format!("unknown theme {other:?}")));
-                    }
-                };
+                // Any non-empty name is accepted: the four known kebab tags map
+                // to their built-in variants, anything else names a custom theme
+                // the startup loader resolves (falling back to default if it is
+                // unknown or corrupt). Only an empty value is rejected.
+                let parsed = ThemeSetting::from_tag(value)
+                    .map_err(|msg| SettingsError::Other(format!("invalid theme: {msg}")))?;
                 layer.theme = Some(parsed);
             }
             "session_backend" => {
@@ -2304,6 +2361,90 @@ mod tests {
         assert_eq!(s.theme(), ThemeSetting::Light);
     }
 
+    /// A custom `theme:` name (any non-empty string that is not a built-in
+    /// tag) must parse to `ThemeSetting::Custom(name)` rather than aborting
+    /// deserialization — this is what lets a user theme reach the loader
+    /// (VAL-COMPAT-004 / 005 / 016). It also round-trips as its bare name.
+    #[test]
+    fn custom_theme_name_parses_and_round_trips() {
+        let s: Settings = serde_yaml::from_str("theme: custom-neon\n").unwrap();
+        assert_eq!(
+            s.theme(),
+            ThemeSetting::Custom("custom-neon".to_string()),
+            "an unknown name must not abort parse; it becomes Custom",
+        );
+
+        // Serialise back and confirm the bare name survives (no tag wrapping),
+        // then re-parse to prove the round-trip is stable.
+        let body = serde_yaml::to_string(&s).unwrap();
+        assert!(
+            body.contains("theme: custom-neon"),
+            "custom theme must serialise as its bare name, got: {body}",
+        );
+        let reparsed: Settings = serde_yaml::from_str(&body).unwrap();
+        assert_eq!(
+            reparsed.theme(),
+            ThemeSetting::Custom("custom-neon".to_string())
+        );
+    }
+
+    /// The four built-in tags still map to their unit variants, and a built-in
+    /// still serialises as its fixed kebab tag (default-look invariant).
+    #[test]
+    fn builtin_theme_tags_still_map_to_unit_variants() {
+        for (tag, want) in [
+            ("dark", ThemeSetting::Dark),
+            ("light", ThemeSetting::Light),
+            ("high-contrast", ThemeSetting::HighContrast),
+            ("system", ThemeSetting::System),
+        ] {
+            let s: Settings = serde_yaml::from_str(&format!("theme: {tag}\n")).unwrap();
+            assert_eq!(s.theme(), want, "tag {tag} must map to its built-in");
+            let body = serde_yaml::to_string(&s).unwrap();
+            assert!(
+                body.contains(&format!("theme: {tag}")),
+                "built-in {tag} must serialise as its kebab tag, got: {body}",
+            );
+        }
+    }
+
+    /// `apply_setting_by_id("theme", <custom>)` must accept a custom name so
+    /// the theme selector / `/theme` path can persist a user theme, while an
+    /// empty value is still rejected.
+    #[test]
+    fn apply_theme_by_id_accepts_custom_and_rejects_empty() {
+        let mut mgr = SettingsManager::in_memory();
+        mgr.apply_setting_by_id(SettingsScope::Global, "theme", "custom-neon")
+            .expect("custom theme name is accepted");
+        assert_eq!(
+            mgr.current().theme(),
+            ThemeSetting::Custom("custom-neon".to_string()),
+        );
+
+        assert!(
+            mgr.apply_setting_by_id(SettingsScope::Global, "theme", "")
+                .is_err(),
+            "an empty theme name must be rejected",
+        );
+    }
+
+    /// `resolve_startup_theme` hands `ThemeSetting::as_tag()` straight to the
+    /// loader (`resolve_theme_or_default`). This asserts the exact string a
+    /// custom theme surfaces, so a `Custom("neon")` reaches the loader as
+    /// `"neon"` (the loader's own tests then prove the graceful fallback).
+    #[test]
+    fn theme_as_tag_is_the_name_handed_to_the_loader() {
+        assert_eq!(ThemeSetting::Dark.as_tag(), "dark");
+        assert_eq!(ThemeSetting::Light.as_tag(), "light");
+        assert_eq!(ThemeSetting::HighContrast.as_tag(), "high-contrast");
+        assert_eq!(ThemeSetting::System.as_tag(), "system");
+        assert_eq!(
+            ThemeSetting::Custom("neon".to_string()).as_tag(),
+            "neon",
+            "a custom theme reaches the loader under its bare name",
+        );
+    }
+
     #[test]
     fn sub_struct_field_merging() {
         let dir = TempDir::new().unwrap();
@@ -2362,6 +2503,28 @@ mod tests {
             SettingsError::Yaml { path, .. } => assert_eq!(path, p),
             other => panic!("expected Yaml error, got {other:?}"),
         }
+    }
+
+    /// VAL-COMPAT-017 (pinned behaviour): a syntactically corrupt
+    /// `settings.yaml` yields a **readable** error that names the offending
+    /// file, rather than a default-plus-warning silent start. The rt driver
+    /// surfaces this before `SessionGuard::enter` toggles raw mode, so the
+    /// terminal stays cooked. Contrast with an unknown-keys-only file, which
+    /// starts normally (see `unknown_top_level_key_ignored_without_error`).
+    #[test]
+    fn corrupt_settings_error_is_readable_and_names_the_file() {
+        let dir = TempDir::new().unwrap();
+        let p = write_yaml(&dir, "corrupt.yaml", "theme: light\n  : broken indent\n");
+        let err = Settings::load(Some(&p), None).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("YAML parse error"),
+            "error should be a readable YAML diagnostic: {rendered}"
+        );
+        assert!(
+            rendered.contains(&p.display().to_string()),
+            "error should name the offending file: {rendered}"
+        );
     }
 
     #[test]
@@ -2911,6 +3074,34 @@ mod tests {
         let yaml_path = dir.path().join("settings.yaml");
         let s = Settings::load(None, Some(&yaml_path)).unwrap();
         assert_eq!(s.theme(), ThemeSetting::HighContrast);
+    }
+
+    /// A custom theme name is not a known enum tag, so the snake→kebab enum
+    /// rewrite must leave it untouched during migration; it then loads as a
+    /// `Custom` theme rather than being coerced or rejected.
+    #[test]
+    fn migration_passes_custom_theme_name_through_untouched() {
+        let dir = TempDir::new().unwrap();
+        let json = dir.path().join("settings.json");
+        write_text(&json, r#"{"theme": "my_custom_theme"}"#);
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
+
+        // The value is not a known tag, so it survives verbatim — including
+        // its underscores (no forced snake→kebab rewrite for custom names).
+        let yaml_body = std::fs::read_to_string(dir.path().join("settings.yaml")).unwrap();
+        assert!(
+            yaml_body.contains("theme: my_custom_theme"),
+            "custom theme name must pass through untouched, got: {yaml_body}",
+        );
+
+        let yaml_path = dir.path().join("settings.yaml");
+        let s = Settings::load(None, Some(&yaml_path)).unwrap();
+        assert_eq!(
+            s.theme(),
+            ThemeSetting::Custom("my_custom_theme".to_string())
+        );
     }
 
     #[test]

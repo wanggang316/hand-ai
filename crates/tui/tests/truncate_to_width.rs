@@ -1,7 +1,5 @@
 //! Integration tests for `truncate_to_width` and `visible_width`.
 
-mod common;
-
 use hand_tui::utils;
 use hand_tui::{truncate_to_width, visible_width};
 

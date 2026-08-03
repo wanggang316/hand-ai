@@ -35,9 +35,8 @@ pub enum ChatUpdate {
         message: Box<model::AssistantMessage>,
     },
     /// Begin tracking a tool execution. The driver spawns a tool component
-    /// (or a [`super::components::BashExecutionComponent`] when `tool_name`
-    /// is `bash`) and remembers it under `tool_call_id` for subsequent
-    /// updates.
+    /// (or a dedicated bash-execution view when `tool_name` is `bash`) and
+    /// remembers it under `tool_call_id` for subsequent updates.
     ToolStart {
         tool_call_id: String,
         tool_name: String,

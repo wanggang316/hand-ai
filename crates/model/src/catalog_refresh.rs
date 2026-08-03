@@ -20,6 +20,36 @@ use crate::models::{Registry, install_catalog};
 const CATALOG_FILE: &str = "models.json";
 const ETAG_FILE: &str = "models.etag";
 
+/// Stable rolling-release asset URL. CI regenerates the catalog daily and
+/// republishes it under the `catalog` release tag
+/// (`.github/workflows/refresh-catalog.yml`), so this URL always serves the
+/// latest catalog.
+pub const DEFAULT_CATALOG_URL: &str =
+    "https://github.com/wanggang316/hand-ai/releases/download/catalog/models.json";
+
+/// Resolve the catalog-refresh URL from the environment, or `None` when the
+/// remote fetch should be skipped entirely.
+///
+/// Mirrors the version-probe convention: `HAND_OFFLINE` (presence, any
+/// value) disables the fetch; `HAND_CATALOG_URL` overrides
+/// [`DEFAULT_CATALOG_URL`]. A blank override falls back to the default.
+pub fn resolve_catalog_url() -> Option<String> {
+    catalog_url_from(
+        std::env::var_os("HAND_OFFLINE").is_some(),
+        std::env::var("HAND_CATALOG_URL").ok().as_deref(),
+    )
+}
+
+/// Pure resolution over the two environment inputs, split out so tests never
+/// have to mutate process-global env vars.
+fn catalog_url_from(offline: bool, override_url: Option<&str>) -> Option<String> {
+    if offline {
+        return None;
+    }
+    let trimmed = override_url.map(str::trim).filter(|s| !s.is_empty());
+    Some(trimmed.unwrap_or(DEFAULT_CATALOG_URL).to_string())
+}
+
 /// Outcome of a remote refresh attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshOutcome {
@@ -201,5 +231,42 @@ mod tests {
         assert!(!load_cached_catalog_from(&tmp.path().join("absent")));
         write_cache(tmp.path(), "garbage", None).unwrap();
         assert!(!load_cached_catalog_from(tmp.path()));
+    }
+
+    #[test]
+    fn catalog_url_defaults_to_the_rolling_release() {
+        assert_eq!(
+            catalog_url_from(false, None).as_deref(),
+            Some(DEFAULT_CATALOG_URL)
+        );
+    }
+
+    #[test]
+    fn catalog_url_honours_the_env_override() {
+        assert_eq!(
+            catalog_url_from(false, Some("https://example.test/models.json")).as_deref(),
+            Some("https://example.test/models.json")
+        );
+    }
+
+    #[test]
+    fn catalog_url_blank_override_falls_back_to_default() {
+        assert_eq!(
+            catalog_url_from(false, Some("   ")).as_deref(),
+            Some(DEFAULT_CATALOG_URL)
+        );
+        assert_eq!(
+            catalog_url_from(false, Some("")).as_deref(),
+            Some(DEFAULT_CATALOG_URL)
+        );
+    }
+
+    #[test]
+    fn catalog_url_offline_skips_the_fetch_even_with_an_override() {
+        assert_eq!(catalog_url_from(true, None), None);
+        assert_eq!(
+            catalog_url_from(true, Some("https://example.test/models.json")),
+            None
+        );
     }
 }

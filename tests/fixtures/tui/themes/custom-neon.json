@@ -1,0 +1,71 @@
+{
+	"name": "custom-neon",
+	"vars": {
+		"neonPink": "#ff00ff",
+		"neonCyan": "#00ffff",
+		"neonGreen": "#39ff14",
+		"neonYellow": "#ffea00",
+		"deepBg": "#12001f",
+		"panelBg": "#1a0033"
+	},
+	"colors": {
+		"accent": "neonPink",
+		"border": "neonCyan",
+		"borderAccent": "neonPink",
+		"borderMuted": "#663399",
+		"success": "neonGreen",
+		"error": "#ff003c",
+		"warning": "neonYellow",
+		"muted": "#9977bb",
+		"dim": "#665588",
+		"text": "#f0e6ff",
+		"thinkingText": "neonCyan",
+
+		"selectedBg": "panelBg",
+		"userMessageBg": "deepBg",
+		"userMessageText": "#f0e6ff",
+		"customMessageBg": "panelBg",
+		"customMessageText": "#f0e6ff",
+		"customMessageLabel": "neonPink",
+		"toolPendingBg": "#1a0033",
+		"toolSuccessBg": "#001a0d",
+		"toolErrorBg": "#2b0011",
+		"toolTitle": "neonCyan",
+		"toolOutput": "#c0a0e0",
+
+		"mdHeading": "neonYellow",
+		"mdLink": "neonCyan",
+		"mdLinkUrl": "#665588",
+		"mdCode": "neonPink",
+		"mdCodeBlock": "neonGreen",
+		"mdCodeBlockBorder": "#663399",
+		"mdQuote": "#9977bb",
+		"mdQuoteBorder": "#663399",
+		"mdHr": "#663399",
+		"mdListBullet": "neonPink",
+
+		"toolDiffAdded": "neonGreen",
+		"toolDiffRemoved": "#ff003c",
+		"toolDiffContext": "#9977bb",
+
+		"syntaxComment": "#665588",
+		"syntaxKeyword": "neonPink",
+		"syntaxFunction": "neonYellow",
+		"syntaxVariable": "neonCyan",
+		"syntaxString": "neonGreen",
+		"syntaxNumber": "#ffea00",
+		"syntaxType": "#00ffff",
+		"syntaxOperator": "#f0e6ff",
+		"syntaxPunctuation": "#f0e6ff",
+
+		"thinkingOff": "#663399",
+		"thinkingMinimal": "#7744aa",
+		"thinkingLow": "#9955cc",
+		"thinkingMedium": "#bb66ee",
+		"thinkingHigh": "#dd77ff",
+		"thinkingXhigh": "#ff00ff",
+		"thinkingMax": "#ff5fff",
+
+		"bashMode": "neonGreen"
+	}
+}

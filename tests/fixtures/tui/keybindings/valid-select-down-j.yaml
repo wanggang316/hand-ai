@@ -1,0 +1,8 @@
+# Valid selector-navigation override: move the selection down with `j` (a
+# vim-style key) instead of the Arrow-Down default. Drives the VAL-OVERLAY-021
+# "custom keys drive registry-backed selectors" check: /tree, /resume, and /fork
+# snapshot this from the live table when they open, so `j` navigates and the hint
+# line reads `↑/j navigate`. The hardcoded-dispatch family (model / oauth /
+# scoped-models / thinking / theme) keeps its built-in keys.
+select-down: j
+select-up: k

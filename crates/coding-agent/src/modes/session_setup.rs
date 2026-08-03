@@ -129,24 +129,44 @@ impl SessionSetup {
         // Provider selection precedence (highest first):
         //
         // 1. `--provider` flag — explicit caller intent.
-        // 2. Project / global `default_provider` from `.hand/settings.yaml`.
+        // 2. Provider prefix embedded in `--model`, when the first slash
+        //    segment names a known provider (`--model
+        //    openrouter/openai/gpt-4o-mini` → openrouter). The prefix is
+        //    explicit caller intent too, so it must beat the settings
+        //    default: previously the settings `default_provider` was
+        //    applied before the pattern was even parsed, silently
+        //    rerouting `openrouter/…` to e.g. `zai` on machines with the
+        //    YAML set.
+        // 3. Project / global `default_provider` from `.hand/settings.yaml`.
         //    Issue #16 / UAT-013: a user with the YAML set to
         //    `anthropic` was instead landing on whichever provider
         //    `pick_default_provider`'s auth-walk found first (e.g.
-        //    `zai`), making the setting silently ignored.
-        // 3. Slashed `--model a/b` defers to the resolver — the slash
+        //    `zai`), making the setting silently ignored. Also covers
+        //    slashed patterns whose first segment is NOT a known
+        //    provider — a slash inside a plain model id keeps honouring
+        //    the configured default.
+        // 4. Slashed `--model a/b` defers to the resolver — the slash
         //    drives routing (e.g. `--model deepseek/deepseek-r1` →
         //    openrouter).
-        // 4. Bare `--model <id>` (no slash) looks the id up in the
+        // 5. Bare `--model <id>` (no slash) looks the id up in the
         //    catalogue. If exactly one provider hosts that id, use it.
         //    This prevents `--model gemini-2.5-flash` from silently
         //    falling back to anthropic and erroring on auth.
-        // 5. No `--model` at all auto-picks the first configured
+        // 6. No `--model` at all auto-picks the first configured
         //    provider (auth.json record OR env-var key) in a known
         //    priority order. So a user with only OPENROUTER_API_KEY
         //    exported lands on openrouter rather than anthropic.
         let explicit_provider = args.provider.as_deref();
-        let auto_picked: Option<String> = if explicit_provider.is_some() {
+        // Rung 2: does the `--model` pattern's first slash segment name a
+        // known provider? Then routing is already decided by the pattern —
+        // leave `auto_picked` empty so the slash-routing branch of
+        // `resolve_model(None, …)` below honours the prefix.
+        let pattern_names_provider = args
+            .model
+            .as_deref()
+            .and_then(|m| m.split_once('/'))
+            .is_some_and(|(prefix, _)| model::types::Provider::from_str(prefix).is_some());
+        let auto_picked: Option<String> = if explicit_provider.is_some() || pattern_names_provider {
             None
         } else if let Some(p) = settings_provider.as_deref() {
             Some(p.to_string())
@@ -509,7 +529,15 @@ mod tests {
 
     #[test]
     fn resolves_default_args() {
-        let args = Args::try_parse_from(["hand"]).expect("default parse");
+        // Hermetic: `stream_options.reasoning` must come out None by
+        // default, but a developer machine whose real
+        // `~/.hand/agent/settings.yaml` sets `default-thinking-level`
+        // would poison the assertion. Point HOME at an empty tempdir.
+        let home = tempfile::TempDir::new().expect("home");
+        let _home = HomeGuard::set(home.path());
+        let cwd = tempfile::TempDir::new().expect("cwd");
+        let args = Args::try_parse_from(["hand", "--cwd", cwd.path().to_str().unwrap()])
+            .expect("default parse");
         let setup = SessionSetup::resolve(&args).expect("resolve");
         // Default tool list should match the full built-in set.
         let default_len = tools::create_default_tools(&setup.cwd).len();
@@ -649,6 +677,12 @@ mod tests {
     /// slash-routing path.
     #[test]
     fn slashed_model_with_provider_prefix_routes_to_provider_no_cli_flag() {
+        // Hermetic: an empty temp HOME so a developer machine's real
+        // `~/.hand/agent/settings.yaml` (e.g. `default-provider: zai`)
+        // cannot leak into the global settings layer and poison the
+        // routing under test.
+        let home = tempfile::TempDir::new().expect("home");
+        let _home = HomeGuard::set(home.path());
         let tmp = tempfile::TempDir::new().expect("tmp");
         let args = Args::try_parse_from([
             "hand",
@@ -666,6 +700,76 @@ mod tests {
             setup.model.provider.as_str()
         );
         assert_eq!(setup.model.id, "openai/gpt-4o-mini");
+    }
+
+    /// Regression: a provider prefix embedded in `--model` must beat the
+    /// settings `default_provider`. Before the fix, a global settings
+    /// layer carrying `default-provider: zai` made `--model
+    /// openrouter/openai/gpt-4o-mini` route to zai — the settings default
+    /// was applied before the pattern prefix was parsed, so the same
+    /// command behaved differently across machines. The temp HOME here
+    /// reproduces that poisoned shape hermetically.
+    #[test]
+    fn model_provider_prefix_beats_settings_default_provider() {
+        let home = tempfile::TempDir::new().expect("home");
+        std::fs::create_dir_all(home.path().join(".hand/agent")).unwrap();
+        std::fs::write(
+            home.path().join(".hand/agent/settings.yaml"),
+            "default-provider: zai\n",
+        )
+        .unwrap();
+        let _home = HomeGuard::set(home.path());
+
+        let cwd = tempfile::TempDir::new().expect("cwd");
+        let args = Args::try_parse_from([
+            "hand",
+            "--cwd",
+            cwd.path().to_str().unwrap(),
+            "--model",
+            "openrouter/openai/gpt-4o-mini",
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert_eq!(
+            setup.model.provider.as_str(),
+            "openrouter",
+            "explicit provider prefix must beat settings default-provider, got {}",
+            setup.model.provider.as_str()
+        );
+        assert_eq!(setup.model.id, "openai/gpt-4o-mini");
+    }
+
+    /// A slash whose first segment is NOT a known provider is part of
+    /// the model id, not a routing prefix — such patterns must keep
+    /// honouring the settings `default_provider` (models with slashes
+    /// in their ids keep resolving under the configured default).
+    #[test]
+    fn unknown_prefix_slashed_model_still_honours_settings_default_provider() {
+        let home = tempfile::TempDir::new().expect("home");
+        std::fs::create_dir_all(home.path().join(".hand/agent")).unwrap();
+        std::fs::write(
+            home.path().join(".hand/agent/settings.yaml"),
+            "default-provider: zai\n",
+        )
+        .unwrap();
+        let _home = HomeGuard::set(home.path());
+
+        let cwd = tempfile::TempDir::new().expect("cwd");
+        let args = Args::try_parse_from([
+            "hand",
+            "--cwd",
+            cwd.path().to_str().unwrap(),
+            "--model",
+            "unknownvendor/imaginary-model-zzz",
+        ])
+        .expect("parse");
+        let setup = SessionSetup::resolve(&args).expect("resolve");
+        assert_eq!(
+            setup.model.provider.as_str(),
+            "zai",
+            "unknown first segment must fall through to settings default-provider, got {}",
+            setup.model.provider.as_str()
+        );
     }
 
     /// `default-model` from settings.yaml should drive the model
@@ -961,5 +1065,41 @@ mod tests {
             "openrouter",
             "explicit --provider must NOT cross over to native deepseek even when openrouter lacks the model"
         );
+    }
+
+    /// Serialize `HOME` mutation and restore it on drop so a test never
+    /// leaks env state onto a sibling. `SettingsManager::from_cwd` and
+    /// `AuthStorage::new` both root at `dirs::home_dir()` (i.e. `$HOME`),
+    /// so pointing HOME at a tempdir is what makes these tests hermetic
+    /// — a developer's real `~/.hand/agent/settings.yaml` must never
+    /// leak into the global settings layer under test.
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        fn set(home: &Path) -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            // SAFETY: LOCK is held for the guard's lifetime, serializing env mutation.
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+            Self { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: LOCK is still held (we own the guard).
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
     }
 }

@@ -1,0 +1,3129 @@
+//! Interactive TUI driver on the ratatui runtime (rt stack).
+//!
+//! This is the **M3 strangler cutover**: `hand`'s interactive mode now runs on
+//! the rt stack (`hand_tui::rt`) — a real terminal session guard, a frame
+//! scheduler that owns the terminal, an async input pump, and a fixed-max inline
+//! viewport — instead of the legacy `hand_tui::Tui` run loop with its background
+//! tokio tasks sharing state through raw pointers.
+//!
+//! # What this feature is (the skeleton)
+//!
+//! The run-loop *skeleton*: enough to start on the new stack, type, submit,
+//! stream a turn's output into scrollback, and exit cleanly on every path. The
+//! two legacy exit hacks are **gone**:
+//!
+//! - **`std::process::exit`** — the legacy driver hard-exited the process on
+//!   quit / slash-quit because a graceful teardown hung on `tokio::io::stdin`'s
+//!   uncancellable blocking thread. The rt input pump is a bounded-poll
+//!   crossterm reader that watches a shutdown flag (it exits within one poll
+//!   interval — see `hand_tui::rt::events`), so every exit path now converges
+//!   on one teardown that drops the scheduler, restores the terminal, and
+//!   returns.
+//! - **`StopHandle(*const Tui)`** — a `Send`/`Sync` newtype over a raw pointer
+//!   used to call `tui.stop()` from a background task. There is no such handle
+//!   here: quitting is a plain `break` out of the input loop.
+//!
+//! Both are replaced by the rt [`SessionGuard`](hand_tui::rt::session::SessionGuard)'s
+//! deterministic restore (idempotent across explicit restore / `Drop` / panic
+//! hook, and re-armed per session by the single-session guard) plus the
+//! [`EraseOnDrop`](hand_tui::rt::session::EraseOnDrop) viewport wipe.
+//!
+//! # Structure and seams for the follow-up features
+//!
+//! - [`state`] — the shared, `Send` [`DriverState`](state::DriverState) (size,
+//!   input rows, streaming flag, running usage accumulator, pending scrollback
+//!   commits) and the shared editor + footer view-model. Follow-up features add
+//!   selector state here.
+//! - [`footer`] — the [`FooterViewModel`](footer::FooterViewModel) and its pure
+//!   two-line renderer, rebuilt from session state after each turn.
+//! - [`input`] — the editor component wiring (M2 [`Editor`](hand_tui::rt::components::Editor),
+//!   borderless / no-placeholder hand-chat style) and the bottom-area draw.
+//!   Slash-command dispatch mounts on this task; the composite completion
+//!   provider from [`autocomplete`] (slash commands on `/`, cwd paths from
+//!   [`mention`] on `@`) is installed on the editor at construction.
+//! - [`chat`] — [`ChatUpdate`](super::event_dispatch::ChatUpdate) → scrollback
+//!   [`Line`]s. *Seam:* the message components (markdown, thinking, bash, tool
+//!   cards) replace the flat text arms here without touching the commit path.
+//! - [`watchdog`] — the injectable per-turn timeout (VAL-CHAT-022). *Seam:* a
+//!   test or the `stall` mock-provider scenario injects a short ceiling.
+//! - The **agent driver task** (below) subscribes to
+//!   [`AgentSession`] events through the reused, `hand_tui`-free
+//!   [`event_dispatch`](super::event_dispatch) protocol, converts them to
+//!   scrollback commits, and runs each turn under the watchdog. *Seam:* turn
+//!   control (steering, cancel, follow-up) and full slash/selector dispatch
+//!   mount on this task.
+//!
+//! The chat scrollback / active-area split mirrors the rt demo
+//! (`hand_tui`'s `rt_demo` example): finalized output goes to native scrollback
+//! via the [`HistorySink`](hand_tui::rt::history::HistorySink), and the live
+//! bottom area (editor + two-line footer) is laid out inside the fixed inline
+//! viewport with [`bottom_area_geometry`](hand_tui::rt::view::bottom_area_geometry)
+//! `.offset_y(frame.area().y)` (the M1 FIX-2 invariant: the viewport origin
+//! drifts down as `insert_before` fills scrollback).
+
+pub mod autocomplete;
+pub mod bash;
+pub mod chat;
+pub mod chrome;
+pub mod clipboard;
+pub mod config_selector;
+pub mod external_editor;
+pub mod footer;
+pub mod input;
+pub mod keys;
+pub mod login;
+pub mod login_dialog;
+pub mod login_provider_picker;
+pub mod mention;
+pub mod messages;
+pub mod model_selector;
+pub mod oauth_flow;
+pub mod overlay;
+pub mod replay;
+pub mod scoped_models_selector;
+pub mod selectors;
+pub mod session_picker;
+pub mod settings_selector;
+pub mod slash;
+pub mod state;
+pub mod summary;
+pub mod theme_selector;
+pub mod thinking_selector;
+pub mod tools;
+pub mod tree_selector;
+pub mod user_message_selector;
+pub mod watchdog;
+
+use std::io;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use hand_tui::rt::components::{BorderTint, Editor, EditorBorder};
+use hand_tui::rt::events::{RtInputEvent, RtKey, spawn_event_pump};
+use hand_tui::rt::scheduler::FrameRequester;
+use hand_tui::rt::session::{SessionError, SessionGuard, hangup_listener};
+use hand_tui::rt::view::{RtComponent, TerminalSize};
+use ratatui::text::Line;
+use tokio::sync::mpsc;
+
+use crate::core::agent_session::{AgentSession, AgentSessionEvent};
+use crate::core::error::CodingAgentError;
+use crate::core::keybindings::{Action, Diagnostic, KeyBindings};
+use crate::modes::interactive::theme::ThemePalette;
+
+use self::chrome::{ChangelogStartupAction, ProgressState, PromptMark};
+use self::footer::build_footer_view;
+use self::keys::{SharedKeybindings, new_shared_keybindings, resolved_key_id};
+use self::overlay::{DoneSignal, SharedOverlay, new_done_signal, new_shared_overlay};
+use self::state::{DriverState, SharedEditor, SharedFooter, lock_editor, lock_footer, lock_state};
+use self::watchdog::Watchdog;
+use super::event_dispatch::{ChatUpdate, dispatch as dispatch_event};
+
+/// The status line committed to scrollback after a Ctrl+T thinking toggle, so a
+/// probe can confirm the flip and its resulting global state.
+fn thinking_status_line(hidden: bool) -> String {
+    let state = if hidden { "hidden" } else { "visible" };
+    format!("[thinking blocks: {state}]")
+}
+
+/// Bound on the rt input event channel. A small buffer suffices for interactive
+/// typing; backpressure just parks the pump, which is fine.
+const EVENT_CHANNEL_CAPACITY: usize = 64;
+
+/// Queue the resumed session's stored transcript as ordered scrollback blocks, so a
+/// resume (`--continue` / `--resume` / `--fork`, seeding messages from disk) shows
+/// its prior conversation below the startup chrome before the first frame paints.
+///
+/// A fresh session (no messages) is a no-op — nothing is queued, so a brand-new
+/// session starts on a clean transcript with no spurious `[resumed: …]` marker. The
+/// replayed assistant messages are also seeded into the assistant-history so a later
+/// global Ctrl+T re-render includes them.
+fn queue_startup_replay(session: &AgentSession, state: &Arc<Mutex<DriverState>>) {
+    let messages = session.messages();
+    if messages.is_empty() {
+        return;
+    }
+    let label = session
+        .label()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| session.session_id().chars().take(8).collect());
+
+    let mut guard = lock_state(state);
+    let width = guard.size.cols;
+    let hide_thinking = guard.hide_thinking;
+    let palette = guard.palette();
+    for block in self::replay::replay_blocks(messages, &label, hide_thinking, width, &palette) {
+        guard.queue_commit(block);
+    }
+    for message in messages {
+        if let model::Message::Assistant(a) = message {
+            guard.remember_assistant(a.clone());
+        }
+    }
+}
+
+/// Errors raised by the interactive TUI driver.
+#[derive(Debug, thiserror::Error)]
+pub enum InteractiveError {
+    /// An agent-layer error (session build, send failure surfaced to the caller).
+    #[error("agent error: {0}")]
+    Agent(#[from] CodingAgentError),
+
+    /// A terminal-session error from the rt stack: not a TTY, a session already
+    /// active, or a raw-mode / escape-write I/O failure.
+    #[error("terminal session error: {0}")]
+    Session(#[from] SessionError),
+
+    /// A plain I/O error from the run loop.
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+}
+
+/// The interactive TUI driver.
+///
+/// Built with [`InteractiveMode::new`]; [`InteractiveMode::run`] takes over the
+/// terminal and runs to a clean exit. A short per-turn watchdog can be injected
+/// with [`InteractiveMode::with_watchdog`] (the `stall` mock-provider scenario
+/// and the timeout-banner test drive this).
+pub struct InteractiveMode {
+    session: AgentSession,
+    cwd: PathBuf,
+    watchdog: Watchdog,
+}
+
+impl InteractiveMode {
+    /// Build the driver. The per-turn watchdog defaults to 5 minutes, overridable
+    /// via the `HAND_TURN_TIMEOUT_MS` env (the VAL-CHAT-022 probe seam).
+    pub fn new(session: AgentSession, cwd: PathBuf) -> Self {
+        Self {
+            session,
+            cwd,
+            watchdog: Watchdog::from_env_or_default(),
+        }
+    }
+
+    /// Override the per-turn watchdog ceiling. Used to inject a short timeout so
+    /// the timeout-banner path (VAL-CHAT-022) is probable without waiting the
+    /// full default.
+    #[must_use]
+    pub fn with_watchdog(mut self, watchdog: Watchdog) -> Self {
+        self.watchdog = watchdog;
+        self
+    }
+
+    /// Run the interactive TUI to completion on the rt stack.
+    ///
+    /// Establishes the session guard (raw mode, bracketed paste, kitty flags,
+    /// panic-restore), spawns the frame scheduler (which owns the terminal), the
+    /// input pump, the SIGHUP listener, and the agent driver task, then runs the
+    /// input loop until any clean-exit path fires. Every path — Ctrl+D, a
+    /// `/quit` family command, event-stream EOF, or SIGHUP — converges on the
+    /// single teardown at the end, which drops the scheduler (erasing the
+    /// viewport) and restores the terminal. No `process::exit`, no `StopHandle`.
+    pub async fn run(self) -> Result<(), InteractiveError> {
+        let InteractiveMode {
+            mut session,
+            cwd,
+            watchdog,
+        } = self;
+
+        // Establish the guard first: it verifies stdin/stdout are TTYs and claims
+        // the single-session flag *before* toggling raw mode, so a non-interactive
+        // or re-entrant launch leaves the shell untouched.
+        let mut guard = SessionGuard::enter()?;
+        let terminal = guard.terminal()?;
+
+        // Seed the tracked size from the real terminal; resize events overwrite it.
+        let (init_cols, init_rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        let mut driver_state = DriverState::new(TerminalSize::new(init_cols, init_rows));
+        // Seed `show_images` from the merged settings so the image path honours the
+        // configured value from the first tool result; the `/settings` toggle flips
+        // it live thereafter (VAL-IMG-011).
+        driver_state.set_show_images(session.settings().current().terminal.show_images());
+        // Resolve the configured theme to a concrete palette, tolerating every
+        // failure mode (unknown name, malformed / partial JSON, `system`): the
+        // resolver always yields at least the built-in default, so a bad theme
+        // never blocks startup (VAL-COMPAT-004 / 005 / 016). The optional
+        // `fallback_reason` is surfaced as a startup diagnostic below.
+        let theme_resolution = resolve_startup_theme(&session);
+        driver_state.set_theme(Arc::new(theme_resolution.theme));
+        let theme_fallback_reason = theme_resolution.fallback_reason;
+        let state = Arc::new(Mutex::new(driver_state));
+
+        // The chat editor: borderless, no placeholder — the hand chat-input style.
+        // The driver's own bottom-area geometry supplies the bordered box, so the
+        // editor paints text only. History seeds the recall buffer from prior
+        // user turns so Up/Down recall survives a resume. The composite
+        // autocomplete provider serves both triggers through the editor's single
+        // slot: `/` completes the registered slash commands from the registry and
+        // `@` opens path completion over the cwd snapshot the mention source
+        // walks at construction.
+        let editor: SharedEditor = Arc::new(Mutex::new(
+            Editor::new()
+                .border(EditorBorder::None)
+                .with_history(recall_history(&session))
+                .with_autocomplete_provider(autocomplete::build_editor_provider(&cwd)),
+        ));
+        // Footer view-model — built from session state so every field (cwd, git
+        // branch, model id/provider, thinking level, context %, usage) is visible
+        // at startup, before any turn. Rebuilt after each turn by the turn runner
+        // so usage, branch, and thinking-level changes surface.
+        let footer: SharedFooter = Arc::new(Mutex::new(build_footer_view(
+            &session,
+            &cwd,
+            self::footer::TokenUsageSummary::default(),
+        )));
+
+        // Startup chrome: welcome header, any tmux keyboard warning, and the
+        // changelog banner, committed to the top of scrollback BEFORE the first
+        // frame paints. The changelog decision reads (and may write) settings, so
+        // it runs while we still hold `&mut session`, before it moves into the
+        // turn runner.
+        let startup_palette = lock_state(&state).palette();
+        let startup = collect_startup_chrome(&mut session, &startup_palette);
+        for block in startup {
+            lock_state(&state).queue_commit(block);
+        }
+
+        // Surface a theme-fallback notice (unknown / malformed / partial theme)
+        // as a single yellow startup line — the session keeps running on the
+        // default palette (VAL-COMPAT-005 / 016), the same "never crash on bad
+        // config" discipline the keybindings loader uses.
+        if let Some(reason) = theme_fallback_reason {
+            lock_state(&state).queue_commit(chat::status_lines_for(&format!("theme: {reason}")));
+        }
+
+        // Load the user keybindings (app-layer): project `<cwd>/.hand` > global
+        // `~/.hand` > defaults. A *semantically* bad entry (unknown action,
+        // malformed chord, conflicting chord) never crashes the app — it lands a
+        // yellow diagnostic in the startup transcript and the affected action keeps
+        // its default; only an unreadable / syntactically broken file falls back to
+        // defaults with a single notice (VAL-COMPAT-003). The live table is shared so
+        // `/reload` can swap it and the selectors can snapshot it.
+        let keybindings = load_keybindings(&cwd, &state);
+
+        // Route submit through the app-layer table: the editor SUBMITS on the
+        // chord bound to `Action::Submit` (default Enter) and inserts a newline on
+        // every other Enter variant. This is what makes a project `submit: alt+enter`
+        // fire (bare Enter then stops submitting) rather than the editor's hardcoded
+        // Enter handling winning (VAL-COMPAT-002). `/reload` re-applies it below.
+        lock_editor(&editor).set_submit_key(&resolved_key_id(&keybindings, Action::Submit));
+
+        // Startup replay: when the session was resumed (`--continue` / `--resume` /
+        // `--fork` seed the transcript from disk), render its stored user /
+        // assistant / tool-result messages into scrollback *in order*, closed by the
+        // `[resumed: <label>]` marker — so the resumed conversation reads as one
+        // continuous transcript below the chrome, and a stored `stop_reason=Error`
+        // assistant surfaces its red error footnote live (VAL-CHAT-012 /
+        // VAL-CHAT-029). A fresh session has no messages, so this is a no-op.
+        queue_startup_replay(&session, &state);
+
+        // Bridge agent events into the driver through the reused, hand_tui-free
+        // ChatUpdate protocol. The listener forwards raw session events over an
+        // unbounded channel to the agent driver task, which dispatches them.
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentSessionEvent>();
+        let forward = event_tx.clone();
+        session.subscribe(move |event| {
+            let _ = forward.send(event);
+        });
+
+        // The overlay runtime: a shared stack the scheduler renders over the base
+        // viewport and the input loop routes keys into (modal capture), plus a
+        // single shared "top overlay finished" flag every selector raises on its
+        // terminal key. This is the reusable substrate for the selector family; the
+        // /model selector is the first mounted on it.
+        let overlays: SharedOverlay = new_shared_overlay();
+        let overlay_done: DoneSignal = new_done_signal();
+
+        // Spawn the frame scheduler: it owns the terminal and is the single place
+        // the UI is painted, wrapped in synchronized-output markers.
+        let (requester, scheduler) = input::spawn_scheduler(
+            terminal,
+            state.clone(),
+            editor.clone(),
+            footer.clone(),
+            overlays.clone(),
+        );
+
+        // Spawn the rt input pump: a bounded-poll crossterm reader on a
+        // blocking thread → RtInputEvent channel. Bounded polls keep the
+        // resize path's cursor-position queries answerable (a parked
+        // EventStream reader would strand their replies — see
+        // hand_tui::rt::events).
+        let (mut events, pump) = spawn_event_pump(EVENT_CHANNEL_CAPACITY);
+
+        // Register the SIGHUP listener so a closing PTY master takes the same
+        // clean-exit path as Ctrl+D instead of terminating the process raw.
+        let mut hangup = hangup_listener().map_err(SessionError::Io)?;
+
+        // The channel the input loop uses to hand submitted text to the turn
+        // runner. Dropping it on teardown is what tells the runner to stop.
+        // Unbounded so a submit *during* an in-flight turn is queued, not dropped:
+        // the turn runner drains it one turn at a time, so follow-up messages
+        // typed mid-turn are processed in order once the current turn ends
+        // (VAL-CHAT-015).
+        let (submit_tx, submit_rx) = mpsc::unbounded_channel::<String>();
+
+        // The cancel handle: a shared handle to the session's cancellation token.
+        // Grabbed here, *before* the session moves into the turn runner, so the
+        // input loop can cancel an in-flight turn (Esc / Ctrl+C) from outside the
+        // task that owns `&mut session`. `send_message` swaps the inner token per
+        // turn but keeps this same `Arc<Mutex<…>>`, so a cancel through this handle
+        // always hits the current turn's token (VAL-CHAT-013 / VAL-CHAT-014).
+        let cancel = session.cancel_handle();
+
+        // First-run onboarding gate (VAL-OVERLAY-022): with no provider credential on
+        // file (stored or via env var), greet the user and auto-open the login
+        // picker. Decided here, *before* the session moves into the turn runner
+        // (which owns `&mut session`); the welcome banner is committed now so it
+        // lands above the picker, and a `/login` submit is queued below so the turn
+        // runner opens the overlay.
+        let needs_onboarding = !login::any_provider_has_credentials(&session);
+        if needs_onboarding {
+            lock_state(&state).queue_commit(chat::status_lines_for(login::WELCOME_NO_CREDENTIALS));
+        }
+
+        // Spawn the turn runner: it owns the session and runs each submitted turn
+        // to completion under the watchdog. It does NOT exit the process.
+        let turns = tokio::spawn(turn_runner(TurnRunner {
+            session,
+            cwd: cwd.clone(),
+            watchdog,
+            state: state.clone(),
+            editor: editor.clone(),
+            footer: footer.clone(),
+            requester: requester.clone(),
+            submits: submit_rx,
+            overlays: overlays.clone(),
+            overlay_done: overlay_done.clone(),
+            keybindings: keybindings.clone(),
+        }));
+
+        // Kick off first-run onboarding: queue a `/login` submit the turn runner
+        // drains, which opens the provider picker on the overlay runtime. Sent after
+        // the runner is spawned so the channel is live; the welcome banner committed
+        // above renders first.
+        if needs_onboarding {
+            let _ = submit_tx.send("/login".to_string());
+        }
+
+        // Spawn the event applier as an INDEPENDENT task. It must not share a
+        // `select!` with the turn runner: `send_message` emits events through
+        // `event_rx`, so multiplexing the two would cancel an in-flight turn the
+        // moment its own event arrived. Kept separate, a turn future is polled to
+        // completion while its events render live.
+        let applier = tokio::spawn(event_applier(event_rx, state.clone(), requester.clone()));
+
+        // Best-effort async version probe: when crates.io reports a newer
+        // published version, commit an "update available" banner. Offline
+        // (`HAND_OFFLINE`) the fetcher returns `None` so the banner never appears,
+        // and the probe never blocks startup — it runs in its own task and the
+        // run loop paints immediately below regardless of when it finishes.
+        let version_task = tokio::spawn(version_probe(state.clone(), requester.clone()));
+
+        // Initial paint.
+        requester.request_frame();
+
+        // The input loop. It never draws directly: it mutates shared state / the
+        // editor and requests a frame. Every clean-exit path breaks out of it.
+        run_input_loop(RunInputArgs {
+            events: &mut events,
+            hangup: &mut hangup,
+            editor: &editor,
+            state: &state,
+            requester: &requester,
+            submit_tx: &submit_tx,
+            cancel: &cancel,
+            overlays: &overlays,
+            guard: &guard,
+            keybindings: &keybindings,
+        })
+        .await;
+
+        // --- Single teardown for every exit path ---------------------------
+
+        // Drop the submit channel so the turn runner wakes and returns; abort it
+        // so a stalled in-flight turn (mid-stream quit) is abandoned without
+        // waiting — the terminal restore below does not depend on the turn
+        // unwinding. The event applier is likewise aborted.
+        drop(submit_tx);
+        turns.abort();
+        applier.abort();
+        version_task.abort();
+
+        // Drop the last requester so the scheduler drains its final frame, closes
+        // its synchronized block, and stops; awaiting it releases the terminal
+        // (and fires EraseOnDrop) before we restore. This is the interrupt-safe
+        // ordering that guarantees a clean line even mid-stream.
+        drop(requester);
+        let _ = scheduler.await;
+
+        // Stop the input pump: flip its shutdown flag. A blocking-pool thread
+        // ignores abort(), so the bounded-poll loop watches the flag and exits
+        // within one poll interval. Deliberately not awaited: the runtime
+        // joins the thread at shutdown, and dropping `events` on return
+        // unblocks a pump parked on a full channel.
+        pump.shutdown();
+
+        // Explicit restore before returning; Drop would also do it (idempotent).
+        guard.restore();
+        Ok(())
+    }
+}
+
+/// Arguments for the input loop, grouped to keep the signature readable.
+struct RunInputArgs<'a> {
+    events: &'a mut mpsc::Receiver<RtInputEvent>,
+    hangup: &'a mut hand_tui::rt::session::Hangup,
+    editor: &'a SharedEditor,
+    state: &'a Arc<Mutex<DriverState>>,
+    requester: &'a FrameRequester,
+    submit_tx: &'a mpsc::UnboundedSender<String>,
+    /// Shared handle to the in-flight turn's cancellation token, used by Esc /
+    /// Ctrl+C to abort a streaming turn from outside the turn runner.
+    cancel: &'a Arc<Mutex<hand_agent::CancellationToken>>,
+    /// The shared overlay: a modal selector, when mounted, captures every key before
+    /// it can reach the editor or the turn-control paths below. The mounted selector
+    /// carries its own done flag, so the input loop needs only the overlay here.
+    overlays: &'a SharedOverlay,
+    /// The live session guard, borrowed for the Ctrl+G terminal handoff: the input
+    /// loop suspends it (yield raw mode) around the external-editor spawn and
+    /// resumes it (re-enter raw mode) after, using the M1 SessionGuard
+    /// suspend/resume seam (VAL-EDITOR-020). The guard's own teardown contract is
+    /// untouched — `restore` / `Drop` / the panic hook still fire exactly once.
+    guard: &'a SessionGuard,
+    /// The live app-layer keybindings. The global-toggle dispatch below resolves
+    /// each action's chord through this table (so a user remap fires verbatim),
+    /// and `/reload` swaps the table behind it so new chords take effect live.
+    keybindings: &'a SharedKeybindings,
+}
+
+/// The interactive input loop.
+///
+/// Wakes on an input event or a SIGHUP. It resolves the exit paths and the
+/// submit path; everything else routes to the editor. It returns when any exit
+/// path fires, leaving the caller to run the single teardown.
+async fn run_input_loop(args: RunInputArgs<'_>) {
+    let RunInputArgs {
+        events,
+        hangup,
+        editor,
+        state,
+        requester,
+        submit_tx,
+        cancel,
+        overlays,
+        guard,
+        keybindings,
+    } = args;
+
+    loop {
+        // Two clean-exit signals converge here besides the explicit quit below:
+        //   - the event channel closing (`None`): the pump's bounded-poll read
+        //     errored at input EOF (stdin closed) and dropped its sender — the
+        //     plain EOF exit.
+        //   - a SIGHUP: a closing PTY master, routed here so it exits cleanly
+        //     with the terminal restored rather than terminating raw.
+        let event = tokio::select! {
+            maybe = events.recv() => match maybe {
+                Some(event) => event,
+                None => break,
+            },
+            _ = hangup.recv() => break,
+        };
+
+        match event {
+            RtInputEvent::Key(key) => {
+                // A mounted modal selector owns every key first (VAL-OVERLAY-005):
+                // route it through the overlay, and if one was open it consumes the
+                // key — the editor, the global toggles, and the turn-control paths
+                // below never see it. The dialog closes itself once the selector
+                // raises its done flag on Enter/Esc.
+                if overlay::dispatch_key(overlays, requester, &key) {
+                    requester.request_frame();
+                    continue;
+                }
+                // The global toggles are resolved through the live app-layer table
+                // so a user remap fires verbatim and `/reload` re-points them
+                // (VAL-COMPAT-001 / VAL-COMPAT-020). The default chords match the
+                // built-in ids the rt pump tags, so an unconfigured session behaves
+                // exactly as before. `key_id` of `None` (a bare modifier / lock key)
+                // matches nothing.
+                let Some(pressed) = key.key_id.as_deref() else {
+                    // No canonical id — route to the editor (it may still act on the
+                    // raw event) and skip the id-driven toggles.
+                    if handle_key(&key, editor, state, submit_tx) == KeyOutcome::Quit {
+                        break;
+                    }
+                    requester.request_frame();
+                    continue;
+                };
+                // Open the current buffer in the external editor (`$VISUAL` over
+                // `$EDITOR`). The driver yields the terminal to the editor (suspend
+                // raw mode), spawns it, then re-enters and repaints — a save-and-exit
+                // replaces the buffer, a non-zero exit leaves it and lands an error
+                // status line (VAL-EDITOR-020). Handled here (where the guard +
+                // editor + requester are in scope) before the editor so the chord
+                // never inserts a literal char.
+                if pressed == resolved_key_id(keybindings, Action::OpenExternalEditor) {
+                    open_external_editor(editor, state, requester, guard).await;
+                    requester.request_frame();
+                    continue;
+                }
+                // Paste the system clipboard into the editor: text lands verbatim, an
+                // image is written to a temp PNG and its absolute path inserted, and
+                // an empty/unavailable clipboard lands a red status line and leaves
+                // the editor unchanged (VAL-IMG-010). Handled here so the driver — not
+                // the terminal's own paste — owns the read.
+                if pressed == resolved_key_id(keybindings, Action::PasteClipboard) {
+                    paste_clipboard(editor, state, requester);
+                    requester.request_frame();
+                    continue;
+                }
+                // A global toggle: flip thinking-visibility across every assistant
+                // message in the transcript, so it is handled here (where the
+                // requester is in scope) rather than in the editor path.
+                if pressed == resolved_key_id(keybindings, Action::ToggleThinking) {
+                    toggle_thinking_globally(state, requester);
+                    requester.request_frame();
+                    continue;
+                }
+                // Expand / collapse the most-recent collapsible summary (compaction /
+                // branch / skill). Scrollback is immutable, so the toggle re-commits
+                // the summary in its new state — this is what makes the collapsed
+                // `(ctrl+r to expand)` hint *real*. Handled here because the summaries
+                // live on the shared state, not the session. A silent no-op when no
+                // summary has landed.
+                if pressed == resolved_key_id(keybindings, Action::ToggleLastSummary) {
+                    toggle_last_summary(state, requester);
+                    requester.request_frame();
+                    continue;
+                }
+                // Copy the last assistant message — the keyboard twin of `/copy`. The
+                // copy needs the session (which the turn runner owns), so it is
+                // forwarded as a `/copy` submit through the same channel the turn
+                // runner drains; both paths hit the identical handler, so this chord
+                // and `/copy` behave the same (VAL-CHAT-023).
+                if pressed == resolved_key_id(keybindings, Action::CopyLastMessage) {
+                    let _ = submit_tx.send("/copy".to_string());
+                    requester.request_frame();
+                    continue;
+                }
+                // Turn control (VAL-CHAT-013 / VAL-CHAT-014). Esc and Ctrl+C both
+                // cancel an in-flight turn; both are inert when idle. In raw mode
+                // Ctrl+C is an ordinary key (SIGINT is swallowed), so the driver —
+                // not the OS — decides its meaning: cancel a turn, or a visible
+                // no-op. It must never exit (only Ctrl+D quits), so the terminal is
+                // never left raw.
+                match pressed {
+                    "escape" => {
+                        // Cancel a streaming turn; otherwise fall through so the
+                        // editor can use Esc (autocomplete dismiss, etc).
+                        if try_cancel_turn(state, requester, cancel, CancelSource::Esc) {
+                            continue;
+                        }
+                    }
+                    "ctrl+c" => {
+                        // Cancel a streaming turn; idle it is a visible no-op — the
+                        // app stays alive, no cancel line lands, the terminal is
+                        // untouched. Either way, consume it (never reaches the
+                        // editor, never quits).
+                        try_cancel_turn(state, requester, cancel, CancelSource::CtrlC);
+                        continue;
+                    }
+                    _ => {}
+                }
+                if handle_key(&key, editor, state, submit_tx) == KeyOutcome::Quit {
+                    break;
+                }
+            }
+            RtInputEvent::Paste(payload) => {
+                // A mounted selector with a text field (the login key dialog) owns a
+                // paste first: the whole payload lands in its input in one shot
+                // (VAL-OVERLAY-027), and the editor beneath never sees it. Only when
+                // no overlay is open does the paste reach the chat editor.
+                if overlay::dispatch_paste(overlays, requester, &payload) {
+                    requester.request_frame();
+                    continue;
+                }
+                lock_editor(editor).insert_paste(&payload);
+            }
+            RtInputEvent::Resize { cols, rows } => {
+                let _ = lock_state(state).size.apply_resize(cols, rows);
+            }
+            RtInputEvent::FocusGained | RtInputEvent::FocusLost => {}
+        }
+
+        requester.request_frame();
+    }
+}
+
+/// Whether a handled key requested a quit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyOutcome {
+    /// Keep running.
+    Continue,
+    /// Break the input loop and tear down.
+    Quit,
+}
+
+/// Handle one key event.
+///
+/// The exit-priority rule (VAL-COMPAT-013): **Ctrl+D always quits**, even with a
+/// non-empty buffer — the quit wins over the editor's own `ctrl+d`
+/// delete-forward binding, matching the legacy unconditional Ctrl+D listener.
+/// Ctrl+C is *not* an exit here: it is turn control (cancel / no-op), resolved by
+/// the input loop before this function is reached, so it never quits and the
+/// terminal is never left raw (VAL-CHAT-014). Otherwise the key routes to the
+/// editor; after dispatch a latched submit is drained and, if it is a
+/// `/quit`-family command, quits — every other submit is forwarded to the agent
+/// driver.
+fn handle_key(
+    key: &RtKey,
+    editor: &SharedEditor,
+    state: &Arc<Mutex<DriverState>>,
+    submit_tx: &mpsc::UnboundedSender<String>,
+) -> KeyOutcome {
+    // Ctrl+D: unconditional clean quit. Intercepted BEFORE the editor so Ctrl+D
+    // exits rather than deleting a character (exit beats delete-char). Ctrl+C is
+    // handled by the input loop (cancel / no-op) and never reaches here.
+    if key.key_id.as_deref() == Some("ctrl+d") {
+        return KeyOutcome::Quit;
+    }
+
+    // Route the key to the editor, then drain any latched submit.
+    let submitted = {
+        let mut ed = lock_editor(editor);
+        ed.handle_key(key);
+        ed.take_submit()
+    };
+
+    let Some(text) = submitted else {
+        return KeyOutcome::Continue;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return KeyOutcome::Continue;
+    }
+
+    // Skeleton slash handling: the `/quit` family exits; the full slash table is
+    // a follow-up feature. Everything else is forwarded to the agent driver.
+    if is_quit_command(trimmed) {
+        return KeyOutcome::Quit;
+    }
+
+    // Mark streaming immediately so the loader/tint show before the first event,
+    // then forward the turn. A send failure means the agent task is gone (we are
+    // tearing down), which is harmless.
+    lock_state(state).streaming = true;
+    let _ = submit_tx.send(trimmed.to_string());
+    KeyOutcome::Continue
+}
+
+/// Which key requested a turn cancellation, so the yellow status line names the
+/// source the user pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CancelSource {
+    /// The Escape key.
+    Esc,
+    /// Ctrl+C (an ordinary key in raw mode, not a SIGINT).
+    CtrlC,
+}
+
+impl CancelSource {
+    /// The yellow status line committed to scrollback on cancel, naming the key.
+    fn cancel_line(self) -> &'static str {
+        match self {
+            CancelSource::Esc => "[cancelled by Esc]",
+            CancelSource::CtrlC => "[cancelled by ^C]",
+        }
+    }
+}
+
+/// Cancel the in-flight turn if one is streaming, and report whether it did.
+///
+/// This is the shared Esc / Ctrl+C turn-control path (VAL-CHAT-013 /
+/// VAL-CHAT-014). With a turn in flight it: cancels the session token so the
+/// agent loop drops its request at the next await point, clears the loader and
+/// latches the cancel flag in one step (so the turn runner suppresses the
+/// cancelled turn's error banner), commits the yellow `[cancelled …]` line, and
+/// repaints — the user sees the loader vanish and the cancel line land at once.
+///
+/// Idle (no loader / no streaming turn) it does nothing and returns `false`, so
+/// the caller can fall through: Esc reaches the editor, Ctrl+C is a visible
+/// no-op. Cancellation is committed exactly once even if the key repeats, because
+/// clearing `streaming` immediately makes a second press see no in-flight turn.
+fn try_cancel_turn(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    cancel: &Arc<Mutex<hand_agent::CancellationToken>>,
+    source: CancelSource,
+) -> bool {
+    if !cancel_in_flight_turn(state, cancel) {
+        return false;
+    }
+    commit(
+        state,
+        requester,
+        chat::status_lines_for(source.cancel_line()),
+    );
+    true
+}
+
+/// The side-effecting core of [`try_cancel_turn`], minus the scrollback commit
+/// and repaint: mutate the shared state and cancel the session token, reporting
+/// whether a turn was actually in flight.
+///
+/// Kept as a `FrameRequester`-free function so the cancel decision — idle is a
+/// no-op, streaming clears the loader, latches the cancel flag, and cancels the
+/// token exactly once — is unit-tested with a real `DriverState` and a real
+/// `CancellationToken`, without a running scheduler.
+fn cancel_in_flight_turn(
+    state: &Arc<Mutex<DriverState>>,
+    cancel: &Arc<Mutex<hand_agent::CancellationToken>>,
+) -> bool {
+    {
+        let mut guard = lock_state(state);
+        if !guard.is_streaming() {
+            return false;
+        }
+        // Clear the loader + latch the cancel flag while holding the lock so a
+        // rapid second Esc/Ctrl+C can't race a duplicate cancel line.
+        guard.mark_cancelled();
+    }
+    // Cancel the session token so the in-flight `send_message` unwinds. The token
+    // is behind its own Mutex on the session; a poisoned lock just means the turn
+    // already tore down, so a failed lock is harmless here.
+    if let Ok(token) = cancel.lock() {
+        token.cancel();
+    }
+    true
+}
+
+/// Whether a submitted line is a `/quit`-family command (`/quit`, `/exit`, `/q`,
+/// case-insensitive). The full slash table is a follow-up feature; the skeleton
+/// only needs the exit aliases wired.
+fn is_quit_command(trimmed: &str) -> bool {
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return false;
+    };
+    // Only the bare command (no args) counts as a quit.
+    let name = rest.split_whitespace().next().unwrap_or("");
+    matches!(name.to_ascii_lowercase().as_str(), "quit" | "exit" | "q")
+}
+
+/// Open the current chat-input buffer in the external editor and apply the result
+/// (Ctrl+G, VAL-EDITOR-020).
+///
+/// Resolves the editor from `$VISUAL` (preferred) or `$EDITOR`; with neither set
+/// it lands the guidance line and does nothing. Otherwise it performs the terminal
+/// handoff: suspend the session guard (yield raw mode so the editor gets a clean
+/// cooked TTY), spawn the editor on the inherited terminal, wait for it, resume the
+/// guard (re-enter raw mode), and request a full repaint (the scheduler's per-frame
+/// viewport wipe redraws the bottom UI with no interleaved / stale frame). A
+/// save-and-exit replaces the buffer; a non-zero exit / spawn failure leaves the
+/// buffer untouched and commits the red error status line.
+///
+/// The blocking editor run is offloaded to `spawn_blocking` so the async input loop
+/// is not stalled on the child; the guard is suspended for exactly that span.
+async fn open_external_editor(
+    editor: &SharedEditor,
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    guard: &SessionGuard,
+) {
+    let Some(command) = external_editor::resolve_editor_command() else {
+        commit(
+            state,
+            requester,
+            chat::error_lines("[editor: set $VISUAL or $EDITOR to use Ctrl+G]"),
+        );
+        return;
+    };
+    let Some((program, args)) = external_editor::split_editor_command(&command) else {
+        commit(
+            state,
+            requester,
+            chat::error_lines("[editor: $VISUAL/$EDITOR is blank]"),
+        );
+        return;
+    };
+
+    // Snapshot the current buffer to seed the editor.
+    let buffer = lock_editor(editor).text();
+
+    // Terminal handoff: yield raw mode, run the editor on the inherited TTY, then
+    // re-enter raw mode. The blocking run is offloaded so the input loop's task is
+    // not wedged; the guard stays live (its teardown contract is untouched).
+    guard.suspend();
+    let outcome = tokio::task::spawn_blocking(move || {
+        external_editor::run_editor_roundtrip(&program, &args, &buffer)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        external_editor::EditorOutcome::Failed(format!("[editor task failed: {e}]"))
+    });
+    guard.resume();
+
+    match outcome {
+        external_editor::EditorOutcome::Replaced(text) => {
+            lock_editor(editor).set_text(&text);
+        }
+        external_editor::EditorOutcome::Failed(msg) => {
+            commit(state, requester, chat::error_lines(&msg));
+        }
+    }
+    // A full repaint redraws the bottom UI cleanly after the editor's screen — no
+    // interleaved or stale frame survives the handoff.
+    requester.request_frame();
+}
+
+/// Paste the system clipboard into the chat editor (Ctrl+V, VAL-IMG-010).
+///
+/// Text lands verbatim at the caret; an image is written to a temp PNG and its
+/// absolute path inserted at the caret; an empty / unavailable clipboard leaves the
+/// editor unchanged and commits a red status line. The clipboard reads happen here
+/// and the decision is delegated to [`clipboard::resolve_paste`] (pure, tested),
+/// so this wrapper only performs the reads and applies the outcome.
+fn paste_clipboard(
+    editor: &SharedEditor,
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+) {
+    let text = crate::utils::clipboard::read_clipboard_text();
+    let image = crate::utils::clipboard_image::read_clipboard_image().map_err(|e| e.to_string());
+    let outcome = clipboard::resolve_paste(text, image, &std::env::temp_dir());
+
+    match outcome {
+        clipboard::PasteOutcome::InsertText(text) => {
+            lock_editor(editor).insert_str(&text);
+        }
+        clipboard::PasteOutcome::InsertPath(path) => {
+            lock_editor(editor).insert_str(&path);
+        }
+        clipboard::PasteOutcome::Failed(msg) => {
+            commit(state, requester, chat::error_lines(&msg));
+        }
+    }
+}
+
+/// State the turn-runner task owns.
+struct TurnRunner {
+    session: AgentSession,
+    cwd: PathBuf,
+    watchdog: Watchdog,
+    state: Arc<Mutex<DriverState>>,
+    editor: SharedEditor,
+    footer: SharedFooter,
+    requester: FrameRequester,
+    submits: mpsc::UnboundedReceiver<String>,
+    /// The shared overlay stack the runner mounts a selector on (e.g. `/model`).
+    /// Shared with the input loop, which routes keys into the mounted selector
+    /// while the runner awaits its outcome.
+    overlays: SharedOverlay,
+    /// The shared "top overlay finished" flag handed to a mounted selector so the
+    /// input loop can close the dialog once the selector emits its outcome.
+    overlay_done: DoneSignal,
+    /// The live app-layer keybindings. `/reload` swaps the table behind this
+    /// handle (new chords fire, old ones stop), and each registry-backed selector
+    /// snapshots its navigation keys from it when it mounts (VAL-OVERLAY-021).
+    keybindings: SharedKeybindings,
+}
+
+/// The turn-runner task: drains submitted user turns and runs each to
+/// completion under the watchdog.
+///
+/// It is deliberately **separate** from the event applier. Multiplexing a
+/// running turn against the agent-event stream in one `select!` is a
+/// cancellation trap: `send_message` emits events *through the same channel*, so
+/// an arriving event would make the events arm ready and cancel the in-flight
+/// turn future — dropping it mid-request before it ever completes. Draining
+/// events in their own always-running task means a turn future is polled to
+/// completion and never cancelled, while its events still render live.
+///
+/// The task never touches the process lifecycle. On timeout the watchdog cancels
+/// the session token and the banner is committed, leaving the session usable
+/// (VAL-CHAT-022).
+async fn turn_runner(mut runner: TurnRunner) {
+    while let Some(text) = runner.submits.recv().await {
+        run_turn(&mut runner, &text).await;
+    }
+    // Submit channel closed — teardown.
+}
+
+/// The event applier: drains agent session events and commits their scrollback
+/// representation, always running independently of the turn runner.
+///
+/// Because it owns only the `Send` state + requester (not the session or
+/// editor), it can run as its own task without contending for the turn runner's
+/// `&mut session`. It applies events as they stream in, so a turn's output
+/// renders live while `send_message` is still in flight in the turn runner.
+async fn event_applier(
+    mut events: mpsc::UnboundedReceiver<AgentSessionEvent>,
+    state: Arc<Mutex<DriverState>>,
+    requester: FrameRequester,
+) {
+    while let Some(event) = events.recv().await {
+        apply_event(&state, &requester, &event);
+    }
+    // Event channel closed: the session (and its listener) is gone.
+}
+
+/// Queue a finalized scrollback block and request a repaint. Empty blocks are
+/// dropped by [`DriverState::queue_commit`], so a no-content update is silent.
+fn commit(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester, lines: Vec<Line<'static>>) {
+    if lines.is_empty() {
+        return;
+    }
+    lock_state(state).queue_commit(lines);
+    requester.request_frame();
+}
+
+/// Run one submitted turn under the watchdog.
+///
+/// The turn is bracketed with a single, balanced OSC 133 A/B/C sequence
+/// (VAL-CHAT-017 / VAL-CHAT-034): `A` (prompt start) before the user echo, `B`
+/// (command start) after it, and `C` (command end) once the whole assistant
+/// response — including any interleaved tool calls — has landed. The count stays
+/// balanced regardless of how many tool calls the turn made, because the marks
+/// live here on the turn boundary, not in the per-event apply path. OSC 9;4
+/// progress goes indeterminate while the turn runs and clears (or errors) at the
+/// end (VAL-CHAT-018).
+async fn run_turn(runner: &mut TurnRunner, text: &str) {
+    // Inline `!cmd` bash runs locally instead of going to the model: it is
+    // executed through `session.run_bash`, its output committed as a bash box,
+    // and the footer refreshed (a `!cd`-style change reflects on the next turn).
+    // It never touches the OSC-133 turn brackets or the assistant-message path.
+    if let Some(parsed) = bash::parse_inline_bash(text) {
+        run_bash_inline(runner, parsed).await;
+        return;
+    }
+
+    // `/compact` runs the async summarizer, so it is intercepted *before* the
+    // sync slash dispatch: it shows the compaction loader, calls
+    // `session.compact()` / `compact_with()` (which emits the
+    // `[Compacting context...]` / `[Compaction complete]` status lines through
+    // the event applier), and commits a collapsible compaction summary. It owns
+    // the streaming loader for its duration, so it does not clear it up front.
+    if let Some(steer) = slash::parse_compact(text) {
+        run_compact(runner, steer).await;
+        return;
+    }
+
+    // `/model` (bare) opens the model selector overlay, which awaits the user's
+    // pick, so it is intercepted here on the async turn runner — the one task that
+    // owns `&mut session` and can apply the switch. Like `/compact`, it runs
+    // *before* the sync slash dispatch. `/model <pattern>` still routes through the
+    // sync dispatch (it is a non-interactive switch, not an overlay).
+    if slash::is_open_model_selector(text) {
+        run_model_selector(runner).await;
+        return;
+    }
+
+    // `/resume` opens the session picker overlay, which awaits the user's pick and
+    // then switches + replays, so it is intercepted here on the async turn runner
+    // (the one task that owns `&mut session`), *before* the sync slash dispatch —
+    // like `/model`.
+    if slash::is_open_resume_picker(text) {
+        run_resume_picker(runner).await;
+        return;
+    }
+
+    // The config-selector family (`/thinking`, `/theme`, `/settings`, and
+    // `/model <pattern>`) is intercepted here for the same reason as `/model`: the
+    // bare forms mount a modal overlay and await the pick, and the direct-arg forms
+    // apply against `&mut session`. Both run on the turn runner, *before* the sync
+    // slash dispatch.
+    if let Some(action) = slash::config_selector_action(text) {
+        run_config_selector(runner, action).await;
+        return;
+    }
+
+    // The picker-selector family (`/tree`, `/scoped-models`, `/fork`) mounts a modal
+    // overlay and awaits the pick, so it is intercepted here on the async turn runner
+    // (the one task that owns `&mut session`), *before* the sync slash dispatch — the
+    // same reason as `/model` / `/resume` / the config family.
+    if let Some(action) = slash::picker_selector_action(text) {
+        run_picker_selector(runner, action).await;
+        return;
+    }
+
+    // The login family (`/login`, `/logout`) mounts a modal overlay (provider picker
+    // → key dialog, or the OAuth flow) and awaits, or clears credentials, so it is
+    // intercepted here on the async turn runner (the one task that owns
+    // `&mut session`), *before* the sync slash dispatch — the same reason as
+    // `/model` / `/resume` / the config + picker families.
+    if let Some(action) = slash::login_action(text) {
+        run_login(runner, action).await;
+        return;
+    }
+
+    // `/hotkeys` renders the keyboard-shortcut listing against the *live* app-layer
+    // table (so user overrides surface, VAL-COMPAT-006). Intercepted here because
+    // the runner holds the live shared bindings; the sync-dispatch fallback only
+    // knows the defaults.
+    if slash::is_hotkeys(text) {
+        run_hotkeys(runner);
+        return;
+    }
+
+    // `/reload` reloads the app-layer keybindings from disk and swaps the live
+    // shared table (new chords fire, old ones stop) with a status line reporting
+    // the outcome (VAL-COMPAT-020). Intercepted here because it mutates the shared
+    // keybindings the input loop and selectors read; run *before* the sync dispatch
+    // so it does not fall through to the generic `[reload …]` stub.
+    if slash::is_reload(text) {
+        run_reload(runner);
+        return;
+    }
+
+    // Slash commands are intercepted here — the turn runner is the one place
+    // that owns `&mut session`, so the session-lifecycle commands (`/new`,
+    // `/clone`, `/import`, `/name`) run against it directly. The `/quit` family
+    // never reaches the runner (the input loop breaks on it), and a slash
+    // command never touches the model, the OSC-133 turn brackets, or the
+    // streaming loader — so clear the streaming flag the input loop optimistically
+    // set on submit and run the action synchronously.
+    if slash::is_slash_command(text) {
+        run_slash_command(runner, text);
+        return;
+    }
+
+    // Clear any stale cancel flag and in-band-error latch from a prior turn so a
+    // cancellation only ever suppresses *this* turn's error banner (VAL-CHAT-013 /
+    // VAL-CHAT-014) and a prior failure never masks this turn's progress-clear
+    // (VAL-CHAT-018).
+    {
+        let mut guard = lock_state(&runner.state);
+        guard.cancel_requested = false;
+        guard.reset_turn_error();
+    }
+
+    // OSC 133 A — prompt start, before the user echo.
+    queue_raw(&runner.state, &runner.requester, PromptMark::PromptStart);
+
+    // Echo the user message into scrollback immediately for input responsiveness.
+    let echo = {
+        let ctx = render_context(&runner.state);
+        chat::render_update(
+            &ChatUpdate::AppendUser {
+                text: text.to_string(),
+            },
+            ctx,
+        )
+        .unwrap_or_default()
+    };
+    commit(&runner.state, &runner.requester, echo);
+
+    // OSC 133 B — command start, after the user echo; OSC 9;4 indeterminate while
+    // the turn is in flight.
+    queue_raw(&runner.state, &runner.requester, PromptMark::CommandStart);
+    queue_progress(
+        &runner.state,
+        &runner.requester,
+        ProgressState::Indeterminate,
+    );
+
+    // Streaming: loader on + border tint while the turn runs.
+    set_streaming(&runner.state, &runner.editor, &runner.requester, true);
+
+    // Grab the cancel handle before the `&mut` send borrow: `cancel_handle`
+    // borrows `&self`, `send_message` borrows `&mut self`, so they cannot overlap.
+    let cancel = runner.session.cancel_handle();
+    let send = runner.session.send_message(text);
+    let progress_end = match run_under_watchdog(runner.watchdog, send, &cancel).await {
+        TurnOutcome::Completed => ProgressState::Clear,
+        TurnOutcome::Failed(e) => {
+            // A turn cancelled by the user (Esc / Ctrl+C) returns an error from
+            // `send_message`, but that is not a failure: the yellow `[cancelled …]`
+            // line already landed from the input loop, so suppress the red banner
+            // and clear (not error) the progress. A genuine failure — a missing
+            // credential, a send error — was not user-cancelled, so it takes the
+            // red-banner route with the loader cleared (VAL-CHAT-016).
+            let cancelled = lock_state(&runner.state).take_cancel_requested();
+            if failed_turn_shows_banner(cancelled) {
+                commit(
+                    &runner.state,
+                    &runner.requester,
+                    chat::error_lines(&format!("send failed: {e}")),
+                );
+                ProgressState::Error
+            } else {
+                ProgressState::Clear
+            }
+        }
+        TurnOutcome::TimedOut => {
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::error_lines(&runner.watchdog.timeout_banner()),
+            );
+            ProgressState::Error
+        }
+    };
+
+    // OSC 133 C — command end, closing the balanced A/B/C region; then the
+    // progress terminal state. `progress_end` is the outcome-derived base — a
+    // `Clear` when `send_message` returned `Ok`, an `Error` on a `send_message`
+    // failure / timeout. But a provider stream error surfaces *in band* as a
+    // `StopReason::Error` assistant message with `send_message` still returning
+    // `Ok` (so the outcome reads `Completed` → base `Clear`); the event applier
+    // latched that failure, so `queue_terminal_progress` upgrades the base to
+    // `Error` and the trailing `Clear` never overwrites the red state
+    // (VAL-CHAT-018).
+    queue_raw(&runner.state, &runner.requester, PromptMark::CommandEnd);
+    lock_state(&runner.state).queue_terminal_progress(progress_end);
+    runner.requester.request_frame();
+
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    // Refresh the footer from post-turn session state: the running usage
+    // accumulator (bumped on each MessageEnd), the re-detected git branch (so a
+    // `!git checkout -b tmp` shows on the next turn), and the current
+    // thinking-level / context %. The rebuild reads the session, so it lives here
+    // in the turn runner (which owns it) rather than in the event applier.
+    refresh_footer(runner);
+}
+
+/// Execute an inline `!cmd` (or `!!cmd`) bash submission.
+///
+/// Echoes the `$ cmd` header live in the active-area preview and shows the
+/// running loader while the command runs, then commits the finalized bash box
+/// (header + output + exit-code footer) to scrollback once the process exits
+/// (VAL-CHAT-009). A `!!cmd` renders the frame dim (excluded from the LLM
+/// context). Context truncation surfaces the yellow `Output truncated. Full
+/// output: <path>` footnote, the path existing on disk (VAL-CHAT-010). A bare
+/// `!` / `!!` commits the yellow `[bash] empty command` notice and runs nothing.
+async fn run_bash_inline(runner: &mut TurnRunner, parsed: bash::ParsedBash) {
+    if parsed.command.is_empty() {
+        let palette = lock_state(&runner.state).palette();
+        commit(
+            &runner.state,
+            &runner.requester,
+            vec![bash::empty_command_notice(&palette)],
+        );
+        return;
+    }
+
+    // Live header echo in the preview + running loader while the command runs.
+    let header = bash::ParsedBash {
+        command: parsed.command.clone(),
+        exclude_from_context: parsed.exclude_from_context,
+    };
+    {
+        let mut guard = lock_state(&runner.state);
+        let palette = guard.palette();
+        let running = bash::bash_block_lines(
+            &header,
+            "",
+            bash::BashOutcome::Exited(None),
+            None,
+            true,
+            guard.size.cols,
+            &palette,
+        );
+        guard.set_streaming_preview(Some(running));
+    }
+    set_streaming(&runner.state, &runner.editor, &runner.requester, true);
+
+    let outcome = runner.session.run_bash(&parsed.command, 0).await;
+
+    // Clear the live preview + loader before committing the finalized box.
+    lock_state(&runner.state).set_streaming_preview(None);
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match outcome {
+        Ok(run) => {
+            let bash_outcome = if run.aborted {
+                bash::BashOutcome::Cancelled
+            } else {
+                bash::BashOutcome::Exited(run.result.exit_code)
+            };
+            let full_output_path = run
+                .result
+                .full_output_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned());
+            let (width, palette) = {
+                let guard = lock_state(&runner.state);
+                (guard.size.cols, guard.palette())
+            };
+            let lines = bash::bash_block_lines(
+                &parsed,
+                &run.result.output,
+                bash_outcome,
+                full_output_path.as_deref(),
+                false,
+                width,
+                &palette,
+            );
+            commit(&runner.state, &runner.requester, lines);
+        }
+        Err(e) => {
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::error_lines(&format!("bash failed: {e}")),
+            );
+        }
+    }
+
+    // A `!cmd` may change the working tree (branch checkout, file writes); refresh
+    // the footer so the next-turn view reflects it.
+    refresh_footer(runner);
+}
+
+/// Execute a submitted slash command against the live session.
+///
+/// The input loop optimistically marks the state streaming on every submit
+/// (so the loader shows the instant Enter is pressed, before the first event).
+/// A slash command has no streaming turn, so clear that flag first, then
+/// dispatch the action through the reused parsing layer. Session-lifecycle
+/// commands mutate `&mut session`; the footer is rebuilt inside the handlers
+/// that change session state, so no post-dispatch refresh is needed here.
+fn run_slash_command(runner: &mut TurnRunner, text: &str) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    let _ = slash::dispatch_slash(
+        text,
+        &mut runner.session,
+        &runner.cwd,
+        &runner.state,
+        &runner.footer,
+        &runner.requester,
+    );
+}
+
+/// `/hotkeys` — render the keyboard-shortcut listing from the *live* app-layer
+/// table, so a user override (or a `/reload`ed change) surfaces immediately and the
+/// listing has no dead entries (VAL-COMPAT-006). Committed as a labelled box, the
+/// same chrome the other info commands use.
+fn run_hotkeys(runner: &mut TurnRunner) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    let text = {
+        let guard = runner.keybindings.lock().unwrap_or_else(|e| e.into_inner());
+        crate::modes::interactive::slash_commands::SlashCommandTable::hotkeys_text(&guard)
+    };
+    commit(
+        &runner.state,
+        &runner.requester,
+        chat::status_lines_for(&text),
+    );
+}
+
+/// `/reload` — re-read the app-layer keybindings from disk and swap the live
+/// shared table so the new chords take effect immediately (the old ones stop),
+/// then land a status line reporting the outcome (VAL-COMPAT-020).
+///
+/// The scope of *this* feature is the keybindings reload. On success it swaps the
+/// shared table in place (the input loop and future selector opens read the new
+/// bindings on their next key) and reports how many overrides + diagnostics the
+/// reload produced. A load error (unreadable / syntactically broken file) leaves
+/// the previous table in place and lands a yellow notice — a bad edit never wipes
+/// working bindings. Any load diagnostics are surfaced as yellow lines, same as at
+/// startup.
+fn run_reload(runner: &mut TurnRunner) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match KeyBindings::load_for_cwd(&runner.cwd) {
+        Ok(reloaded) => {
+            let diagnostics: Vec<Vec<Line<'static>>> = diagnostic_lines(reloaded.diagnostics());
+            let diag_count = reloaded.diagnostics().len();
+            // Swap the live table so the input loop's next resolve and the next
+            // selector open both see the reloaded bindings.
+            {
+                let mut guard = runner.keybindings.lock().unwrap_or_else(|e| e.into_inner());
+                *guard = reloaded;
+            }
+            // Re-point the editor's submit chord from the reloaded table so a
+            // changed `submit:` binding takes effect on the next key, mirroring the
+            // startup wiring (VAL-COMPAT-002 / VAL-COMPAT-020).
+            lock_editor(&runner.editor)
+                .set_submit_key(&resolved_key_id(&runner.keybindings, Action::Submit));
+            for line in diagnostics {
+                commit(&runner.state, &runner.requester, line);
+            }
+            let summary = if diag_count == 0 {
+                "[reloaded keybindings]".to_string()
+            } else {
+                format!("[reloaded keybindings — {diag_count} diagnostic(s) above]")
+            };
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::status_lines_for(&summary),
+            );
+        }
+        Err(e) => {
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::status_lines_for(&format!("[reload failed: {e} — kept current keybindings]")),
+            );
+        }
+    }
+}
+
+/// Execute `/compact` against the live session (VAL-CHAT-027).
+///
+/// `/compact` is the one slash command that awaits, so it runs here on the turn
+/// runner (which owns `&mut session`) rather than through the sync dispatch. It:
+///
+/// 1. names the working-loader `Compacting context…` and turns it on;
+/// 2. calls `session.compact()` / `compact_with(steer)`, whose `CompactionStart`
+///    / `CompactionEnd` events land the `[Compacting context...]` /
+///    `[Compaction complete]` status lines through the event applier;
+/// 3. on success commits a *collapsible* compaction summary (collapsed, with the
+///    `(ctrl+r to expand)` hint) and remembers it so Ctrl+R can expand it;
+/// 4. on failure (e.g. no credential) commits the red `[compact failed: …]`
+///    banner.
+///
+/// The loader is cleared and its message reset whichever way it ends.
+async fn run_compact(runner: &mut TurnRunner, steer: Option<String>) {
+    // Name the loader for its duration, then turn it on. The input loop marked
+    // streaming on submit; naming the loader makes it read `Compacting context…`.
+    lock_state(&runner.state).loader_message = Some("Compacting context…".to_string());
+    set_streaming(&runner.state, &runner.editor, &runner.requester, true);
+
+    // Snapshot the pre-compaction message count so the summary reports it.
+    let tokens_before = runner.session.message_count() as u64;
+    let result = match steer.as_deref() {
+        Some(s) => runner.session.compact_with(s).await,
+        None => runner.session.compact().await,
+    };
+
+    // Reset the loader message + clear the loader before committing the outcome.
+    lock_state(&runner.state).loader_message = None;
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match result {
+        Ok(summary) => {
+            let entry = summary::CollapsibleSummary::compaction(summary, tokens_before);
+            let lines = {
+                let mut guard = lock_state(&runner.state);
+                let width = guard.size.cols;
+                let palette = guard.palette();
+                let lines = summary::summary_lines(&entry, width, &palette);
+                guard.remember_summary(entry);
+                lines
+            };
+            commit(&runner.state, &runner.requester, lines);
+        }
+        Err(e) => {
+            commit(
+                &runner.state,
+                &runner.requester,
+                chat::error_lines(&format!("[compact failed: {e}]")),
+            );
+        }
+    }
+
+    // Compaction changed the transcript; refresh the footer so context % rebases.
+    refresh_footer(runner);
+}
+
+/// Open the `/model` selector overlay and apply the user's pick (VAL-OVERLAY-*).
+///
+/// The input loop optimistically marked the state streaming on submit; a selector
+/// is not a streaming turn, so clear that first. Then hand off to
+/// [`selectors::open_model_selector`], which mounts the modal dialog, awaits the
+/// single outcome (fed by the input loop driving the dialog), applies it
+/// (`session.set_model` + footer refresh + status line) or reports the cancel, and
+/// returns once the dialog closes.
+async fn run_model_selector(runner: &mut TurnRunner) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    selectors::open_model_selector(
+        &mut runner.session,
+        &runner.cwd,
+        &runner.overlays,
+        &runner.overlay_done,
+        &runner.state,
+        &runner.footer,
+        &runner.requester,
+    )
+    .await;
+}
+
+/// Open the `/resume` session picker overlay and, on a pick, switch to and replay
+/// the chosen session (VAL-OVERLAY-010 / VAL-CHAT-012 / VAL-CHAT-032).
+///
+/// The input loop optimistically marked the state streaming on submit; a picker is
+/// not a streaming turn, so clear that first. Then hand off to
+/// [`selectors::open_resume_picker`], which lists the resumable sessions, mounts the
+/// modal dialog, awaits the single outcome (fed by the input loop driving the
+/// dialog), switches + replays the pick (or reports the cancel), and returns once
+/// the dialog closes.
+async fn run_resume_picker(runner: &mut TurnRunner) {
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+    let nav = keys::NavKeys::snapshot(&runner.keybindings);
+    selectors::open_resume_picker(
+        &mut runner.session,
+        &runner.cwd,
+        &runner.overlays,
+        &runner.overlay_done,
+        &runner.state,
+        &runner.footer,
+        &runner.requester,
+        nav,
+    )
+    .await;
+}
+
+/// Route a config-selector command (`/thinking`, `/theme`, `/settings`,
+/// `/model <pattern>`) to its overlay open or direct-arg apply (VAL-OVERLAY-013 /
+/// -014 / -017 / -018 / -025 / -026 / -036).
+///
+/// The input loop optimistically marked the state streaming on submit; a selector
+/// (or a direct-arg apply) is not a streaming turn, so clear that first. Then:
+///
+/// - the **bare** forms (`/thinking`, `/theme`, `/settings`) mount a modal overlay
+///   and await the pick;
+/// - the **direct-arg** forms (`/thinking <level>`, `/theme <name>`,
+///   `/model <pattern>`) apply immediately with a status line and no dialog.
+///
+/// The dialog-vs-direct-arg split is carried by the typed
+/// [`SlashCommandAction`](crate::modes::interactive::slash_commands::SlashCommandAction)
+/// the driver parsed before entering here.
+async fn run_config_selector(
+    runner: &mut TurnRunner,
+    action: crate::modes::interactive::slash_commands::SlashCommandAction,
+) {
+    use crate::modes::interactive::slash_commands::SlashCommandAction;
+
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match action {
+        // `/thinking` (bare) opens the ladder; `/thinking <level>` applies directly.
+        SlashCommandAction::OpenThinkingSelector { inline_level } => match inline_level {
+            None => {
+                selectors::open_thinking_selector(
+                    &mut runner.session,
+                    &runner.cwd,
+                    &runner.overlays,
+                    &runner.overlay_done,
+                    &runner.state,
+                    &runner.footer,
+                    &runner.requester,
+                )
+                .await;
+            }
+            Some(level) => selectors::apply_thinking_inline(
+                &mut runner.session,
+                &runner.cwd,
+                &level,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            ),
+        },
+        // `/theme` (bare) opens the picker; `/theme <name>` applies directly.
+        SlashCommandAction::Theme(name) => match name {
+            None => {
+                selectors::open_theme_selector(
+                    &mut runner.session,
+                    &runner.overlays,
+                    &runner.overlay_done,
+                    &runner.state,
+                    &runner.requester,
+                )
+                .await;
+            }
+            Some(name) => selectors::apply_theme_inline(
+                &mut runner.session,
+                &name,
+                &runner.state,
+                &runner.requester,
+            ),
+        },
+        // `/settings` opens the editable settings dialog (M2 SettingsList).
+        SlashCommandAction::OpenSettingsSelector => {
+            let nav = keys::NavKeys::snapshot(&runner.keybindings);
+            selectors::open_settings_selector(
+                &mut runner.session,
+                &runner.cwd,
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+                nav,
+            )
+            .await;
+        }
+        // `/model <pattern>` is a non-interactive switch (bare `/model` is caught
+        // earlier by `is_open_model_selector`).
+        SlashCommandAction::ModelByPattern(pattern) => selectors::apply_model_pattern(
+            &mut runner.session,
+            &runner.cwd,
+            &pattern,
+            &runner.state,
+            &runner.footer,
+            &runner.requester,
+        ),
+        // `config_selector_action` only ever yields the four arms above; any other
+        // action means the routing predicate and this match disagree — dispatch it
+        // synchronously so it is never silently dropped.
+        other => {
+            let _ = slash::apply_slash_action(
+                other,
+                &mut runner.session,
+                &runner.cwd,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            );
+        }
+    }
+}
+
+/// Route a picker-selector command (`/tree`, `/scoped-models`, `/fork`) to its
+/// overlay open (VAL-OVERLAY-011 / -019 / -023 / -024 / -031 / -033).
+///
+/// The input loop optimistically marked the state streaming on submit; a picker is
+/// not a streaming turn, so clear that first. Then mount the picker's modal overlay
+/// and await the pick — each open owns its no-data degradation (a non-directory
+/// `/tree`, an empty registry `/scoped-models`, a user-message-less `/fork` land the
+/// status line without opening) and applies its result against `&mut session`.
+async fn run_picker_selector(
+    runner: &mut TurnRunner,
+    action: crate::modes::interactive::slash_commands::SlashCommandAction,
+) {
+    use crate::modes::interactive::slash_commands::SlashCommandAction;
+
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match action {
+        // `/tree` (bare or `<subdir>`) opens the directory picker.
+        SlashCommandAction::OpenTreeSelector(arg) => {
+            let nav = keys::NavKeys::snapshot(&runner.keybindings);
+            selectors::open_tree_selector(
+                &runner.cwd,
+                arg.as_deref(),
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.requester,
+                nav,
+            )
+            .await;
+        }
+        // `/scoped-models` opens the session-only multi-select.
+        SlashCommandAction::OpenScopedModelsSelector => {
+            selectors::open_scoped_models_selector(
+                &mut runner.session,
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.requester,
+            )
+            .await;
+        }
+        // `/fork` (bare or `<entry-id>`) opens the fork-from-message picker.
+        SlashCommandAction::Fork(_) => {
+            let nav = keys::NavKeys::snapshot(&runner.keybindings);
+            selectors::open_fork_selector(
+                &mut runner.session,
+                &runner.cwd,
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+                nav,
+            )
+            .await;
+        }
+        // `picker_selector_action` only ever yields the three arms above; any other
+        // action means the routing predicate and this match disagree — dispatch it
+        // synchronously so it is never silently dropped.
+        other => {
+            let _ = slash::apply_slash_action(
+                other,
+                &mut runner.session,
+                &runner.cwd,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            );
+        }
+    }
+}
+
+/// Route a login-family command (`/login`, `/logout`) to its overlay flow
+/// (VAL-OVERLAY-015 / -016 / -027 / -028 / -029 / -034).
+///
+/// The input loop optimistically marked the state streaming on submit; a login flow
+/// is not a streaming turn, so clear that first. Then:
+///
+/// - `/login` (bare) opens the provider picker → the chosen provider's flow (OAuth
+///   for `anthropic` / `openai-codex` / `github-copilot`, else the API-key dialog);
+///   `/login <provider>` skips the picker and goes straight to that provider's flow,
+///   split case-insensitively (VAL-OVERLAY-034);
+/// - `/logout` clears stored credentials so the `configured` badge disappears on the
+///   next `/login` (VAL-OVERLAY-029).
+async fn run_login(
+    runner: &mut TurnRunner,
+    action: crate::modes::interactive::slash_commands::SlashCommandAction,
+) {
+    use crate::modes::interactive::slash_commands::SlashCommandAction;
+
+    set_streaming(&runner.state, &runner.editor, &runner.requester, false);
+
+    match action {
+        SlashCommandAction::OpenLoginDialog { provider } => {
+            login::open_login(
+                &mut runner.session,
+                provider.as_deref(),
+                &runner.overlays,
+                &runner.overlay_done,
+                &runner.state,
+                &runner.requester,
+            )
+            .await;
+        }
+        SlashCommandAction::Logout => {
+            login::open_logout(&mut runner.session, None, &runner.state, &runner.requester).await;
+        }
+        // `login_action` only ever yields the two arms above; any other action means
+        // the routing predicate and this match disagree — dispatch it synchronously
+        // so it is never silently dropped.
+        other => {
+            let _ = slash::apply_slash_action(
+                other,
+                &mut runner.session,
+                &runner.cwd,
+                &runner.state,
+                &runner.footer,
+                &runner.requester,
+            );
+        }
+    }
+}
+
+/// Whether a failed turn commits the red `send failed` banner.
+///
+/// A user cancellation (Esc / Ctrl+C) surfaces as a `send_message` error, but the
+/// yellow `[cancelled …]` line already landed from the input loop, so no red
+/// banner is shown. A genuine failure (a missing credential, a transport error)
+/// was not user-cancelled, so it shows the banner (VAL-CHAT-016). Kept as a free
+/// fn so this either/or decision is unit-tested without a running turn.
+fn failed_turn_shows_banner(cancelled: bool) -> bool {
+    !cancelled
+}
+
+/// Rebuild the footer view-model from current session state and the running usage
+/// accumulator, then request a repaint so the new fields show.
+fn refresh_footer(runner: &TurnRunner) {
+    let usage = lock_state(&runner.state).usage;
+    let view = build_footer_view(&runner.session, &runner.cwd, usage);
+    *lock_footer(&runner.footer) = view;
+    runner.requester.request_frame();
+}
+
+/// Queue an OSC 133 prompt mark for the draw closure to write, and request a
+/// frame so it is flushed promptly.
+fn queue_raw(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester, mark: PromptMark) {
+    lock_state(state).queue_raw(mark.sequence());
+    requester.request_frame();
+}
+
+/// Queue an OSC 9;4 progress update for the draw closure to write, and request a
+/// frame so it is flushed promptly.
+fn queue_progress(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    progress: ProgressState,
+) {
+    lock_state(state).queue_raw(progress.sequence());
+    requester.request_frame();
+}
+
+/// How a turn ended under the watchdog.
+#[derive(Debug)]
+enum TurnOutcome {
+    /// The turn completed within the ceiling.
+    Completed,
+    /// The turn returned an error within the ceiling.
+    Failed(CodingAgentError),
+    /// The turn exceeded the ceiling; the watchdog cancelled it.
+    TimedOut,
+}
+
+/// Run a turn future under the watchdog ceiling, cancelling the session token on
+/// elapse.
+///
+/// This is the watchdog-integration seam VAL-CHAT-022 probes: on timeout it
+/// cancels the shared [`CancellationToken`](hand_agent::CancellationToken) so the
+/// agent loop drops its in-flight future, then reports [`TurnOutcome::TimedOut`]
+/// so the caller surfaces the banner — while the session (and its refreshed
+/// cancel token) stays usable for the next turn. Kept as a free async fn over the
+/// future + cancel handle so the timeout / cancel wiring is unit-tested with a
+/// `pending()` future and a real token, without the model layer.
+async fn run_under_watchdog<F>(
+    watchdog: Watchdog,
+    turn: F,
+    cancel: &Arc<std::sync::Mutex<hand_agent::CancellationToken>>,
+) -> TurnOutcome
+where
+    F: std::future::Future<Output = Result<Vec<model::Message>, CodingAgentError>>,
+{
+    match tokio::time::timeout(watchdog.turn_timeout(), turn).await {
+        Ok(Ok(_)) => TurnOutcome::Completed,
+        Ok(Err(e)) => TurnOutcome::Failed(e),
+        Err(_) => {
+            if let Ok(token) = cancel.lock() {
+                token.cancel();
+            }
+            TurnOutcome::TimedOut
+        }
+    }
+}
+
+/// Apply a single agent session event.
+///
+/// Finalized blocks commit into immutable scrollback; the in-flight assistant
+/// partial renders live in the active-area preview. The event handling keys off
+/// message boundaries:
+///
+/// - A streaming `MessageUpdate` (the reused `event_dispatch`'s
+///   `ReplaceLastAssistant` delta) refreshes the active-area preview via the
+///   scheduler's request-frame — the M1 live-block semantics, throttled by the
+///   scheduler's own frame coalescing, not committed per token.
+/// - `MessageEnd` clears the preview and commits the *final* assistant snapshot
+///   once, from `assistant_lines`, and remembers it so a later Ctrl+T can
+///   re-render the whole transcript under the new thinking state.
+/// - Tool lifecycle, status, and compaction updates flow through the reused
+///   `event_dispatch` → [`chat::render_update`] path; only the ones with a
+///   scrollback representation (tool end, status) commit.
+/// - Errors take the red-banner route.
+fn apply_event(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    event: &AgentSessionEvent,
+) {
+    if let AgentSessionEvent::Error(msg) = event {
+        // Surface the failure to the terminal's progress indicator (OSC 9;4
+        // error) alongside the red banner. Latch the turn as errored so the turn
+        // runner ends on the error state and the unconditional trailing `Clear`
+        // does not overwrite it (VAL-CHAT-018).
+        lock_state(state).mark_turn_error();
+        queue_progress(state, requester, ProgressState::Error);
+        commit(state, requester, chat::error_lines(msg));
+        return;
+    }
+
+    if let AgentSessionEvent::Agent(agent_event) = event {
+        match agent_event.as_ref() {
+            // Streaming delta → live active-area preview (not scrollback). The
+            // scheduler coalesces the request-frames, so a fast token stream
+            // repaints at the frame rate rather than once per token.
+            hand_agent::types::AgentEvent::MessageUpdate {
+                message: model::Message::Assistant(assistant),
+                ..
+            } => {
+                update_streaming_preview(state, requester, assistant);
+                return;
+            }
+            // Finalize: clear the preview, commit the final snapshot once, and
+            // remember it for a global Ctrl+T re-render.
+            hand_agent::types::AgentEvent::MessageEnd {
+                message: model::Message::Assistant(assistant),
+            } => {
+                // A provider stream error surfaces here, not as a `send_message`
+                // `Err`: the agent loop folds it into a `StopReason::Error`
+                // assistant message and returns `Ok`, so the turn reads as
+                // `Completed`. Latch the failure so the turn runner ends on the
+                // OSC 9;4 error state instead of the trailing `Clear`
+                // (VAL-CHAT-018). `finalize_assistant` still renders the red
+                // `Error: <msg>` banner from the message itself.
+                if assistant.stop_reason == model::StopReason::Error {
+                    lock_state(state).mark_turn_error();
+                    queue_progress(state, requester, ProgressState::Error);
+                }
+                finalize_assistant(state, requester, assistant);
+                return;
+            }
+            // A tool call begins: remember its name + args so the matching end
+            // can render a complete state-tinted box. Nothing commits yet — the
+            // box lands finalized on the end (the running loader rides the
+            // streaming flag meanwhile).
+            hand_agent::types::AgentEvent::ToolExecutionStart {
+                tool_call_id,
+                tool_name,
+                args,
+            } => {
+                lock_state(state).remember_tool(
+                    tool_call_id.clone(),
+                    tool_name.clone(),
+                    args.clone(),
+                );
+                return;
+            }
+            // A tool call finished: commit its state-tinted box (name / args /
+            // result), tinting success or failure by the error flag. The result
+            // text is resolved through the image-parity path so a graphics
+            // terminal emits no image bytes and a plain one shows a `[mime WxH]`
+            // indicator (VAL-IMG-019).
+            hand_agent::types::AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                tool_name,
+                result,
+                is_error,
+            } => {
+                finalize_tool(state, requester, tool_call_id, tool_name, result, *is_error);
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    // Everything else (tool lifecycle, status, compaction) flows through the
+    // reused dispatch → render path; streaming deltas render nothing here.
+    let ctx = render_context(state);
+    let mut lines = Vec::new();
+    for update in dispatch_event(event) {
+        if let Some(rendered) = chat::render_update(&update, ctx) {
+            lines.extend(rendered);
+        }
+    }
+    commit(state, requester, lines);
+}
+
+/// Refresh the active-area streaming preview from an in-flight assistant partial
+/// and request a repaint. The preview renders the concatenated text through the
+/// stream renderer, which defensively closes an unclosed code fence so the code
+/// styling stays contained mid-stream (VAL-CHAT-033).
+fn update_streaming_preview(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    assistant: &model::AssistantMessage,
+) {
+    let (width, partial) = {
+        let guard = lock_state(state);
+        (guard.size.cols, assistant_stream_text(assistant))
+    };
+    let preview = if partial.trim().is_empty() {
+        None
+    } else {
+        Some(messages::stream_preview_lines(&partial, width))
+    };
+    lock_state(state).set_streaming_preview(preview);
+    requester.request_frame();
+}
+
+/// Finalize an assistant message: clear the live preview, commit its rendered
+/// lines to scrollback once, and remember the snapshot so a later global
+/// thinking-toggle (Ctrl+T) can re-render the whole transcript.
+fn finalize_assistant(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    assistant: &model::AssistantMessage,
+) {
+    let lines = {
+        let mut guard = lock_state(state);
+        guard.set_streaming_preview(None);
+        // Fold this message's usage into the running total so the footer's spend
+        // segment increases monotonically across the session (VAL-CHAT-005). The
+        // turn runner rebuilds the footer from this accumulator at the turn
+        // boundary.
+        guard.accumulate_usage(&assistant.usage);
+        let width = guard.size.cols;
+        let hide_thinking = guard.hide_thinking;
+        let palette = guard.palette();
+        let lines = messages::assistant_lines(assistant, hide_thinking, width, &palette);
+        guard.remember_assistant(assistant.clone());
+        lines
+    };
+    commit(state, requester, lines);
+}
+
+/// Commit a finished tool call's state-tinted box to scrollback.
+///
+/// Pairs the finishing tool with the name + args remembered at start (falling
+/// back to the end event's own name when the start was missed — a defensive
+/// path). The result text is resolved through the image-parity pipeline
+/// ([`resolve_tool_result_text`]): a graphics-capable terminal excludes image
+/// blocks entirely (zero graphics bytes reach the chat, per Decision Log ⑤),
+/// while a plain terminal replaces each with a `[mime WxH]` indicator box
+/// (VAL-IMG-019). The box tints success or failure by `is_error`
+/// (VAL-CHAT-011), and `edit` / `write` tools render their diff with `+`/`-`
+/// coloring inside the box (VAL-CHAT-039).
+fn finalize_tool(
+    state: &Arc<Mutex<DriverState>>,
+    requester: &FrameRequester,
+    tool_call_id: &str,
+    tool_name: &str,
+    result: &hand_agent::types::ToolResult,
+    is_error: bool,
+) {
+    // Read the live `show_images` setting so a mid-session toggle takes effect on
+    // the next tool result: `false` forces the `[mime WxH]` placeholder even on a
+    // graphics-capable terminal (VAL-IMG-011).
+    let show_images = lock_state(state).show_images();
+    let result_text = resolve_tool_result_text(result, show_images);
+    let lines = {
+        let mut guard = lock_state(state);
+        let pending = guard.take_tool(tool_call_id);
+        let (name, args) = match pending {
+            Some(p) => (p.name, p.args),
+            None => (tool_name.to_string(), serde_json::Value::Null),
+        };
+        let state_tint = tools::ToolState::from_result(Some(is_error));
+        let palette = guard.palette();
+        tools::tool_box_lines(
+            &name,
+            &args,
+            &result_text,
+            state_tint,
+            guard.size.cols,
+            &palette,
+        )
+    };
+    commit(state, requester, lines);
+}
+
+/// Resolve a tool result's content to display text with image parity, using the
+/// terminal's detected image capabilities.
+///
+/// A thin wrapper over [`tool_result_display_text`] that reads the process-global
+/// detected capabilities; the pure inner function takes them explicitly so the
+/// parity behaviour is unit-tested without touching the global cache. `show_images`
+/// is the live `terminal.show_images` setting, threaded from the driver state so a
+/// mid-session toggle takes effect on the next tool result (VAL-IMG-011).
+fn resolve_tool_result_text(result: &hand_agent::types::ToolResult, show_images: bool) -> String {
+    let caps = hand_tui::get_capabilities();
+    tool_result_display_text(result, show_images, &caps)
+}
+
+/// Resolve a tool result's content to display text with image parity, against an
+/// explicit capability set.
+///
+/// Routes the result blocks through
+/// [`get_text_output`](crate::tools::render_utils::get_text_output) with the live
+/// `show_images` flag: when `show_images` is `true` *and* the terminal is
+/// graphics-capable (kitty / iTerm2), image blocks are dropped from the text (the
+/// chat shows no image — Decision Log ⑤ — so the chat emits zero graphics bytes);
+/// otherwise — a plain terminal, or `show_images = false` on any terminal — each
+/// image is substituted with a `[mime WxH]` indicator box so its presence is still
+/// visible (VAL-IMG-019 / VAL-IMG-011). Flipping `show_images` off therefore forces
+/// the placeholder even on a graphics terminal, stopping all subsequent image
+/// graphics bytes mid-session.
+fn tool_result_display_text(
+    result: &hand_agent::types::ToolResult,
+    show_images: bool,
+    caps: &hand_tui::TerminalImageCapabilities,
+) -> String {
+    crate::tools::render_utils::get_text_output(&result.content, show_images, caps)
+}
+
+/// The concatenated text content of an in-flight assistant partial, joined with
+/// newlines — the mid-stream body the preview renders.
+fn assistant_stream_text(message: &model::AssistantMessage) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            model::AssistantContentBlock::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Build the [`chat::RenderContext`] from the current driver state — the render
+/// width, the global thinking-collapse flag, and the active theme palette — for
+/// the arms that render rich message bodies.
+fn render_context(state: &Arc<Mutex<DriverState>>) -> chat::RenderContext {
+    let guard = lock_state(state);
+    chat::RenderContext {
+        width: guard.size.cols,
+        hide_thinking: guard.hide_thinking,
+        palette: guard.palette(),
+    }
+}
+
+/// Flip the global thinking-collapse state (Ctrl+T) and re-commit the whole
+/// assistant transcript under the new state, followed by a status line.
+///
+/// Native scrollback is immutable — already-committed lines cannot be rewritten
+/// in place — so a *global* flip re-renders every remembered assistant message
+/// under the new `hide_thinking` value and commits the re-rendered transcript as
+/// a fresh block, then a `[thinking blocks: hidden/visible]` status line. The
+/// user sees the transcript reflowed with thinking collapsed/expanded and a
+/// clear marker of the current state.
+fn toggle_thinking_globally(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester) {
+    let (blocks, status) = {
+        let mut guard = lock_state(state);
+        let hidden = guard.toggle_thinking();
+        let width = guard.size.cols;
+        let palette = guard.palette();
+        let blocks: Vec<Vec<Line<'static>>> = guard
+            .assistant_history
+            .iter()
+            .map(|msg| messages::assistant_lines(msg, hidden, width, &palette))
+            .filter(|lines| !lines.is_empty())
+            .collect();
+        (blocks, thinking_status_line(hidden))
+    };
+
+    for block in blocks {
+        commit(state, requester, block);
+    }
+    commit(state, requester, chat::status_lines_for(&status));
+}
+
+/// Flip the most-recent collapsible summary's expansion state (Ctrl+R) and
+/// re-commit it under the new state.
+///
+/// Native scrollback is immutable — a committed collapsed summary cannot be
+/// rewritten in place — so a toggle re-renders the summary in its new state and
+/// commits it as a fresh block (the same discipline the Ctrl+T thinking toggle
+/// uses). This is what makes the collapsed `(ctrl+r to expand)` hint *real*: the
+/// hint promises an expand, and pressing Ctrl+R delivers the expanded block. A
+/// silent no-op when no collapsible summary has landed yet.
+fn toggle_last_summary(state: &Arc<Mutex<DriverState>>, requester: &FrameRequester) {
+    let lines = {
+        let mut guard = lock_state(state);
+        let palette = guard.palette();
+        match guard.toggle_last_summary() {
+            Some(entry) => summary::summary_lines(&entry, guard.size.cols, &palette),
+            None => return,
+        }
+    };
+    commit(state, requester, lines);
+}
+
+/// Toggle the streaming flag (loader + editor "thinking" tint) and repaint.
+fn set_streaming(
+    state: &Arc<Mutex<DriverState>>,
+    editor: &SharedEditor,
+    requester: &FrameRequester,
+    on: bool,
+) {
+    lock_state(state).streaming = on;
+    lock_editor(editor).set_tint(if on {
+        BorderTint::Thinking
+    } else {
+        BorderTint::Idle
+    });
+    requester.request_frame();
+}
+
+/// Seed the editor recall history from the session's prior user turns (newest
+/// first), so Up/Down recall survives a resume. Capped by the editor itself.
+fn recall_history(session: &AgentSession) -> Vec<String> {
+    let mut history: Vec<String> = session
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            model::Message::User(u) => user_text(u),
+            _ => None,
+        })
+        .collect();
+    history.reverse(); // newest first for recall.
+    history
+}
+
+/// Extract the plain text of a user message, if any.
+fn user_text(message: &model::UserMessage) -> Option<String> {
+    let text = match &message.content {
+        model::UserContent::Text(t) => t.clone(),
+        model::UserContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| match block {
+                model::UserContentBlock::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    (!text.trim().is_empty()).then_some(text)
+}
+
+/// Load the app-layer keybindings for `cwd` and queue any load diagnostics as
+/// yellow startup lines, returning the live shared table.
+///
+/// Resolution order is project (`<cwd>/.hand/keybindings.yaml`) > global
+/// (`$HAND_HOME`/`~`/.hand/keybindings.yaml) > defaults. A *semantically* bad
+/// entry (unknown action / malformed chord / conflicting chord) is skipped with a
+/// visible yellow diagnostic and the affected action keeps its default; a
+/// syntactically broken or unreadable file (the `Err` path) falls back to defaults
+/// with a single notice — the app always starts (VAL-COMPAT-003).
+fn load_keybindings(cwd: &std::path::Path, state: &Arc<Mutex<DriverState>>) -> SharedKeybindings {
+    let bindings = match KeyBindings::load_for_cwd(cwd) {
+        Ok(kb) => kb,
+        Err(e) => {
+            lock_state(state).queue_commit(chat::status_lines_for(&format!(
+                "keybindings: could not load config ({e}) — using defaults"
+            )));
+            KeyBindings::defaults()
+        }
+    };
+    for line in diagnostic_lines(bindings.diagnostics()) {
+        lock_state(state).queue_commit(line);
+    }
+    new_shared_keybindings(bindings)
+}
+
+/// Resolve the configured theme into a concrete palette for the renderers,
+/// tolerating every failure mode.
+///
+/// The `theme` setting names one of `dark` / `light` / `high-contrast` /
+/// `system`; the resolver additionally accepts any custom `<name>.json` in the
+/// user themes directory. Whatever the value, the result is never a hard
+/// failure — an unknown name, a malformed / partial JSON, or an unresolvable
+/// custom-dir all fold down to the built-in default palette, with a populated
+/// `fallback_reason` the caller lands as a startup notice
+/// (VAL-COMPAT-004 / 005 / 016).
+fn resolve_startup_theme(
+    session: &AgentSession,
+) -> crate::modes::interactive::theme::ResolvedTheme {
+    use crate::modes::interactive::theme::{
+        default_custom_themes_dir, default_theme, resolve_theme_or_default,
+    };
+
+    // Pass the setting's tag straight to the loader: the built-ins resolve from
+    // embedded JSON, and a `Custom` name reaches the custom-theme directory. The
+    // loader itself folds every failure (unknown name, malformed JSON) down to
+    // the default palette with a `fallback_reason`, so a custom name is never a
+    // hard failure here.
+    let setting = session.settings().current().theme();
+    let name = setting.as_tag();
+
+    // The custom-theme directory may be unavailable (no home dir); fall back to
+    // the built-in default rather than failing. A built-in name still resolves
+    // from the embedded JSON, so only genuine custom themes are lost here.
+    let Ok(dir) = default_custom_themes_dir() else {
+        return crate::modes::interactive::theme::ResolvedTheme {
+            theme: default_theme(None),
+            fallback_reason: None,
+        };
+    };
+
+    resolve_theme_or_default(name, &dir, None)
+}
+
+/// Render each keybindings [`Diagnostic`] as a one-line yellow status block.
+fn diagnostic_lines(diagnostics: &[Diagnostic]) -> Vec<Vec<Line<'static>>> {
+    diagnostics
+        .iter()
+        .map(|d| chat::status_lines_for(&d.message()))
+        .collect()
+}
+
+/// Assemble the startup-chrome scrollback blocks in order: the welcome header,
+/// any tmux keyboard warning, and the changelog banner (when the session is a
+/// fresh, empty one that has fallen behind the recorded version).
+///
+/// Each returned `Vec<Line>` is committed as a single `insert_before` block. The
+/// changelog decision reads `last_changelog_version` from settings and, on
+/// display or a fresh install, records the current version back — so this takes
+/// `&mut session`. Empty blocks are skipped so no phantom scrollback lands.
+fn collect_startup_chrome(
+    session: &mut AgentSession,
+    palette: &ThemePalette,
+) -> Vec<Vec<Line<'static>>> {
+    let mut blocks: Vec<Vec<Line<'static>>> = Vec::new();
+
+    // 1. Welcome header — always first at the top of scrollback.
+    let model = session.model();
+    blocks.push(chrome::welcome_header_lines(
+        model.provider.as_str(),
+        &model.id,
+        chrome::version(),
+        palette,
+    ));
+
+    // 2. tmux keyboard warning — only inside a misconfigured tmux.
+    if let Some(warning) = chrome::check_tmux_keyboard_setup() {
+        blocks.push(chrome::warning_lines(warning, palette));
+    }
+
+    // 3. Changelog banner — three-state, gated on an empty (non-resumed) session.
+    if let Some(block) = changelog_startup_block(session, palette) {
+        blocks.push(block);
+    }
+
+    blocks.into_iter().filter(|b| !b.is_empty()).collect()
+}
+
+/// Resolve the changelog three-state and return the scrollback block to display,
+/// or `None` when the action is skip / record-only. On display or a fresh
+/// install it records the current version back into settings (best-effort — any
+/// save failure is swallowed so startup never blocks).
+fn changelog_startup_block(
+    session: &mut AgentSession,
+    palette: &ThemePalette,
+) -> Option<Vec<Line<'static>>> {
+    let current_version = chrome::version();
+    let messages_empty = session.messages().is_empty();
+    let last_version = session.settings().current().last_changelog_version.clone();
+
+    let path = chrome::locate_changelog_file()?;
+    let entries = crate::utils::changelog::parse_changelog_file(&path).ok()?;
+
+    let action =
+        chrome::decide_changelog_startup(messages_empty, last_version.as_deref(), &entries);
+    let scope = crate::core::settings::SettingsScope::Global;
+    match action {
+        ChangelogStartupAction::Skip => None,
+        ChangelogStartupAction::RecordOnly => {
+            session
+                .settings_mut()
+                .set_last_changelog_version(scope, Some(current_version.to_string()));
+            let _ = session.settings().save(scope);
+            None
+        }
+        ChangelogStartupAction::Display(body) => {
+            session
+                .settings_mut()
+                .set_last_changelog_version(scope, Some(current_version.to_string()));
+            let _ = session.settings().save(scope);
+            Some(chrome::changelog_lines(&body, palette))
+        }
+    }
+}
+
+/// Best-effort async version probe. Hits crates.io through the default fetcher
+/// and, on a newer published version, commits an "update available" banner and
+/// requests a repaint. Offline (`HAND_OFFLINE`) or on any fetch failure the
+/// fetcher returns `None`, so nothing is committed — and because it runs in its
+/// own task, an offline start never blocks the run loop (the poll budget is the
+/// fetcher's own timeout, not the startup path's).
+async fn version_probe(state: Arc<Mutex<DriverState>>, requester: FrameRequester) {
+    let fetcher = crate::utils::version_check::HttpVersionFetcher::new();
+    let current = chrome::version();
+    if let Some(latest) =
+        crate::utils::version_check::check_for_new_version(&fetcher, current).await
+    {
+        let banner = chrome::update_available_banner(current, &latest);
+        let palette = lock_state(&state).palette();
+        commit(&state, &requester, chrome::warning_lines(&banner, &palette));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quit_command_matches_aliases_case_insensitively() {
+        for input in ["/quit", "/exit", "/q", "/QUIT", "/Exit", "/Q"] {
+            assert!(is_quit_command(input), "{input} should be a quit command");
+        }
+    }
+
+    #[test]
+    fn quit_command_ignores_non_quit_slashes_and_plain_text() {
+        for input in ["/help", "/model gpt", "quit", "hello", "/quitter", ""] {
+            assert!(!is_quit_command(input), "{input} should not quit");
+        }
+    }
+
+    #[test]
+    fn quit_command_matches_on_the_name_token_ignoring_args() {
+        // The command name is the first whitespace-delimited token, matching the
+        // legacy `ParsedSlashCommand` parser: `/quit now` dispatches on "quit"
+        // and exits, exactly as the legacy slash table does (args ignored).
+        assert!(is_quit_command("/quit now"));
+        assert!(is_quit_command("/exit  "));
+        // But a different name that merely starts with "quit" is not the alias.
+        assert!(!is_quit_command("/quitter"));
+    }
+
+    /// Ctrl+D quits even with a non-empty buffer: the exit wins over the editor's
+    /// `ctrl+d` delete-forward binding (VAL-COMPAT-013). Verified at the
+    /// `handle_key` level with a real editor holding text.
+    #[test]
+    fn ctrl_d_quits_over_delete_char_with_nonempty_buffer() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        lock_editor(&editor).set_text("unsent draft");
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+
+        let ctrl_d = RtKey {
+            key_id: Some("ctrl+d".to_string()),
+            raw: KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        };
+        let outcome = handle_key(&ctrl_d, &editor, &state, &tx);
+
+        assert_eq!(outcome, KeyOutcome::Quit, "Ctrl+D must quit");
+        // The buffer is untouched — the key never reached the editor's
+        // delete-forward path.
+        assert_eq!(lock_editor(&editor).text(), "unsent draft");
+    }
+
+    /// A plain printable key routes to the editor and does not quit.
+    #[test]
+    fn printable_key_edits_and_continues() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+
+        let a = RtKey {
+            key_id: Some("a".to_string()),
+            raw: KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        };
+        let outcome = handle_key(&a, &editor, &state, &tx);
+
+        assert_eq!(outcome, KeyOutcome::Continue);
+        assert_eq!(lock_editor(&editor).text(), "a");
+    }
+
+    /// Submitting a non-quit line forwards it to the agent driver and marks the
+    /// state streaming, without quitting.
+    #[test]
+    fn enter_submits_text_to_agent_and_marks_streaming() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        lock_editor(&editor).set_text("do a thing");
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        let enter = RtKey {
+            key_id: Some("enter".to_string()),
+            raw: KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        };
+        let outcome = handle_key(&enter, &editor, &state, &tx);
+
+        assert_eq!(outcome, KeyOutcome::Continue);
+        assert_eq!(rx.try_recv().ok(), Some("do a thing".to_string()));
+        assert!(lock_state(&state).streaming, "submit marks streaming");
+    }
+
+    /// A configured `submit: alt+enter` routes Alt+Enter through the editor's
+    /// submit path and forwards the buffer to the agent — while bare Enter, no
+    /// longer the submit chord, inserts a newline instead of sending
+    /// (VAL-COMPAT-002).
+    #[test]
+    fn configured_alt_enter_submit_routes_to_agent() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        // The startup / reload wiring points the editor's submit chord at the
+        // resolved `Action::Submit` binding; here that is alt+enter.
+        lock_editor(&editor).set_submit_key("alt+enter");
+        lock_editor(&editor).set_text("do a thing");
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        // Bare Enter no longer submits: it inserts a newline and forwards nothing.
+        let enter = RtKey {
+            key_id: Some("enter".to_string()),
+            raw: KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        };
+        assert_eq!(
+            handle_key(&enter, &editor, &state, &tx),
+            KeyOutcome::Continue
+        );
+        assert!(rx.try_recv().is_err(), "bare Enter must not submit");
+        assert!(
+            !lock_state(&state).streaming,
+            "bare Enter does not mark streaming"
+        );
+
+        // Alt+Enter is the submit chord: it forwards the (now multi-line) buffer.
+        let alt_enter = RtKey {
+            key_id: Some("alt+enter".to_string()),
+            raw: KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        };
+        assert_eq!(
+            handle_key(&alt_enter, &editor, &state, &tx),
+            KeyOutcome::Continue
+        );
+        assert_eq!(rx.try_recv().ok(), Some("do a thing".to_string()));
+        assert!(
+            lock_state(&state).streaming,
+            "alt+enter submit marks streaming"
+        );
+    }
+
+    /// The watchdog cancels a stalled turn on elapse and reports `TimedOut`,
+    /// leaving the (freshly-cancellable) session token cancelled — the
+    /// VAL-CHAT-022 timeout wiring. Driven with a `pending()` future so it never
+    /// completes on its own, a near-zero ceiling so the test is instant, and a
+    /// real `CancellationToken` so the cancel is observable.
+    #[tokio::test]
+    async fn watchdog_cancels_and_times_out_a_stalled_turn() {
+        use hand_agent::CancellationToken;
+
+        let watchdog = Watchdog::new(std::time::Duration::from_millis(1));
+        let cancel = Arc::new(std::sync::Mutex::new(CancellationToken::new()));
+
+        let stalled = std::future::pending::<Result<Vec<model::Message>, CodingAgentError>>();
+        let outcome = run_under_watchdog(watchdog, stalled, &cancel).await;
+
+        assert!(
+            matches!(outcome, TurnOutcome::TimedOut),
+            "a stalled turn must time out, got {outcome:?}"
+        );
+        assert!(
+            cancel.lock().unwrap().is_cancelled(),
+            "the watchdog must cancel the session token on timeout"
+        );
+    }
+
+    /// A turn that completes within the ceiling reports `Completed` and never
+    /// cancels the token.
+    #[tokio::test]
+    async fn watchdog_lets_a_fast_turn_complete_without_cancelling() {
+        use hand_agent::CancellationToken;
+
+        let watchdog = Watchdog::new(std::time::Duration::from_secs(300));
+        let cancel = Arc::new(std::sync::Mutex::new(CancellationToken::new()));
+
+        let done = std::future::ready(Ok(Vec::<model::Message>::new()));
+        let outcome = run_under_watchdog(watchdog, done, &cancel).await;
+
+        assert!(matches!(outcome, TurnOutcome::Completed), "got {outcome:?}");
+        assert!(
+            !cancel.lock().unwrap().is_cancelled(),
+            "a completed turn must not cancel the token"
+        );
+    }
+
+    /// Build an assistant `MessageEnd` event carrying the given stop reason, the
+    /// shape a completed model turn delivers through the event applier.
+    fn assistant_message_end(stop_reason: model::StopReason) -> AgentSessionEvent {
+        let assistant = model::AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![model::AssistantContentBlock::Text(
+                model::types::TextContent::new("partial before error"),
+            )],
+            api: model::types::Api::OpenAICompletions,
+            provider: model::types::Provider::OpenAI,
+            model: "mock-model".to_string(),
+            usage: model::Usage::default(),
+            stop_reason,
+            error_message: Some("mock provider error".to_string()),
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        };
+        AgentSessionEvent::Agent(Box::new(hand_agent::types::AgentEvent::MessageEnd {
+            message: model::Message::Assistant(assistant),
+        }))
+    }
+
+    /// A turn whose model response ends on `StopReason::Error` (a provider stream
+    /// error, which the agent loop folds into a `StopReason::Error` assistant
+    /// message while `send_message` still returns `Ok`) must end the terminal
+    /// progress on the OSC 9;4 *error* state (`9;4;2`), and the turn boundary's
+    /// outcome-derived `Clear` (`9;4;0`) must not overwrite it (VAL-CHAT-018).
+    #[tokio::test]
+    async fn in_band_error_message_ends_progress_on_error_not_clobbered_by_clear() {
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let requester = test_requester();
+
+        // The event applier observes the error-ended assistant message: it latches
+        // the failure and queues the transient OSC 9;4 error immediately.
+        apply_event(
+            &state,
+            &requester,
+            &assistant_message_end(model::StopReason::Error),
+        );
+
+        // The turn boundary runs next. The outcome reads `Completed` (send_message
+        // returned Ok), so the outcome-derived base is `Clear` — but the latch
+        // upgrades it to `Error`, so no trailing `Clear` is queued.
+        lock_state(&state).queue_terminal_progress(ProgressState::Clear);
+
+        let raw = lock_state(&state).take_raw();
+        let last_progress = raw
+            .iter()
+            .rev()
+            .find(|s| s.starts_with("\x1b]9;4;"))
+            .copied();
+        assert_eq!(
+            last_progress,
+            Some(ProgressState::Error.sequence()),
+            "a failed turn must end on the OSC 9;4 error state, got raw {raw:?}"
+        );
+        assert!(
+            !raw.contains(&ProgressState::Clear.sequence()),
+            "the trailing Clear must not be queued once the turn errored: {raw:?}"
+        );
+        assert!(
+            !lock_state(&state).turn_error,
+            "queue_terminal_progress must take (clear) the latch"
+        );
+    }
+
+    /// A clean turn (`StopReason::Stop`) ends the terminal progress on `Clear`
+    /// (`9;4;0`): the error path never fires and the latch stays clear.
+    #[tokio::test]
+    async fn clean_turn_ends_progress_on_clear() {
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let requester = test_requester();
+
+        apply_event(
+            &state,
+            &requester,
+            &assistant_message_end(model::StopReason::Stop),
+        );
+        lock_state(&state).queue_terminal_progress(ProgressState::Clear);
+
+        let raw = lock_state(&state).take_raw();
+        let last_progress = raw
+            .iter()
+            .rev()
+            .find(|s| s.starts_with("\x1b]9;4;"))
+            .copied();
+        assert_eq!(
+            last_progress,
+            Some(ProgressState::Clear.sequence()),
+            "a clean turn must end on the OSC 9;4 clear state, got raw {raw:?}"
+        );
+        assert!(
+            !raw.contains(&ProgressState::Error.sequence()),
+            "a clean turn must never queue the error state: {raw:?}"
+        );
+    }
+
+    /// A `/quit` submit quits and never forwards to the agent.
+    #[test]
+    fn slash_quit_submit_quits_without_forwarding() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        lock_editor(&editor).set_text("/quit");
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        let enter = RtKey {
+            key_id: Some("enter".to_string()),
+            raw: KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        };
+        let outcome = handle_key(&enter, &editor, &state, &tx);
+
+        assert_eq!(outcome, KeyOutcome::Quit);
+        assert!(rx.try_recv().is_err(), "quit must not forward a turn");
+    }
+
+    /// Ctrl+C is no longer a quit at the `handle_key` level: turn control resolves
+    /// it in the input loop (cancel / no-op), so it must never quit and never
+    /// leave the terminal raw (VAL-CHAT-014). With a non-empty buffer it also must
+    /// not delete a character — the input loop consumes it before the editor.
+    #[test]
+    fn ctrl_c_is_not_a_quit_at_handle_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        lock_editor(&editor).set_text("draft");
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+
+        let ctrl_c = RtKey {
+            key_id: Some("ctrl+c".to_string()),
+            raw: KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        };
+        // `handle_key` never sees Ctrl+C in the real loop (the loop consumes it),
+        // but even if it did it must not quit — only Ctrl+D quits.
+        let outcome = handle_key(&ctrl_c, &editor, &state, &tx);
+        assert_eq!(outcome, KeyOutcome::Continue, "Ctrl+C must not quit");
+    }
+
+    /// The cancel core is a no-op when idle: no loader, nothing to cancel. It
+    /// reports `false` (so Esc falls to the editor / Ctrl+C is a visible no-op),
+    /// leaves the state untouched, and never cancels the token (VAL-CHAT-013 /
+    /// VAL-CHAT-014, the idle Ctrl+C no-op parity pin).
+    #[test]
+    fn cancel_is_a_noop_when_no_turn_is_streaming() {
+        use hand_agent::CancellationToken;
+
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let cancel = Arc::new(Mutex::new(CancellationToken::new()));
+
+        let cancelled = cancel_in_flight_turn(&state, &cancel);
+
+        assert!(!cancelled, "idle cancel must report nothing to cancel");
+        assert!(!lock_state(&state).streaming, "state stays idle");
+        assert!(
+            !lock_state(&state).cancel_requested,
+            "no cancel flag latched when idle"
+        );
+        assert!(
+            !cancel.lock().unwrap().is_cancelled(),
+            "the token must not be cancelled by an idle no-op"
+        );
+    }
+
+    /// The cancel core cancels a streaming turn: it clears the loader (streaming
+    /// off), latches the cancel flag (so the turn runner suppresses the error
+    /// banner), cancels the session token (so `send_message` unwinds), and reports
+    /// `true`. This is the Esc / Ctrl+C cancel path (VAL-CHAT-013 / VAL-CHAT-014).
+    #[test]
+    fn cancel_stops_a_streaming_turn_and_clears_the_loader() {
+        use hand_agent::CancellationToken;
+
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        lock_state(&state).streaming = true; // a turn is in flight (loader shown).
+        let cancel = Arc::new(Mutex::new(CancellationToken::new()));
+
+        let cancelled = cancel_in_flight_turn(&state, &cancel);
+
+        assert!(cancelled, "a streaming turn must be cancelled");
+        assert!(
+            !lock_state(&state).streaming,
+            "the loader clears immediately on cancel"
+        );
+        assert!(
+            lock_state(&state).cancel_requested,
+            "the cancel flag is latched so the error banner is suppressed"
+        );
+        assert!(
+            cancel.lock().unwrap().is_cancelled(),
+            "the session token is cancelled so send_message unwinds"
+        );
+    }
+
+    /// A second cancel after the first is inert: the first clears `streaming`, so
+    /// the second sees no in-flight turn and reports `false` — no duplicate
+    /// `[cancelled …]` line lands from a key repeat.
+    #[test]
+    fn a_second_cancel_after_the_first_is_inert() {
+        use hand_agent::CancellationToken;
+
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        lock_state(&state).streaming = true;
+        let cancel = Arc::new(Mutex::new(CancellationToken::new()));
+
+        assert!(
+            cancel_in_flight_turn(&state, &cancel),
+            "first press cancels"
+        );
+        assert!(
+            !cancel_in_flight_turn(&state, &cancel),
+            "second press is a no-op (no duplicate cancel line)"
+        );
+    }
+
+    /// The cancel-source status lines name the key the user pressed, so scrollback
+    /// distinguishes an Esc cancel from a Ctrl+C one.
+    #[test]
+    fn cancel_source_lines_name_the_key() {
+        assert_eq!(CancelSource::Esc.cancel_line(), "[cancelled by Esc]");
+        assert_eq!(CancelSource::CtrlC.cancel_line(), "[cancelled by ^C]");
+    }
+
+    /// `take_cancel_requested` reports and clears the latch exactly once: a
+    /// cancelled turn's error is suppressed on the turn it was cancelled, and a
+    /// later turn (no cancel) sees a cleared flag so its genuine error surfaces.
+    #[test]
+    fn take_cancel_requested_is_a_one_shot_latch() {
+        let mut state = DriverState::new(TerminalSize::new(80, 24));
+        state.mark_cancelled();
+        assert!(state.take_cancel_requested(), "the latched cancel is taken");
+        assert!(
+            !state.take_cancel_requested(),
+            "a second take sees a cleared flag — a later turn's error is not masked"
+        );
+    }
+
+    /// A failed turn shows the red banner only when it was *not* user-cancelled: a
+    /// genuine failure (missing credential, send error) surfaces the red banner
+    /// with the loader cleared (VAL-CHAT-016); a cancellation suppresses it (the
+    /// yellow cancel line already landed).
+    #[test]
+    fn failed_turn_shows_banner_only_when_not_cancelled() {
+        assert!(
+            failed_turn_shows_banner(false),
+            "a genuine failure shows the red banner"
+        );
+        assert!(
+            !failed_turn_shows_banner(true),
+            "a user cancellation suppresses the red banner"
+        );
+    }
+
+    /// Two messages submitted while a turn is in flight are both queued on the
+    /// unbounded submit channel and drained in order — neither is dropped
+    /// (VAL-CHAT-015). The channel *is* the queue: the turn runner drains it one
+    /// turn at a time, so a submit mid-turn parks until the current turn ends and
+    /// then processes in FIFO order.
+    #[test]
+    fn queued_submits_during_a_turn_are_preserved_in_order() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+        // Simulate two follow-up messages submitted while a turn is running: they
+        // are pushed to the channel back to back.
+        tx.send("first follow-up".to_string()).unwrap();
+        tx.send("second follow-up".to_string()).unwrap();
+
+        // The turn runner drains them in FIFO order after the current turn ends;
+        // neither is lost, and the order is preserved.
+        assert_eq!(rx.try_recv().ok(), Some("first follow-up".to_string()));
+        assert_eq!(rx.try_recv().ok(), Some("second follow-up".to_string()));
+        assert!(
+            rx.try_recv().is_err(),
+            "exactly two were queued, none dropped"
+        );
+    }
+
+    // --- collapsible summary Ctrl+R expand (VAL-CHAT-019) ----------------
+
+    /// A real [`FrameRequester`] over a no-op scheduler, built under the test's
+    /// tokio runtime. `request_frame` only sends on a channel and tolerates a
+    /// dead scheduler, so the summary toggle repaints without a live terminal.
+    fn test_requester() -> FrameRequester {
+        let (requester, _handle) = hand_tui::rt::scheduler::FrameScheduler::spawn(|| Ok(()));
+        requester
+    }
+
+    /// Ctrl+R with no committed summary is a silent no-op: nothing is committed,
+    /// so a stray Ctrl+R before any compaction / branch / skill summary never
+    /// scrolls the screen.
+    #[tokio::test]
+    async fn toggle_last_summary_with_no_summary_commits_nothing() {
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let requester = test_requester();
+
+        toggle_last_summary(&state, &requester);
+
+        assert!(
+            lock_state(&state).pending_commits.is_empty(),
+            "a Ctrl+R with no summary must commit nothing"
+        );
+    }
+
+    /// Ctrl+R on a committed (collapsed) summary re-commits it *expanded*: the
+    /// hint is real. Scrollback is immutable, so the expanded block is appended,
+    /// carrying the summary body that was hidden while collapsed. A second Ctrl+R
+    /// re-commits it collapsed again (the hint returns).
+    #[tokio::test]
+    async fn toggle_last_summary_re_commits_expanded_then_collapsed() {
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let requester = test_requester();
+        // A collapsed compaction summary is on the state (as if /compact just
+        // landed it). Its body is hidden while collapsed.
+        lock_state(&state).remember_summary(summary::CollapsibleSummary::compaction(
+            "the recovered summary body",
+            2_000,
+        ));
+
+        // First Ctrl+R expands: the re-committed block reveals the body.
+        toggle_last_summary(&state, &requester);
+        let expanded: String = lock_state(&state)
+            .pending_commits
+            .iter()
+            .flatten()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            expanded.contains("the recovered summary body"),
+            "Ctrl+R must re-commit the summary expanded: {expanded}"
+        );
+
+        // Second Ctrl+R collapses again: the fresh block carries the hint.
+        lock_state(&state).take_commits();
+        toggle_last_summary(&state, &requester);
+        let collapsed: String = lock_state(&state)
+            .pending_commits
+            .iter()
+            .flatten()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            collapsed.contains("ctrl+r to expand"),
+            "a second Ctrl+R collapses the summary again: {collapsed}"
+        );
+        assert!(
+            !collapsed.contains("the recovered summary body"),
+            "collapsed again hides the body: {collapsed}"
+        );
+    }
+
+    // --- tool-result image parity (VAL-IMG-019) --------------------------
+
+    fn plain_caps() -> hand_tui::TerminalImageCapabilities {
+        hand_tui::TerminalImageCapabilities {
+            kitty: false,
+            iterm2: false,
+            cell_dimensions: hand_tui::CellDimensions {
+                width: 8,
+                height: 16,
+            },
+        }
+    }
+
+    fn kitty_caps() -> hand_tui::TerminalImageCapabilities {
+        hand_tui::TerminalImageCapabilities {
+            kitty: true,
+            iterm2: false,
+            cell_dimensions: hand_tui::CellDimensions {
+                width: 8,
+                height: 16,
+            },
+        }
+    }
+
+    fn image_result() -> hand_agent::types::ToolResult {
+        use model::types::{ImageContent, TextContent, ToolResultContent};
+        hand_agent::types::ToolResult {
+            content: vec![
+                ToolResultContent::Text(TextContent::new("screenshot")),
+                // A tiny 1x1 PNG so dimension probing has real bytes to read.
+                ToolResultContent::Image(ImageContent::new(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+                    "image/png",
+                )),
+            ],
+            details: None,
+            terminate: None,
+        }
+    }
+
+    /// On a graphics-capable (kitty) terminal, an image block is excluded from
+    /// the tool-result text entirely — the chat shows the surrounding text and
+    /// no image bytes leak in (Decision Log ⑤ / VAL-IMG-019).
+    #[test]
+    fn tool_result_text_on_kitty_omits_the_image_with_no_indicator() {
+        // show_images = true (the default) on a graphics terminal drops the image.
+        let text = tool_result_display_text(&image_result(), true, &kitty_caps());
+        assert!(
+            text.contains("screenshot"),
+            "surrounding text kept: {text:?}"
+        );
+        assert!(
+            !text.contains("image/png"),
+            "graphics terminal must not emit an image indicator (image shown out-of-band, and per Decision Log ⑤ not in chat): {text:?}"
+        );
+    }
+
+    /// On a plain terminal, the image block is replaced with a `[mime WxH]`
+    /// indicator box so its presence is still visible (VAL-IMG-019 plain
+    /// persona).
+    #[test]
+    fn tool_result_text_on_plain_shows_a_mime_indicator() {
+        let text = tool_result_display_text(&image_result(), true, &plain_caps());
+        assert!(
+            text.contains("screenshot"),
+            "surrounding text kept: {text:?}"
+        );
+        assert!(
+            text.contains("image/png"),
+            "plain terminal must show a [mime WxH] indicator: {text:?}"
+        );
+    }
+
+    /// With `show_images = false`, a graphics-capable (kitty) terminal is forced
+    /// to the `[mime WxH]` placeholder instead of dropping the image — this is the
+    /// mid-session `show_images` off behaviour: no image graphics bytes are
+    /// emitted, the placeholder stands in (VAL-IMG-011).
+    #[test]
+    fn show_images_false_forces_placeholder_even_on_kitty() {
+        let text = tool_result_display_text(&image_result(), false, &kitty_caps());
+        assert!(
+            text.contains("screenshot"),
+            "surrounding text kept: {text:?}"
+        );
+        assert!(
+            text.contains("image/png"),
+            "show_images=false must force the placeholder even on a graphics terminal: {text:?}"
+        );
+    }
+
+    /// With `show_images = true` restored, the graphics terminal again drops the
+    /// image (no placeholder) — the on/off/on transition VAL-IMG-011 probes.
+    #[test]
+    fn show_images_true_resumes_dropping_the_image_on_kitty() {
+        let text = tool_result_display_text(&image_result(), true, &kitty_caps());
+        assert!(
+            !text.contains("image/png"),
+            "show_images=true resumes the graphics path (no placeholder): {text:?}"
+        );
+    }
+
+    // --- inline bash routing (VAL-CHAT-009) ------------------------------
+
+    /// A `!cmd` submission is recognised as inline bash (so the turn runner runs
+    /// it locally rather than forwarding it to the model), while a plain prompt
+    /// is not.
+    #[test]
+    fn bang_prefixed_submit_is_recognised_as_inline_bash() {
+        assert!(bash::parse_inline_bash("!echo hi").is_some());
+        assert!(bash::parse_inline_bash("!!git status").is_some());
+        assert!(
+            bash::parse_inline_bash("explain this code").is_none(),
+            "a plain prompt is not inline bash"
+        );
+    }
+
+    /// Two rapid submits through `handle_key` both reach the channel: the second
+    /// does not overwrite the first (the single-slot drop the skeleton warned
+    /// about does not happen — the channel is a queue), and both mark streaming
+    /// (VAL-CHAT-015).
+    #[test]
+    fn rapid_submits_through_handle_key_all_reach_the_queue() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let editor: SharedEditor = Arc::new(Mutex::new(Editor::new()));
+        let state = Arc::new(Mutex::new(DriverState::new(TerminalSize::new(80, 24))));
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        let enter = RtKey {
+            key_id: Some("enter".to_string()),
+            raw: KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        };
+
+        lock_editor(&editor).set_text("msg one");
+        assert_eq!(
+            handle_key(&enter, &editor, &state, &tx),
+            KeyOutcome::Continue
+        );
+        lock_editor(&editor).set_text("msg two");
+        assert_eq!(
+            handle_key(&enter, &editor, &state, &tx),
+            KeyOutcome::Continue
+        );
+
+        assert_eq!(rx.try_recv().ok(), Some("msg one".to_string()));
+        assert_eq!(rx.try_recv().ok(), Some("msg two".to_string()));
+        assert!(rx.try_recv().is_err(), "both submits queued, none dropped");
+        assert!(lock_state(&state).streaming, "submit marks streaming");
+    }
+
+    /// Installing the `@`-mention provider and typing `@<prefix>` opens the
+    /// path-completion popup with the matching cwd file, while a bare `/` context
+    /// leaves it closed — slash dispatch is unaffected (VAL-CROSS-001 seam).
+    #[test]
+    fn mention_provider_opens_the_popup_on_an_at_prefix_only() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+
+        let mut editor = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(mention::build_mention_provider(dir.path()));
+
+        // A char key routed through the editor mutates the buffer and refreshes the
+        // popup off the new caret context, exactly as the live input pump does.
+        let char_key = |c: char| RtKey {
+            key_id: Some(c.to_string()),
+            raw: KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        };
+        for c in "@READM".chars() {
+            editor.handle_key(&char_key(c));
+        }
+
+        assert!(
+            editor.autocomplete_visible(),
+            "@READM opens the completion popup"
+        );
+        let labels: Vec<&str> = editor
+            .autocomplete()
+            .items()
+            .iter()
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(
+            labels.contains(&"README.md"),
+            "popup surfaces README.md: {labels:?}"
+        );
+
+        // A `/` at line start is a slash context, not `@`; the mention provider
+        // does not claim it, so the popup stays closed and slash dispatch is free.
+        let mut slash_editor = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(mention::build_mention_provider(dir.path()));
+        slash_editor.handle_key(&char_key('/'));
+        assert!(
+            !slash_editor.autocomplete_visible(),
+            "the `@`-mention provider is inert on the `/` trigger"
+        );
+    }
+
+    /// Installing the composite provider gives the editor BOTH triggers: `/mo`
+    /// opens the popup with the registry's `/model` entry and Tab splices
+    /// `/model ` (trailing space, ready for the argument); `@<prefix>` still
+    /// opens path completion; and plain typing neither opens the popup nor
+    /// disturbs the normal Enter submit.
+    #[test]
+    fn composite_provider_completes_slash_commands_and_keeps_both_triggers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("README.md"), "").unwrap();
+
+        let char_key = |c: char| RtKey {
+            key_id: Some(c.to_string()),
+            raw: KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE),
+        };
+        let named_key = |id: &str, code: KeyCode| RtKey {
+            key_id: Some(id.to_string()),
+            raw: KeyEvent::new(code, KeyModifiers::NONE),
+        };
+
+        // `/mo` opens the completion index with the registry's /model row.
+        let mut editor = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(autocomplete::build_editor_provider(dir.path()));
+        for c in "/mo".chars() {
+            editor.handle_key(&char_key(c));
+        }
+        assert!(editor.autocomplete_visible(), "/mo opens the popup");
+        let labels: Vec<&str> = editor
+            .autocomplete()
+            .items()
+            .iter()
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(
+            labels.iter().any(|l| l.starts_with("/model")),
+            "popup surfaces /model: {labels:?}"
+        );
+
+        // Tab accepts the highlighted candidate: the buffer lands `/model `
+        // (trailing space — the user keeps typing the pattern) and the popup
+        // closes.
+        editor.handle_key(&named_key("tab", KeyCode::Tab));
+        assert_eq!(editor.text(), "/model ");
+        assert!(!editor.autocomplete_visible(), "accept closes the popup");
+
+        // A bare `/` lists the commands (bounded by the popup's own row cap).
+        let mut bare = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(autocomplete::build_editor_provider(dir.path()));
+        bare.handle_key(&char_key('/'));
+        assert!(bare.autocomplete_visible(), "bare `/` lists the commands");
+
+        // `@` path completion still works through the same composite slot.
+        let mut at_editor = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(autocomplete::build_editor_provider(dir.path()));
+        for c in "@READM".chars() {
+            at_editor.handle_key(&char_key(c));
+        }
+        assert!(at_editor.autocomplete_visible(), "@READM opens the popup");
+        assert!(
+            at_editor
+                .autocomplete()
+                .items()
+                .iter()
+                .any(|i| i.label == "README.md"),
+            "path completion routes through the composite"
+        );
+
+        // Plain typing is a non-trigger context: the popup stays closed and
+        // Enter submits the buffer verbatim.
+        let mut plain = Editor::new()
+            .border(EditorBorder::None)
+            .with_autocomplete_provider(autocomplete::build_editor_provider(dir.path()));
+        for c in "hello".chars() {
+            plain.handle_key(&char_key(c));
+        }
+        assert!(!plain.autocomplete_visible(), "no trigger, no popup");
+        plain.handle_key(&named_key("enter", KeyCode::Enter));
+        assert_eq!(plain.take_submit().as_deref(), Some("hello"));
+    }
+}

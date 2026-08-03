@@ -2,18 +2,13 @@
 name = "model-examples"
 version.workspace = true
 edition = "2024"
-rust-version = "1.85"
+rust-version.workspace = true
 
 [[bin]]
 name = "client-test"
 path = "src/main.rs"
 
-[[bin]]
-name = "tui-demo"
-path = "src/tui_demo.rs"
-
 [dependencies]
 model = { path = "../crates/model" }
-hand-tui = { path = "../crates/tui" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"

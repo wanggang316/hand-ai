@@ -97,6 +97,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Prime the model catalog before ANY mode resolves a model: install the
+    // locally cached catalog synchronously (local IO only), then refresh from
+    // the rolling release in the background. Placed after the `--offline`
+    // handling above so `HAND_OFFLINE` suppresses the remote fetch. Never
+    // blocks startup on the network.
+    hand_coding_agent::core::model_registry::prime_model_catalog();
+    timings::time("catalog_prime");
+
+    // `hand config` launches the rt-native resource-configuration selector: a
+    // one-shot TUI over the resolved resources, with immediate checkbox feedback and
+    // a clean Esc / Ctrl+C exit that restores the terminal to cooked state.
+    if cli.positional.first().map(String::as_str) == Some("config")
+        && !cli.print
+        && cli.prompt.is_none()
+    {
+        run_config_selector().await?;
+        return Ok(());
+    }
+
     // upstream-parity stub subcommands. When the first positional matches a
     // upstream extension-management command, we surface a clean
     // "not implemented" exit-1 message instead of treating the keyword
@@ -107,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         && cli.prompt.is_none()
         && matches!(
             first.as_str(),
-            "install" | "remove" | "uninstall" | "config" | "update" | "list" | "search"
+            "install" | "remove" | "uninstall" | "update" | "list" | "search"
         )
     {
         eprintln!(
@@ -815,6 +834,31 @@ fn print_extension_commands(session: &AgentSession) {
             }
         }
     }
+}
+
+/// Resolve the configured resources and run the one-shot `hand config` selector.
+///
+/// Builds a [`DefaultSourceRegistry`] from the settings layers for the current
+/// directory, resolves every discovered resource (uninstalled packages are skipped —
+/// `resolve` walks only installed dirs and top-level convention paths, so no network
+/// install is triggered), and hands the snapshot to the rt-native selector. The
+/// selector owns its own terminal session and restores it on exit.
+async fn run_config_selector() -> Result<(), Box<dyn std::error::Error>> {
+    use hand_coding_agent::core::extensions::source_registry::{
+        DefaultSourceRegistry, SourceRegistry,
+    };
+
+    let cwd = std::env::current_dir()?;
+    let agent_dir = dirs::home_dir()
+        .map(|h| h.join(".hand/agent"))
+        .unwrap_or_else(|| PathBuf::from(".hand/agent"));
+    let settings_manager = hand_coding_agent::SettingsManager::from_cwd(&cwd)?;
+
+    let registry = DefaultSourceRegistry::new(cwd, agent_dir, &settings_manager);
+    let resolved = registry.resolve(None).await?;
+
+    hand_coding_agent::cli::select_config(resolved).await?;
+    Ok(())
 }
 
 fn print_help() {

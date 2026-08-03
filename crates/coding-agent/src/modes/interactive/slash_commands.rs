@@ -14,6 +14,8 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::core::keybindings::{Action, Key, KeyBindings, KeyChord, Scope};
+
 /// Parsed slash-command form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedSlashCommand {
@@ -93,9 +95,10 @@ pub enum SlashCommandAction {
     OpenThinkingSelector { inline_level: Option<String> },
     /// Open the settings selector overlay.
     OpenSettingsSelector,
-    /// Open the login dialog overlay. `provider` is the provider id to
-    /// authenticate against (e.g. `"anthropic"`, `"openai"`); when `None`
-    /// the dialog defaults to Anthropic.
+    /// Open the login flow overlay. `provider` is the provider id to authenticate
+    /// against (e.g. `"anthropic"`, `"openai"`), skipping straight to its key/OAuth
+    /// dialog; when `None` (a bare `/login`) the provider **picker** is opened first
+    /// so the user chooses which provider to authenticate against.
     OpenLoginDialog { provider: Option<String> },
     /// Open the session-resume picker (most-recent fallback).
     OpenResumePicker,
@@ -186,6 +189,24 @@ pub struct SlashCommandContext {
     pub provider: String,
 }
 
+impl SlashCommandContext {
+    /// A context with empty `model_id`/`provider`, for dispatching commands whose
+    /// action does **not** read the context (the config-selector, picker, and
+    /// login families the async turn runner intercepts). Those branches route to a
+    /// live-session re-dispatch or an overlay that re-reads the session, so the
+    /// model/provider here are never observed — this constructor names that
+    /// invariant so a caller does not have to fabricate a fake session just to get
+    /// a parse. Commands that *do* echo the current model must build a real
+    /// context from the live session instead.
+    #[must_use]
+    pub fn placeholder() -> Self {
+        Self {
+            model_id: String::new(),
+            provider: String::new(),
+        }
+    }
+}
+
 impl fmt::Display for SlashCommandAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -261,13 +282,14 @@ impl SlashCommandTable {
                 SlashCommandAction::ModelByPattern(cmd.args.clone())
             }),
 
-            // Show keybinding hints inline. Reads the live KeybindingsManager
-            // so user overrides surface here; falls back to a short static
-            // crib of session-level shortcuts that aren't in the
-            // registry-driven Keybinding enum (Enter / Ctrl+C / Ctrl+D / Esc).
-            "hotkeys" | "keybindings" => {
-                SlashCommandResult::Handled(SlashCommandAction::ShowText(Self::hotkeys_text()))
-            }
+            // Show keybinding hints inline. The driver intercepts `/hotkeys`
+            // before this sync dispatch and renders `hotkeys_text` against the
+            // *live* app-layer table so user overrides surface; reaching here
+            // (e.g. from a non-driver caller) renders the defaults so the command
+            // is never a silent no-op.
+            "hotkeys" | "keybindings" => SlashCommandResult::Handled(SlashCommandAction::ShowText(
+                Self::hotkeys_text(&KeyBindings::defaults()),
+            )),
 
             // The dispatcher emits a typed action; the driver owns
             // rendering because it has access to the live AgentSession
@@ -408,79 +430,154 @@ Inline:
   !!command            Same as ! but the output is hidden from agent context"
     }
 
-    /// Build the `/hotkeys` text by enumerating the live
-    /// [`hand_tui::keybindings::KeybindingsManager`] so user overrides
-    /// show up and additions to the registry don't require updating this
-    /// file. Returns a static header (session-level shortcuts that
-    /// aren't in the registry) followed by the resolved bindings,
-    /// grouped by category.
-    fn hotkeys_text() -> String {
-        use hand_tui::keybindings::{
-            Keybinding, KeybindingDefinition, TUI_KEYBINDINGS, get_keybindings,
-        };
-
-        // Group bindings by id-prefix (`tui.editor.*` etc.) so the output
-        // is readable. Order within each group follows `Keybinding::all()`
-        // declaration order.
-        let manager = get_keybindings();
-        type KeybindingRow = (Keybinding, Vec<String>, String);
-        let mut groups: std::collections::BTreeMap<&str, Vec<KeybindingRow>> =
-            std::collections::BTreeMap::new();
-        for (binding, keys) in manager.all() {
-            let id = binding.id();
-            let category = id.split('.').nth(1).unwrap_or("other");
-            let key_labels: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
-            let description: String = TUI_KEYBINDINGS
-                .get(id)
-                .and_then(|d: &KeybindingDefinition| d.description.clone())
-                .unwrap_or_else(|| id.to_string());
-            groups
-                .entry(category)
-                .or_default()
-                .push((binding, key_labels, description));
+    /// Build the `/hotkeys` text from the **app-layer**
+    /// [`KeyBindings`](crate::core::keybindings::KeyBindings) table (Decision Log
+    /// 2026-07-24, option A: the legacy `hand_tui::keybindings` registry is an M4
+    /// retirement target and is not read here).
+    ///
+    /// The listing enumerates exactly the actions the effective table binds — so
+    /// the listed set is *equal to* the effective registry set with **no dead
+    /// entries** and no missing ones (VAL-COMPAT-006, pinned by a unit test). A
+    /// user override surfaces here verbatim because the chord is read from the same
+    /// table the driver dispatches against; a conflicting-and-therefore-disabled
+    /// chord shows `(disabled)`.
+    ///
+    /// The header lists the fixed exit / turn-control keys (Ctrl+D quit, Esc /
+    /// Ctrl+C turn control) that are resolved by the input loop's priority paths
+    /// rather than through the remappable action table.
+    pub fn hotkeys_text(bindings: &KeyBindings) -> String {
+        // Group the actions by scope so input-line and selector bindings read as
+        // separate sections. Within a group, order follows `Action::ALL`.
+        let mut input_rows: Vec<(&'static str, String)> = Vec::new();
+        let mut selector_rows: Vec<(&'static str, String)> = Vec::new();
+        for action in Action::ALL {
+            let scope = action.scope();
+            // A chord that reverse-resolves to this action is *live*; one that does
+            // not (because it conflicts with another same-scope action, so the
+            // chord was dropped from the reverse index) shows `(disabled)` — the
+            // listing must not advertise a key that does nothing (VAL-COMPAT-006).
+            let label = match bindings.resolve(*action) {
+                Some(chord) if bindings.resolve_chord_in(scope, chord) == Some(*action) => {
+                    key_chord_label(chord)
+                }
+                _ => "(disabled)".to_string(),
+            };
+            let row = (action_description(*action), label);
+            match scope {
+                Scope::Input => input_rows.push(row),
+                Scope::Selector => selector_rows.push(row),
+            }
         }
 
         let mut out = String::from(
             "Keyboard shortcuts:\n\n\
-             Session\n  \
-             Enter      Send message\n  \
-             Shift+Enter  Insert newline\n  \
-             Up / Down  History navigation\n  \
-             Ctrl+C     Cancel current turn / clear input\n  \
+             Session (fixed)\n  \
              Ctrl+D     Quit\n  \
-             Ctrl+X     Copy last assistant message\n  \
+             Ctrl+C     Cancel current turn / clear input\n  \
              Esc        Cancel running turn / close overlay\n",
         );
-        for (category, entries) in groups {
-            let header = match category {
-                "editor" => "Editor",
-                "input" => "Input",
-                "select" => "Select",
-                other => other,
-            };
-            out.push('\n');
-            out.push_str(header);
-            out.push('\n');
-            let max_keys = entries
-                .iter()
-                .map(|(_, keys, _)| keys.join(", ").chars().count())
-                .max()
-                .unwrap_or(0);
-            for (_binding, keys, description) in entries {
-                let key_str = if keys.is_empty() {
-                    "(disabled)".to_string()
-                } else {
-                    keys.join(", ")
-                };
-                out.push_str(&format!(
-                    "  {:<width$}  {}\n",
-                    key_str,
-                    description,
-                    width = max_keys.max("(disabled)".len())
-                ));
-            }
-        }
+        push_hotkey_group(&mut out, "Input", &input_rows);
+        push_hotkey_group(&mut out, "Selectors", &selector_rows);
         out
+    }
+}
+
+/// The set of action names `/hotkeys` lists (the "listed set" for VAL-COMPAT-006).
+///
+/// Exposed so a unit test can pin equality against the effective registry (every
+/// action the [`KeyBindings`](crate::core::keybindings::KeyBindings) table binds) —
+/// no dead entries, none missing.
+#[must_use]
+pub fn hotkeys_listed_actions() -> Vec<&'static str> {
+    Action::ALL.iter().map(|a| a.as_str()).collect()
+}
+
+/// A human-facing, single-key label for a chord (e.g. `Ctrl+X`, `Enter`, `↑`).
+fn key_chord_label(chord: &KeyChord) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if chord.modifiers.ctrl {
+        parts.push("Ctrl");
+    }
+    if chord.modifiers.alt {
+        parts.push("Alt");
+    }
+    if chord.modifiers.shift {
+        parts.push("Shift");
+    }
+    if chord.modifiers.cmd {
+        parts.push("Cmd");
+    }
+    let key = key_label(&chord.key);
+    if parts.is_empty() {
+        key
+    } else {
+        format!("{}+{}", parts.join("+"), key)
+    }
+}
+
+/// A human-facing label for a single [`Key`](crate::core::keybindings::Key).
+fn key_label(key: &Key) -> String {
+    match key {
+        Key::Char(' ') => "Space".to_string(),
+        Key::Char(c) => c.to_ascii_uppercase().to_string(),
+        Key::Enter => "Enter".to_string(),
+        Key::Tab => "Tab".to_string(),
+        Key::Backspace => "Backspace".to_string(),
+        Key::Delete => "Delete".to_string(),
+        Key::Escape => "Esc".to_string(),
+        Key::ArrowUp => "↑".to_string(),
+        Key::ArrowDown => "↓".to_string(),
+        Key::ArrowLeft => "←".to_string(),
+        Key::ArrowRight => "→".to_string(),
+        Key::Home => "Home".to_string(),
+        Key::End => "End".to_string(),
+        Key::PageUp => "PageUp".to_string(),
+        Key::PageDown => "PageDown".to_string(),
+        Key::F(n) => format!("F{n}"),
+    }
+}
+
+/// A short description for each [`Action`], shown after its key in `/hotkeys`.
+fn action_description(action: Action) -> &'static str {
+    match action {
+        Action::Submit => "Send message",
+        Action::Cancel => "Cancel / clear input",
+        Action::NewLine => "Insert newline",
+        Action::HistoryPrev => "Previous history entry",
+        Action::HistoryNext => "Next history entry",
+        Action::DeleteWordBack => "Delete previous word",
+        Action::KillToEnd => "Kill to end of line",
+        Action::KillToStart => "Kill to start of line",
+        Action::Quit => "Quit",
+        Action::ToggleThinking => "Toggle thinking blocks",
+        Action::OpenSlashPalette => "Open slash-command palette",
+        Action::CopyLastMessage => "Copy last assistant message",
+        Action::OpenExternalEditor => "Open buffer in external editor",
+        Action::PasteClipboard => "Paste clipboard",
+        Action::ToggleLastSummary => "Expand / collapse last summary",
+        Action::SelectUp => "Move selection up",
+        Action::SelectDown => "Move selection down",
+        Action::SelectConfirm => "Confirm selection",
+        Action::SelectCancel => "Dismiss selector",
+    }
+}
+
+/// Append one `/hotkeys` section (header + aligned rows) to `out`.
+fn push_hotkey_group(out: &mut String, header: &str, rows: &[(&'static str, String)]) {
+    if rows.is_empty() {
+        return;
+    }
+    let max_keys = rows
+        .iter()
+        .map(|(_, key)| key.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("(disabled)".len());
+    out.push('\n');
+    out.push_str(header);
+    out.push('\n');
+    for (description, key) in rows {
+        out.push_str(&format!("  {key:<max_keys$}  {description}\n"));
     }
 }
 
@@ -1047,29 +1144,81 @@ mod tests {
     }
 
     #[test]
-    fn dispatches_hotkeys_includes_registry_bindings() {
-        // /hotkeys reads the live KeybindingsManager so user overrides
-        // and additions to the registry surface here automatically.
+    fn dispatches_hotkeys_reads_app_layer_table() {
+        // /hotkeys renders from the app-layer KeyBindings table (option A): the
+        // sync-dispatch fallback shows the defaults, the driver renders live.
         let parsed = ParsedSlashCommand::parse("/hotkeys").unwrap();
         let text = match SlashCommandTable::dispatch(&parsed, &ctx()) {
             SlashCommandResult::Handled(SlashCommandAction::ShowText(s)) => s,
             other => panic!("expected ShowText, got {other:?}"),
         };
-        // Session header + every category that has bindings registered.
         assert!(text.contains("Keyboard shortcuts:"), "{text}");
-        assert!(text.contains("Editor"), "missing Editor section: {text}");
         assert!(text.contains("Input"), "missing Input section: {text}");
-        assert!(text.contains("Select"), "missing Select section: {text}");
-        // Spot-check one editor binding's description — proves we're
-        // reading from TUI_KEYBINDINGS rather than a hand-written list.
         assert!(
-            text.contains("Move cursor up"),
-            "expected editor cursorUp description, got: {text}"
+            text.contains("Selectors"),
+            "missing Selectors section: {text}"
         );
-        // Session-level shortcuts live in the static header.
+        // A default input-line binding surfaces with its key + description.
         assert!(
-            text.contains("Ctrl+X     Copy last assistant message"),
-            "expected Ctrl+X copy hint, got: {text}"
+            text.contains("Copy last assistant message"),
+            "expected copy-last-message row, got: {text}"
+        );
+    }
+
+    #[test]
+    fn hotkeys_listing_equals_the_effective_registry_set() {
+        // VAL-COMPAT-006: the set of actions /hotkeys lists is EXACTLY the set the
+        // effective table binds — no dead entries, none missing. The listing pulls
+        // every Action, and every Action has a default binding, so the two sets are
+        // equal by construction; this test pins that invariant so a future action
+        // added to the enum but forgotten in the listing (or vice-versa) fails.
+        use crate::core::keybindings::{Action, KeyBindings};
+        use std::collections::BTreeSet;
+
+        let bindings = KeyBindings::defaults();
+        let effective: BTreeSet<&str> = Action::ALL
+            .iter()
+            .filter(|a| bindings.resolve(**a).is_some())
+            .map(|a| a.as_str())
+            .collect();
+        let listed: BTreeSet<&str> = hotkeys_listed_actions().into_iter().collect();
+        assert_eq!(
+            listed, effective,
+            "the /hotkeys listed set must equal the effective registry set (no dead entries)"
+        );
+
+        // And the rendered text names every listed action's description, so a real
+        // listing (not just the id set) carries every binding.
+        let text = SlashCommandTable::hotkeys_text(&bindings);
+        for action in Action::ALL {
+            assert!(
+                text.contains(super::action_description(*action)),
+                "hotkeys text is missing action {:?}",
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn hotkeys_reflects_a_user_override_and_a_disabled_conflict() {
+        use crate::core::keybindings::KeyBindings;
+        use std::io::Write;
+
+        // A remapped copy key surfaces verbatim; a conflicting pair shows disabled.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("kb.yaml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(b"copy-last-message: alt+c\nsubmit: ctrl+z\ncancel: ctrl+z\n")
+            .unwrap();
+        let bindings = KeyBindings::load(Some(&path), None).unwrap();
+
+        let text = SlashCommandTable::hotkeys_text(&bindings);
+        assert!(text.contains("Alt+C"), "override not shown: {text}");
+        // submit + cancel both conflict on ctrl+z → both disabled.
+        let disabled_count = text.matches("(disabled)").count();
+        assert!(
+            disabled_count >= 2,
+            "expected the conflicting pair disabled, got: {text}"
         );
     }
 

@@ -1,0 +1,5 @@
+# Project-layer fixture for the project-shadows-global precedence check
+# (VAL-COMPAT-002). Placed at <cwd>/.hand/keybindings.yaml. Paired with
+# global-submit-ctrl-s.yaml, this value (Alt+Enter) wins because project shadows
+# global.
+submit: alt+enter

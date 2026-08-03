@@ -1,0 +1,19 @@
+{
+  "providers": {
+    "openai": {
+      "baseUrl": "http://127.0.0.1:39217/v1",
+      "apiKey": "mock-key-no-real-auth",
+      "models": [
+        {
+          "id": "mock-model",
+          "name": "Mock Provider Model",
+          "api": "openai-completions",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 8192
+        }
+      ]
+    }
+  }
+}

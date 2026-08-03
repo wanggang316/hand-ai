@@ -18,7 +18,6 @@ pub mod modes;
 pub mod prelude;
 pub mod rpc;
 pub mod tools;
-pub mod tui_bridge;
 pub mod utils;
 
 // Convenience re-exports at crate root for non-prelude consumers.
@@ -42,7 +41,7 @@ pub use core::extensions::{
 // Slash commands and keybindings — same caveat as extensions; will be
 // reshaped in Phases 4/5.
 pub use core::keybindings::{
-    Action, ChordParseError, Key, KeyBindings, KeyBindingsError, KeyBindingsFile, KeyChord,
-    KeyModifiers, parse_chord,
+    Action, ChordParseError, Diagnostic, Key, KeyBindings, KeyBindingsError, KeyBindingsFile,
+    KeyChord, KeyModifiers, Scope, parse_chord,
 };
 pub use core::slash_commands::SlashCommandRegistry;

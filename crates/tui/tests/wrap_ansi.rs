@@ -1,7 +1,5 @@
 //! Integration tests for ANSI-aware wrapping.
 
-mod common;
-
 use hand_tui::utils::wrap_text_with_ansi;
 use hand_tui::{visible_width, wrap_text};
 

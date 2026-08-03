@@ -1,27 +1,28 @@
 //! Interactive TUI mode for the coding agent.
 //!
-//! Components live in `components/` and the theme system in `theme/`.
-//! This module wires them together via [`InteractiveMode`], covering
-//! the happy path: chat scrollback, editor input, agent dispatch, a
-//! small slash-command table, and a model-selector overlay. Features
-//! still in flight are marked with `// TODO` notes.
+//! The interactive driver runs on the **ratatui runtime** (`hand_tui::rt`) — see
+//! [`rt_driver`], the M3 strangler cutover. It wires the rt session guard, frame
+//! scheduler, input pump, and fixed-max inline viewport into a run loop that
+//! starts, types, submits, streams a turn into scrollback, and exits cleanly on
+//! every path (no `process::exit`, no raw-pointer stop handle).
 //!
-//! # Theming
+//! The [`event_dispatch`] protocol (`AgentSessionEvent` → `ChatUpdate`) is reused
+//! unchanged — it carries zero `hand_tui` dependency and is the bridge the rt
+//! driver commits agent output through.
 //!
-//! Interactive components are styled through semantic color slots
-//! (`user_message_bg`, `custom_message_label`, etc.) provided by
-//! [`theme`]. The driver currently uses the components' built-in
-//! defaults rather than reading the theme directly — the
-//! theme-to-component wiring is a follow-up task.
+//! # Follow-up features build on this skeleton
+//!
+//! Full startup chrome, the rich message components (markdown / thinking / bash /
+//! tool cards), the complete slash-command table, the selectors, and the full
+//! footer view-model all live in the [`rt_driver`] on the ratatui runtime.
 
-pub mod components;
-pub mod driver;
 pub mod event_dispatch;
+pub mod rt_driver;
 pub mod slash_commands;
-pub mod syntax_highlight;
 pub mod theme;
 
-pub use driver::{InteractiveError, InteractiveMode};
+pub use rt_driver::watchdog::{DEFAULT_TURN_TIMEOUT, Watchdog};
+pub use rt_driver::{InteractiveError, InteractiveMode};
 pub use slash_commands::{
     ExportFormat, ParsedSlashCommand, SlashCommandAction, SlashCommandContext, SlashCommandResult,
     SlashCommandTable,
@@ -47,25 +48,61 @@ pub async fn run_interactive(args: Args) -> Result<(), Box<dyn std::error::Error
     let setup = SessionSetup::resolve(&args)?;
     let cwd = setup.cwd.clone();
 
-    // A bare `--resume` (no value following) lands as `Some("")` from
-    // clap; promote it to `--continue` semantics so the user resumes
-    // the most-recent session in cwd instead of getting a confusing
-    // 'Session "" not found' error.
+    // A bare `--resume` (no value following) lands as `Some("")` from clap. In the
+    // rt TUI it mounts the one-shot session picker *before* the driver starts
+    // (VAL-CHAT-036): the user lists their sessions and picks one to resume, and a
+    // clean Esc cancel falls back to a fresh session with the terminal restored (no
+    // orphan UI). An explicit `--continue` keeps its "resume most-recent" semantics.
     let bare_resume = matches!(args.resume.as_deref(), Some(""));
-    let continue_like = args.continue_session || bare_resume;
-    let resume_session = if continue_like {
-        None
+    let picked = if bare_resume {
+        // Mount the picker *before* consuming the tools / building the session, so a
+        // cancel leaves the terminal cooked and only then do we build a fresh session.
+        Some(pick_resume_session(&cwd).await?)
     } else {
-        args.resume.clone()
+        None
     };
 
-    let base_config = setup.to_config(resume_session);
+    // Resolve the session config *before* moving the tools out of `setup`
+    // (`to_config` borrows `&setup`). `continue_like` is only meaningful on the
+    // no-picker path; the picker resolves resume directly to a key (or a fresh
+    // session on cancel).
+    let continue_like = picked.is_none() && args.continue_session;
+    let base_config = match &picked {
+        // Bare `--resume` resolved the picker: a `Some(path)` resumes that session by
+        // its resolved key; a `None` (clean cancel) falls back to a fresh session.
+        Some(Some(path)) => setup.to_config(Some(path.to_string_lossy().to_string())),
+        Some(None) => setup.to_config(None),
+        // No picker: the ordinary `--continue` / `--resume <id>` / fresh path.
+        None if continue_like => setup.to_config(None),
+        None => setup.to_config(args.resume.clone()),
+    };
+
     let agent_tools = setup.agent_tools;
 
-    let session = build_session(&args, continue_like, base_config, agent_tools, &cwd)?;
+    // The picker's `Some(Some(path))` resumes a specific session directly; every
+    // other case flows through `build_session` (which honours `--continue` /
+    // `--fork` / `--resume <id>`).
+    let session = match picked {
+        Some(Some(_)) => AgentSession::new(base_config, agent_tools)?,
+        _ => build_session(&args, continue_like, base_config, agent_tools, &cwd)?,
+    };
 
     InteractiveMode::new(session, cwd).run().await?;
     Ok(())
+}
+
+/// Mount the one-shot `--resume` session picker and return the chosen session's
+/// path, or `None` when the user cancelled (Esc) or no sessions exist.
+///
+/// Lists the resumable sessions in `cwd` (backend-aware) and shows the rt picker.
+/// A listing failure or an empty list surfaces the picker's `(no sessions)` empty
+/// state (which the user leaves with Esc → `None`), so the resume flow degrades to
+/// a fresh session rather than erroring.
+async fn pick_resume_session(cwd: &Path) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let backend = SettingsManager::session_backend_for_cwd(cwd);
+    let sessions = SessionManager::list_with_backend(backend, cwd).unwrap_or_default();
+    let picked = crate::cli::select_session(sessions).await?;
+    Ok(picked)
 }
 
 /// Build the [`AgentSession`] honouring `--continue` / `--fork` / `--resume`
