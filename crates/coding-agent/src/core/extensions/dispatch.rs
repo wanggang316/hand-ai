@@ -6,72 +6,210 @@
 //!
 //! See ADR-001 and Phase 3 task T3.3a for the design.
 
-use super::api::{Extension, ExtensionContext, HookDecision, ToolCallEvent, ToolResultEvent};
+use super::api::{
+    Extension, ExtensionContextFactory, HookDecision, ToolCallEvent, ToolResultEvent,
+    UserMessageEvent,
+};
 use std::sync::Arc;
+
+/// How many passes over the chain `dispatch_before_tool_call` will make before
+/// it gives up and cancels the call. One pass produces a rewrite, the next
+/// re-validates it; a chain that keeps rewriting on every pass never converges
+/// and is treated as a fault.
+pub(crate) const MAX_BEFORE_TOOL_CALL_ROUNDS: usize = 3;
 
 /// Dispatch `on_before_tool_call` across an ordered chain of extensions.
 ///
 /// # Aggregation rules
 ///
-/// Extensions are called sequentially in the order they appear in `extensions`:
+/// Extensions are called sequentially in the order they appear in
+/// `extensions`. Per extension:
 ///
 /// - `Continue` — args are unchanged; continue to the next extension.
 /// - `Replace(new_args)` — the working `ToolCallEvent::arguments` is updated to
-///   `new_args` so subsequent extensions see the replaced value. The chain
-///   keeps running.
+///   `new_args` so subsequent extensions see the replaced value.
 /// - `Cancel(reason)` — the chain short-circuits; no further extensions are
 ///   called, and `Cancel(reason)` is returned immediately.
 /// - `Err(_)` — the error is logged via `tracing::warn!` and treated as
 ///   `Continue` for that extension. A misbehaving extension never aborts the
 ///   chain.
 ///
-/// If multiple extensions return `Replace`, **the last one wins** because each
-/// `Replace` overwrites the previous working arguments before the next
-/// extension is called.
+/// # Re-validation on replace
+///
+/// A `Replace` invalidates every verdict already cast in this pass: an
+/// extension that answered `Continue` did so for arguments that no longer
+/// exist. So whenever a pass rewrites the arguments, the whole chain is run
+/// again from the head with the rewritten value, giving earlier extensions
+/// (path guards, approval gates) a chance to inspect what will actually reach
+/// the tool. Without this, a later extension could rewrite arguments past a
+/// guard registered ahead of it.
+///
+/// A `Replace` whose value equals the current working arguments is a no-op and
+/// does not trigger another pass, so idempotent rewriters (path canonicalizers
+/// and the like) converge on the second pass instead of burning the budget.
+///
+/// The chain is re-run at most [`MAX_BEFORE_TOOL_CALL_ROUNDS`] times. A chain
+/// that still rewrites on the last pass has not converged and the call is
+/// cancelled — an unbounded rewrite loop is a fault, and failing closed keeps
+/// an un-validated argument set from reaching the tool.
 ///
 /// The returned `HookDecision`:
 /// - `Continue` — every extension returned `Continue` (or errored);
 ///   `event.arguments` is unchanged from the caller's input.
-/// - `Replace(final_args)` — at least one extension returned `Replace` and no
-///   later one returned `Cancel`; `final_args` is the last replacement value.
-/// - `Cancel(reason)` — some extension cancelled.
+/// - `Replace(final_args)` — the chain converged on `final_args` and every
+///   extension has seen that value.
+/// - `Cancel(reason)` — some extension cancelled, or the chain did not
+///   converge.
 pub(crate) async fn dispatch_before_tool_call(
     extensions: &[Arc<dyn Extension>],
-    cx: &ExtensionContext,
+    contexts: &ExtensionContextFactory,
     event: &ToolCallEvent,
 ) -> HookDecision {
     let mut working = event.clone();
     let mut replaced: Option<serde_json::Value> = None;
 
-    for ext in extensions {
-        let decision = match ext.on_before_tool_call(cx, &working).await {
-            Ok(d) => d,
-            Err(err) => {
-                tracing::warn!(
-                    extension = %ext.manifest().name,
-                    error = %err,
-                    "extension on_before_tool_call errored; treating as Continue"
-                );
-                HookDecision::Continue
-            }
-        };
+    for _round in 0..MAX_BEFORE_TOOL_CALL_ROUNDS {
+        let mut replaced_this_round = false;
 
-        match decision {
-            HookDecision::Continue => {}
-            HookDecision::Replace(new_args) => {
-                working.arguments = new_args.clone();
-                replaced = Some(new_args);
+        for ext in extensions {
+            let cx = contexts.for_extension(&ext.manifest().name);
+            let decision = match ext.on_before_tool_call(&cx, &working).await {
+                Ok(d) => d,
+                Err(err) => {
+                    tracing::warn!(
+                        extension = %ext.manifest().name,
+                        error = %err,
+                        "extension on_before_tool_call errored; treating as Continue"
+                    );
+                    HookDecision::Continue
+                }
+            };
+
+            match decision {
+                HookDecision::Continue => {}
+                HookDecision::Replace(new_args) => {
+                    if new_args == working.arguments {
+                        // Idempotent rewrite: nothing changed, so nothing
+                        // needs re-validating.
+                        continue;
+                    }
+                    working.arguments = new_args.clone();
+                    replaced = Some(new_args);
+                    replaced_this_round = true;
+                }
+                HookDecision::Cancel(reason) => {
+                    return HookDecision::Cancel(reason);
+                }
             }
-            HookDecision::Cancel(reason) => {
-                return HookDecision::Cancel(reason);
-            }
+        }
+
+        if !replaced_this_round {
+            return match replaced {
+                Some(args) => HookDecision::Replace(args),
+                None => HookDecision::Continue,
+            };
         }
     }
 
-    match replaced {
-        Some(args) => HookDecision::Replace(args),
-        None => HookDecision::Continue,
+    tracing::warn!(
+        tool = %event.tool_name,
+        rounds = MAX_BEFORE_TOOL_CALL_ROUNDS,
+        "extension chain kept rewriting tool arguments; cancelling the call"
+    );
+    HookDecision::Cancel(format!(
+        "extension chain did not converge on tool arguments after \
+         {MAX_BEFORE_TOOL_CALL_ROUNDS} rounds of rewriting"
+    ))
+}
+
+/// Dispatch `on_user_message` across an ordered chain of extensions.
+///
+/// Only extensions whose manifest declares `capabilities.on_user_message`
+/// are called — unlike the tool-call hooks, this one fires on every turn,
+/// so the host does not round-trip extensions that never asked for it.
+///
+/// Aggregation matches [`dispatch_before_tool_call`]: `Cancel` short-
+/// circuits and wins, a `Replace` re-runs the chain from the head so an
+/// extension ahead of the rewriter re-inspects the final text, errors are
+/// logged and treated as `Continue`, and the chain is bounded to
+/// [`MAX_BEFORE_TOOL_CALL_ROUNDS`] passes.
+///
+/// `Replace` must carry a JSON string; any other payload is a contract
+/// violation, logged and ignored.
+///
+/// The returned decision's `Replace` variant always holds a
+/// `serde_json::Value::String`.
+pub(crate) async fn dispatch_user_message(
+    extensions: &[Arc<dyn Extension>],
+    contexts: &ExtensionContextFactory,
+    event: &UserMessageEvent,
+) -> HookDecision {
+    let subscribed: Vec<&Arc<dyn Extension>> = extensions
+        .iter()
+        .filter(|ext| ext.manifest().capabilities.on_user_message)
+        .collect();
+    if subscribed.is_empty() {
+        return HookDecision::Continue;
     }
+
+    let mut working = event.clone();
+    let mut replaced: Option<String> = None;
+
+    for _round in 0..MAX_BEFORE_TOOL_CALL_ROUNDS {
+        let mut replaced_this_round = false;
+
+        for ext in &subscribed {
+            let name = ext.manifest().name.clone();
+            let cx = contexts.for_extension(&name);
+            let decision = match ext.on_user_message(&cx, &working).await {
+                Ok(d) => d,
+                Err(err) => {
+                    tracing::warn!(
+                        extension = %name,
+                        error = %err,
+                        "extension on_user_message errored; treating as Continue"
+                    );
+                    HookDecision::Continue
+                }
+            };
+
+            match decision {
+                HookDecision::Continue => {}
+                HookDecision::Replace(value) => {
+                    let Some(text) = value.as_str() else {
+                        tracing::warn!(
+                            extension = %name,
+                            "on_user_message returned a non-string Replace payload; ignoring"
+                        );
+                        continue;
+                    };
+                    if text == working.text {
+                        continue;
+                    }
+                    working.text = text.to_string();
+                    replaced = Some(text.to_string());
+                    replaced_this_round = true;
+                }
+                HookDecision::Cancel(reason) => return HookDecision::Cancel(reason),
+            }
+        }
+
+        if !replaced_this_round {
+            return match replaced {
+                Some(text) => HookDecision::Replace(serde_json::Value::String(text)),
+                None => HookDecision::Continue,
+            };
+        }
+    }
+
+    tracing::warn!(
+        rounds = MAX_BEFORE_TOOL_CALL_ROUNDS,
+        "extension chain kept rewriting the user message; cancelling the turn"
+    );
+    HookDecision::Cancel(format!(
+        "extension chain did not converge on the user message after \
+         {MAX_BEFORE_TOOL_CALL_ROUNDS} rounds of rewriting"
+    ))
 }
 
 /// Dispatch `on_after_tool_call` across an ordered chain of extensions.
@@ -82,11 +220,12 @@ pub(crate) async fn dispatch_before_tool_call(
 /// hooks are observational only.
 pub(crate) async fn dispatch_after_tool_call(
     extensions: &[Arc<dyn Extension>],
-    cx: &ExtensionContext,
+    contexts: &ExtensionContextFactory,
     event: &ToolResultEvent,
 ) {
     for ext in extensions {
-        if let Err(err) = ext.on_after_tool_call(cx, event).await {
+        let cx = contexts.for_extension(&ext.manifest().name);
+        if let Err(err) = ext.on_after_tool_call(&cx, event).await {
             tracing::warn!(
                 extension = %ext.manifest().name,
                 error = %err,
@@ -100,7 +239,7 @@ pub(crate) async fn dispatch_after_tool_call(
 mod tests {
     use super::*;
     use crate::core::extensions::api::{
-        Extension, ExtensionCapabilities, ExtensionError, ExtensionManifest,
+        Extension, ExtensionCapabilities, ExtensionContext, ExtensionError, ExtensionManifest,
     };
     use async_trait::async_trait;
     use std::path::PathBuf;
@@ -116,15 +255,16 @@ mod tests {
             env: Default::default(),
             slash_commands: Vec::new(),
             custom_tools: Vec::new(),
+            timeouts: Default::default(),
         }
     }
 
-    fn ctx() -> ExtensionContext {
-        ExtensionContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "test-session".into(),
-            data_dir: PathBuf::from("/tmp/data"),
-        }
+    fn ctx() -> ExtensionContextFactory {
+        ExtensionContextFactory::new(
+            PathBuf::from("/tmp"),
+            "test-session",
+            PathBuf::from("/tmp/.hand/extensions"),
+        )
     }
 
     fn event(args: serde_json::Value) -> ToolCallEvent {
@@ -295,6 +435,185 @@ mod tests {
         assert_eq!(c_calls[0].arguments, args2);
     }
 
+    // -- Re-validation after a Replace ---------------------------------------
+
+    /// An extension that cancels whenever the working arguments carry a
+    /// `path` outside `/workspace`. Stateless, so it answers the same way
+    /// on every pass over the chain.
+    struct PathGuardExt {
+        manifest: ExtensionManifest,
+        calls: Mutex<Vec<ToolCallEvent>>,
+    }
+
+    impl PathGuardExt {
+        fn new(name: &str) -> Self {
+            Self {
+                manifest: manifest(name),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Extension for PathGuardExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn on_before_tool_call(
+            &self,
+            _cx: &ExtensionContext,
+            event: &ToolCallEvent,
+        ) -> Result<HookDecision, ExtensionError> {
+            self.calls.lock().unwrap().push(event.clone());
+            let path = event.arguments.get("path").and_then(|v| v.as_str());
+            match path {
+                Some(p) if !p.starts_with("/workspace") => Ok(HookDecision::Cancel(format!(
+                    "path {p} is outside /workspace"
+                ))),
+                _ => Ok(HookDecision::Continue),
+            }
+        }
+    }
+
+    /// An extension that rewrites the arguments to a fresh value on every
+    /// call, so the chain can never converge.
+    struct NeverConvergingExt {
+        manifest: ExtensionManifest,
+        calls: Mutex<usize>,
+    }
+
+    impl NeverConvergingExt {
+        fn new(name: &str) -> Self {
+            Self {
+                manifest: manifest(name),
+                calls: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Extension for NeverConvergingExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn on_before_tool_call(
+            &self,
+            _cx: &ExtensionContext,
+            _event: &ToolCallEvent,
+        ) -> Result<HookDecision, ExtensionError> {
+            let mut n = self.calls.lock().unwrap();
+            *n += 1;
+            Ok(HookDecision::Replace(serde_json::json!({ "round": *n })))
+        }
+    }
+
+    /// The security case from the issue: a guard registered ahead of a
+    /// rewriting extension must still see — and be able to veto — the
+    /// arguments that would actually reach the tool.
+    #[tokio::test]
+    async fn replace_reruns_chain_so_an_earlier_guard_sees_the_final_args() {
+        let guard = Arc::new(PathGuardExt::new("guard"));
+        let rewriter = Arc::new(RecordingExt::new(
+            "rewriter",
+            vec![BeforeAction::Replace(
+                serde_json::json!({"path": "/etc/passwd"}),
+            )],
+        ));
+
+        let exts: Vec<Arc<dyn Extension>> = vec![guard.clone(), rewriter.clone()];
+        let decision = dispatch_before_tool_call(
+            &exts,
+            &ctx(),
+            &event(serde_json::json!({"path": "/workspace/notes.md"})),
+        )
+        .await;
+
+        match decision {
+            HookDecision::Cancel(reason) => assert!(
+                reason.contains("/etc/passwd"),
+                "cancel reason should name the rewritten path, got {reason:?}"
+            ),
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+
+        let guard_calls = guard.calls.lock().unwrap();
+        assert_eq!(
+            guard_calls.len(),
+            2,
+            "guard is re-consulted after a replace"
+        );
+        assert_eq!(
+            guard_calls[1].arguments,
+            serde_json::json!({"path": "/etc/passwd"}),
+            "the second consultation carries the rewritten arguments"
+        );
+    }
+
+    #[tokio::test]
+    async fn converging_replace_calls_each_extension_at_most_twice() {
+        let replacement = serde_json::json!({"path": "/workspace/rewritten.md"});
+        let a = Arc::new(RecordingExt::new(
+            "a",
+            vec![BeforeAction::Replace(replacement.clone())],
+        ));
+        let b = Arc::new(RecordingExt::new("b", vec![BeforeAction::Continue]));
+
+        let exts: Vec<Arc<dyn Extension>> = vec![a.clone(), b.clone()];
+        let decision = dispatch_before_tool_call(
+            &exts,
+            &ctx(),
+            &event(serde_json::json!({"path": "/workspace/notes.md"})),
+        )
+        .await;
+
+        match decision {
+            HookDecision::Replace(v) => assert_eq!(v, replacement),
+            other => panic!("expected Replace, got {other:?}"),
+        }
+        assert_eq!(a.before_calls.lock().unwrap().len(), 2);
+        assert_eq!(b.before_calls.lock().unwrap().len(), 2);
+    }
+
+    /// A `Replace` that yields the value the extension was already handed is
+    /// a no-op: it must not cost an extra pass over the chain.
+    #[tokio::test]
+    async fn idempotent_replace_does_not_trigger_another_round() {
+        let same = serde_json::json!({"path": "/workspace/notes.md"});
+        let a = Arc::new(RecordingExt::new(
+            "a",
+            vec![BeforeAction::Replace(same.clone())],
+        ));
+
+        let exts: Vec<Arc<dyn Extension>> = vec![a.clone()];
+        let decision = dispatch_before_tool_call(&exts, &ctx(), &event(same)).await;
+
+        assert!(matches!(decision, HookDecision::Continue));
+        assert_eq!(a.before_calls.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn non_converging_chain_is_cancelled() {
+        let ext = Arc::new(NeverConvergingExt::new("flip-flop"));
+        let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
+        let decision =
+            dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
+
+        match decision {
+            HookDecision::Cancel(reason) => assert!(
+                reason.contains("did not converge"),
+                "unexpected cancel reason: {reason:?}"
+            ),
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+        assert_eq!(
+            *ext.calls.lock().unwrap(),
+            MAX_BEFORE_TOOL_CALL_ROUNDS,
+            "the chain is bounded to MAX_BEFORE_TOOL_CALL_ROUNDS passes"
+        );
+    }
+
     #[tokio::test]
     async fn replace_then_cancel_returns_cancel() {
         let args1 = serde_json::json!({"step": 1});
@@ -346,6 +665,195 @@ mod tests {
         assert_eq!(a.before_calls.lock().unwrap().len(), 1);
         assert_eq!(b.before_calls.lock().unwrap().len(), 1);
         assert_eq!(c.before_calls.lock().unwrap().len(), 1);
+    }
+
+    /// Each extension is handed its own context, stamped with its own
+    /// manifest name — two extensions never share a `data_dir`.
+    #[tokio::test]
+    async fn each_extension_gets_its_own_context() {
+        struct ContextRecorder {
+            manifest: ExtensionManifest,
+            seen: Mutex<Vec<PathBuf>>,
+        }
+
+        #[async_trait]
+        impl Extension for ContextRecorder {
+            fn manifest(&self) -> &ExtensionManifest {
+                &self.manifest
+            }
+
+            async fn on_before_tool_call(
+                &self,
+                cx: &ExtensionContext,
+                _event: &ToolCallEvent,
+            ) -> Result<HookDecision, ExtensionError> {
+                self.seen.lock().unwrap().push(cx.data_dir.clone());
+                Ok(HookDecision::Continue)
+            }
+
+            async fn on_after_tool_call(
+                &self,
+                cx: &ExtensionContext,
+                _event: &ToolResultEvent,
+            ) -> Result<(), ExtensionError> {
+                self.seen.lock().unwrap().push(cx.data_dir.clone());
+                Ok(())
+            }
+        }
+
+        let a = Arc::new(ContextRecorder {
+            manifest: manifest("alpha"),
+            seen: Mutex::new(Vec::new()),
+        });
+        let b = Arc::new(ContextRecorder {
+            manifest: manifest("beta"),
+            seen: Mutex::new(Vec::new()),
+        });
+
+        let exts: Vec<Arc<dyn Extension>> = vec![a.clone(), b.clone()];
+        let _ = dispatch_before_tool_call(&exts, &ctx(), &event(serde_json::json!({}))).await;
+        dispatch_after_tool_call(&exts, &ctx(), &result_event()).await;
+
+        assert_eq!(
+            *a.seen.lock().unwrap(),
+            vec![
+                PathBuf::from("/tmp/.hand/extensions/alpha/data"),
+                PathBuf::from("/tmp/.hand/extensions/alpha/data"),
+            ]
+        );
+        assert_eq!(
+            *b.seen.lock().unwrap(),
+            vec![
+                PathBuf::from("/tmp/.hand/extensions/beta/data"),
+                PathBuf::from("/tmp/.hand/extensions/beta/data"),
+            ]
+        );
+    }
+
+    // -- Tests for dispatch_user_message -------------------------------------
+
+    /// A test extension for the user-message hook. `subscribed` controls
+    /// whether the manifest declares the capability.
+    struct PromptExt {
+        manifest: ExtensionManifest,
+        action: Mutex<Vec<HookDecision>>,
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl PromptExt {
+        fn new(name: &str, subscribed: bool, actions: Vec<HookDecision>) -> Arc<Self> {
+            let mut manifest = manifest(name);
+            manifest.capabilities.on_user_message = subscribed;
+            Arc::new(Self {
+                manifest,
+                action: Mutex::new(actions),
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Extension for PromptExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn on_user_message(
+            &self,
+            _cx: &ExtensionContext,
+            event: &UserMessageEvent,
+        ) -> Result<HookDecision, ExtensionError> {
+            self.seen.lock().unwrap().push(event.text.clone());
+            let mut actions = self.action.lock().unwrap();
+            if actions.is_empty() {
+                return Ok(HookDecision::Continue);
+            }
+            Ok(actions.remove(0))
+        }
+    }
+
+    fn prompt(text: &str) -> UserMessageEvent {
+        UserMessageEvent { text: text.into() }
+    }
+
+    #[tokio::test]
+    async fn user_message_hook_fires_once_with_the_raw_prompt() {
+        let ext = PromptExt::new("linter", true, vec![HookDecision::Continue]);
+        let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
+
+        let decision = dispatch_user_message(&exts, &ctx(), &prompt("hello world")).await;
+        assert!(matches!(decision, HookDecision::Continue));
+        assert_eq!(*ext.seen.lock().unwrap(), vec!["hello world".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn user_message_hook_skips_extensions_that_did_not_declare_it() {
+        let ext = PromptExt::new("silent", false, vec![HookDecision::Cancel("no".into())]);
+        let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
+
+        let decision = dispatch_user_message(&exts, &ctx(), &prompt("hello")).await;
+        assert!(matches!(decision, HookDecision::Continue));
+        assert!(
+            ext.seen.lock().unwrap().is_empty(),
+            "an extension that did not declare the capability must never be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_message_replace_rewrites_the_prompt_and_is_re_validated() {
+        let scrubber = PromptExt::new(
+            "scrubber",
+            true,
+            vec![HookDecision::Replace(serde_json::json!("token=[redacted]"))],
+        );
+        let auditor = PromptExt::new("auditor", true, vec![]);
+        let exts: Vec<Arc<dyn Extension>> = vec![scrubber.clone(), auditor.clone()];
+
+        let decision = dispatch_user_message(&exts, &ctx(), &prompt("token=hunter2")).await;
+        match decision {
+            HookDecision::Replace(v) => assert_eq!(v, serde_json::json!("token=[redacted]")),
+            other => panic!("expected Replace, got {other:?}"),
+        }
+        // The extension ahead of the rewrite sees the final text too.
+        assert_eq!(
+            *scrubber.seen.lock().unwrap(),
+            vec!["token=hunter2".to_string(), "token=[redacted]".to_string()]
+        );
+        assert_eq!(
+            auditor.seen.lock().unwrap().last().map(String::as_str),
+            Some("token=[redacted]")
+        );
+    }
+
+    #[tokio::test]
+    async fn user_message_cancel_wins() {
+        let a = PromptExt::new("a", true, vec![HookDecision::Continue]);
+        let b = PromptExt::new(
+            "b",
+            true,
+            vec![HookDecision::Cancel("contains a secret".into())],
+        );
+        let exts: Vec<Arc<dyn Extension>> = vec![a, b];
+
+        match dispatch_user_message(&exts, &ctx(), &prompt("hi")).await {
+            HookDecision::Cancel(reason) => assert_eq!(reason, "contains a secret"),
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+    }
+
+    /// `Replace` on this hook carries prompt text; a non-string payload is a
+    /// contract violation and must not silently corrupt the prompt.
+    #[tokio::test]
+    async fn user_message_non_string_replace_is_ignored() {
+        let ext = PromptExt::new(
+            "confused",
+            true,
+            vec![HookDecision::Replace(serde_json::json!({"text": "nope"}))],
+        );
+        let exts: Vec<Arc<dyn Extension>> = vec![ext];
+
+        let decision = dispatch_user_message(&exts, &ctx(), &prompt("hi")).await;
+        assert!(matches!(decision, HookDecision::Continue));
     }
 
     // -- Tests for dispatch_after_tool_call ----------------------------------

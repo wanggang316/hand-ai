@@ -1,6 +1,8 @@
 //! Slash command system — parse and execute `/command` inputs.
 
-use crate::core::extensions::api::{Extension, ExtensionContext, ExtensionError, SlashCommandSpec};
+use crate::core::extensions::api::{
+    Extension, ExtensionContextFactory, ExtensionError, SlashCommandSpec,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -281,6 +283,10 @@ impl SlashCommandRegistry {
     /// [`Self::find_extension_command`] (so built-ins shadow extensions),
     /// then calls `Extension::handle_slash_command`.
     ///
+    /// The context is built from `contexts` for the extension that owns the
+    /// command, so a command handler sees the same per-extension `data_dir`
+    /// its hooks do.
+    ///
     /// Returns `Ok(Some(output))` on success, `Ok(None)` if the name doesn't
     /// match any extension command (caller should treat as "unknown"), or
     /// the extension's `Err` on failure.
@@ -288,12 +294,16 @@ impl SlashCommandRegistry {
         &self,
         name: &str,
         args: &str,
-        cx: &ExtensionContext,
+        contexts: &ExtensionContextFactory,
     ) -> Result<Option<String>, ExtensionError> {
         let Some(entry) = self.find_extension_command(name) else {
             return Ok(None);
         };
-        let output = entry.extension.handle_slash_command(cx, name, args).await?;
+        let cx = contexts.for_extension(&entry.extension.manifest().name);
+        let output = entry
+            .extension
+            .handle_slash_command(&cx, name, args)
+            .await?;
         Ok(Some(output))
     }
 }
@@ -502,15 +512,12 @@ mod tests {
             env: Default::default(),
             slash_commands: Vec::new(),
             custom_tools: Vec::new(),
+            timeouts: Default::default(),
         }
     }
 
-    fn test_ctx() -> ExtensionContext {
-        ExtensionContext {
-            cwd: PathBuf::from("/tmp"),
-            session_id: "s".into(),
-            data_dir: PathBuf::from("/tmp"),
-        }
+    fn test_ctx() -> ExtensionContextFactory {
+        ExtensionContextFactory::new(PathBuf::from("/tmp"), "s", PathBuf::from("/tmp/extensions"))
     }
 
     /// A fake extension whose `handle_slash_command` records the call and

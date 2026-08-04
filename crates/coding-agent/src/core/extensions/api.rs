@@ -50,12 +50,110 @@ pub struct ExtensionManifest {
     /// builds tools in code via `Extension::custom_tools()`).
     #[serde(default)]
     pub custom_tools: Vec<CustomToolSpec>,
+    /// Tier 2 only: per-hook RPC budgets. Ignored for Tier 1 (an
+    /// in-process extension cannot be timed out without cancelling its
+    /// future, which the trait does not promise is safe).
+    #[serde(default)]
+    pub timeouts: ExtensionTimeouts,
+}
+
+/// Per-hook RPC budgets for a Tier 2 extension, in milliseconds.
+///
+/// Every hook is a blocking request/response over the child's stdio,
+/// serialized behind one mutex, so a child that never answers would
+/// otherwise hang the session with no user-visible recovery path. Each RPC
+/// gets a budget; blowing it kills the child and disables the extension for
+/// the rest of the session rather than paying the timeout again on every
+/// later call.
+///
+/// In `extension.toml`:
+///
+/// ```toml
+/// [timeouts]
+/// before-tool-call-ms = 5000
+/// after-tool-call-ms = 2000
+/// on-before-tool-call-timeout = "cancel"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ExtensionTimeouts {
+    /// Budget for `on_before_tool_call`. Blocking — the agent loop waits on
+    /// the verdict — so the default is generous but finite.
+    #[serde(default = "default_before_tool_call_ms")]
+    pub before_tool_call_ms: u64,
+    /// Budget for `on_after_tool_call`. Observational: the result is
+    /// already produced, so abandoning it is safe and the budget is tighter.
+    #[serde(default = "default_after_tool_call_ms")]
+    pub after_tool_call_ms: u64,
+    /// Budget for `on_load` / `on_shutdown`.
+    #[serde(default = "default_lifecycle_ms")]
+    pub lifecycle_ms: u64,
+    /// Budget for user-initiated work — custom tool execution and slash
+    /// commands. These legitimately take longer than a hook, so the budget
+    /// is much larger.
+    #[serde(default = "default_invoke_ms")]
+    pub invoke_ms: u64,
+    /// What a `before_tool_call` timeout resolves to. Defaults to
+    /// [`TimeoutPolicy::Cancel`]: a security-shaped extension that times
+    /// out and silently allows the call is the dangerous default.
+    #[serde(default)]
+    pub on_before_tool_call_timeout: TimeoutPolicy,
+}
+
+fn default_before_tool_call_ms() -> u64 {
+    5_000
+}
+
+fn default_after_tool_call_ms() -> u64 {
+    2_000
+}
+
+fn default_lifecycle_ms() -> u64 {
+    5_000
+}
+
+fn default_invoke_ms() -> u64 {
+    30_000
+}
+
+impl Default for ExtensionTimeouts {
+    fn default() -> Self {
+        Self {
+            before_tool_call_ms: default_before_tool_call_ms(),
+            after_tool_call_ms: default_after_tool_call_ms(),
+            lifecycle_ms: default_lifecycle_ms(),
+            invoke_ms: default_invoke_ms(),
+            on_before_tool_call_timeout: TimeoutPolicy::default(),
+        }
+    }
+}
+
+/// What a blocking hook's timeout means for the tool call it was guarding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimeoutPolicy {
+    /// Fail closed: block the tool call. The default — an extension that
+    /// declared `before_tool_call` was registered to have an opinion, and a
+    /// missing opinion is not consent.
+    #[default]
+    Cancel,
+    /// Fail open: let the tool call through. For extensions that only
+    /// observe or annotate.
+    Continue,
 }
 
 /// Which extension hooks/contributions the extension provides.
 ///
 /// All `false` by default. Set the booleans for what the extension implements
 /// so the host can avoid round-tripping events the extension doesn't care about.
+///
+/// # What the host gates on
+///
+/// `on_user_message` is the one flag the host *enforces*: the hook fires on
+/// every prompt, so it is dispatched only to extensions that ask for it.
+/// The tool-call hooks and the contribution flags are advisory — the host
+/// dispatches to whatever the trait implements and the manifest declares.
+/// `custom_provider` has no consumer in tree yet; declaring it is inert.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ExtensionCapabilities {
@@ -63,6 +161,8 @@ pub struct ExtensionCapabilities {
     pub before_tool_call: bool,
     #[serde(default)]
     pub after_tool_call: bool,
+    /// Whether this extension wants [`Extension::on_user_message`]. Gated:
+    /// an extension that does not declare it is never called.
     #[serde(default)]
     pub on_user_message: bool,
     /// Whether this extension contributes slash commands.
@@ -72,6 +172,10 @@ pub struct ExtensionCapabilities {
     #[serde(default)]
     pub custom_tools: bool,
     /// Whether this extension contributes a custom ApiProvider.
+    ///
+    /// Reserved: nothing in the host consumes it yet, so declaring it has
+    /// no effect. Kept in the schema so manifests written against it keep
+    /// parsing under `deny_unknown_fields`.
     #[serde(default)]
     pub custom_provider: bool,
 }
@@ -93,6 +197,16 @@ pub struct ToolResultEvent {
     pub call_id: String,
     pub success: bool,
     pub result: serde_json::Value,
+}
+
+/// Fired when the user submits a prompt, before it is appended to the
+/// transcript or sent to the model. Lets an extension lint, scrub, or
+/// rewrite the prompt — or refuse the turn outright.
+#[derive(Debug, Clone)]
+pub struct UserMessageEvent {
+    /// The raw prompt text as typed. Attachments (images) are not part of
+    /// the v1 event and are never rewritten.
+    pub text: String,
 }
 
 /// What an extension's `on_before_tool_call` decides.
@@ -141,9 +255,92 @@ pub struct ExtensionContext {
     pub cwd: PathBuf,
     /// Identifier of the current session. Stable for a session's lifetime.
     pub session_id: String,
-    /// The extension's own slot in `~/.hand/extensions/<name>/data/` (or
-    /// equivalent) for persistent state. Created lazily.
+    /// This extension's private slot for persistent state, and nobody
+    /// else's: `<data root>/<extension name>/data/`. The root is the host's
+    /// data directory when it pinned one (`AgentSessionConfig::base_dir`),
+    /// else `<cwd>/.hand/`. Created lazily — the host does not mkdir it
+    /// until something is about to write there.
     pub data_dir: PathBuf,
+}
+
+/// Session-level inputs from which a per-extension [`ExtensionContext`] is
+/// derived.
+///
+/// The context handed to a hook differs per extension in exactly one field
+/// (`data_dir`), so the host holds one factory per session and stamps the
+/// extension's identity in at dispatch time. This keeps two extensions from
+/// sharing a directory — and silently clobbering each other's `state.json`.
+#[derive(Clone, Debug)]
+pub struct ExtensionContextFactory {
+    cwd: PathBuf,
+    session_id: String,
+    data_root: PathBuf,
+}
+
+impl ExtensionContextFactory {
+    /// `data_root` is the directory that holds every extension's private
+    /// slot, i.e. `<base_dir or cwd/.hand>/extensions`.
+    pub fn new(
+        cwd: impl Into<PathBuf>,
+        session_id: impl Into<String>,
+        data_root: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            cwd: cwd.into(),
+            session_id: session_id.into(),
+            data_root: data_root.into(),
+        }
+    }
+
+    /// Working directory shared by every extension in this session.
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
+
+    /// Session identifier shared by every extension in this session.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Root under which per-extension data directories are allocated.
+    pub fn data_root(&self) -> &std::path::Path {
+        &self.data_root
+    }
+
+    /// Build the context for one extension. `name` comes from the
+    /// extension's manifest and is sanitized into a single path segment, so
+    /// a hand-written Tier 1 manifest cannot escape the data root.
+    pub fn for_extension(&self, name: &str) -> ExtensionContext {
+        ExtensionContext {
+            cwd: self.cwd.clone(),
+            session_id: self.session_id.clone(),
+            data_dir: self.data_root.join(sanitize_segment(name)).join("data"),
+        }
+    }
+}
+
+/// Reduce an extension name to one safe path segment.
+///
+/// Tier 2 names are already validated to `[a-z0-9_-]+` by the manifest
+/// loader; Tier 1 manifests are hand-written Rust and get no such check, so
+/// anything outside that set (including `/`, `\`, and `..`) is folded to
+/// `_`.
+fn sanitize_segment(name: &str) -> String {
+    let mapped: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if mapped.is_empty() {
+        "_unnamed".to_string()
+    } else {
+        mapped
+    }
 }
 
 /// The Tier 1 extension trait.
@@ -169,6 +366,27 @@ pub trait Extension: Send + Sync {
     /// Called once when the session ends.
     async fn on_shutdown(&self, _cx: &ExtensionContext) -> Result<(), ExtensionError> {
         Ok(())
+    }
+
+    /// Called when the user submits a prompt, before it enters the
+    /// transcript. Default: no-op (Continue).
+    ///
+    /// Only dispatched to extensions whose manifest declares
+    /// `capabilities.on_user_message` — this hook runs on every turn, so
+    /// the host does not pay for extensions that don't want it.
+    ///
+    /// Decisions:
+    /// - `Continue` — the prompt is unchanged.
+    /// - `Replace(value)` — `value` must be a JSON string carrying the new
+    ///   prompt text; anything else is logged and treated as `Continue`.
+    /// - `Cancel(reason)` — the turn does not start, nothing is persisted,
+    ///   and `reason` is surfaced to the user.
+    async fn on_user_message(
+        &self,
+        _cx: &ExtensionContext,
+        _event: &UserMessageEvent,
+    ) -> Result<HookDecision, ExtensionError> {
+        Ok(HookDecision::Continue)
     }
 
     /// Called before each tool call. Default: no-op (Continue).
@@ -235,6 +453,14 @@ pub enum ExtensionError {
         #[source]
         source: ManifestError,
     },
+    #[error("extension {extension} exceeded its {timeout_ms}ms budget for {hook}")]
+    Timeout {
+        extension: String,
+        hook: &'static str,
+        timeout_ms: u64,
+    },
+    #[error("extension {extension} is disabled for this session: {reason}")]
+    Disabled { extension: String, reason: String },
     #[error("Tier 2 RPC error in {extension}: {source}")]
     Rpc {
         extension: String,
@@ -306,6 +532,7 @@ mod tests {
                 env: Default::default(),
                 slash_commands: Vec::new(),
                 custom_tools: Vec::new(),
+                timeouts: Default::default(),
             },
         };
         let cx = ctx();
@@ -336,6 +563,35 @@ mod tests {
 
         assert!(ext.slash_commands().is_empty());
         assert!(ext.custom_tools(&cx).is_empty());
+    }
+
+    #[test]
+    fn factory_gives_each_extension_its_own_data_dir() {
+        let factory =
+            ExtensionContextFactory::new("/work", "sess-1", PathBuf::from("/state/extensions"));
+        let foo = factory.for_extension("foo");
+        let bar = factory.for_extension("bar");
+
+        assert_eq!(foo.data_dir, PathBuf::from("/state/extensions/foo/data"));
+        assert_eq!(bar.data_dir, PathBuf::from("/state/extensions/bar/data"));
+        assert_ne!(foo.data_dir, bar.data_dir);
+        assert_eq!(foo.cwd, PathBuf::from("/work"));
+        assert_eq!(foo.session_id, "sess-1");
+    }
+
+    #[test]
+    fn factory_sanitizes_names_into_one_path_segment() {
+        let factory =
+            ExtensionContextFactory::new("/work", "sess-1", PathBuf::from("/state/extensions"));
+
+        assert_eq!(
+            factory.for_extension("../../etc").data_dir,
+            PathBuf::from("/state/extensions/______etc/data")
+        );
+        assert_eq!(
+            factory.for_extension("").data_dir,
+            PathBuf::from("/state/extensions/_unnamed/data")
+        );
     }
 
     #[test]

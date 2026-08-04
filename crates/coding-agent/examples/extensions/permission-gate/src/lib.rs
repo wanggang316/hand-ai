@@ -52,6 +52,7 @@ impl PermissionGate {
                 env: Default::default(),
                 slash_commands: Vec::new(),
                 custom_tools: Vec::new(),
+                timeouts: Default::default(),
             },
             deny_patterns: DEFAULT_DENY_PATTERNS.to_vec(),
         }

@@ -17,8 +17,10 @@ use `jq` or a language with proper JSON support.
     `on_after_tool_call`.
   - `{"type":"error","message":"..."}` for unknown events.
 
-The host injects `HAND_DATA_DIR` (set to the session's
-`extension_context().data_dir`) so the script can persist state.
+The host injects `HAND_DATA_DIR` (set to this extension's own
+`extension_context_for("notify-sh").data_dir`, i.e.
+`<base_dir or cwd/.hand>/extensions/notify-sh/data`) so the script can
+persist state without colliding with other extensions.
 
 ## Layout
 

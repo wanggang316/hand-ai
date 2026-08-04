@@ -6,9 +6,12 @@
 use crate::core::compaction;
 use crate::core::error::CodingAgentError;
 use crate::core::extensions::api::{
-    Extension, ExtensionContext, HookDecision, SlashCommandSpec, ToolCallEvent, ToolResultEvent,
+    Extension, ExtensionContext, ExtensionContextFactory, HookDecision, SlashCommandSpec,
+    ToolCallEvent, ToolResultEvent, UserMessageEvent,
 };
-use crate::core::extensions::dispatch::{dispatch_after_tool_call, dispatch_before_tool_call};
+use crate::core::extensions::dispatch::{
+    dispatch_after_tool_call, dispatch_before_tool_call, dispatch_user_message,
+};
 use crate::core::extensions::registry::builtin_tier1_extensions;
 use crate::core::model_registry::ModelRegistry;
 use crate::core::session_manager::{SessionBackend, SessionEntry, SessionManager};
@@ -161,6 +164,14 @@ pub struct AgentSession {
     /// Empty for in-memory test sessions; populated from
     /// [`builtin_tier1_extensions`] for [`Self::new`] / [`Self::new_with_skill_dirs`].
     extensions: Vec<Arc<dyn Extension>>,
+    /// Whether each entry of `extensions` has had `on_load` run, index-
+    /// aligned with it. Drives the "exactly once per session" contract in
+    /// [`Self::load_extensions`] / [`Self::shutdown_extensions`].
+    extensions_loaded: Vec<bool>,
+    /// Extensions whose `on_load` failed, as `(name, error)`. They are
+    /// dropped from the dispatch chain; hosts surface this the way they
+    /// surface `skill_errors`.
+    extension_errors: Vec<(String, String)>,
     /// Aggregate model catalog for this session. Built eagerly from the
     /// owned [`model::Client`] at construction time and rebuilt by
     /// [`Self::register_extension`] (extensions may contribute models in
@@ -423,6 +434,8 @@ impl AgentSession {
             Ok(auth) => ModelRegistry::create(auth),
             Err(_) => ModelRegistry::build(&client),
         };
+        let extensions = builtin_tier1_extensions();
+        let extensions_loaded = vec![false; extensions.len()];
         Ok(Self {
             config,
             session_manager,
@@ -433,7 +446,9 @@ impl AgentSession {
             event_listeners: Arc::new(Mutex::new(Vec::new())),
             skills: skills_discovered,
             skill_errors,
-            extensions: builtin_tier1_extensions(),
+            extensions,
+            extensions_loaded,
+            extension_errors: Vec::new(),
             model_registry,
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
@@ -495,6 +510,8 @@ impl AgentSession {
             skills: Vec::new(),
             skill_errors: Vec::new(),
             extensions: Vec::new(),
+            extensions_loaded: Vec::new(),
+            extension_errors: Vec::new(),
             model_registry,
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
@@ -531,7 +548,17 @@ impl AgentSession {
         text: &str,
         images: Option<Vec<ImageContent>>,
     ) -> Result<Vec<Message>, CodingAgentError> {
-        let user_msg = Message::User(build_user_message(text, images));
+        // Give every extension its one-time setup before any hook can fire.
+        // Idempotent, so this is a no-op on every turn after the first.
+        self.load_extensions().await;
+
+        // Let extensions see the prompt before the transcript does: a
+        // `Replace` rewrites what both the transcript and the model
+        // receive, a `Cancel` aborts the turn. Cancelling here leaves no
+        // state to unwind — the turn has not started, `is_streaming` is
+        // still false, and nothing has been persisted.
+        let text = self.dispatch_user_message_hook(text).await?;
+        let user_msg = Message::User(build_user_message(&text, images));
 
         // Persist the user message
         self.session_manager.append_message(user_msg.clone())?;
@@ -557,7 +584,7 @@ impl AgentSession {
             (None, None)
         } else {
             let extensions: Arc<Vec<Arc<dyn Extension>>> = Arc::new(self.extensions.clone());
-            let cx = Arc::new(self.extension_context());
+            let cx = Arc::new(self.extension_context_factory());
             (
                 Some(build_before_tool_call_hook(extensions.clone(), cx.clone())),
                 Some(build_after_tool_call_hook(extensions, cx)),
@@ -1419,7 +1446,146 @@ impl AgentSession {
     /// once they do (cheap: the static catalog has ~dozens of entries).
     pub fn register_extension(&mut self, ext: Arc<dyn Extension>) {
         self.extensions.push(ext);
+        // `on_load` cannot run here (this is a sync fn); the next
+        // `load_extensions` — which `send_message` runs itself — picks the
+        // new extension up.
+        self.extensions_loaded.push(false);
         self.model_registry = ModelRegistry::build(&self.client);
+    }
+
+    /// Run `on_load` for every registered extension that has not been
+    /// loaded yet, then mark it loaded.
+    ///
+    /// Idempotent: an extension is loaded at most once per session, so
+    /// calling this repeatedly (as [`Self::send_message`] does) is cheap and
+    /// safe. Hosts that want setup to happen before the first turn — to
+    /// surface load errors at startup rather than mid-conversation — can
+    /// call it directly after construction.
+    ///
+    /// **A failing `on_load` drops the extension from the chain.** An
+    /// extension that could not set itself up would otherwise run degraded,
+    /// silently answering `Continue` for hooks it was registered to police.
+    /// The failure is logged and recorded in [`Self::extension_errors`]; it
+    /// is never fatal to the session.
+    ///
+    /// Load state is per `AgentSession` instance, not per session file:
+    /// `reset_session` and `fork` keep the chain loaded rather than
+    /// re-running setup.
+    pub async fn load_extensions(&mut self) {
+        let pending: Vec<(usize, Arc<dyn Extension>)> = self
+            .extensions
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !self.extensions_loaded[*idx])
+            .map(|(idx, ext)| (idx, ext.clone()))
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+
+        let contexts = self.extension_context_factory();
+        let mut failed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for (idx, ext) in pending {
+            let name = ext.manifest().name.clone();
+            match ext.on_load(&contexts.for_extension(&name)).await {
+                Ok(()) => self.extensions_loaded[idx] = true,
+                Err(err) => {
+                    tracing::warn!(
+                        extension = %name,
+                        error = %err,
+                        "extension on_load failed; dropping it from the dispatch chain"
+                    );
+                    self.extension_errors.push((name, err.to_string()));
+                    failed.insert(idx);
+                }
+            }
+        }
+
+        if !failed.is_empty() {
+            let loaded = std::mem::take(&mut self.extensions_loaded);
+            let mut kept_exts = Vec::with_capacity(self.extensions.len() - failed.len());
+            let mut kept_loaded = Vec::with_capacity(kept_exts.capacity());
+            for (idx, ext) in std::mem::take(&mut self.extensions).into_iter().enumerate() {
+                if failed.contains(&idx) {
+                    continue;
+                }
+                kept_exts.push(ext);
+                kept_loaded.push(loaded[idx]);
+            }
+            self.extensions = kept_exts;
+            self.extensions_loaded = kept_loaded;
+            self.model_registry = ModelRegistry::build(&self.client);
+        }
+    }
+
+    /// Run `on_shutdown` for every loaded extension, in reverse
+    /// registration order (teardown mirrors setup), then mark them
+    /// unloaded.
+    ///
+    /// Idempotent, and errors are logged rather than propagated — teardown
+    /// must not fail. Hosts call this before dropping or replacing a
+    /// session; [`crate::core::agent_session_runtime::AgentSessionRuntime::dispose`]
+    /// does it for them. Tier 2 children are killed here rather than
+    /// lingering until the host process exits.
+    pub async fn shutdown_extensions(&mut self) {
+        let loaded: Vec<Arc<dyn Extension>> = self
+            .extensions
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| self.extensions_loaded[*idx])
+            .map(|(_, ext)| ext.clone())
+            .rev()
+            .collect();
+        if loaded.is_empty() {
+            return;
+        }
+
+        let contexts = self.extension_context_factory();
+        for ext in loaded {
+            let name = ext.manifest().name.clone();
+            if let Err(err) = ext.on_shutdown(&contexts.for_extension(&name)).await {
+                tracing::warn!(
+                    extension = %name,
+                    error = %err,
+                    "extension on_shutdown failed; continuing teardown"
+                );
+            }
+        }
+        self.extensions_loaded.iter_mut().for_each(|f| *f = false);
+    }
+
+    /// Run the `on_user_message` chain and resolve it to the prompt text
+    /// the turn should actually use.
+    ///
+    /// Returns `Err` when an extension cancelled the turn — the caller must
+    /// not persist the message or start the agent loop.
+    async fn dispatch_user_message_hook(&self, text: &str) -> Result<String, CodingAgentError> {
+        if self.extensions.is_empty() {
+            return Ok(text.to_string());
+        }
+        let event = UserMessageEvent {
+            text: text.to_string(),
+        };
+        let decision =
+            dispatch_user_message(&self.extensions, &self.extension_context_factory(), &event)
+                .await;
+        match decision {
+            HookDecision::Continue => Ok(text.to_string()),
+            HookDecision::Replace(value) => Ok(value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| text.to_string())),
+            HookDecision::Cancel(reason) => Err(CodingAgentError::Other(format!(
+                "message cancelled by extension: {reason}"
+            ))),
+        }
+    }
+
+    /// Extensions that failed `on_load`, as `(name, error)`. Populated by
+    /// [`Self::load_extensions`]; the listed extensions are no longer in
+    /// the dispatch chain.
+    pub fn extension_errors(&self) -> &[(String, String)] {
+        &self.extension_errors
     }
 
     /// Aggregate model catalog for this session.
@@ -1460,27 +1626,38 @@ impl AgentSession {
     /// extensions return tools backed by Rust closures; Tier 2 extensions
     /// return tools whose execute fn drives an RPC into the subprocess.
     pub fn collected_custom_tools(&self) -> Vec<AgentTool> {
-        let cx = self.extension_context();
+        let contexts = self.extension_context_factory();
         let mut out = Vec::new();
         for ext in &self.extensions {
-            out.extend(ext.custom_tools(&cx));
+            out.extend(ext.custom_tools(&contexts.for_extension(&ext.manifest().name)));
         }
         out
     }
 
-    /// Build the [`ExtensionContext`] passed to hooks for this session.
+    /// Factory for the per-extension [`ExtensionContext`] values handed to
+    /// this session's hooks, custom tools, and slash commands.
     ///
-    /// `data_dir` is computed as `<cwd>/.hand/extensions/<unspecified>/data/`
-    /// at the session level — extensions get a per-extension subdirectory
-    /// resolved when they're invoked. For now we surface the session-wide
-    /// root so callers and tests can verify it's well-formed; lazy creation
-    /// of the per-extension subdir lands in T3.4.
-    pub fn extension_context(&self) -> ExtensionContext {
-        ExtensionContext {
-            cwd: self.config.cwd.clone(),
-            session_id: self.session_manager.id().to_string(),
-            data_dir: self.config.cwd.join(".hand").join("extensions"),
-        }
+    /// The data root is `<base_dir>/extensions` when the host pinned a
+    /// [`AgentSessionConfig::base_dir`] — a GUI embedder keeps extension
+    /// state in its own app-data directory rather than inside whatever
+    /// repository the user pointed the agent at — and `<cwd>/.hand/extensions`
+    /// otherwise, which is where the CLI has always put it.
+    pub fn extension_context_factory(&self) -> ExtensionContextFactory {
+        let root = match &self.config.base_dir {
+            Some(base) => base.clone(),
+            None => self.config.cwd.join(".hand"),
+        };
+        ExtensionContextFactory::new(
+            self.config.cwd.clone(),
+            self.session_manager.id().to_string(),
+            root.join("extensions"),
+        )
+    }
+
+    /// Build the [`ExtensionContext`] for one named extension. Shorthand for
+    /// `extension_context_factory().for_extension(name)`.
+    pub fn extension_context_for(&self, name: &str) -> ExtensionContext {
+        self.extension_context_factory().for_extension(name)
     }
 
     /// Generate a compaction summary using the LLM.
@@ -1609,15 +1786,15 @@ fn drain_queue(queue: &Mutex<Vec<Message>>, mode: QueueMode) -> Vec<Message> {
 /// Build a `BeforeToolCallHook` that fans the tool-call event out to
 /// every registered extension and aggregates their decisions.
 ///
-/// NOTE: after the merge with origin/main, hand-agent's
-/// [`BeforeToolCallResult`] dropped its `replace_args` field. The Tier-1
-/// hook chain still emits [`HookDecision::Replace(args)`] but we can no
-/// longer forward it to the agent loop — the rewrite is logged and
-/// downgraded to `Continue` until a follow-up re-introduces argument
-/// rewriting in hand-agent.
+/// The three decisions map onto [`BeforeToolCallResult`] directly:
+/// `Continue` returns `None` (nothing to override), `Cancel` blocks the
+/// call with the extension's reason, and `Replace` hands the agent loop the
+/// rewritten arguments — which the loop re-validates against the tool's
+/// schema before executing. The transcript keeps the model's original tool
+/// call; the rewrite describes what the host let it do.
 fn build_before_tool_call_hook(
     extensions: Arc<Vec<Arc<dyn Extension>>>,
-    cx: Arc<ExtensionContext>,
+    cx: Arc<ExtensionContextFactory>,
 ) -> hand_agent::types::BeforeToolCallHook {
     Arc::new(
         move |ctx: BeforeToolCallContext<'_>,
@@ -1634,18 +1811,15 @@ fn build_before_tool_call_hook(
                 let decision = dispatch_before_tool_call(&extensions, &cx, &event).await;
                 match decision {
                     HookDecision::Continue => None,
-                    HookDecision::Replace(_args) => {
-                        tracing::warn!(
-                            tool = %event.tool_name,
-                            "extension requested arg rewrite (HookDecision::Replace) but \
-                             hand-agent::BeforeToolCallResult no longer supports it; \
-                             treating as Continue. Re-enable by restoring replace_args."
-                        );
-                        None
-                    }
+                    HookDecision::Replace(args) => Some(BeforeToolCallResult {
+                        block: false,
+                        reason: None,
+                        replace_args: Some(args),
+                    }),
                     HookDecision::Cancel(reason) => Some(BeforeToolCallResult {
                         block: true,
                         reason: Some(reason),
+                        replace_args: None,
                     }),
                 }
             })
@@ -1658,7 +1832,7 @@ fn build_before_tool_call_hook(
 /// rewrite it — so the hook always returns `None`.
 fn build_after_tool_call_hook(
     extensions: Arc<Vec<Arc<dyn Extension>>>,
-    cx: Arc<ExtensionContext>,
+    cx: Arc<ExtensionContextFactory>,
 ) -> hand_agent::types::AfterToolCallHook {
     Arc::new(
         move |ctx: AfterToolCallContext<'_>,
@@ -2345,17 +2519,22 @@ mod tests {
             env: Default::default(),
             slash_commands: Vec::new(),
             custom_tools: Vec::new(),
+            timeouts: Default::default(),
         }
     }
 
-    /// A test extension that records every before/after invocation it sees.
-    /// `before_decision` is what `on_before_tool_call` returns; `after_ok`
-    /// controls whether `on_after_tool_call` returns Ok or Err.
+    /// A test extension that records every invocation it sees, in order.
+    /// `before_decision` is what `on_before_tool_call` returns;
+    /// `load_fails` makes `on_load` return an error.
     struct RecordingExt {
         manifest: ExtensionManifest,
         before_decision: HookDecision,
         before_calls: Mutex<Vec<ToolCallEvent>>,
         after_calls: Mutex<Vec<ToolResultEvent>>,
+        /// Every hook this extension saw, in call order — lets a test
+        /// assert `on_load` really precedes the first tool call.
+        trace: Mutex<Vec<String>>,
+        load_fails: bool,
     }
 
     impl RecordingExt {
@@ -2365,7 +2544,28 @@ mod tests {
                 before_decision,
                 before_calls: Mutex::new(Vec::new()),
                 after_calls: Mutex::new(Vec::new()),
+                trace: Mutex::new(Vec::new()),
+                load_fails: false,
             })
+        }
+
+        fn failing_load(name: &str) -> Arc<Self> {
+            Arc::new(Self {
+                manifest: ext_manifest(name),
+                before_decision: HookDecision::Continue,
+                before_calls: Mutex::new(Vec::new()),
+                after_calls: Mutex::new(Vec::new()),
+                trace: Mutex::new(Vec::new()),
+                load_fails: true,
+            })
+        }
+
+        fn trace(&self) -> Vec<String> {
+            self.trace.lock().unwrap().clone()
+        }
+
+        fn count(&self, hook: &str) -> usize {
+            self.trace().iter().filter(|h| *h == hook).count()
         }
     }
 
@@ -2375,11 +2575,28 @@ mod tests {
             &self.manifest
         }
 
+        async fn on_load(&self, _cx: &ExtensionContext) -> Result<(), ExtensionError> {
+            self.trace.lock().unwrap().push("load".into());
+            if self.load_fails {
+                return Err(ExtensionError::Custom {
+                    name: self.manifest.name.clone(),
+                    message: "setup failed".into(),
+                });
+            }
+            Ok(())
+        }
+
+        async fn on_shutdown(&self, _cx: &ExtensionContext) -> Result<(), ExtensionError> {
+            self.trace.lock().unwrap().push("shutdown".into());
+            Ok(())
+        }
+
         async fn on_before_tool_call(
             &self,
             _cx: &ExtensionContext,
             event: &ToolCallEvent,
         ) -> Result<HookDecision, ExtensionError> {
+            self.trace.lock().unwrap().push("before".into());
             self.before_calls.lock().unwrap().push(event.clone());
             Ok(self.before_decision.clone())
         }
@@ -2389,6 +2606,7 @@ mod tests {
             _cx: &ExtensionContext,
             event: &ToolResultEvent,
         ) -> Result<(), ExtensionError> {
+            self.trace.lock().unwrap().push("after".into());
             self.after_calls.lock().unwrap().push(event.clone());
             Ok(())
         }
@@ -2404,6 +2622,60 @@ mod tests {
 
         assert_eq!(session.extensions().len(), 1);
         assert_eq!(session.extensions()[0].manifest().name, "recorder");
+    }
+
+    /// `on_load` runs once per extension no matter how often the session
+    /// drives the lifecycle, and `on_shutdown` runs once per load.
+    #[tokio::test]
+    async fn extension_lifecycle_runs_once_per_session() {
+        let mut session = AgentSession::in_memory(test_model(), vec![]);
+        let ext = RecordingExt::new("recorder", HookDecision::Continue);
+        session.register_extension(ext.clone());
+
+        session.load_extensions().await;
+        session.load_extensions().await;
+        assert_eq!(ext.count("load"), 1, "on_load must not run twice");
+
+        session.shutdown_extensions().await;
+        session.shutdown_extensions().await;
+        assert_eq!(ext.count("shutdown"), 1, "on_shutdown must not run twice");
+        assert_eq!(ext.trace(), vec!["load", "shutdown"]);
+    }
+
+    /// Shutting down a session that never loaded its extensions is a no-op:
+    /// an extension that never got `on_load` must not get `on_shutdown`.
+    #[tokio::test]
+    async fn shutdown_without_load_is_a_no_op() {
+        let mut session = AgentSession::in_memory(test_model(), vec![]);
+        let ext = RecordingExt::new("recorder", HookDecision::Continue);
+        session.register_extension(ext.clone());
+
+        session.shutdown_extensions().await;
+        assert!(ext.trace().is_empty());
+    }
+
+    /// An extension whose setup failed is dropped from the chain rather
+    /// than left running degraded, and the failure is reported.
+    #[tokio::test]
+    async fn failing_on_load_drops_the_extension() {
+        let mut session = AgentSession::in_memory(test_model(), vec![]);
+        let broken = RecordingExt::failing_load("broken");
+        let healthy = RecordingExt::new("healthy", HookDecision::Continue);
+        session.register_extension(broken.clone());
+        session.register_extension(healthy.clone());
+
+        session.load_extensions().await;
+
+        assert_eq!(session.extensions().len(), 1);
+        assert_eq!(session.extensions()[0].manifest().name, "healthy");
+        assert_eq!(session.extension_errors().len(), 1);
+        assert_eq!(session.extension_errors()[0].0, "broken");
+        assert!(session.extension_errors()[0].1.contains("setup failed"));
+
+        // The dropped extension never sees teardown for a load that failed.
+        session.shutdown_extensions().await;
+        assert_eq!(broken.trace(), vec!["load"]);
+        assert_eq!(healthy.trace(), vec!["load", "shutdown"]);
     }
 
     /// With no extensions registered, `collected_slash_commands()` returns
@@ -2513,14 +2785,68 @@ mod tests {
     #[test]
     fn extension_context_returns_well_formed_values() {
         let session = AgentSession::in_memory(test_model(), vec![]);
-        let cx = session.extension_context();
+        let cx = session.extension_context_for("foo");
 
         assert!(!cx.session_id.is_empty(), "session id must not be empty");
         assert!(!cx.cwd.as_os_str().is_empty(), "cwd must not be empty");
         assert!(
-            cx.data_dir.ends_with("extensions"),
-            "data_dir should be rooted at .hand/extensions, got {:?}",
+            cx.data_dir.ends_with("extensions/foo/data"),
+            "data_dir should be the extension's own slot, got {:?}",
             cx.data_dir
+        );
+    }
+
+    /// Every extension gets its own directory: two extensions writing
+    /// `state.json` must not collide.
+    #[test]
+    fn extension_context_is_per_extension() {
+        let session = AgentSession::in_memory(test_model(), vec![]);
+        let foo = session.extension_context_for("foo");
+        let bar = session.extension_context_for("bar");
+
+        assert_ne!(foo.data_dir, bar.data_dir);
+        assert!(foo.data_dir.ends_with("foo/data"));
+        assert!(bar.data_dir.ends_with("bar/data"));
+    }
+
+    /// With no `base_dir`, extension state stays where the CLI has always
+    /// put it: `<cwd>/.hand/extensions/<name>/data`.
+    #[test]
+    fn extension_data_dir_falls_back_to_cwd_when_no_base_dir() {
+        let cwd = TempDir::new().unwrap();
+        let cfg = test_config(cwd.path().to_path_buf());
+        let session = AgentSession::new(cfg, vec![]).expect("session creates");
+
+        let cx = session.extension_context_for("foo");
+        assert_eq!(
+            cx.data_dir,
+            cwd.path()
+                .join(".hand")
+                .join("extensions")
+                .join("foo")
+                .join("data")
+        );
+    }
+
+    /// An embedder that pinned `base_dir` (a Tauri app-data dir, say) keeps
+    /// extension state out of the user's repository entirely — and nothing
+    /// is created under `cwd` just by resolving the path.
+    #[test]
+    fn extension_data_dir_honors_base_dir() {
+        let base = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let mut cfg = test_config(cwd.path().to_path_buf());
+        cfg.base_dir = Some(base.path().to_path_buf());
+        let session = AgentSession::new(cfg, vec![]).expect("session creates under base_dir");
+
+        let cx = session.extension_context_for("foo");
+        assert_eq!(
+            cx.data_dir,
+            base.path().join("extensions").join("foo").join("data")
+        );
+        assert!(
+            !cwd.path().join(".hand").join("extensions").exists(),
+            "resolving an extension data dir must not write into the workspace"
         );
     }
 
@@ -2611,6 +2937,192 @@ mod tests {
         ) -> AssistantMessageEventStream<'static> {
             self.stream(model, context, options.map(|o| o.base))
         }
+    }
+
+    /// Mock provider that records the user text it was handed, so a test
+    /// can assert what the model actually received.
+    struct PromptRecordingProvider {
+        prompts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ApiProvider for PromptRecordingProvider {
+        fn stream(
+            &self,
+            _model: model::Model,
+            context: Context,
+            _options: Option<StreamOptions>,
+        ) -> AssistantMessageEventStream<'static> {
+            for msg in &context.messages {
+                if let Message::User(user) = msg {
+                    self.prompts
+                        .lock()
+                        .unwrap()
+                        .push(extract_user_message_text(&user.content));
+                }
+            }
+            Box::pin(async_stream::stream! {
+                let msg = assistant_text_message("ack");
+                yield AssistantMessageEvent::Start { partial: msg.clone() };
+                yield AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message: msg,
+                };
+            })
+        }
+
+        fn stream_simple(
+            &self,
+            model: model::Model,
+            context: Context,
+            options: Option<SimpleStreamOptions>,
+        ) -> AssistantMessageEventStream<'static> {
+            self.stream(model, context, options.map(|o| o.base))
+        }
+    }
+
+    /// A test extension for the user-message hook, gated on the capability
+    /// exactly as a real one would be.
+    struct PromptExt {
+        manifest: ExtensionManifest,
+        decision: HookDecision,
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl PromptExt {
+        fn new(name: &str, subscribed: bool, decision: HookDecision) -> Arc<Self> {
+            let mut manifest = ext_manifest(name);
+            manifest.capabilities.on_user_message = subscribed;
+            Arc::new(Self {
+                manifest,
+                decision,
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Extension for PromptExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn on_user_message(
+            &self,
+            _cx: &ExtensionContext,
+            event: &crate::core::extensions::api::UserMessageEvent,
+        ) -> Result<HookDecision, ExtensionError> {
+            self.seen.lock().unwrap().push(event.text.clone());
+            Ok(self.decision.clone())
+        }
+    }
+
+    /// A `Replace` from the user-message hook changes what both the
+    /// transcript and the model receive.
+    #[tokio::test]
+    async fn user_message_hook_replace_changes_what_the_model_receives() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PromptRecordingProvider {
+                prompts: prompts.clone(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let ext = PromptExt::new(
+            "scrubber",
+            true,
+            HookDecision::Replace(serde_json::json!("token=[redacted]")),
+        );
+        session.register_extension(ext.clone());
+
+        session
+            .send_message("token=hunter2")
+            .await
+            .expect("send_message succeeds");
+
+        assert_eq!(*ext.seen.lock().unwrap().first().unwrap(), "token=hunter2");
+        assert!(
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == "token=[redacted]"),
+            "model should receive the rewritten prompt, got {:?}",
+            prompts.lock().unwrap()
+        );
+        assert!(
+            !prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("hunter2")),
+            "the raw prompt must not reach the model"
+        );
+    }
+
+    /// A `Cancel` aborts the turn before anything is persisted and surfaces
+    /// the reason to the caller.
+    #[tokio::test]
+    async fn user_message_hook_cancel_aborts_the_turn() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PromptRecordingProvider {
+                prompts: prompts.clone(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        session.register_extension(PromptExt::new(
+            "guard",
+            true,
+            HookDecision::Cancel("prompt contains a secret".into()),
+        ));
+
+        let err = session
+            .send_message("token=hunter2")
+            .await
+            .expect_err("a cancelled prompt must not start a turn");
+        assert!(
+            err.to_string().contains("prompt contains a secret"),
+            "the reason should reach the user, got {err}"
+        );
+        assert!(
+            prompts.lock().unwrap().is_empty(),
+            "the model must not be called at all"
+        );
+        assert!(
+            session.messages().is_empty(),
+            "nothing may be persisted for a cancelled turn"
+        );
+    }
+
+    /// An extension that did not declare the capability is never consulted.
+    #[tokio::test]
+    async fn user_message_hook_respects_the_capability_flag() {
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(TextOnlyProvider {
+                reply: "ack".into(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let ext = PromptExt::new("unsubscribed", false, HookDecision::Cancel("nope".into()));
+        session.register_extension(ext.clone());
+
+        session
+            .send_message("hello")
+            .await
+            .expect("an unsubscribed extension cannot cancel the turn");
+        assert!(ext.seen.lock().unwrap().is_empty());
     }
 
     /// Mock provider: turn 1 emits a tool call, turn 2+ emit text and stop.
@@ -2777,6 +3289,42 @@ mod tests {
         assert!(after_calls[0].success, "noop tool should report success");
     }
 
+    /// `send_message` drives the lifecycle itself: an extension registered
+    /// on a session sees exactly one `on_load`, before the first tool call,
+    /// without the host having to call `load_extensions` by hand.
+    #[tokio::test]
+    async fn send_message_loads_extensions_before_the_first_tool_call() {
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(ToolThenTextProvider {
+                tool_name: "noop".into(),
+                args: serde_json::json!({}),
+                invocation: AtomicUsize::new(0),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![noop_tool()], client);
+        let ext = RecordingExt::new("recorder", HookDecision::Continue);
+        session.register_extension(ext.clone());
+
+        let _ = session
+            .send_message("please call noop")
+            .await
+            .expect("send_message should succeed");
+
+        assert_eq!(
+            ext.trace(),
+            vec!["load", "before", "after"],
+            "on_load must precede the first tool-call hook"
+        );
+
+        session.shutdown_extensions().await;
+        assert_eq!(ext.trace(), vec!["load", "before", "after", "shutdown"]);
+    }
+
     /// Cancel-safety regression: when the future returned by `send_message`
     /// is dropped mid-flight (the typical cancellation path the host RPC
     /// layer uses via `tokio::select!`), the session's built-in tools must
@@ -2899,17 +3447,10 @@ mod tests {
         );
     }
 
-    /// F23 regression (post-merge): a `HookDecision::Replace(args)` from a
-    /// Tier-1 extension is currently downgraded to `Continue` (with a
-    /// warning) because hand-agent's `BeforeToolCallResult` no longer
-    /// carries `replace_args` after the merge with origin/main. This test
-    /// pins the contract: send_message still succeeds, the tool observes
-    /// the model's ORIGINAL args, and no panic / unwind escapes.
-    ///
-    /// When `replace_args` is restored upstream this test should flip to
-    /// asserting the rewritten args are observed.
+    /// A `HookDecision::Replace(args)` from a Tier-1 extension reaches the
+    /// tool: the tool executes the rewritten arguments, not the model's.
     #[tokio::test]
-    async fn replace_args_currently_downgrades_to_continue() {
+    async fn replace_args_reaches_the_tool() {
         let client = model::Client::new();
         client.registry.register(
             Api::OpenAICompletions,
@@ -2954,8 +3495,99 @@ mod tests {
         let captured = observed.lock().unwrap().clone();
         assert_eq!(
             captured,
-            Some(serde_json::json!({"original": true})),
-            "with replace_args removed upstream, tool observes the model's original args"
+            Some(serde_json::json!({"replaced": true})),
+            "the tool must run the arguments the extension chain settled on"
+        );
+
+        // The transcript still records what the model asked for — the
+        // rewrite describes what the host allowed, not what the model said.
+        let asked: Vec<serde_json::Value> = session
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::Assistant(a) => Some(a),
+                _ => None,
+            })
+            .flat_map(|a| a.content.iter())
+            .filter_map(|block| match block {
+                model::AssistantContentBlock::ToolCall(tc) => Some(tc.arguments.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked, vec![serde_json::json!({"original": true})]);
+    }
+
+    /// A rewrite that violates the tool's schema is rejected instead of
+    /// being handed to the tool: the call fails with an error result and
+    /// the tool is never entered.
+    #[tokio::test]
+    async fn replace_args_violating_the_schema_is_rejected() {
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(ToolThenTextProvider {
+                tool_name: "echo".into(),
+                args: serde_json::json!({"message": "hello"}),
+                invocation: AtomicUsize::new(0),
+            }),
+            Some("test".into()),
+        );
+
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entered_for_tool = entered.clone();
+        let echo_tool = AgentTool::simple(
+            "echo",
+            "Echoes a message",
+            serde_json::json!({
+                "type": "object",
+                "properties": { "message": { "type": "string" } },
+                "required": ["message"]
+            }),
+            "Echo",
+            move |_call_id, _args| {
+                let entered = entered_for_tool.clone();
+                async move {
+                    entered.store(true, Ordering::SeqCst);
+                    hand_agent::types::ToolResult::text("echoed")
+                }
+            },
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![echo_tool], client);
+        session.register_extension(RecordingExt::new(
+            "rewriter",
+            // `message` is required and must be a string.
+            HookDecision::Replace(serde_json::json!({"message": 42})),
+        ));
+
+        session
+            .send_message("call echo")
+            .await
+            .expect("the turn survives a rejected rewrite");
+
+        assert!(
+            !entered.load(Ordering::SeqCst),
+            "the tool must not run with arguments its schema rejects"
+        );
+        let results: Vec<String> = session
+            .messages()
+            .iter()
+            .filter_map(|m| match m {
+                Message::ToolResult(tr) => Some(tr),
+                _ => None,
+            })
+            .flat_map(|tr| tr.content.iter())
+            .filter_map(|c| match c {
+                model::ToolResultContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            results
+                .iter()
+                .any(|t| t.contains("Invalid replacement arguments")),
+            "the model should see why the call failed, got {results:?}"
         );
     }
 

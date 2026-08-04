@@ -369,6 +369,7 @@ async fn before_tool_call_blocks() {
             Some(BeforeToolCallResult {
                 block: true,
                 reason: Some("Blocked by test".into()),
+                replace_args: None,
             })
         })
     }));
@@ -393,6 +394,115 @@ async fn before_tool_call_blocks() {
         .iter()
         .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. }));
     assert!(has_blocked);
+}
+
+#[tokio::test]
+async fn before_tool_call_replaces_arguments() {
+    let client = setup_client_with_tool("echo", serde_json::json!({"message": "original"}), "Done");
+    let (emit, events) = collecting_event_sink();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext::default();
+
+    let mut config = default_config();
+    config.before_tool_call = Some(Arc::new(|_ctx, _cancel| {
+        Box::pin(async {
+            Some(BeforeToolCallResult {
+                block: false,
+                reason: None,
+                replace_args: Some(serde_json::json!({"message": "rewritten"})),
+            })
+        })
+    }));
+
+    let tools = vec![echo_tool()];
+    let prompt = vec![Message::User(UserMessage::new_text("Use echo"))];
+
+    run_agent_loop(
+        prompt,
+        &mut context,
+        &tools,
+        &config,
+        &client,
+        &emit,
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    let evs = events.lock().unwrap();
+    let echoed = evs.iter().find_map(|e| match e {
+        AgentEvent::ToolExecutionEnd { result, .. } => {
+            result.content.iter().find_map(|c| match c {
+                ToolResultContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    });
+    assert_eq!(
+        echoed.as_deref(),
+        Some("Echo: rewritten"),
+        "the tool must run the hook's replacement arguments"
+    );
+}
+
+/// A replacement that violates the tool's schema is rejected before the
+/// tool runs — a hook cannot smuggle in a shape the tool never accepted.
+#[tokio::test]
+async fn before_tool_call_replacement_is_schema_validated() {
+    let client = setup_client_with_tool("echo", serde_json::json!({"message": "original"}), "Done");
+    let (emit, events) = collecting_event_sink();
+    let cancel = CancellationToken::new();
+    let mut context = AgentContext::default();
+
+    let mut config = default_config();
+    config.before_tool_call = Some(Arc::new(|_ctx, _cancel| {
+        Box::pin(async {
+            Some(BeforeToolCallResult {
+                block: false,
+                reason: None,
+                // `message` must be a string per echo_tool's schema.
+                replace_args: Some(serde_json::json!({"message": 42})),
+            })
+        })
+    }));
+
+    let tools = vec![echo_tool()];
+    let prompt = vec![Message::User(UserMessage::new_text("Use echo"))];
+
+    run_agent_loop(
+        prompt,
+        &mut context,
+        &tools,
+        &config,
+        &client,
+        &emit,
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    let evs = events.lock().unwrap();
+    let failure = evs.iter().find_map(|e| match e {
+        AgentEvent::ToolExecutionEnd {
+            result,
+            is_error: true,
+            ..
+        } => result.content.iter().find_map(|c| match c {
+            ToolResultContent::Text(t) => Some(t.text.clone()),
+            _ => None,
+        }),
+        _ => None,
+    });
+    let failure = failure.expect("the call fails instead of running");
+    assert!(
+        failure.contains("Invalid replacement arguments"),
+        "unexpected error text: {failure:?}"
+    );
+    assert!(
+        !failure.contains("Echo:"),
+        "the tool must not have executed"
+    );
 }
 
 // ---------------------------------------------------------------------------

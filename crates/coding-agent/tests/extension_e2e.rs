@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ext_permission_gate::PermissionGate;
 use hand_coding_agent::AgentSession;
+use hand_coding_agent::core::agent_session::AgentSessionConfig;
 use hand_coding_agent::core::extensions::api::{ExtensionContext, ToolResultEvent};
 use hand_coding_agent::core::extensions::subprocess::discover_subprocess_extensions;
 use hand_coding_agent::tools::bash;
@@ -313,5 +314,153 @@ async fn notify_sh_subprocess_logs_tool_call() {
     assert!(
         log.contains("success=true"),
         "log should record success flag; got: {log:?}"
+    );
+}
+
+// ------------------------------------------------------------------
+// (c) The session drives the Tier 2 lifecycle: on_load fires once, and
+// shutdown reaches the child and reaps it.
+// ------------------------------------------------------------------
+
+/// Install a subprocess fixture that appends every event type it sees to
+/// `$HAND_DATA_DIR/events.log`, prefixed by its own pid, and answers `ok`.
+fn install_lifecycle_logger(root: &Path) -> PathBuf {
+    let dst = root.join("lifecycle-logger");
+    std::fs::create_dir_all(&dst).unwrap();
+    std::fs::write(
+        dst.join("extension.toml"),
+        r#"
+name = "lifecycle-logger"
+version = "0.1.0"
+exec = ["./main.sh"]
+
+[capabilities]
+after-tool-call = true
+
+# Widened past the production defaults so a loaded CI box cannot turn this
+# lifecycle test into a timeout test.
+[timeouts]
+lifecycle-ms = 60000
+before-tool-call-ms = 60000
+after-tool-call-ms = 60000
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dst.join("main.sh"),
+        r#"#!/bin/bash
+set -u
+mkdir -p "$HAND_DATA_DIR"
+log="$HAND_DATA_DIR/events.log"
+echo "pid=$$" >> "$log"
+while IFS= read -r line; do
+  case "$line" in
+    *on_load*) echo "on_load" >> "$log" ;;
+    *on_shutdown*) echo "on_shutdown" >> "$log" ;;
+    *) echo "other" >> "$log" ;;
+  esac
+  printf '{"type":"ok"}\n'
+done
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dst.join("main.sh"))
+            .unwrap()
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(dst.join("main.sh"), perms).unwrap();
+    }
+    dst
+}
+
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn session_drives_tier2_lifecycle_and_reaps_the_child() {
+    if !bash_available() {
+        eprintln!("skipping: /bin/bash not found");
+        return;
+    }
+
+    let workspace = tempfile::tempdir().unwrap();
+    let ext_root = tempfile::tempdir().unwrap();
+    install_lifecycle_logger(ext_root.path());
+
+    let (mut exts, failures) = discover_subprocess_extensions(ext_root.path());
+    assert!(failures.is_empty(), "discovery failures: {failures:?}");
+    let ext = exts.remove(0);
+
+    // A session pinned to a workspace tempdir, with extension state routed
+    // under it — nothing lands in the repo.
+    let config = AgentSessionConfig {
+        cwd: workspace.path().to_path_buf(),
+        model: openai_test_model(),
+        stream_options: SimpleStreamOptions::default(),
+        custom_system_prompt: None,
+        custom_guidelines: None,
+        resume_session: None,
+        no_session: true,
+        no_context_files: true,
+        session_dir: None,
+        no_skills: true,
+        extra_skill_dirs: Vec::new(),
+        base_dir: Some(workspace.path().join("state")),
+    };
+    let mut session = AgentSession::new(config, vec![]).expect("session builds");
+    session.register_extension(ext);
+
+    session.load_extensions().await;
+    // Idempotent: a second call must not re-run setup.
+    session.load_extensions().await;
+
+    let data_dir = session
+        .extension_context_for("lifecycle-logger")
+        .data_dir
+        .clone();
+    let log_path = data_dir.join("events.log");
+    let after_load = std::fs::read_to_string(&log_path).expect("events.log written on load");
+    assert_eq!(
+        after_load.matches("on_load").count(),
+        1,
+        "on_load must fire exactly once; got: {after_load:?}"
+    );
+
+    let pid: u32 = after_load
+        .lines()
+        .find_map(|l| l.strip_prefix("pid="))
+        .expect("fixture records its pid")
+        .trim()
+        .parse()
+        .expect("pid parses");
+    assert!(
+        process_alive(pid),
+        "child should be running before shutdown"
+    );
+
+    session.shutdown_extensions().await;
+
+    let after_shutdown = std::fs::read_to_string(&log_path).unwrap();
+    assert_eq!(
+        after_shutdown.matches("on_shutdown").count(),
+        1,
+        "on_shutdown must reach the child exactly once; got: {after_shutdown:?}"
+    );
+    assert!(
+        !process_alive(pid),
+        "child should be reaped once the session shuts its extensions down"
+    );
+    assert!(
+        data_dir.starts_with(workspace.path()),
+        "extension state must stay under the session's workspace, got {data_dir:?}"
     );
 }
