@@ -332,7 +332,10 @@ fn install_lifecycle_logger(root: &Path) -> PathBuf {
         r#"
 name = "lifecycle-logger"
 version = "0.1.0"
-exec = ["./main.sh"]
+# Spawned through `bash <path>` rather than exec'd directly: exec'ing a file
+# the test just wrote races with any sibling forking at that moment and fails
+# with ETXTBSY on Linux.
+exec = ["/bin/bash", "./main.sh"]
 
 [capabilities]
 after-tool-call = true
