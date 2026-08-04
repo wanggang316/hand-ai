@@ -1195,7 +1195,20 @@ impl SettingsManager {
     pub fn from_cwd(cwd: &Path) -> Result<Self, SettingsError> {
         let global_path = dirs::home_dir().map(|h| h.join(".hand/agent/settings.yaml"));
         let project_path = Some(cwd.join(".hand/settings.yaml"));
+        Self::from_paths(global_path, project_path)
+    }
 
+    /// Construct from explicit layer paths. `None` for a layer means the
+    /// layer is absent (defaults apply); a path that does not exist is
+    /// equally fine.
+    ///
+    /// [`Self::from_cwd`] is this with the standard paths filled in. Tests
+    /// use the explicit form to pin one layer without inheriting the other
+    /// from whoever is running them.
+    pub fn from_paths(
+        global_path: Option<PathBuf>,
+        project_path: Option<PathBuf>,
+    ) -> Result<Self, SettingsError> {
         // Best-effort migration of legacy JSON settings, BEFORE load. The
         // base directory for each layer is the parent of its YAML path.
         if let Some(p) = global_path.as_ref().and_then(|p| p.parent()) {
