@@ -904,6 +904,21 @@ mod tests {
     /// Write a Bash script that for every line on stdin emits one JSONL
     /// response. The script body is provided by the caller; it can branch
     /// on `$line` to vary the response per event type.
+    /// Spawn a fixture script through `bash <path>` rather than executing
+    /// the file itself.
+    ///
+    /// Exec'ing a file this process just wrote races with any sibling test
+    /// forking at that moment: the child inherits the still-open write
+    /// descriptor and the exec fails with `ETXTBSY` ("Text file busy") on
+    /// Linux. Handing the path to `bash` as an argument sidesteps it —
+    /// `bash` is only ever opened for reading.
+    fn bash_exec(script: &Path) -> Vec<String> {
+        vec![
+            "/bin/bash".to_string(),
+            script.to_string_lossy().into_owned(),
+        ]
+    }
+
     fn write_bash_script(dir: &Path, script: &str) -> PathBuf {
         let script_path = dir.join("ext.sh");
         let body = format!("#!/bin/bash\nset -u\nwhile IFS= read -r line; do\n{script}\ndone\n");
@@ -1002,7 +1017,7 @@ exec = ["/bin/true"]
   esac
 "#,
         );
-        let manifest = make_manifest("hooky", vec![script.to_string_lossy().into_owned()]);
+        let manifest = make_manifest("hooky", bash_exec(&script));
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
@@ -1041,7 +1056,7 @@ exec = ["/bin/true"]
   esac
 "#,
         );
-        let mut manifest = make_manifest("scrubber", vec![script.to_string_lossy().into_owned()]);
+        let mut manifest = make_manifest("scrubber", bash_exec(&script));
         manifest.capabilities.on_user_message = true;
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
@@ -1107,11 +1122,8 @@ exec = ["/bin/true"]
   printf '{"type":"continue"}\n'
 "#,
         );
-        let manifest = make_impatient_manifest(
-            "sleeper",
-            vec![script.to_string_lossy().into_owned()],
-            TimeoutPolicy::Cancel,
-        );
+        let manifest =
+            make_impatient_manifest("sleeper", bash_exec(&script), TimeoutPolicy::Cancel);
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
@@ -1171,11 +1183,8 @@ exec = ["/bin/true"]
   printf '{"type":"continue"}\n'
 "#,
         );
-        let manifest = make_impatient_manifest(
-            "sleeper-open",
-            vec![script.to_string_lossy().into_owned()],
-            TimeoutPolicy::Continue,
-        );
+        let manifest =
+            make_impatient_manifest("sleeper-open", bash_exec(&script), TimeoutPolicy::Continue);
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
@@ -1195,7 +1204,7 @@ exec = ["/bin/true"]
     async fn extension_within_budget_is_unaffected() {
         let dir = TempDir::new().unwrap();
         let script = write_bash_script(dir.path(), r#"  printf '{"type":"continue"}\n'"#);
-        let manifest = make_manifest("prompt", vec![script.to_string_lossy().into_owned()]);
+        let manifest = make_manifest("prompt", bash_exec(&script));
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
@@ -1219,7 +1228,7 @@ exec = ["/bin/true"]
             dir.path(),
             r#"  printf '{"type":"cancel","reason":"blocked"}\n'"#,
         );
-        let manifest = make_manifest("blocker", vec![script.to_string_lossy().into_owned()]);
+        let manifest = make_manifest("blocker", bash_exec(&script));
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
@@ -1241,7 +1250,7 @@ exec = ["/bin/true"]
             dir.path(),
             r#"  printf '{"type":"replace","arguments":{"foo":"bar"}}\n'"#,
         );
-        let manifest = make_manifest("rewriter", vec![script.to_string_lossy().into_owned()]);
+        let manifest = make_manifest("rewriter", bash_exec(&script));
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
@@ -1277,7 +1286,7 @@ exec = ["/bin/true"]
             perms.set_mode(0o755);
             fs::set_permissions(&script_path, perms).unwrap();
         }
-        let manifest = make_manifest("broken", vec![script_path.to_string_lossy().into_owned()]);
+        let manifest = make_manifest("broken", bash_exec(&script_path));
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
@@ -1301,7 +1310,7 @@ exec = ["/bin/true"]
             dir.path(),
             r#"  printf '{"type":"error","message":"boom"}\n'"#,
         );
-        let manifest = make_manifest("erroring", vec![script.to_string_lossy().into_owned()]);
+        let manifest = make_manifest("erroring", bash_exec(&script));
         let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
             .expect("subprocess constructs");
 
@@ -1385,8 +1394,7 @@ exec = ["/bin/true"]
             dir.path(),
             r#"  printf '{"type":"tool_result","content":"hello","is_error":false}\n'"#,
         );
-        let mut manifest =
-            make_manifest("rust-checker", vec![script.to_string_lossy().into_owned()]);
+        let mut manifest = make_manifest("rust-checker", bash_exec(&script));
         manifest.custom_tools = vec![CustomToolSpec {
             name: "rust_check".into(),
             description: "Run cargo check".into(),
@@ -1433,7 +1441,7 @@ exec = ["/bin/true"]
             dir.path(),
             r#"  printf '{"type":"tool_result","content":"compile failed","is_error":true}\n'"#,
         );
-        let mut manifest = make_manifest("erroring", vec![script.to_string_lossy().into_owned()]);
+        let mut manifest = make_manifest("erroring", bash_exec(&script));
         manifest.custom_tools = vec![CustomToolSpec {
             name: "rust_check".into(),
             description: "Run cargo check".into(),
@@ -1496,10 +1504,7 @@ done
             std::fs::set_permissions(&script_path, perms).unwrap();
         }
 
-        let mut manifest = make_manifest(
-            "context-echo",
-            vec![script_path.to_string_lossy().into_owned()],
-        );
+        let mut manifest = make_manifest("context-echo", bash_exec(&script_path));
         manifest.custom_tools = vec![CustomToolSpec {
             name: "echo_ctx".into(),
             description: "Echo context".into(),
@@ -1565,7 +1570,7 @@ done
             dir.path(),
             r#"  printf '{"type":"slash_result","output":"done"}\n'"#,
         );
-        let mut manifest = make_manifest("slasher", vec![script.to_string_lossy().into_owned()]);
+        let mut manifest = make_manifest("slasher", bash_exec(&script));
         manifest.slash_commands = vec![SlashCommandSpec {
             name: "review".into(),
             description: "Review code".into(),
