@@ -12,6 +12,16 @@ read this file. Add new entries above the previous version with a
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-05
+
+### Added
+
+- `sqlite` cargo feature on `hand-coding-agent`, on by default. Embedders can now build with `default-features = false` to drop rusqlite — and with it the `links = "sqlite3"` claim cargo permits only once per dependency graph, which previously made the crate unusable alongside sqlx, diesel, or a different rusqlite version. The `hand` binary is unaffected; `SessionBackend::Sqlite` exists in every build and behaves exactly as before. Without the feature, selecting the sqlite backend fails with a message naming it instead of silently falling back to JSONL ([#141](https://github.com/wanggang316/hand-ai/issues/141))
+
+### Fixed
+
+- A session that fails to load says why. A corrupt log now names the line that could not be parsed; previously every such failure was reported as "No session header found", which blamed the header even when the header was intact and left no way to find the damaged line short of bisecting the file by hand. Applies to opening a session and to forking from one ([#142](https://github.com/wanggang316/hand-ai/issues/142))
+
 ## [0.4.0] - 2026-08-04
 
 ### Changed
