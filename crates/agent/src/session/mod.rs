@@ -33,5 +33,6 @@ pub use projection::{ContextProjection, Projector};
 pub use sqlite::SqliteStore;
 pub use store::SessionStore;
 pub use types::{
-    SESSION_FORMAT_VERSION, SessionEntry, SessionHeader, SessionStoreError, SessionSummary,
+    NO_HEADER_DETAIL, SESSION_FORMAT_VERSION, SessionEntry, SessionHeader, SessionStoreError,
+    SessionSummary,
 };

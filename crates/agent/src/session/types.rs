@@ -74,6 +74,15 @@ pub struct SessionSummary {
     pub updated_ms: i64,
 }
 
+/// `detail` carried by [`SessionStoreError::Corrupt`] when a stored log
+/// exists but holds no session header line.
+///
+/// A header-less log is corruption like any other — the store cannot
+/// interpret it as a session — but callers routinely want to say "this
+/// file is not a session" rather than "line N is damaged". Matching on
+/// this constant separates the two without adding an error variant.
+pub const NO_HEADER_DETAIL: &str = "no session header line";
+
 /// Errors surfaced by [`crate::session::SessionStore`] backends.
 #[derive(Debug, Error)]
 pub enum SessionStoreError {
