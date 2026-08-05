@@ -42,6 +42,34 @@ jobs:
       - run: cargo clippy --workspace --all-targets --features model/faux -- -D warnings
       - run: cargo clippy -p hand-agent --all-targets --features sqlite -- -D warnings
 
+  # The sqlite-free build embedders rely on. `hand-coding-agent` enables
+  # the sqlite backend by default, so nothing above this job ever compiles
+  # the `#[cfg(not(feature = "sqlite"))]` paths — a missing cfg only
+  # surfaces in a downstream build.
+  no-sqlite:
+    name: Sqlite-free build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p hand-coding-agent --no-default-features --all-targets -- -D warnings
+      - run: cargo test -p hand-coding-agent --no-default-features
+      # rusqlite claims `links = "sqlite3"`, which cargo permits once per
+      # dependency graph. If it reaches this build the crate is unusable
+      # alongside an embedder's own sqlx / diesel, so assert the graph
+      # directly: a manifest can re-enable the feature unconditionally
+      # without breaking any compile above.
+      - name: Assert no rusqlite in the sqlite-free graph
+        run: |
+          if cargo tree -p hand-coding-agent --no-default-features \
+             | grep -E 'rusqlite|libsqlite3-sys'; then
+            echo "::error::--no-default-features pulled in rusqlite; something enables the sqlite feature unconditionally"
+            exit 1
+          fi
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
