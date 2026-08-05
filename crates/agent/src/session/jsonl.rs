@@ -14,7 +14,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use super::store::{SessionStore, entries_up_to, forked_header};
-use super::types::{SessionEntry, SessionHeader, SessionStoreError, SessionSummary};
+use super::types::{
+    NO_HEADER_DETAIL, SessionEntry, SessionHeader, SessionStoreError, SessionSummary,
+};
 
 /// Byte cap for the bounded header scan in [`JsonlStore::read_header`]
 /// and [`JsonlStore::list`]. Generous enough for a header line with a
@@ -56,7 +58,7 @@ impl JsonlStore {
         loop {
             line.clear();
             if reader.read_line(&mut line)? == 0 {
-                return Err(corrupt(session, "no session header line"));
+                return Err(corrupt(session, NO_HEADER_DETAIL));
             }
             let trimmed = line.trim();
             if trimmed.is_empty() {
@@ -198,7 +200,7 @@ impl SessionStore for JsonlStore {
                 }
             }
         }
-        let header = header.ok_or_else(|| corrupt(session_id, "no session header line"))?;
+        let header = header.ok_or_else(|| corrupt(session_id, NO_HEADER_DETAIL))?;
         Ok((header, entries))
     }
 

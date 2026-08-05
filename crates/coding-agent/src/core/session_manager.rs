@@ -3,8 +3,8 @@
 use crate::core::error::CodingAgentError;
 use chrono::Utc;
 use hand_agent::session::{
-    InMemoryStore, JsonlStore, SessionEntry as StoreEntry, SessionHeader as StoreHeader,
-    SessionStore, SessionStoreError, SqliteStore,
+    InMemoryStore, JsonlStore, NO_HEADER_DETAIL, SessionEntry as StoreEntry,
+    SessionHeader as StoreHeader, SessionStore, SessionStoreError, SqliteStore,
 };
 use model::Message;
 use serde::{Deserialize, Serialize};
@@ -632,6 +632,32 @@ fn store_err(e: SessionStoreError) -> CodingAgentError {
     CodingAgentError::Session(e.to_string())
 }
 
+/// Map a [`SessionStore::load`] failure into the session error domain
+/// for callers that address a session by path.
+///
+/// "There is no session here" gets the caller's own wording via
+/// `no_header` — a missing file and a header-less file are the same
+/// thing to someone trying to open a session, and the store's internal
+/// phrasing reads worse than the caller's. Every other failure keeps
+/// the cause the store attached: a corrupt log names the offending
+/// line, and that line number is the only way to find it.
+fn load_err(
+    path: &Path,
+    no_header: impl FnOnce() -> String,
+    e: SessionStoreError,
+) -> CodingAgentError {
+    let msg = match e {
+        SessionStoreError::Io(io) => format!("Failed to read session: {io}"),
+        SessionStoreError::NotFound(_) => no_header(),
+        SessionStoreError::Corrupt { ref detail, .. } if detail == NO_HEADER_DETAIL => no_header(),
+        SessionStoreError::Corrupt { detail, .. } => {
+            format!("Session file is corrupt ({}): {detail}", path.display())
+        }
+        other => format!("Failed to read {}: {other}", path.display()),
+    };
+    CodingAgentError::Session(msg)
+}
+
 /// Derive the store addressing (directory + file-stem key) for a
 /// session file path. The stem is the store key even when the header
 /// id differs (literal-path sessions keep working).
@@ -795,13 +821,12 @@ impl SessionManager {
     pub fn open(path: &Path) -> Result<Self, CodingAgentError> {
         let (session_dir, stem) = store_addr(path)?;
         let store: Box<dyn SessionStore> = Box::new(JsonlStore::new(&session_dir));
-        let (store_header, body) = store.load(&stem).map_err(|e| match e {
-            SessionStoreError::Io(io) => {
-                CodingAgentError::Session(format!("Failed to read session: {}", io))
-            }
-            _ => {
-                CodingAgentError::Session(format!("No session header found in {}", path.display()))
-            }
+        let (store_header, body) = store.load(&stem).map_err(|e| {
+            load_err(
+                path,
+                || format!("No session header found in {}", path.display()),
+                e,
+            )
         })?;
 
         let header = to_typed_header(&store_header);
@@ -1278,16 +1303,18 @@ impl SessionManager {
         // reads and writes go through separate stores.
         let (source_dir, source_stem) = store_addr(source_path)?;
         let source_store = JsonlStore::new(&source_dir);
-        let (source_header, source_body) =
-            source_store.load(&source_stem).map_err(|e| match e {
-                SessionStoreError::Io(io) => {
-                    CodingAgentError::Session(format!("Failed to read session: {}", io))
-                }
-                _ => CodingAgentError::Session(format!(
-                    "Cannot fork: source session is empty or has no header: {}",
-                    source_path.display()
-                )),
-            })?;
+        let (source_header, source_body) = source_store.load(&source_stem).map_err(|e| {
+            load_err(
+                source_path,
+                || {
+                    format!(
+                        "Cannot fork: source session is empty or has no header: {}",
+                        source_path.display()
+                    )
+                },
+                e,
+            )
+        })?;
 
         let session_dir = match session_dir {
             Some(dir) => dir.to_path_buf(),
@@ -1890,6 +1917,73 @@ mod tests {
 
         let opened = SessionManager::open(&path).unwrap();
         assert_eq!(opened.id(), id);
+    }
+
+    /// A fully-written malformed line is corruption the store reports
+    /// with the offending line number. `open` must surface that number
+    /// — pre-fix it was replaced by "No session header found", sending
+    /// the reader to inspect the one part of the file that parses.
+    #[test]
+    fn open_corrupt_line_reports_the_line_not_a_missing_header() {
+        let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
+        let mut mgr = SessionManager::create(dir.path()).unwrap();
+        mgr.append_message(Message::User(UserMessage::new_text("hello")))
+            .unwrap();
+        let path = mgr.path().to_path_buf();
+
+        // Header (line 1) and the appended message (line 2) stay valid;
+        // line 3 is malformed and fully written.
+        let mut contents = std::fs::read_to_string(&path).unwrap();
+        contents.push_str("not json\n");
+        std::fs::write(&path, contents).unwrap();
+
+        let err = match SessionManager::open(&path) {
+            Ok(_) => panic!("a fully-written malformed line must fail the open"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("line 3"), "should name the bad line: {err}");
+        assert!(
+            !err.contains("No session header found"),
+            "header is intact; must not blame it: {err}"
+        );
+    }
+
+    /// The historical wording is preserved for a file that genuinely
+    /// carries no header. Note the store reports this as `Corrupt` with
+    /// [`NO_HEADER_DETAIL`], not `NotFound` — `load_err` maps both.
+    #[test]
+    fn open_header_less_file_still_reports_no_session_header() {
+        let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
+        let path = dir.path().join("s_headerless.jsonl");
+        std::fs::write(&path, "").unwrap();
+
+        let err = match SessionManager::open(&path) {
+            Ok(_) => panic!("a header-less file must fail the open"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("No session header found"), "{err}");
+    }
+
+    /// A torn last line is the crash shape that actually occurs, and it
+    /// stays tolerated: the complete prefix loads.
+    #[test]
+    fn open_torn_last_line_loads_the_complete_prefix() {
+        let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
+        let mut mgr = SessionManager::create(dir.path()).unwrap();
+        mgr.append_message(Message::User(UserMessage::new_text("hello")))
+            .unwrap();
+        let path = mgr.path().to_path_buf();
+
+        // A partial write: malformed AND missing its trailing newline.
+        let mut contents = std::fs::read_to_string(&path).unwrap();
+        contents.push_str("{\"type\":\"mes");
+        std::fs::write(&path, contents).unwrap();
+
+        let opened = SessionManager::open(&path).expect("torn tail must be tolerated");
+        assert_eq!(opened.message_count(), 1);
     }
 
     #[test]
