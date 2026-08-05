@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 model = { path = "../model" }
-hand-agent = { path = "../agent", features = ["sqlite"] }
+hand-agent = { path = "../agent" }
 hand-tui = { path = "../tui" }
 # The rt interactive driver renders through the rt stack's public API, whose
 # types (Editor, Line, Rect, RtKey) are ratatui / crossterm types surfaced by
@@ -55,6 +55,15 @@ zip = { version = "5", default-features = false, features = ["deflate"] }
 rand = "0.8"
 unicode-normalization = "0.1"
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+
+[features]
+# On by default so the `hand` binary and existing embedders are
+# unaffected. Turning it off drops rusqlite — and with it the
+# `links = "sqlite3"` claim that cargo permits only once per dependency
+# graph, which otherwise conflicts with an embedder's own sqlx / diesel
+# / rusqlite. Session storage then only offers `SessionBackend::Jsonl`.
+default = ["sqlite"]
+sqlite = ["hand-agent/sqlite"]
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["process", "signal"] }

@@ -1409,6 +1409,7 @@ mod tests {
     /// session-backend setting. It previously called the jsonl-only
     /// discovery, so a sqlite-backed project silently started a fresh
     /// session instead of resuming and never touched the database.
+    #[cfg(feature = "sqlite")]
     #[test]
     fn print_continue_honours_sqlite_backend_setting() {
         use clap::Parser as _;

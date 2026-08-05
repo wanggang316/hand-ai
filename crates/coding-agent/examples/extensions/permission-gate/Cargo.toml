@@ -5,7 +5,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
-hand-coding-agent = { path = "../../.." }
+# Extensions hook the agent; none of them touch session storage, so
+# they build against the sqlite-free surface — which also keeps this
+# dev-dependency edge from pulling rusqlite back into the workspace.
+hand-coding-agent = { path = "../../..", default-features = false }
 async-trait = "0.1"
 
 [dev-dependencies]

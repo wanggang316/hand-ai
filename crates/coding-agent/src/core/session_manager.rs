@@ -2,9 +2,11 @@
 
 use crate::core::error::CodingAgentError;
 use chrono::Utc;
+#[cfg(feature = "sqlite")]
+use hand_agent::session::SqliteStore;
 use hand_agent::session::{
     InMemoryStore, JsonlStore, NO_HEADER_DETAIL, SessionEntry as StoreEntry,
-    SessionHeader as StoreHeader, SessionStore, SessionStoreError, SqliteStore,
+    SessionHeader as StoreHeader, SessionStore, SessionStoreError,
 };
 use model::Message;
 use serde::{Deserialize, Serialize};
@@ -677,6 +679,13 @@ fn store_addr(path: &Path) -> Result<(PathBuf, String), CodingAgentError> {
 /// `session-backend` setting. `Jsonl` is the historical default: one
 /// `.jsonl` file per session. `Sqlite` keeps every session of a
 /// session directory in a single database file.
+///
+/// `Sqlite` exists in every build so the enum's shape — and any
+/// embedder's `match` over it — does not change with cargo features.
+/// Selecting it in a build without the `sqlite` feature is a runtime
+/// error naming the missing feature, never a silent fall back to
+/// `Jsonl`: a silent fallback would write sessions somewhere the user
+/// is not expecting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SessionBackend {
     #[default]
@@ -691,13 +700,27 @@ pub enum SessionBackend {
 /// directory resolves.
 pub const SQLITE_DB_FILENAME: &str = "sessions.db";
 
+#[cfg(feature = "sqlite")]
 fn sqlite_db_path(session_dir: &Path) -> PathBuf {
     session_dir.join(SQLITE_DB_FILENAME)
+}
+
+/// Rejection for a [`SessionBackend::Sqlite`] request in a build
+/// compiled without the `sqlite` feature. Names the feature so the
+/// remedy is in the message rather than in the source.
+#[cfg(not(feature = "sqlite"))]
+fn sqlite_unavailable() -> CodingAgentError {
+    CodingAgentError::Session(
+        "This build has no sqlite session backend. Rebuild hand-coding-agent with the \
+         `sqlite` feature, or set `session-backend: jsonl` in settings.yaml."
+            .to_string(),
+    )
 }
 
 /// Open the sqlite store for `session_dir`, adopting any JSONL
 /// sessions already in that directory (idempotent; the source files
 /// are never modified or deleted).
+#[cfg(feature = "sqlite")]
 fn open_sqlite_store(session_dir: &Path) -> Result<SqliteStore, CodingAgentError> {
     SqliteStore::open_with_import(sqlite_db_path(session_dir), session_dir).map_err(store_err)
 }
@@ -706,6 +729,7 @@ fn open_sqlite_store(session_dir: &Path) -> Result<SqliteStore, CodingAgentError
 /// a unique id-prefix match over the store listing. Zero matches and
 /// ambiguous prefixes both error, mirroring the jsonl resolver's
 /// user-facing wording.
+#[cfg(feature = "sqlite")]
 fn resolve_sqlite_session_id(
     store: &SqliteStore,
     id_or_prefix: &str,
@@ -797,10 +821,13 @@ impl SessionManager {
                 Box::new(JsonlStore::new(&session_dir)),
                 session_dir.join(format!("{}.jsonl", id)),
             ),
+            #[cfg(feature = "sqlite")]
             SessionBackend::Sqlite => (
                 Box::new(open_sqlite_store(&session_dir)?),
                 sqlite_db_path(&session_dir),
             ),
+            #[cfg(not(feature = "sqlite"))]
+            SessionBackend::Sqlite => return Err(sqlite_unavailable()),
         };
         store.create(&to_store_header(&header)).map_err(store_err)?;
 
@@ -890,16 +917,20 @@ impl SessionManager {
                     ))),
                 }
             }
+            #[cfg(feature = "sqlite")]
             SessionBackend::Sqlite => {
                 let store = open_sqlite_store(session_dir)?;
                 let id = resolve_sqlite_session_id(&store, id_or_prefix)?;
                 Self::from_sqlite_store(store, session_dir, &id)
             }
+            #[cfg(not(feature = "sqlite"))]
+            SessionBackend::Sqlite => Err(sqlite_unavailable()),
         }
     }
 
     /// Build a manager over an already-open sqlite store for the
     /// session `id` (which must exist in the store).
+    #[cfg(feature = "sqlite")]
     fn from_sqlite_store(
         store: SqliteStore,
         session_dir: &Path,
@@ -1023,11 +1054,14 @@ impl SessionManager {
                         session_dir,
                     )
                 }
+                #[cfg(feature = "sqlite")]
                 SessionBackend::Sqlite => {
                     let store = open_sqlite_store(&session_dir)?;
                     let path = sqlite_db_path(&session_dir);
                     (Box::new(store) as Box<dyn SessionStore>, path, session_dir)
                 }
+                #[cfg(not(feature = "sqlite"))]
+                SessionBackend::Sqlite => return Err(sqlite_unavailable()),
             }
         };
 
@@ -1258,6 +1292,14 @@ impl SessionManager {
         match backend {
             SessionBackend::Jsonl => Self::most_recent_session_path(cwd, session_dir)
                 .map(|p| p.to_string_lossy().into_owned()),
+            // Discovery is already fallible-as-None (an unopenable store
+            // means "nothing to continue"), so a build without the
+            // feature reports no candidate here. The user still gets the
+            // named error: `--continue` falls through to starting a
+            // session, which goes through `create_with_backend`.
+            #[cfg(not(feature = "sqlite"))]
+            SessionBackend::Sqlite => None,
+            #[cfg(feature = "sqlite")]
             SessionBackend::Sqlite => {
                 let dir = match session_dir {
                     Some(dir) => dir.to_path_buf(),
@@ -1373,6 +1415,26 @@ impl SessionManager {
     /// records the source id as `parent_session`. The forked header
     /// inherits the source session's stored cwd (the CLI only exposes
     /// same-cwd forks, where the two agree).
+    ///
+    /// Present in every build — callers dispatch on
+    /// [`SessionBackend::Sqlite`] and would otherwise need their own
+    /// `cfg` — but errors immediately when the `sqlite` feature is off.
+    #[cfg(not(feature = "sqlite"))]
+    pub fn fork_in_sqlite(
+        _cwd: &Path,
+        _session_dir: Option<&Path>,
+        _source: &str,
+    ) -> Result<Self, CodingAgentError> {
+        Err(sqlite_unavailable())
+    }
+
+    /// Fork a session by id (or unique id prefix) inside the sqlite
+    /// database of `session_dir` (or `cwd`'s default session dir).
+    /// Store-level fork: body entries keep their ids, the new header
+    /// records the source id as `parent_session`. The forked header
+    /// inherits the source session's stored cwd (the CLI only exposes
+    /// same-cwd forks, where the two agree).
+    #[cfg(feature = "sqlite")]
     pub fn fork_in_sqlite(
         cwd: &Path,
         session_dir: Option<&Path>,
@@ -1448,6 +1510,9 @@ impl SessionManager {
     ) -> Result<Vec<SessionInfo>, CodingAgentError> {
         match backend {
             SessionBackend::Jsonl => Self::list(cwd),
+            #[cfg(not(feature = "sqlite"))]
+            SessionBackend::Sqlite => Err(sqlite_unavailable()),
+            #[cfg(feature = "sqlite")]
             SessionBackend::Sqlite => {
                 let dir = Self::default_session_dir(cwd);
                 let store = open_sqlite_store(&dir)?;
@@ -2909,6 +2974,7 @@ mod tests {
     // sqlite backend
     // ------------------------------------------------------------------
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_create_append_reopen_by_id() {
         let cwd = TempDir::new().unwrap();
@@ -2943,6 +3009,7 @@ mod tests {
         assert_eq!(jsonl_count, 0);
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_continue_recent_picks_newest() {
         let cwd = TempDir::new().unwrap();
@@ -2984,6 +3051,7 @@ mod tests {
         assert_eq!(key, older.id());
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_prefix_resolution_unique_and_ambiguous() {
         let cwd = TempDir::new().unwrap();
@@ -3032,6 +3100,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_fork_preserves_entries_and_provenance() {
         let cwd = TempDir::new().unwrap();
@@ -3076,6 +3145,7 @@ mod tests {
         assert_eq!(reopened.message_count(), 1);
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_adopts_existing_jsonl_sessions_once_and_leaves_files_alone() {
         let cwd = TempDir::new().unwrap();
@@ -3107,6 +3177,34 @@ mod tests {
         assert_eq!(std::fs::read(&jsonl_path).unwrap(), bytes_before);
     }
 
+    /// A build without the feature must say so. Falling back to Jsonl
+    /// would silently write sessions somewhere the user is not looking,
+    /// and a bare failure would leave the remedy undiscoverable.
+    #[cfg(not(feature = "sqlite"))]
+    #[test]
+    fn sqlite_backend_without_the_feature_reports_the_missing_feature() {
+        let home = TempDir::new().unwrap();
+        let _g = scoped_hand_home(home.path());
+        let cwd = TempDir::new().unwrap();
+
+        for outcome in [
+            SessionManager::create_with_backend(SessionBackend::Sqlite, cwd.path()),
+            SessionManager::fork_in_sqlite(cwd.path(), None, "s_whatever"),
+        ] {
+            let err = match outcome {
+                Ok(_) => panic!("sqlite must not silently fall back to jsonl"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("sqlite"), "must name the feature: {err}");
+        }
+
+        assert!(
+            SessionManager::list_with_backend(SessionBackend::Sqlite, cwd.path()).is_err(),
+            "listing a sqlite backend must fail rather than report zero sessions"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
     #[test]
     fn sqlite_list_populates_session_info_fields() {
         let home = TempDir::new().unwrap();

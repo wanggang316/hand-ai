@@ -3638,6 +3638,7 @@ mod tests {
 
     /// With `session-backend: sqlite` in the project settings, a fresh
     /// session lands in the session directory's database.
+    #[cfg(feature = "sqlite")]
     #[test]
     fn new_session_honours_sqlite_backend_setting() {
         let tmp = TempDir::new().unwrap();
