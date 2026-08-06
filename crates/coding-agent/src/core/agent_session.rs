@@ -9,6 +9,8 @@ use crate::core::extensions::api::{
     Extension, ExtensionContext, ExtensionContextFactory, HookDecision, SlashCommandSpec,
     ToolCallEvent, ToolResultEvent, UserMessageEvent,
 };
+#[cfg(test)]
+use crate::core::extensions::api::{ResultDecision, UserMessageOutcome};
 use crate::core::extensions::dispatch::{
     dispatch_after_tool_call, dispatch_before_tool_call, dispatch_user_message,
 };
@@ -557,13 +559,24 @@ impl AgentSession {
         // receive, a `Cancel` aborts the turn. Cancelling here leaves no
         // state to unwind — the turn has not started, `is_streaming` is
         // still false, and nothing has been persisted.
-        let text = self.dispatch_user_message_hook(text).await?;
+        let (text, extension_contexts) = self.dispatch_user_message_hook(text).await?;
         let user_msg = Message::User(build_user_message(&text, images));
+
+        // Context an extension contributed goes in front of the prompt as
+        // its own message, and is persisted like any other: the transcript
+        // must show what the model actually read, or a resume would replay
+        // a different conversation than the one that happened.
+        let context_msg = build_extension_context_message(&extension_contexts);
+
+        let mut prompts = Vec::with_capacity(2);
+        if let Some(msg) = context_msg {
+            self.session_manager.append_message(msg.clone())?;
+            prompts.push(msg);
+        }
 
         // Persist the user message
         self.session_manager.append_message(user_msg.clone())?;
-
-        let prompts = vec![user_msg];
+        prompts.push(user_msg);
         // Capture the prompt count before `prompts` is moved into the
         // agent loop below — used to skip-already-persisted entries
         // when writing back `result.messages`.
@@ -1555,30 +1568,37 @@ impl AgentSession {
     }
 
     /// Run the `on_user_message` chain and resolve it to the prompt text
-    /// the turn should actually use.
+    /// the turn should actually use, plus any context extensions want in
+    /// front of the model.
     ///
     /// Returns `Err` when an extension cancelled the turn — the caller must
     /// not persist the message or start the agent loop.
-    async fn dispatch_user_message_hook(&self, text: &str) -> Result<String, CodingAgentError> {
+    async fn dispatch_user_message_hook(
+        &self,
+        text: &str,
+    ) -> Result<(String, Vec<(String, String)>), CodingAgentError> {
         if self.extensions.is_empty() {
-            return Ok(text.to_string());
+            return Ok((text.to_string(), Vec::new()));
         }
         let event = UserMessageEvent {
             text: text.to_string(),
         };
-        let decision =
+        let resolution =
             dispatch_user_message(&self.extensions, &self.extension_context_factory(), &event)
                 .await;
-        match decision {
-            HookDecision::Continue => Ok(text.to_string()),
-            HookDecision::Replace(value) => Ok(value
+        let resolved = match resolution.decision {
+            HookDecision::Continue => text.to_string(),
+            HookDecision::Replace(value) => value
                 .as_str()
                 .map(str::to_string)
-                .unwrap_or_else(|| text.to_string())),
-            HookDecision::Cancel(reason) => Err(CodingAgentError::Other(format!(
-                "message cancelled by extension: {reason}"
-            ))),
-        }
+                .unwrap_or_else(|| text.to_string()),
+            HookDecision::Cancel(reason) => {
+                return Err(CodingAgentError::Other(format!(
+                    "message cancelled by extension: {reason}"
+                )));
+            }
+        };
+        Ok((resolved, resolution.contexts))
     }
 
     /// Extensions that failed `on_load`, as `(name, error)`. Populated by
@@ -1830,6 +1850,29 @@ fn build_before_tool_call_hook(
 /// Build an `AfterToolCallHook` that fans the result event out to every
 /// registered extension. The result is read-only — extensions cannot
 /// rewrite it — so the hook always returns `None`.
+/// Render extension-contributed context as one message placed ahead of the
+/// user's prompt, or `None` when nothing was contributed.
+///
+/// Each contribution is wrapped in a tag naming its extension. Without the
+/// attribution the model reads injected text as if the user typed it, which
+/// is how an extension's advice ends up being treated as an instruction the
+/// user never gave.
+fn build_extension_context_message(contexts: &[(String, String)]) -> Option<Message> {
+    if contexts.is_empty() {
+        return None;
+    }
+    let mut body = String::new();
+    for (name, text) in contexts {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&format!(
+            "<extension-context extension=\"{name}\">\n{text}\n</extension-context>"
+        ));
+    }
+    Some(Message::User(build_user_message(&body, None)))
+}
+
 fn build_after_tool_call_hook(
     extensions: Arc<Vec<Arc<dyn Extension>>>,
     cx: Arc<ExtensionContextFactory>,
@@ -1856,8 +1899,31 @@ fn build_after_tool_call_hook(
                 }),
             };
             Box::pin(async move {
-                dispatch_after_tool_call(&extensions, &cx, &event).await;
-                None
+                let replacement = dispatch_after_tool_call(&extensions, &cx, &event).await?;
+                // The chain hands back a value shaped like the event's
+                // `result`, i.e. a serialized ToolResult. Parse it back so
+                // a malformed replacement fails here — dropping the
+                // override and keeping the tool's own output — rather than
+                // reaching the model as a mangled result.
+                match serde_json::from_value::<hand_agent::types::ToolResult>(replacement) {
+                    Ok(parsed) => Some(AfterToolCallResult {
+                        content: Some(parsed.content),
+                        details: parsed.details,
+                        terminate: parsed.terminate,
+                        // `is_error` is not part of the result shape the
+                        // event exposes; a hook rewrites what the model
+                        // reads, not whether the call counted as failed.
+                        is_error: None,
+                    }),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "extension chain returned an unparseable tool-result replacement; \
+                             keeping the original result"
+                        );
+                        None
+                    }
+                }
             })
         },
     )
@@ -2529,6 +2595,9 @@ mod tests {
     struct RecordingExt {
         manifest: ExtensionManifest,
         before_decision: HookDecision,
+        /// What the after-hook returns. Defaults to `Continue`; a test that
+        /// exercises result rewriting sets it via `with_after_decision`.
+        after_decision: ResultDecision,
         before_calls: Mutex<Vec<ToolCallEvent>>,
         after_calls: Mutex<Vec<ToolResultEvent>>,
         /// Every hook this extension saw, in call order — lets a test
@@ -2542,6 +2611,20 @@ mod tests {
             Arc::new(Self {
                 manifest: ext_manifest(name),
                 before_decision,
+                after_decision: ResultDecision::Continue,
+                before_calls: Mutex::new(Vec::new()),
+                after_calls: Mutex::new(Vec::new()),
+                trace: Mutex::new(Vec::new()),
+                load_fails: false,
+            })
+        }
+
+        /// Same as `new`, but the after-hook rewrites the tool result.
+        fn replacing_result(name: &str, replacement: serde_json::Value) -> Arc<Self> {
+            Arc::new(Self {
+                manifest: ext_manifest(name),
+                before_decision: HookDecision::Continue,
+                after_decision: ResultDecision::Replace(replacement),
                 before_calls: Mutex::new(Vec::new()),
                 after_calls: Mutex::new(Vec::new()),
                 trace: Mutex::new(Vec::new()),
@@ -2553,6 +2636,7 @@ mod tests {
             Arc::new(Self {
                 manifest: ext_manifest(name),
                 before_decision: HookDecision::Continue,
+                after_decision: ResultDecision::Continue,
                 before_calls: Mutex::new(Vec::new()),
                 after_calls: Mutex::new(Vec::new()),
                 trace: Mutex::new(Vec::new()),
@@ -2605,10 +2689,10 @@ mod tests {
             &self,
             _cx: &ExtensionContext,
             event: &ToolResultEvent,
-        ) -> Result<(), ExtensionError> {
+        ) -> Result<ResultDecision, ExtensionError> {
             self.trace.lock().unwrap().push("after".into());
             self.after_calls.lock().unwrap().push(event.clone());
-            Ok(())
+            Ok(self.after_decision.clone())
         }
     }
 
@@ -2984,17 +3068,17 @@ mod tests {
     /// exactly as a real one would be.
     struct PromptExt {
         manifest: ExtensionManifest,
-        decision: HookDecision,
+        outcome: UserMessageOutcome,
         seen: Mutex<Vec<String>>,
     }
 
     impl PromptExt {
-        fn new(name: &str, subscribed: bool, decision: HookDecision) -> Arc<Self> {
+        fn new(name: &str, subscribed: bool, outcome: UserMessageOutcome) -> Arc<Self> {
             let mut manifest = ext_manifest(name);
             manifest.capabilities.on_user_message = subscribed;
             Arc::new(Self {
                 manifest,
-                decision,
+                outcome,
                 seen: Mutex::new(Vec::new()),
             })
         }
@@ -3010,9 +3094,9 @@ mod tests {
             &self,
             _cx: &ExtensionContext,
             event: &crate::core::extensions::api::UserMessageEvent,
-        ) -> Result<HookDecision, ExtensionError> {
+        ) -> Result<UserMessageOutcome, ExtensionError> {
             self.seen.lock().unwrap().push(event.text.clone());
-            Ok(self.decision.clone())
+            Ok(self.outcome.clone())
         }
     }
 
@@ -3034,7 +3118,7 @@ mod tests {
         let ext = PromptExt::new(
             "scrubber",
             true,
-            HookDecision::Replace(serde_json::json!("token=[redacted]")),
+            HookDecision::Replace(serde_json::json!("token=[redacted]")).into(),
         );
         session.register_extension(ext.clone());
 
@@ -3063,6 +3147,74 @@ mod tests {
         );
     }
 
+    /// `additional_context` reaches the model without the user's own
+    /// message being edited, and is attributed to its extension so the
+    /// model does not read it as something the user typed.
+    #[tokio::test]
+    async fn user_message_additional_context_reaches_the_model_separately() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PromptRecordingProvider {
+                prompts: prompts.clone(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        session.register_extension(PromptExt::new(
+            "git-status",
+            true,
+            UserMessageOutcome::context("on branch main, 3 files modified"),
+        ));
+
+        session
+            .send_message("what changed?")
+            .await
+            .expect("send_message succeeds");
+
+        let seen = prompts.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|p| p.contains("on branch main")),
+            "the model must receive the contributed context, got {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|p| p.contains("extension=\"git-status\"")),
+            "context must be attributed to its extension, got {seen:?}"
+        );
+        // The user's own message is delivered untouched, as its own entry.
+        assert!(
+            seen.iter().any(|p| p == "what changed?"),
+            "the user's prompt must arrive unedited, got {seen:?}"
+        );
+    }
+
+    /// With no extension contributing context, the request is exactly what
+    /// it was before the feature existed — one message, the user's.
+    #[tokio::test]
+    async fn no_additional_context_leaves_the_request_unchanged() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PromptRecordingProvider {
+                prompts: prompts.clone(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        session.register_extension(PromptExt::new("quiet", true, HookDecision::Continue.into()));
+
+        session
+            .send_message("hello")
+            .await
+            .expect("send_message succeeds");
+
+        assert_eq!(*prompts.lock().unwrap(), vec!["hello".to_string()]);
+    }
+
     /// A `Cancel` aborts the turn before anything is persisted and surfaces
     /// the reason to the caller.
     #[tokio::test]
@@ -3081,7 +3233,7 @@ mod tests {
         session.register_extension(PromptExt::new(
             "guard",
             true,
-            HookDecision::Cancel("prompt contains a secret".into()),
+            HookDecision::Cancel("prompt contains a secret".into()).into(),
         ));
 
         let err = session
@@ -3115,7 +3267,11 @@ mod tests {
         );
 
         let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
-        let ext = PromptExt::new("unsubscribed", false, HookDecision::Cancel("nope".into()));
+        let ext = PromptExt::new(
+            "unsubscribed",
+            false,
+            HookDecision::Cancel("nope".into()).into(),
+        );
         session.register_extension(ext.clone());
 
         session
@@ -3130,15 +3286,27 @@ mod tests {
         tool_name: String,
         args: serde_json::Value,
         invocation: AtomicUsize,
+        /// Text of every tool result present in the context each time the
+        /// provider is called — i.e. exactly what the model got to read.
+        tool_results: Arc<Mutex<Vec<String>>>,
     }
 
     impl ApiProvider for ToolThenTextProvider {
         fn stream(
             &self,
             _model: model::Model,
-            _context: Context,
+            context: Context,
             _options: Option<StreamOptions>,
         ) -> AssistantMessageEventStream<'static> {
+            for msg in &context.messages {
+                if let Message::ToolResult(tr) = msg {
+                    for block in &tr.content {
+                        if let model::ToolResultContent::Text(text) = block {
+                            self.tool_results.lock().unwrap().push(text.text.clone());
+                        }
+                    }
+                }
+            }
             let n = self.invocation.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
                 let tool_name = self.tool_name.clone();
@@ -3246,6 +3414,89 @@ mod tests {
         );
     }
 
+    /// The redaction case from the after-hook contract: a `Replace` must
+    /// change what the model reads, and the un-replaced value must never
+    /// appear in the request.
+    #[tokio::test]
+    async fn after_hook_replace_changes_what_the_model_reads() {
+        let tool_results: Arc<Mutex<Vec<String>>> = Default::default();
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(ToolThenTextProvider {
+                tool_name: "noop".into(),
+                args: serde_json::json!({}),
+                invocation: AtomicUsize::new(0),
+                tool_results: tool_results.clone(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![noop_tool()], client);
+
+        // `noop_tool` returns "noop ok"; the extension swaps it for a
+        // scrubbed body of the same shape.
+        session.register_extension(RecordingExt::replacing_result(
+            "scrubber",
+            serde_json::json!({
+                "content": [{"type": "text", "text": "[redacted]"}]
+            }),
+        ));
+
+        session
+            .send_message("please call noop")
+            .await
+            .expect("send_message should succeed");
+
+        let seen = tool_results.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|t| t == "[redacted]"),
+            "model must read the replacement, got {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|t| t.contains("noop ok")),
+            "the original result must never reach the model, got {seen:?}"
+        );
+    }
+
+    /// An unparseable replacement is a contract violation by the
+    /// extension. It must cost the rewrite, not the result — dropping the
+    /// tool's output entirely would be a far worse failure.
+    #[tokio::test]
+    async fn after_hook_malformed_replacement_keeps_the_original_result() {
+        let tool_results: Arc<Mutex<Vec<String>>> = Default::default();
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(ToolThenTextProvider {
+                tool_name: "noop".into(),
+                args: serde_json::json!({}),
+                invocation: AtomicUsize::new(0),
+                tool_results: tool_results.clone(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![noop_tool()], client);
+        session.register_extension(RecordingExt::replacing_result(
+            "confused",
+            serde_json::json!("not a tool result"),
+        ));
+
+        session
+            .send_message("please call noop")
+            .await
+            .expect("send_message should succeed");
+
+        let seen = tool_results.lock().unwrap().clone();
+        assert!(
+            seen.iter().any(|t| t.contains("noop ok")),
+            "a malformed rewrite must leave the tool's own output intact, got {seen:?}"
+        );
+    }
+
     #[tokio::test]
     async fn send_message_fires_before_and_after_hooks_on_tool_call() {
         // Register the mock provider on a Client.
@@ -3256,6 +3507,7 @@ mod tests {
                 tool_name: "noop".into(),
                 args: serde_json::json!({}),
                 invocation: AtomicUsize::new(0),
+                tool_results: Default::default(),
             }),
             Some("test".into()),
         );
@@ -3301,6 +3553,7 @@ mod tests {
                 tool_name: "noop".into(),
                 args: serde_json::json!({}),
                 invocation: AtomicUsize::new(0),
+                tool_results: Default::default(),
             }),
             Some("test".into()),
         );
@@ -3401,6 +3654,7 @@ mod tests {
                 tool_name: "noop".into(),
                 args: serde_json::json!({}),
                 invocation: AtomicUsize::new(0),
+                tool_results: Default::default(),
             }),
             Some("test".into()),
         );
@@ -3458,6 +3712,7 @@ mod tests {
                 tool_name: "noop".into(),
                 args: serde_json::json!({"original": true}),
                 invocation: AtomicUsize::new(0),
+                tool_results: Default::default(),
             }),
             Some("test".into()),
         );
@@ -3529,6 +3784,7 @@ mod tests {
                 tool_name: "echo".into(),
                 args: serde_json::json!({"message": "hello"}),
                 invocation: AtomicUsize::new(0),
+                tool_results: Default::default(),
             }),
             Some("test".into()),
         );

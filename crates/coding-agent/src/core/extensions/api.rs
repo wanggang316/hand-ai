@@ -189,13 +189,17 @@ pub struct ToolCallEvent {
     pub call_id: String,
 }
 
-/// Fired after the agent loop executes a tool call. Read-only — the
-/// extension cannot rewrite the result.
+/// Fired after the agent loop executes a tool call. The extension may
+/// leave the result alone or replace what the model sees.
 #[derive(Debug, Clone)]
 pub struct ToolResultEvent {
     pub tool_name: String,
     pub call_id: String,
     pub success: bool,
+    /// The tool result, as the JSON object `{"content": [...], "details":
+    /// …, "terminate": …}`. A [`ResultDecision::Replace`] hands back a
+    /// value of this same shape, so an extension can deserialize, edit,
+    /// and return it.
     pub result: serde_json::Value,
 }
 
@@ -210,14 +214,76 @@ pub struct UserMessageEvent {
 }
 
 /// What an extension's `on_before_tool_call` decides.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum HookDecision {
     /// Let the agent loop run the tool as-is.
+    #[default]
     Continue,
     /// Block the tool call. The model sees an error result with this message.
     Cancel(String),
     /// Replace the tool's arguments with new JSON, then continue.
     Replace(serde_json::Value),
+}
+
+/// What an extension's `on_after_tool_call` decides about the result the
+/// model is about to see.
+///
+/// Separate from [`HookDecision`] because the action already ran: there is
+/// nothing left to cancel, only the record of what it produced.
+#[derive(Debug, Clone, Default)]
+pub enum ResultDecision {
+    /// Leave the result as the tool produced it.
+    #[default]
+    Continue,
+    /// Replace what the model sees. The value must have the shape of
+    /// [`ToolResultEvent::result`]; one that fails to parse is logged and
+    /// treated as `Continue` rather than dropping the result entirely.
+    ///
+    /// The replacement is what the transcript records too — a redaction
+    /// that only hid the secret from the model but still wrote it to disk
+    /// would defeat the purpose.
+    Replace(serde_json::Value),
+}
+
+/// What an extension's `on_user_message` returns.
+///
+/// The decision governs the pending turn; `additional_context` is
+/// orthogonal to it, because a hook often wants to allow the turn *and*
+/// tell the model something.
+#[derive(Debug, Clone, Default)]
+pub struct UserMessageOutcome {
+    pub decision: HookDecision,
+    /// Text placed in front of the model for this turn, attributed to the
+    /// extension that produced it. Contributions are concatenated in
+    /// registration order and ignored when the decision is `Cancel`.
+    ///
+    /// It is recorded in the transcript as its own message, never merged
+    /// into the user's. A resume replays what the model actually saw.
+    pub additional_context: Option<String>,
+}
+
+impl UserMessageOutcome {
+    /// Outcome that changes nothing — the common case.
+    pub fn cont() -> Self {
+        Self::default()
+    }
+
+    /// Outcome carrying only context; the turn proceeds unchanged.
+    pub fn context(text: impl Into<String>) -> Self {
+        Self {
+            decision: HookDecision::Continue,
+            additional_context: Some(text.into()),
+        }
+    }
+}
+
+impl From<HookDecision> for UserMessageOutcome {
+    fn from(decision: HookDecision) -> Self {
+        Self {
+            decision,
+            additional_context: None,
+        }
+    }
 }
 
 /// What a slash command extension declares.
@@ -381,12 +447,17 @@ pub trait Extension: Send + Sync {
     ///   prompt text; anything else is logged and treated as `Continue`.
     /// - `Cancel(reason)` — the turn does not start, nothing is persisted,
     ///   and `reason` is surfaced to the user.
+    ///
+    /// [`UserMessageOutcome::additional_context`] rides alongside the
+    /// decision: use it to tell the model something without editing the
+    /// user's prompt out from under them. `HookDecision` converts into an
+    /// outcome, so `Ok(HookDecision::Continue.into())` stays terse.
     async fn on_user_message(
         &self,
         _cx: &ExtensionContext,
         _event: &UserMessageEvent,
-    ) -> Result<HookDecision, ExtensionError> {
-        Ok(HookDecision::Continue)
+    ) -> Result<UserMessageOutcome, ExtensionError> {
+        Ok(UserMessageOutcome::cont())
     }
 
     /// Called before each tool call. Default: no-op (Continue).
@@ -398,13 +469,19 @@ pub trait Extension: Send + Sync {
         Ok(HookDecision::Continue)
     }
 
-    /// Called after each tool call. Default: no-op.
+    /// Called after each tool call. Default: no-op (Continue).
+    ///
+    /// `Replace` rewrites what the model — and the transcript — see, which
+    /// is how redaction, truncation, and annotation are expressed. The
+    /// chain is sequential and each extension observes its predecessor's
+    /// replacement, so a scrubber registered ahead of a summariser is not
+    /// undone by it.
     async fn on_after_tool_call(
         &self,
         _cx: &ExtensionContext,
         _event: &ToolResultEvent,
-    ) -> Result<(), ExtensionError> {
-        Ok(())
+    ) -> Result<ResultDecision, ExtensionError> {
+        Ok(ResultDecision::Continue)
     }
 
     /// Slash commands this extension contributes. Default: none.
