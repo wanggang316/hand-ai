@@ -35,8 +35,8 @@
 
 use crate::core::extensions::api::{
     Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision, ResultDecision,
-    SlashCommandSpec, TimeoutPolicy, ToolCallEvent, ToolResultEvent, UserMessageEvent,
-    UserMessageOutcome,
+    SlashCommandSpec, TimeoutPolicy, ToolCallEvent, ToolResultEvent, TurnEndEvent,
+    UserMessageEvent, UserMessageOutcome,
 };
 use crate::core::extensions::manifest::load_manifest;
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
@@ -74,6 +74,10 @@ pub enum ExtensionEventOut {
     OnAfterToolCall {
         context: ContextDto,
         event: ToolResultDto,
+    },
+    OnTurnEnd {
+        context: ContextDto,
+        event: TurnEndDto,
     },
     /// Invoke a manifest-declared custom tool. The subprocess responds with
     /// [`ExtensionEventIn::ToolResult`].
@@ -198,6 +202,22 @@ pub struct ToolResultDto {
     pub result: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnEndDto {
+    pub last_assistant_message: String,
+    pub stop_reason: String,
+}
+
+impl From<&TurnEndEvent> for TurnEndDto {
+    fn from(event: &TurnEndEvent) -> Self {
+        TurnEndDto {
+            last_assistant_message: event.last_assistant_message.clone(),
+            stop_reason: event.stop_reason.clone(),
+        }
+    }
+}
+
 impl From<&ToolResultEvent> for ToolResultDto {
     fn from(event: &ToolResultEvent) -> Self {
         ToolResultDto {
@@ -291,6 +311,7 @@ fn event_data_dir(event: &ExtensionEventOut) -> Option<&Path> {
         ExtensionEventOut::OnUserMessage { context, .. } => context,
         ExtensionEventOut::OnBeforeToolCall { context, .. } => context,
         ExtensionEventOut::OnAfterToolCall { context, .. } => context,
+        ExtensionEventOut::OnTurnEnd { context, .. } => context,
         ExtensionEventOut::ExecuteCustomTool { context, .. } => context,
         ExtensionEventOut::ExecuteSlashCommand { context, .. } => context,
     };
@@ -303,6 +324,7 @@ enum Hook {
     Load,
     Shutdown,
     UserMessage,
+    TurnEnd,
     BeforeToolCall,
     AfterToolCall,
     CustomTool,
@@ -315,6 +337,7 @@ impl Hook {
             Hook::Load => "on_load",
             Hook::Shutdown => "on_shutdown",
             Hook::UserMessage => "on_user_message",
+            Hook::TurnEnd => "on_turn_end",
             Hook::BeforeToolCall => "on_before_tool_call",
             Hook::AfterToolCall => "on_after_tool_call",
             Hook::CustomTool => "custom_tool",
@@ -405,7 +428,7 @@ impl SubprocessInner {
     fn budget(&self, hook: Hook) -> Duration {
         let t = &self.manifest.timeouts;
         Duration::from_millis(match hook {
-            Hook::BeforeToolCall | Hook::UserMessage => t.before_tool_call_ms,
+            Hook::BeforeToolCall | Hook::UserMessage | Hook::TurnEnd => t.before_tool_call_ms,
             Hook::AfterToolCall => t.after_tool_call_ms,
             Hook::Load | Hook::Shutdown => t.lifecycle_ms,
             Hook::CustomTool | Hook::SlashCommand => t.invoke_ms,
@@ -686,6 +709,35 @@ impl Extension for SubprocessExtension {
             _ => Err(ExtensionError::Custom {
                 name: self.inner.manifest.name.clone(),
                 message: "unexpected response shape for on_after_tool_call".to_string(),
+            }),
+        }
+    }
+
+    async fn on_turn_end(
+        &self,
+        cx: &ExtensionContext,
+        event: &TurnEndEvent,
+    ) -> Result<HookDecision, ExtensionError> {
+        let response = self
+            .inner
+            .rpc_hook(
+                ExtensionEventOut::OnTurnEnd {
+                    context: cx.into(),
+                    event: event.into(),
+                },
+                Hook::TurnEnd,
+            )
+            .await?;
+        match response {
+            ExtensionEventIn::Ok | ExtensionEventIn::Continue { .. } => Ok(HookDecision::Continue),
+            ExtensionEventIn::Cancel { reason } => Ok(HookDecision::Cancel(reason)),
+            ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
+                name: self.inner.manifest.name.clone(),
+                message,
+            }),
+            _ => Err(ExtensionError::Custom {
+                name: self.inner.manifest.name.clone(),
+                message: "unexpected response shape for on_turn_end".to_string(),
             }),
         }
     }
@@ -1203,6 +1255,56 @@ exec = ["/bin/true"]
             .await
             .expect("rpc ok");
         assert!(matches!(decision, ResultDecision::Continue));
+
+        let _ = ext.on_shutdown(&ctx()).await;
+    }
+
+    /// Tier 2 turn-end: `cancel` keeps the agent working, and the child
+    /// receives the assistant's closing text.
+    #[tokio::test]
+    async fn subprocess_turn_end_can_keep_the_agent_working() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(
+            dir.path(),
+            r#"
+  case "$line" in
+    *on_turn_end*I\ edited*) printf '{"type":"cancel","reason":"run the tests first"}\n' ;;
+    *on_turn_end*) printf '{"type":"continue"}\n' ;;
+    *) printf '{"type":"ok"}\n' ;;
+  esac
+"#,
+        );
+        let mut manifest = make_manifest("nag", bash_exec(&script));
+        manifest.capabilities.on_turn_end = true;
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let decision = ext
+            .on_turn_end(
+                &ctx(),
+                &TurnEndEvent {
+                    last_assistant_message: "I edited three files.".into(),
+                    stop_reason: "Stop".into(),
+                },
+            )
+            .await
+            .expect("rpc ok");
+        match decision {
+            HookDecision::Cancel(reason) => assert_eq!(reason, "run the tests first"),
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+
+        let decision = ext
+            .on_turn_end(
+                &ctx(),
+                &TurnEndEvent {
+                    last_assistant_message: "all done".into(),
+                    stop_reason: "Stop".into(),
+                },
+            )
+            .await
+            .expect("rpc ok");
+        assert!(matches!(decision, HookDecision::Continue));
 
         let _ = ext.on_shutdown(&ctx()).await;
     }
