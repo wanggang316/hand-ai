@@ -7,8 +7,8 @@
 //! See ADR-001 and Phase 3 task T3.3a for the design.
 
 use super::api::{
-    Extension, ExtensionContextFactory, HookDecision, ToolCallEvent, ToolResultEvent,
-    UserMessageEvent,
+    Extension, ExtensionContextFactory, HookDecision, ResultDecision, ToolCallEvent,
+    ToolResultEvent, UserMessageEvent, UserMessageOutcome,
 };
 use std::sync::Arc;
 
@@ -143,17 +143,25 @@ pub(crate) async fn dispatch_user_message(
     extensions: &[Arc<dyn Extension>],
     contexts: &ExtensionContextFactory,
     event: &UserMessageEvent,
-) -> HookDecision {
+) -> UserMessageResolution {
     let subscribed: Vec<&Arc<dyn Extension>> = extensions
         .iter()
         .filter(|ext| ext.manifest().capabilities.on_user_message)
         .collect();
     if subscribed.is_empty() {
-        return HookDecision::Continue;
+        return UserMessageResolution::cont();
     }
 
     let mut working = event.clone();
     let mut replaced: Option<String> = None;
+    // Survives across rounds, keyed by extension: each one's most recent
+    // contribution wins. Discarding all but the converging round would
+    // lose the common case — a scrubber that rewrites the prompt and says
+    // so has nothing left to report once its own rewrite has landed, so
+    // its note would vanish on the very re-validation pass it triggered.
+    // Keying by name is also what stops a rewriting chain from repeating
+    // the same note once per round.
+    let mut collected: Vec<(String, String)> = Vec::new();
 
     for _round in 0..MAX_BEFORE_TOOL_CALL_ROUNDS {
         let mut replaced_this_round = false;
@@ -161,19 +169,35 @@ pub(crate) async fn dispatch_user_message(
         for ext in &subscribed {
             let name = ext.manifest().name.clone();
             let cx = contexts.for_extension(&name);
-            let decision = match ext.on_user_message(&cx, &working).await {
-                Ok(d) => d,
+            let outcome = match ext.on_user_message(&cx, &working).await {
+                Ok(o) => o,
                 Err(err) => {
                     tracing::warn!(
                         extension = %name,
                         error = %err,
                         "extension on_user_message errored; treating as Continue"
                     );
-                    HookDecision::Continue
+                    UserMessageOutcome::cont()
                 }
             };
 
-            match decision {
+            if let Some(text) = outcome.additional_context {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    tracing::debug!(
+                        extension = %name,
+                        "on_user_message returned blank additional_context; ignoring"
+                    );
+                } else if let Some(slot) =
+                    collected.iter_mut().find(|(existing, _)| existing == &name)
+                {
+                    slot.1 = trimmed.to_string();
+                } else {
+                    collected.push((name.clone(), trimmed.to_string()));
+                }
+            }
+
+            match outcome.decision {
                 HookDecision::Continue => {}
                 HookDecision::Replace(value) => {
                     let Some(text) = value.as_str() else {
@@ -190,14 +214,24 @@ pub(crate) async fn dispatch_user_message(
                     replaced = Some(text.to_string());
                     replaced_this_round = true;
                 }
-                HookDecision::Cancel(reason) => return HookDecision::Cancel(reason),
+                // A cancelled turn never reaches the model, so any context
+                // gathered for it is dropped with the rest of the turn.
+                HookDecision::Cancel(reason) => {
+                    return UserMessageResolution {
+                        decision: HookDecision::Cancel(reason),
+                        contexts: Vec::new(),
+                    };
+                }
             }
         }
 
         if !replaced_this_round {
-            return match replaced {
-                Some(text) => HookDecision::Replace(serde_json::Value::String(text)),
-                None => HookDecision::Continue,
+            return UserMessageResolution {
+                decision: match replaced {
+                    Some(text) => HookDecision::Replace(serde_json::Value::String(text)),
+                    None => HookDecision::Continue,
+                },
+                contexts: collected,
             };
         }
     }
@@ -206,33 +240,74 @@ pub(crate) async fn dispatch_user_message(
         rounds = MAX_BEFORE_TOOL_CALL_ROUNDS,
         "extension chain kept rewriting the user message; cancelling the turn"
     );
-    HookDecision::Cancel(format!(
-        "extension chain did not converge on the user message after \
-         {MAX_BEFORE_TOOL_CALL_ROUNDS} rounds of rewriting"
-    ))
+    UserMessageResolution {
+        decision: HookDecision::Cancel(format!(
+            "extension chain did not converge on the user message after \
+             {MAX_BEFORE_TOOL_CALL_ROUNDS} rounds of rewriting"
+        )),
+        contexts: Vec::new(),
+    }
+}
+
+/// Aggregated outcome of the `on_user_message` chain.
+#[derive(Debug, Clone)]
+pub(crate) struct UserMessageResolution {
+    pub decision: HookDecision,
+    /// `(extension name, context text)` in registration order. Empty when
+    /// the turn was cancelled.
+    pub contexts: Vec<(String, String)>,
+}
+
+impl UserMessageResolution {
+    fn cont() -> Self {
+        Self {
+            decision: HookDecision::Continue,
+            contexts: Vec::new(),
+        }
+    }
 }
 
 /// Dispatch `on_after_tool_call` across an ordered chain of extensions.
 ///
-/// Every extension is called with the same `event` in registration order.
+/// Sequential in registration order, and each extension observes its
+/// predecessor's replacement rather than the tool's original output. That
+/// ordering is what makes redaction composable: a summariser registered
+/// after a scrubber works from the scrubbed text, so it cannot reintroduce
+/// the secret the scrubber removed. When a single extension replaces, the
+/// effect is identical to last-write-wins.
+///
 /// Errors are logged and ignored; one misbehaving extension never prevents
-/// the rest from running. There is no aggregated return value — `after`
-/// hooks are observational only.
+/// the rest from running, and never discards the result accumulated so far.
+///
+/// Returns the final replacement, or `None` when nothing changed.
 pub(crate) async fn dispatch_after_tool_call(
     extensions: &[Arc<dyn Extension>],
     contexts: &ExtensionContextFactory,
     event: &ToolResultEvent,
-) {
+) -> Option<serde_json::Value> {
+    let mut working = event.clone();
+    let mut replaced = false;
+
     for ext in extensions {
-        let cx = contexts.for_extension(&ext.manifest().name);
-        if let Err(err) = ext.on_after_tool_call(&cx, event).await {
-            tracing::warn!(
-                extension = %ext.manifest().name,
-                error = %err,
-                "extension on_after_tool_call errored; ignoring"
-            );
+        let name = ext.manifest().name.clone();
+        let cx = contexts.for_extension(&name);
+        match ext.on_after_tool_call(&cx, &working).await {
+            Ok(ResultDecision::Continue) => {}
+            Ok(ResultDecision::Replace(value)) => {
+                working.result = value;
+                replaced = true;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    extension = %name,
+                    error = %err,
+                    "extension on_after_tool_call errored; ignoring"
+                );
+            }
         }
     }
+
+    replaced.then_some(working.result)
 }
 
 #[cfg(test)]
@@ -283,6 +358,13 @@ mod tests {
         Error(String),
     }
 
+    /// The after-hook counterpart. No `Cancel`: the tool already ran.
+    enum AfterAction {
+        Continue,
+        Replace(serde_json::Value),
+        Error(String),
+    }
+
     /// A test extension that records every event it sees and returns a
     /// caller-configured response (Continue / Replace / Cancel / Error) per
     /// call.
@@ -290,7 +372,7 @@ mod tests {
         manifest: ExtensionManifest,
         before_actions: Mutex<Vec<BeforeAction>>,
         before_calls: Mutex<Vec<ToolCallEvent>>,
-        after_actions: Mutex<Vec<Result<(), String>>>,
+        after_actions: Mutex<Vec<AfterAction>>,
         after_calls: Mutex<Vec<ToolResultEvent>>,
     }
 
@@ -305,7 +387,7 @@ mod tests {
             }
         }
 
-        fn with_after(mut self, after: Vec<Result<(), String>>) -> Self {
+        fn with_after(mut self, after: Vec<AfterAction>) -> Self {
             self.after_actions = Mutex::new(after);
             self
         }
@@ -342,15 +424,16 @@ mod tests {
             &self,
             _cx: &ExtensionContext,
             event: &ToolResultEvent,
-        ) -> Result<(), ExtensionError> {
+        ) -> Result<ResultDecision, ExtensionError> {
             self.after_calls.lock().unwrap().push(event.clone());
             let mut actions = self.after_actions.lock().unwrap();
             if actions.is_empty() {
-                return Ok(());
+                return Ok(ResultDecision::Continue);
             }
             match actions.remove(0) {
-                Ok(()) => Ok(()),
-                Err(msg) => Err(ExtensionError::Custom {
+                AfterAction::Continue => Ok(ResultDecision::Continue),
+                AfterAction::Replace(v) => Ok(ResultDecision::Replace(v)),
+                AfterAction::Error(msg) => Err(ExtensionError::Custom {
                     name: self.manifest.name.clone(),
                     message: msg,
                 }),
@@ -695,9 +778,9 @@ mod tests {
                 &self,
                 cx: &ExtensionContext,
                 _event: &ToolResultEvent,
-            ) -> Result<(), ExtensionError> {
+            ) -> Result<ResultDecision, ExtensionError> {
                 self.seen.lock().unwrap().push(cx.data_dir.clone());
-                Ok(())
+                Ok(ResultDecision::Continue)
             }
         }
 
@@ -736,12 +819,12 @@ mod tests {
     /// whether the manifest declares the capability.
     struct PromptExt {
         manifest: ExtensionManifest,
-        action: Mutex<Vec<HookDecision>>,
+        action: Mutex<Vec<UserMessageOutcome>>,
         seen: Mutex<Vec<String>>,
     }
 
     impl PromptExt {
-        fn new(name: &str, subscribed: bool, actions: Vec<HookDecision>) -> Arc<Self> {
+        fn new(name: &str, subscribed: bool, actions: Vec<UserMessageOutcome>) -> Arc<Self> {
             let mut manifest = manifest(name);
             manifest.capabilities.on_user_message = subscribed;
             Arc::new(Self {
@@ -762,11 +845,11 @@ mod tests {
             &self,
             _cx: &ExtensionContext,
             event: &UserMessageEvent,
-        ) -> Result<HookDecision, ExtensionError> {
+        ) -> Result<UserMessageOutcome, ExtensionError> {
             self.seen.lock().unwrap().push(event.text.clone());
             let mut actions = self.action.lock().unwrap();
             if actions.is_empty() {
-                return Ok(HookDecision::Continue);
+                return Ok(UserMessageOutcome::cont());
             }
             Ok(actions.remove(0))
         }
@@ -778,21 +861,26 @@ mod tests {
 
     #[tokio::test]
     async fn user_message_hook_fires_once_with_the_raw_prompt() {
-        let ext = PromptExt::new("linter", true, vec![HookDecision::Continue]);
+        let ext = PromptExt::new("linter", true, vec![HookDecision::Continue.into()]);
         let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
 
-        let decision = dispatch_user_message(&exts, &ctx(), &prompt("hello world")).await;
-        assert!(matches!(decision, HookDecision::Continue));
+        let resolution = dispatch_user_message(&exts, &ctx(), &prompt("hello world")).await;
+        assert!(matches!(resolution.decision, HookDecision::Continue));
+        assert!(resolution.contexts.is_empty());
         assert_eq!(*ext.seen.lock().unwrap(), vec!["hello world".to_string()]);
     }
 
     #[tokio::test]
     async fn user_message_hook_skips_extensions_that_did_not_declare_it() {
-        let ext = PromptExt::new("silent", false, vec![HookDecision::Cancel("no".into())]);
+        let ext = PromptExt::new(
+            "silent",
+            false,
+            vec![HookDecision::Cancel("no".into()).into()],
+        );
         let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
 
-        let decision = dispatch_user_message(&exts, &ctx(), &prompt("hello")).await;
-        assert!(matches!(decision, HookDecision::Continue));
+        let resolution = dispatch_user_message(&exts, &ctx(), &prompt("hello")).await;
+        assert!(matches!(resolution.decision, HookDecision::Continue));
         assert!(
             ext.seen.lock().unwrap().is_empty(),
             "an extension that did not declare the capability must never be called"
@@ -804,13 +892,13 @@ mod tests {
         let scrubber = PromptExt::new(
             "scrubber",
             true,
-            vec![HookDecision::Replace(serde_json::json!("token=[redacted]"))],
+            vec![HookDecision::Replace(serde_json::json!("token=[redacted]")).into()],
         );
         let auditor = PromptExt::new("auditor", true, vec![]);
         let exts: Vec<Arc<dyn Extension>> = vec![scrubber.clone(), auditor.clone()];
 
-        let decision = dispatch_user_message(&exts, &ctx(), &prompt("token=hunter2")).await;
-        match decision {
+        let resolution = dispatch_user_message(&exts, &ctx(), &prompt("token=hunter2")).await;
+        match resolution.decision {
             HookDecision::Replace(v) => assert_eq!(v, serde_json::json!("token=[redacted]")),
             other => panic!("expected Replace, got {other:?}"),
         }
@@ -827,15 +915,18 @@ mod tests {
 
     #[tokio::test]
     async fn user_message_cancel_wins() {
-        let a = PromptExt::new("a", true, vec![HookDecision::Continue]);
+        let a = PromptExt::new("a", true, vec![HookDecision::Continue.into()]);
         let b = PromptExt::new(
             "b",
             true,
-            vec![HookDecision::Cancel("contains a secret".into())],
+            vec![HookDecision::Cancel("contains a secret".into()).into()],
         );
         let exts: Vec<Arc<dyn Extension>> = vec![a, b];
 
-        match dispatch_user_message(&exts, &ctx(), &prompt("hi")).await {
+        match dispatch_user_message(&exts, &ctx(), &prompt("hi"))
+            .await
+            .decision
+        {
             HookDecision::Cancel(reason) => assert_eq!(reason, "contains a secret"),
             other => panic!("expected Cancel, got {other:?}"),
         }
@@ -848,12 +939,12 @@ mod tests {
         let ext = PromptExt::new(
             "confused",
             true,
-            vec![HookDecision::Replace(serde_json::json!({"text": "nope"}))],
+            vec![HookDecision::Replace(serde_json::json!({"text": "nope"})).into()],
         );
         let exts: Vec<Arc<dyn Extension>> = vec![ext];
 
-        let decision = dispatch_user_message(&exts, &ctx(), &prompt("hi")).await;
-        assert!(matches!(decision, HookDecision::Continue));
+        let resolution = dispatch_user_message(&exts, &ctx(), &prompt("hi")).await;
+        assert!(matches!(resolution.decision, HookDecision::Continue));
     }
 
     // -- Tests for dispatch_after_tool_call ----------------------------------
@@ -869,9 +960,11 @@ mod tests {
 
     #[tokio::test]
     async fn after_calls_every_extension_even_when_one_errors() {
-        let a = Arc::new(RecordingExt::new("a", vec![]).with_after(vec![Ok(())]));
-        let b = Arc::new(RecordingExt::new("b", vec![]).with_after(vec![Err("boom".into())]));
-        let c = Arc::new(RecordingExt::new("c", vec![]).with_after(vec![Ok(())]));
+        let a = Arc::new(RecordingExt::new("a", vec![]).with_after(vec![AfterAction::Continue]));
+        let b = Arc::new(
+            RecordingExt::new("b", vec![]).with_after(vec![AfterAction::Error("boom".into())]),
+        );
+        let c = Arc::new(RecordingExt::new("c", vec![]).with_after(vec![AfterAction::Continue]));
 
         let exts: Vec<Arc<dyn Extension>> = vec![a.clone(), b.clone(), c.clone()];
         dispatch_after_tool_call(&exts, &ctx(), &result_event()).await;
@@ -889,6 +982,167 @@ mod tests {
     async fn after_no_extensions_is_a_no_op() {
         let exts: Vec<Arc<dyn Extension>> = Vec::new();
         // Just ensure it returns without panic.
-        dispatch_after_tool_call(&exts, &ctx(), &result_event()).await;
+        assert!(
+            dispatch_after_tool_call(&exts, &ctx(), &result_event())
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn after_replace_is_returned_as_the_final_result() {
+        let ext =
+            Arc::new(
+                RecordingExt::new("scrubber", vec![]).with_after(vec![AfterAction::Replace(
+                    serde_json::json!({"content": [], "details": "scrubbed"}),
+                )]),
+            );
+        let exts: Vec<Arc<dyn Extension>> = vec![ext];
+
+        let replaced = dispatch_after_tool_call(&exts, &ctx(), &result_event()).await;
+        assert_eq!(
+            replaced,
+            Some(serde_json::json!({"content": [], "details": "scrubbed"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn after_chain_feeds_each_replacement_to_the_next_extension() {
+        let scrubber =
+            Arc::new(
+                RecordingExt::new("scrubber", vec![]).with_after(vec![AfterAction::Replace(
+                    serde_json::json!({"details": "scrubbed"}),
+                )]),
+            );
+        let summariser = Arc::new(RecordingExt::new("summariser", vec![]).with_after(vec![
+            AfterAction::Replace(serde_json::json!({"details": "summarised"})),
+        ]));
+        let exts: Vec<Arc<dyn Extension>> = vec![scrubber.clone(), summariser.clone()];
+
+        let replaced = dispatch_after_tool_call(&exts, &ctx(), &result_event()).await;
+
+        // Last replacement wins, matching the before-chain rule…
+        assert_eq!(replaced, Some(serde_json::json!({"details": "summarised"})));
+        // …and the second extension worked from the first's output, not the
+        // tool's. This is what keeps a scrubber from being undone by a
+        // summariser registered behind it.
+        assert_eq!(
+            summariser.after_calls.lock().unwrap()[0].result,
+            serde_json::json!({"details": "scrubbed"})
+        );
+    }
+
+    /// An extension that errors must not discard a replacement an earlier
+    /// one already made — failing open on the *original* would undo a
+    /// redaction because of an unrelated extension's bug.
+    #[tokio::test]
+    async fn after_error_preserves_an_earlier_replacement() {
+        let scrubber =
+            Arc::new(
+                RecordingExt::new("scrubber", vec![]).with_after(vec![AfterAction::Replace(
+                    serde_json::json!({"details": "scrubbed"}),
+                )]),
+            );
+        let broken = Arc::new(
+            RecordingExt::new("broken", vec![]).with_after(vec![AfterAction::Error("boom".into())]),
+        );
+        let exts: Vec<Arc<dyn Extension>> = vec![scrubber, broken];
+
+        let replaced = dispatch_after_tool_call(&exts, &ctx(), &result_event()).await;
+        assert_eq!(replaced, Some(serde_json::json!({"details": "scrubbed"})));
+    }
+
+    #[tokio::test]
+    async fn after_all_continue_reports_no_replacement() {
+        let a = Arc::new(RecordingExt::new("a", vec![]).with_after(vec![AfterAction::Continue]));
+        let exts: Vec<Arc<dyn Extension>> = vec![a];
+
+        assert!(
+            dispatch_after_tool_call(&exts, &ctx(), &result_event())
+                .await
+                .is_none(),
+            "an untouched result must not be reported as a rewrite"
+        );
+    }
+
+    // -- Tests for additional_context ----------------------------------------
+
+    #[tokio::test]
+    async fn user_message_context_is_collected_in_registration_order() {
+        let a = PromptExt::new(
+            "git",
+            true,
+            vec![UserMessageOutcome::context("on branch main")],
+        );
+        let b = PromptExt::new(
+            "ci",
+            true,
+            vec![UserMessageOutcome::context("build is red")],
+        );
+        let exts: Vec<Arc<dyn Extension>> = vec![a, b];
+
+        let resolution = dispatch_user_message(&exts, &ctx(), &prompt("ship it")).await;
+        assert!(matches!(resolution.decision, HookDecision::Continue));
+        assert_eq!(
+            resolution.contexts,
+            vec![
+                ("git".to_string(), "on branch main".to_string()),
+                ("ci".to_string(), "build is red".to_string()),
+            ]
+        );
+    }
+
+    /// Context and decision are orthogonal: informing the model must not
+    /// cost the turn, which is the whole point of the separate channel.
+    #[tokio::test]
+    async fn user_message_context_rides_along_with_a_replace() {
+        let ext = PromptExt::new(
+            "scrubber",
+            true,
+            vec![UserMessageOutcome {
+                decision: HookDecision::Replace(serde_json::json!("token=[redacted]")),
+                additional_context: Some("a secret was removed from this prompt".into()),
+            }],
+        );
+        let exts: Vec<Arc<dyn Extension>> = vec![ext];
+
+        let resolution = dispatch_user_message(&exts, &ctx(), &prompt("token=hunter2")).await;
+        match resolution.decision {
+            HookDecision::Replace(v) => assert_eq!(v, serde_json::json!("token=[redacted]")),
+            other => panic!("expected Replace, got {other:?}"),
+        }
+        // Reported once, not once per re-validation round.
+        assert_eq!(resolution.contexts.len(), 1);
+        assert_eq!(
+            resolution.contexts[0].1,
+            "a secret was removed from this prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_message_context_is_dropped_when_the_turn_is_cancelled() {
+        let informer = PromptExt::new("informer", true, vec![UserMessageOutcome::context("fyi")]);
+        let guard = PromptExt::new(
+            "guard",
+            true,
+            vec![HookDecision::Cancel("contains a secret".into()).into()],
+        );
+        let exts: Vec<Arc<dyn Extension>> = vec![informer, guard];
+
+        let resolution = dispatch_user_message(&exts, &ctx(), &prompt("hi")).await;
+        assert!(matches!(resolution.decision, HookDecision::Cancel(_)));
+        assert!(
+            resolution.contexts.is_empty(),
+            "a turn that never reaches the model carries no context"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_message_blank_context_is_ignored() {
+        let ext = PromptExt::new("noisy", true, vec![UserMessageOutcome::context("   \n  ")]);
+        let exts: Vec<Arc<dyn Extension>> = vec![ext];
+
+        let resolution = dispatch_user_message(&exts, &ctx(), &prompt("hi")).await;
+        assert!(resolution.contexts.is_empty());
     }
 }

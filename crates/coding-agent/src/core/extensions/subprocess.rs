@@ -34,8 +34,9 @@
 //! it.
 
 use crate::core::extensions::api::{
-    Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision, SlashCommandSpec,
-    TimeoutPolicy, ToolCallEvent, ToolResultEvent, UserMessageEvent,
+    Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision, ResultDecision,
+    SlashCommandSpec, TimeoutPolicy, ToolCallEvent, ToolResultEvent, UserMessageEvent,
+    UserMessageOutcome,
 };
 use crate::core::extensions::manifest::load_manifest;
 use crate::rpc::jsonl::{JsonlReadError, read_jsonl, write_jsonl};
@@ -98,11 +99,27 @@ pub enum ExtensionEventIn {
     /// Generic acknowledgement, e.g. for on_load / on_after / on_shutdown.
     Ok,
     /// `HookDecision::Continue`.
-    Continue,
+    ///
+    /// `additionalContext` is optional and only read on `on_user_message`;
+    /// omitting it — as every extension written before it existed does —
+    /// parses to `None`.
+    Continue {
+        #[serde(default, rename = "additionalContext")]
+        additional_context: Option<String>,
+    },
     /// `HookDecision::Cancel(reason)`.
     Cancel { reason: String },
-    /// `HookDecision::Replace(arguments)`.
-    Replace { arguments: serde_json::Value },
+    /// `HookDecision::Replace(arguments)` — tool arguments on the before
+    /// side, or the new prompt text on `on_user_message`.
+    Replace {
+        arguments: serde_json::Value,
+        #[serde(default, rename = "additionalContext")]
+        additional_context: Option<String>,
+    },
+    /// `ResultDecision::Replace(result)` — what the model sees for a tool
+    /// call that already ran. Distinct from `replace`, which carries tool
+    /// *arguments* and would be ambiguous here.
+    ReplaceResult { result: serde_json::Value },
     /// Subprocess-reported error; surfaces as `ExtensionError::Custom`.
     Error { message: String },
     /// Custom tool result. `content` is the text the model sees;
@@ -518,7 +535,7 @@ impl Extension for SubprocessExtension {
             .rpc_hook(ExtensionEventOut::OnLoad { context: cx.into() }, Hook::Load)
             .await?;
         match response {
-            ExtensionEventIn::Ok | ExtensionEventIn::Continue => Ok(()),
+            ExtensionEventIn::Ok | ExtensionEventIn::Continue { .. } => Ok(()),
             ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
                 name: self.inner.manifest.name.clone(),
                 message,
@@ -559,7 +576,7 @@ impl Extension for SubprocessExtension {
         &self,
         cx: &ExtensionContext,
         event: &UserMessageEvent,
-    ) -> Result<HookDecision, ExtensionError> {
+    ) -> Result<UserMessageOutcome, ExtensionError> {
         let response = self
             .inner
             .rpc_hook(
@@ -571,9 +588,18 @@ impl Extension for SubprocessExtension {
             )
             .await?;
         match response {
-            ExtensionEventIn::Continue => Ok(HookDecision::Continue),
-            ExtensionEventIn::Cancel { reason } => Ok(HookDecision::Cancel(reason)),
-            ExtensionEventIn::Replace { arguments } => Ok(HookDecision::Replace(arguments)),
+            ExtensionEventIn::Continue { additional_context } => Ok(UserMessageOutcome {
+                decision: HookDecision::Continue,
+                additional_context,
+            }),
+            ExtensionEventIn::Cancel { reason } => Ok(HookDecision::Cancel(reason).into()),
+            ExtensionEventIn::Replace {
+                arguments,
+                additional_context,
+            } => Ok(UserMessageOutcome {
+                decision: HookDecision::Replace(arguments),
+                additional_context,
+            }),
             ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
                 name: self.inner.manifest.name.clone(),
                 message,
@@ -615,9 +641,9 @@ impl Extension for SubprocessExtension {
             Err(err) => return Err(err),
         };
         match response {
-            ExtensionEventIn::Continue => Ok(HookDecision::Continue),
+            ExtensionEventIn::Continue { .. } => Ok(HookDecision::Continue),
             ExtensionEventIn::Cancel { reason } => Ok(HookDecision::Cancel(reason)),
-            ExtensionEventIn::Replace { arguments } => Ok(HookDecision::Replace(arguments)),
+            ExtensionEventIn::Replace { arguments, .. } => Ok(HookDecision::Replace(arguments)),
             ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
                 name: self.inner.manifest.name.clone(),
                 message,
@@ -637,7 +663,7 @@ impl Extension for SubprocessExtension {
         &self,
         cx: &ExtensionContext,
         event: &ToolResultEvent,
-    ) -> Result<(), ExtensionError> {
+    ) -> Result<ResultDecision, ExtensionError> {
         let response = self
             .inner
             .rpc_hook(
@@ -649,7 +675,10 @@ impl Extension for SubprocessExtension {
             )
             .await?;
         match response {
-            ExtensionEventIn::Ok | ExtensionEventIn::Continue => Ok(()),
+            ExtensionEventIn::Ok | ExtensionEventIn::Continue { .. } => {
+                Ok(ResultDecision::Continue)
+            }
+            ExtensionEventIn::ReplaceResult { result } => Ok(ResultDecision::Replace(result)),
             ExtensionEventIn::Error { message } => Err(ExtensionError::Custom {
                 name: self.inner.manifest.name.clone(),
                 message,
@@ -1070,7 +1099,7 @@ exec = ["/bin/true"]
             )
             .await
             .expect("rpc ok");
-        match decision {
+        match decision.decision {
             HookDecision::Replace(v) => assert_eq!(v, serde_json::json!("token=[redacted]")),
             other => panic!("expected Replace, got {other:?}"),
         }
@@ -1084,7 +1113,96 @@ exec = ["/bin/true"]
             )
             .await
             .expect("rpc ok");
-        assert!(matches!(decision, HookDecision::Continue));
+        assert!(matches!(decision.decision, HookDecision::Continue));
+
+        let _ = ext.on_shutdown(&ctx()).await;
+    }
+
+    /// Tier 2 carries `additionalContext` on the existing `continue`
+    /// response, so a child that never heard of the field — every one
+    /// written before it existed — still parses.
+    #[tokio::test]
+    async fn subprocess_user_message_carries_additional_context() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(
+            dir.path(),
+            r#"
+  case "$line" in
+    *on_user_message*) printf '{"type":"continue","additionalContext":"on branch main"}\n' ;;
+    *) printf '{"type":"ok"}\n' ;;
+  esac
+"#,
+        );
+        let mut manifest = make_manifest("git-status", bash_exec(&script));
+        manifest.capabilities.on_user_message = true;
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let outcome = ext
+            .on_user_message(
+                &ctx(),
+                &UserMessageEvent {
+                    text: "what changed?".into(),
+                },
+            )
+            .await
+            .expect("rpc ok");
+        assert!(matches!(outcome.decision, HookDecision::Continue));
+        assert_eq!(
+            outcome.additional_context.as_deref(),
+            Some("on branch main")
+        );
+
+        let _ = ext.on_shutdown(&ctx()).await;
+    }
+
+    /// Tier 2 result rewriting rides on its own `replace_result` response —
+    /// `replace` already means "tool arguments" on the before side.
+    #[tokio::test]
+    async fn subprocess_after_tool_call_can_replace_the_result() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(
+            dir.path(),
+            r#"
+  case "$line" in
+    *on_after_tool_call*) printf '{"type":"replace_result","result":{"content":[{"type":"text","text":"[redacted]"}]}}\n' ;;
+    *) printf '{"type":"ok"}\n' ;;
+  esac
+"#,
+        );
+        let manifest = make_manifest("scrubber", bash_exec(&script));
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let decision = ext
+            .on_after_tool_call(&ctx(), &tool_result_event())
+            .await
+            .expect("rpc ok");
+        match decision {
+            ResultDecision::Replace(v) => {
+                assert_eq!(v["content"][0]["text"], "[redacted]");
+            }
+            other => panic!("expected Replace, got {other:?}"),
+        }
+
+        let _ = ext.on_shutdown(&ctx()).await;
+    }
+
+    /// A child that acknowledges the after hook the old way — `ok`, with no
+    /// notion of a decision — keeps the tool's result untouched.
+    #[tokio::test]
+    async fn subprocess_after_tool_call_ok_is_still_continue() {
+        let dir = TempDir::new().unwrap();
+        let script = write_bash_script(dir.path(), r#"  printf '{"type":"ok"}\n'"#);
+        let manifest = make_manifest("observer", bash_exec(&script));
+        let ext = SubprocessExtension::new(manifest, dir.path().to_path_buf())
+            .expect("subprocess constructs");
+
+        let decision = ext
+            .on_after_tool_call(&ctx(), &tool_result_event())
+            .await
+            .expect("rpc ok");
+        assert!(matches!(decision, ResultDecision::Continue));
 
         let _ = ext.on_shutdown(&ctx()).await;
     }

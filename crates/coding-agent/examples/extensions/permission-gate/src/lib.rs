@@ -10,7 +10,7 @@
 //! and/or run the tool inside a sandbox.
 
 use async_trait::async_trait;
-use hand_coding_agent::core::extensions::api::{ToolCallEvent, ToolResultEvent};
+use hand_coding_agent::core::extensions::api::ToolCallEvent;
 use hand_coding_agent::{
     Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision,
 };
@@ -95,14 +95,6 @@ impl Extension for PermissionGate {
             }
         }
         Ok(HookDecision::Continue)
-    }
-
-    async fn on_after_tool_call(
-        &self,
-        _cx: &ExtensionContext,
-        _event: &ToolResultEvent,
-    ) -> Result<(), ExtensionError> {
-        Ok(())
     }
 }
 
