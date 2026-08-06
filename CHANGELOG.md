@@ -12,6 +12,18 @@ read this file. Add new entries above the previous version with a
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-06
+
+### Added
+
+- Extensions can rewrite a tool result before the model sees it. `on_after_tool_call` returns a `ResultDecision`, and a `Replace` changes both what the model reads and what the transcript records — which is what makes redaction, truncation, and annotation expressible at all. The chain is sequential and each extension observes its predecessor's replacement, so a summariser registered behind a scrubber cannot reintroduce what the scrubber removed; a replacement that fails to parse is dropped and the tool's own output is kept ([#146](https://github.com/wanggang316/hand-ai/issues/146))
+- Extensions can put context in front of the model without editing the user's prompt. `on_user_message` returns a `UserMessageOutcome` carrying an optional `additional_context` alongside its decision, so informing the model no longer costs the turn (previously `Cancel` was the only channel that reached it). Contributions are attributed to their extension and land as their own message ahead of the prompt, never merged into the user's, and are recorded in the transcript so a resumed session replays what the model actually read ([#147](https://github.com/wanggang316/hand-ai/issues/147))
+- `on_turn_end` hook, fired once when the agent finishes working and is about to hand control back, carrying the assistant's closing text and the stop reason. `Cancel` keeps the agent working with the reason handed to the model as its next instruction. Re-entry is bounded at three continuations per turn so a hook that always refuses cannot bill an unbounded number of model round-trips. Gated on `capabilities.on-turn-end`; user-typed follow-ups still take priority over anything an extension asks for. The bundled `auto-commit-on-exit` example now derives its commit subject from what the agent actually said instead of a static string ([#148](https://github.com/wanggang316/hand-ai/issues/148))
+
+### Changed
+
+- **Breaking (embedders only):** two `Extension` trait methods changed their return type — `on_user_message` now returns `UserMessageOutcome` and `on_after_tool_call` returns `ResultDecision`. Extensions that override either must be updated; `HookDecision` converts into `UserMessageOutcome`, so `Ok(HookDecision::Continue.into())` is usually the whole change. Extensions that only take the trait defaults, and all Tier 2 (subprocess) extensions, are unaffected — the new wire fields are optional and existing responses parse unchanged. The `hand` binary itself is not affected.
+
 ## [0.4.1] - 2026-08-05
 
 ### Added
