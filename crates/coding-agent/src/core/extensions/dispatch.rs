@@ -8,7 +8,7 @@
 
 use super::api::{
     Extension, ExtensionContextFactory, HookDecision, ResultDecision, ToolCallEvent,
-    ToolResultEvent, UserMessageEvent, UserMessageOutcome,
+    ToolResultEvent, TurnEndEvent, UserMessageEvent, UserMessageOutcome,
 };
 use std::sync::Arc;
 
@@ -247,6 +247,58 @@ pub(crate) async fn dispatch_user_message(
         )),
         contexts: Vec::new(),
     }
+}
+
+/// How many times the `on_turn_end` chain may keep the agent working
+/// within a single `send_message` before the host stops honouring it.
+///
+/// A `Cancel` here restarts the agent rather than blocking an action, so
+/// an extension that always refuses would bill the user for an unbounded
+/// number of model round-trips. The bound makes that a bad hook rather
+/// than a runaway session.
+pub(crate) const MAX_TURN_END_CONTINUATIONS: usize = 3;
+
+/// Dispatch `on_turn_end` across an ordered chain of extensions.
+///
+/// Only extensions declaring `capabilities.on_turn_end` are called. The
+/// first `Cancel` wins and short-circuits: one extension asking the agent
+/// to keep working is enough, and asking the rest is pointless once the
+/// turn is already continuing. Errors are logged and treated as
+/// `Continue` — a broken hook must not strand the agent in a loop.
+///
+/// `Replace` has no meaning here (nothing is pending to rewrite) and is
+/// logged and ignored.
+pub(crate) async fn dispatch_turn_end(
+    extensions: &[Arc<dyn Extension>],
+    contexts: &ExtensionContextFactory,
+    event: &TurnEndEvent,
+) -> HookDecision {
+    for ext in extensions
+        .iter()
+        .filter(|ext| ext.manifest().capabilities.on_turn_end)
+    {
+        let name = ext.manifest().name.clone();
+        let cx = contexts.for_extension(&name);
+        match ext.on_turn_end(&cx, event).await {
+            Ok(HookDecision::Continue) => {}
+            Ok(HookDecision::Cancel(reason)) => return HookDecision::Cancel(reason),
+            Ok(HookDecision::Replace(_)) => {
+                tracing::warn!(
+                    extension = %name,
+                    "on_turn_end returned Replace, which has no meaning at a turn \
+                     boundary; treating as Continue"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    extension = %name,
+                    error = %err,
+                    "extension on_turn_end errored; treating as Continue"
+                );
+            }
+        }
+    }
+    HookDecision::Continue
 }
 
 /// Aggregated outcome of the `on_user_message` chain.
@@ -1135,6 +1187,107 @@ mod tests {
             resolution.contexts.is_empty(),
             "a turn that never reaches the model carries no context"
         );
+    }
+
+    // -- Tests for dispatch_turn_end -----------------------------------------
+
+    /// A turn-end extension, gated on the capability like a real one.
+    struct TurnEndExt {
+        manifest: ExtensionManifest,
+        decision: HookDecision,
+        seen: Mutex<Vec<TurnEndEvent>>,
+    }
+
+    impl TurnEndExt {
+        fn new(name: &str, subscribed: bool, decision: HookDecision) -> Arc<Self> {
+            let mut manifest = manifest(name);
+            manifest.capabilities.on_turn_end = subscribed;
+            Arc::new(Self {
+                manifest,
+                decision,
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Extension for TurnEndExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn on_turn_end(
+            &self,
+            _cx: &ExtensionContext,
+            event: &TurnEndEvent,
+        ) -> Result<HookDecision, ExtensionError> {
+            self.seen.lock().unwrap().push(event.clone());
+            Ok(self.decision.clone())
+        }
+    }
+
+    fn turn_end_event() -> TurnEndEvent {
+        TurnEndEvent {
+            last_assistant_message: "I edited three files.".into(),
+            stop_reason: "Stop".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_end_sees_the_assistant_text_once() {
+        let ext = TurnEndExt::new("committer", true, HookDecision::Continue);
+        let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
+
+        let decision = dispatch_turn_end(&exts, &ctx(), &turn_end_event()).await;
+        assert!(matches!(decision, HookDecision::Continue));
+
+        let seen = ext.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one call per turn");
+        assert_eq!(seen[0].last_assistant_message, "I edited three files.");
+    }
+
+    #[tokio::test]
+    async fn turn_end_skips_extensions_that_did_not_declare_it() {
+        let ext = TurnEndExt::new("silent", false, HookDecision::Cancel("keep going".into()));
+        let exts: Vec<Arc<dyn Extension>> = vec![ext.clone()];
+
+        let decision = dispatch_turn_end(&exts, &ctx(), &turn_end_event()).await;
+        assert!(matches!(decision, HookDecision::Continue));
+        assert!(
+            ext.seen.lock().unwrap().is_empty(),
+            "an extension that did not declare the capability must never be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_end_first_cancel_wins_and_short_circuits() {
+        let a = TurnEndExt::new("a", true, HookDecision::Cancel("run the tests".into()));
+        let b = TurnEndExt::new("b", true, HookDecision::Continue);
+        let exts: Vec<Arc<dyn Extension>> = vec![a, b.clone()];
+
+        match dispatch_turn_end(&exts, &ctx(), &turn_end_event()).await {
+            HookDecision::Cancel(reason) => assert_eq!(reason, "run the tests"),
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+        assert!(
+            b.seen.lock().unwrap().is_empty(),
+            "once the turn is already continuing, asking the rest is pointless"
+        );
+    }
+
+    /// There is no pending action at a turn boundary, so `Replace` cannot
+    /// mean anything. It must not be mistaken for a `Cancel`.
+    #[tokio::test]
+    async fn turn_end_replace_is_ignored() {
+        let ext = TurnEndExt::new(
+            "confused",
+            true,
+            HookDecision::Replace(serde_json::json!("nope")),
+        );
+        let exts: Vec<Arc<dyn Extension>> = vec![ext];
+
+        let decision = dispatch_turn_end(&exts, &ctx(), &turn_end_event()).await;
+        assert!(matches!(decision, HookDecision::Continue));
     }
 
     #[tokio::test]

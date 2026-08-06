@@ -7,12 +7,13 @@ use crate::core::compaction;
 use crate::core::error::CodingAgentError;
 use crate::core::extensions::api::{
     Extension, ExtensionContext, ExtensionContextFactory, HookDecision, SlashCommandSpec,
-    ToolCallEvent, ToolResultEvent, UserMessageEvent,
+    ToolCallEvent, ToolResultEvent, TurnEndEvent, UserMessageEvent,
 };
 #[cfg(test)]
 use crate::core::extensions::api::{ResultDecision, UserMessageOutcome};
 use crate::core::extensions::dispatch::{
-    dispatch_after_tool_call, dispatch_before_tool_call, dispatch_user_message,
+    MAX_TURN_END_CONTINUATIONS, dispatch_after_tool_call, dispatch_before_tool_call,
+    dispatch_turn_end, dispatch_user_message,
 };
 use crate::core::extensions::registry::builtin_tier1_extensions;
 use crate::core::model_registry::ModelRegistry;
@@ -29,6 +30,7 @@ use hand_agent::{AgentEventSink, CancellationToken, agent_loop};
 use model::types::{ImageContent, UserContent};
 use model::{Message, SimpleStreamOptions, UserContentBlock};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 type EventListener = Arc<dyn Fn(AgentSessionEvent) + Send + Sync>;
@@ -590,6 +592,9 @@ impl AgentSession {
         // own retry/abort logic, and the field has no safety impact.
         self.is_streaming = true;
 
+        // Filled by the event sink below, read by the follow-up callback.
+        let last_turn: Arc<Mutex<Option<TurnEndEvent>>> = Arc::new(Mutex::new(None));
+
         // Snapshot the extension chain and per-session context so the hook
         // closures can own them as `'static` data captured by the `Box<dyn Fn>`.
         // Cloning the `Vec<Arc<...>>` is cheap (Arc bumps).
@@ -640,20 +645,77 @@ impl AgentSession {
                 Box::pin(async move { drain_queue(&queue, mode) })
             }));
 
+        // The agent loop asks for follow-up messages at the one point
+        // where it would otherwise stop, which is exactly the turn
+        // boundary `on_turn_end` describes. The queue keeps priority: a
+        // user who typed while the agent worked is answered before any
+        // extension gets to argue that it should keep going.
         let follow_up_queue = self.follow_up_queue.clone();
         let follow_up_mode = self.follow_up_mode;
+        let turn_end_extensions = turn_end_hook_extensions(&self.extensions);
+        let turn_end_cx = Arc::new(self.extension_context_factory());
+        let turn_end_snapshot = Arc::clone(&last_turn);
+        let continuations = Arc::new(AtomicUsize::new(0));
         loop_config.get_follow_up_messages =
             Some(Arc::new(move || -> BoxFuture<'static, Vec<Message>> {
                 let queue = follow_up_queue.clone();
                 let mode = follow_up_mode;
-                Box::pin(async move { drain_queue(&queue, mode) })
+                let extensions = turn_end_extensions.clone();
+                let cx = turn_end_cx.clone();
+                let last_turn = turn_end_snapshot.clone();
+                let continuations = continuations.clone();
+                Box::pin(async move {
+                    let queued = drain_queue(&queue, mode);
+                    if !queued.is_empty() || extensions.is_empty() {
+                        return queued;
+                    }
+
+                    if continuations.load(Ordering::SeqCst) >= MAX_TURN_END_CONTINUATIONS {
+                        tracing::warn!(
+                            bound = MAX_TURN_END_CONTINUATIONS,
+                            "on_turn_end kept the agent working up to the re-entry bound; \
+                             letting the turn end"
+                        );
+                        return Vec::new();
+                    }
+
+                    let event = last_turn.lock().unwrap().clone().unwrap_or_default();
+                    match dispatch_turn_end(&extensions, &cx, &event).await {
+                        HookDecision::Cancel(reason) => {
+                            continuations.fetch_add(1, Ordering::SeqCst);
+                            // The reason is the instruction: the loop
+                            // resumes with it as the next user turn, which
+                            // is what makes it visible to the model.
+                            vec![Message::User(build_user_message(&reason, None))]
+                        }
+                        _ => Vec::new(),
+                    }
+                })
             }));
 
         // Create event sink for the agent loop. Replace the session's
         // cancellation token with a fresh one so a previous turn's
         // `abort()` can't poison this turn — and so the new token is
         // observable by `Self::abort()` while this turn is running.
-        let emit = self.build_event_sink();
+        //
+        // The sink also snapshots each `TurnEnd` so the follow-up callback
+        // can describe the finished turn: `GetFollowUpMessagesFn` takes no
+        // arguments, so the event is the only way that data reaches it.
+        let emit = {
+            let base = self.build_event_sink();
+            let last_turn = Arc::clone(&last_turn);
+            Arc::new(move |event: AgentEvent| {
+                if let AgentEvent::TurnEnd { message, .. } = &event
+                    && let Message::Assistant(assistant) = message
+                {
+                    *last_turn.lock().unwrap() = Some(TurnEndEvent {
+                        last_assistant_message: assistant_text(assistant),
+                        stop_reason: format!("{:?}", assistant.stop_reason),
+                    });
+                }
+                base(event);
+            }) as AgentEventSink
+        };
         let cancel = {
             let new_token = CancellationToken::new();
             *self.cancel.lock().unwrap() = new_token.clone();
@@ -1850,6 +1912,35 @@ fn build_before_tool_call_hook(
 /// Build an `AfterToolCallHook` that fans the result event out to every
 /// registered extension. The result is read-only — extensions cannot
 /// rewrite it — so the hook always returns `None`.
+/// Concatenated text blocks of an assistant message, which is what an
+/// `on_turn_end` hook means by "what the agent just said". Tool-call
+/// blocks are skipped — a commit subject derived from them would be
+/// noise.
+fn assistant_text(message: &model::AssistantMessage) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            model::AssistantContentBlock::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// The subset of the chain that asked for `on_turn_end`, snapshotted as
+/// `'static` data the follow-up callback can own. Empty when nothing
+/// subscribes, which lets the callback skip the hook entirely.
+fn turn_end_hook_extensions(extensions: &[Arc<dyn Extension>]) -> Arc<Vec<Arc<dyn Extension>>> {
+    Arc::new(
+        extensions
+            .iter()
+            .filter(|ext| ext.manifest().capabilities.on_turn_end)
+            .cloned()
+            .collect(),
+    )
+}
+
 /// Render extension-contributed context as one message placed ahead of the
 /// user's prompt, or `None` when nothing was contributed.
 ///
@@ -3213,6 +3304,150 @@ mod tests {
             .expect("send_message succeeds");
 
         assert_eq!(*prompts.lock().unwrap(), vec!["hello".to_string()]);
+    }
+
+    /// A turn-end extension, gated on the capability like a real one.
+    /// `refusals` counts down: it keeps the agent working that many times,
+    /// then relents.
+    struct TurnEndExt {
+        manifest: ExtensionManifest,
+        refusals: Mutex<usize>,
+        seen: Mutex<Vec<TurnEndEvent>>,
+    }
+
+    impl TurnEndExt {
+        fn new(name: &str, refusals: usize) -> Arc<Self> {
+            let mut manifest = ext_manifest(name);
+            manifest.capabilities.on_turn_end = true;
+            Arc::new(Self {
+                manifest,
+                refusals: Mutex::new(refusals),
+                seen: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Extension for TurnEndExt {
+        fn manifest(&self) -> &ExtensionManifest {
+            &self.manifest
+        }
+
+        async fn on_turn_end(
+            &self,
+            _cx: &ExtensionContext,
+            event: &TurnEndEvent,
+        ) -> Result<HookDecision, ExtensionError> {
+            self.seen.lock().unwrap().push(event.clone());
+            let mut left = self.refusals.lock().unwrap();
+            if *left == 0 {
+                return Ok(HookDecision::Continue);
+            }
+            *left -= 1;
+            Ok(HookDecision::Cancel("run the tests first".into()))
+        }
+    }
+
+    /// The hook fires once per turn and carries the assistant's final
+    /// text — the piece `auto-commit-on-exit` needs to derive a real
+    /// commit subject instead of a static one.
+    #[tokio::test]
+    async fn turn_end_hook_sees_the_finished_turn() {
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PromptRecordingProvider {
+                prompts: Default::default(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let ext = TurnEndExt::new("committer", 0);
+        session.register_extension(ext.clone());
+
+        session
+            .send_message("do the thing")
+            .await
+            .expect("send_message succeeds");
+
+        let seen = ext.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one call per turn, got {seen:?}");
+        // `PromptRecordingProvider` replies "ack".
+        assert_eq!(seen[0].last_assistant_message, "ack");
+        assert!(
+            !seen[0].stop_reason.is_empty(),
+            "stop reason must be populated"
+        );
+    }
+
+    /// `Cancel` keeps the agent working: the loop runs another turn with
+    /// the reason as the instruction, instead of returning to the user.
+    #[tokio::test]
+    async fn turn_end_cancel_keeps_the_agent_working() {
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PromptRecordingProvider {
+                prompts: prompts.clone(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        let ext = TurnEndExt::new("nag", 1);
+        session.register_extension(ext.clone());
+
+        session
+            .send_message("do the thing")
+            .await
+            .expect("send_message succeeds");
+
+        assert_eq!(
+            ext.seen.lock().unwrap().len(),
+            2,
+            "one refusal then one acceptance"
+        );
+        assert!(
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == "run the tests first"),
+            "the reason must reach the model as the next instruction, got {:?}",
+            prompts.lock().unwrap()
+        );
+    }
+
+    /// An extension that never relents loses at the bound. Without it the
+    /// session would bill the user for model round-trips forever.
+    #[tokio::test]
+    async fn turn_end_repeated_cancel_terminates_at_the_bound() {
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(PromptRecordingProvider {
+                prompts: Default::default(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session = AgentSession::in_memory_with_client(openai_test_model(), vec![], client);
+        // Far more refusals than the bound allows.
+        let ext = TurnEndExt::new("stubborn", 100);
+        session.register_extension(ext.clone());
+
+        session
+            .send_message("do the thing")
+            .await
+            .expect("the turn must end rather than loop forever");
+
+        assert_eq!(
+            ext.seen.lock().unwrap().len(),
+            MAX_TURN_END_CONTINUATIONS,
+            "the hook is consulted up to the bound, then the turn ends"
+        );
     }
 
     /// A `Cancel` aborts the turn before anything is persisted and surfaces

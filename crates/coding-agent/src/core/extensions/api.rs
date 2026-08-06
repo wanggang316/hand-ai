@@ -165,6 +165,10 @@ pub struct ExtensionCapabilities {
     /// an extension that does not declare it is never called.
     #[serde(default)]
     pub on_user_message: bool,
+    /// Whether this extension wants [`Extension::on_turn_end`]. Gated for
+    /// the same reason as `on_user_message`: it fires every turn.
+    #[serde(default)]
+    pub on_turn_end: bool,
     /// Whether this extension contributes slash commands.
     #[serde(default)]
     pub slash_commands: bool,
@@ -223,6 +227,21 @@ pub enum HookDecision {
     Cancel(String),
     /// Replace the tool's arguments with new JSON, then continue.
     Replace(serde_json::Value),
+}
+
+/// Fired when the agent has finished working and is about to hand
+/// control back to the user.
+///
+/// Distinct from `on_after_tool_call`, which fires per call and therefore
+/// mid-work: this is the point where edits have settled and "commit what
+/// was just done" or "run the tests now" is the right thing to do.
+#[derive(Debug, Clone, Default)]
+pub struct TurnEndEvent {
+    /// The assistant's final text for this turn. Empty when the turn
+    /// ended without producing any (e.g. a tool-only turn that stopped).
+    pub last_assistant_message: String,
+    /// Why the loop stopped, as reported by the model's stop reason.
+    pub stop_reason: String,
 }
 
 /// What an extension's `on_after_tool_call` decides about the result the
@@ -482,6 +501,34 @@ pub trait Extension: Send + Sync {
         _event: &ToolResultEvent,
     ) -> Result<ResultDecision, ExtensionError> {
         Ok(ResultDecision::Continue)
+    }
+
+    /// Called when the agent finishes a turn, before control returns to
+    /// the user. Default: no-op (Continue).
+    ///
+    /// Only dispatched to extensions whose manifest declares
+    /// `capabilities.on_turn_end` — like `on_user_message`, this fires
+    /// every turn, so the host does not pay for extensions that don't
+    /// want it.
+    ///
+    /// Decisions:
+    /// - `Continue` — the agent stops as it intended.
+    /// - `Cancel(reason)` — the agent does *not* stop; `reason` is handed
+    ///   to the model as the instruction for what to do next. This is how
+    ///   "you said you'd run the tests, run them" is enforced.
+    /// - `Replace(_)` — meaningless here (there is no pending action to
+    ///   rewrite); logged and treated as `Continue`.
+    ///
+    /// Re-entry is bounded: see
+    /// [`MAX_TURN_END_CONTINUATIONS`](crate::core::extensions::dispatch::MAX_TURN_END_CONTINUATIONS).
+    /// A hook that keeps refusing to let the agent stop eventually loses,
+    /// because an unbounded loop costs the user real money per pass.
+    async fn on_turn_end(
+        &self,
+        _cx: &ExtensionContext,
+        _event: &TurnEndEvent,
+    ) -> Result<HookDecision, ExtensionError> {
+        Ok(HookDecision::Continue)
     }
 
     /// Slash commands this extension contributes. Default: none.

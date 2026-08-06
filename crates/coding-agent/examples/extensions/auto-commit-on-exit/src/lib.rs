@@ -1,25 +1,47 @@
 //! Tier 1 extension: when the session ends, auto-commit any uncommitted
 //! changes in the session's working directory.
 //!
-//! Uses a static commit subject because hand's `on_shutdown` hook does
-//! not yet receive the message log. Deriving the subject from the last
-//! assistant message is a future enhancement once the hook surface
-//! widens.
+//! The commit subject is derived from what the agent last said: an
+//! `on_turn_end` hook records the assistant's closing text each turn, and
+//! the shutdown commit uses the most recent one. Sessions that end without
+//! the agent saying anything fall back to [`AUTO_COMMIT_MESSAGE`].
 //!
 //! All git operations are best-effort: failures are logged via
 //! `tracing::warn!` and never surfaced as errors. A coding session must not
 //! fail to shut down because git happens to be unhappy.
 
 use async_trait::async_trait;
-use hand_coding_agent::{Extension, ExtensionContext, ExtensionError, ExtensionManifest};
+use hand_coding_agent::core::extensions::api::TurnEndEvent;
+use hand_coding_agent::{
+    Extension, ExtensionContext, ExtensionError, ExtensionManifest, HookDecision,
+};
 use std::path::Path;
+use std::sync::Mutex;
 use tokio::process::Command;
 
-/// Commit message used when the session ends with uncommitted work.
+/// Commit subject used when the session ends with uncommitted work and
+/// the agent never produced any text to derive one from.
 pub const AUTO_COMMIT_MESSAGE: &str = "auto-commit: end of session";
+
+/// Git subjects are conventionally kept short; a whole assistant reply is
+/// not a subject line.
+const MAX_SUBJECT_CHARS: usize = 72;
 
 pub struct AutoCommitOnExit {
     manifest: ExtensionManifest,
+    /// The assistant's closing text from the most recent turn.
+    last_assistant_message: Mutex<Option<String>>,
+}
+
+/// First non-empty line of `text`, trimmed and truncated to a subject-sized
+/// string. `None` when there is nothing usable.
+fn subject_from(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let mut subject: String = line.chars().take(MAX_SUBJECT_CHARS).collect();
+    if line.chars().count() > MAX_SUBJECT_CHARS {
+        subject.push('…');
+    }
+    Some(format!("auto-commit: {subject}"))
 }
 
 impl AutoCommitOnExit {
@@ -31,14 +53,17 @@ impl AutoCommitOnExit {
                 description: Some(
                     "Auto-commits uncommitted changes when the agent session ends.".to_string(),
                 ),
-                capabilities:
-                    hand_coding_agent::core::extensions::api::ExtensionCapabilities::default(),
+                capabilities: hand_coding_agent::core::extensions::api::ExtensionCapabilities {
+                    on_turn_end: true,
+                    ..Default::default()
+                },
                 exec: None,
                 env: Default::default(),
                 slash_commands: Vec::new(),
                 custom_tools: Vec::new(),
                 timeouts: Default::default(),
             },
+            last_assistant_message: Mutex::new(None),
         }
     }
 }
@@ -80,7 +105,26 @@ impl Extension for AutoCommitOnExit {
         &self.manifest
     }
 
+    /// Record what the agent just said. Never keeps the agent working —
+    /// committing is this extension's job, nagging is not.
+    async fn on_turn_end(
+        &self,
+        _cx: &ExtensionContext,
+        event: &TurnEndEvent,
+    ) -> Result<HookDecision, ExtensionError> {
+        if let Some(subject) = subject_from(&event.last_assistant_message) {
+            *self.last_assistant_message.lock().unwrap() = Some(subject);
+        }
+        Ok(HookDecision::Continue)
+    }
+
     async fn on_shutdown(&self, cx: &ExtensionContext) -> Result<(), ExtensionError> {
+        let message = self
+            .last_assistant_message
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| AUTO_COMMIT_MESSAGE.to_string());
         match dirty_status(&cx.cwd).await {
             Some(true) => {
                 if let Some(s) = run_git(&cx.cwd, &["add", "-A"]).await
@@ -89,7 +133,7 @@ impl Extension for AutoCommitOnExit {
                     tracing::warn!(cwd = %cx.cwd.display(), "auto-commit-on-exit: git add failed");
                     return Ok(());
                 }
-                match run_git(&cx.cwd, &["commit", "-m", AUTO_COMMIT_MESSAGE]).await {
+                match run_git(&cx.cwd, &["commit", "-m", &message]).await {
                     Some(s) if s.success() => {
                         tracing::info!(
                             cwd = %cx.cwd.display(),
@@ -223,6 +267,49 @@ mod tests {
         let after = commit_count(dir.path()).await;
         assert_eq!(after, before + 1, "expected exactly one new commit");
         assert_eq!(last_commit_subject(dir.path()).await, AUTO_COMMIT_MESSAGE);
+    }
+
+    /// The point of the turn-end hook: the commit says what happened
+    /// instead of "end of session".
+    #[tokio::test]
+    async fn commit_subject_comes_from_the_last_assistant_message() {
+        let dir = TempDir::new().unwrap();
+        if !init_git_repo(dir.path()).await {
+            eprintln!("skipping: git not available");
+            return;
+        }
+        std::fs::write(dir.path().join("work.txt"), "work").unwrap();
+
+        let ext = AutoCommitOnExit::new();
+        let cx = make_ctx(dir.path().to_path_buf());
+        ext.on_turn_end(
+            &cx,
+            &TurnEndEvent {
+                last_assistant_message: "Added retry handling to the uploader.\n\nDetails…".into(),
+                stop_reason: "Stop".into(),
+            },
+        )
+        .await
+        .unwrap();
+        ext.on_shutdown(&cx).await.unwrap();
+
+        assert_eq!(
+            last_commit_subject(dir.path()).await,
+            "auto-commit: Added retry handling to the uploader."
+        );
+    }
+
+    #[test]
+    fn subject_is_the_first_non_empty_line_truncated() {
+        assert_eq!(
+            subject_from("  \n\n  hello world  \nsecond line"),
+            Some("auto-commit: hello world".to_string())
+        );
+        assert_eq!(subject_from("   \n  \n"), None);
+
+        let long = "x".repeat(MAX_SUBJECT_CHARS + 10);
+        let subject = subject_from(&long).unwrap();
+        assert!(subject.ends_with('…'), "over-long subjects are elided");
     }
 
     #[tokio::test]
