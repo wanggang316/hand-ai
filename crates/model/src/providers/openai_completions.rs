@@ -269,6 +269,7 @@ pub fn stream_openai_completions(
 
         let mut current_block: Option<CurrentBlock> = None;
         let mut errored: Option<String> = None;
+        let mut saw_finish_reason = false;
 
         while let Some(chunk_result) = chunk_stream.next().await {
             let chunk = match chunk_result {
@@ -290,6 +291,7 @@ pub fn stream_openai_completions(
             let Some(choice) = chunk.choices.first() else { continue };
 
             if let Some(finish_reason) = &choice.finish_reason {
+                saw_finish_reason = true;
                 output.stop_reason = map_stop_reason(finish_reason);
             }
 
@@ -301,6 +303,9 @@ pub fn stream_openai_completions(
         for ev in finish_current_block(&mut current_block, &mut output) {
             yield ev;
         }
+
+        output.stop_reason =
+            resolve_stop_reason(saw_finish_reason, output.stop_reason, &output.content);
 
         if let Some(e) = errored {
             output.stop_reason = StopReason::Error;
@@ -1454,6 +1459,32 @@ fn map_stop_reason(reason: &str) -> StopReason {
     }
 }
 
+/// Final stop reason for a completed stream.
+///
+/// A `finish_reason` from the provider always wins. Some
+/// OpenAI-compatible endpoints never send one, though, and the reason
+/// then still carries the pre-stream `Stop` default — reporting a turn
+/// that ended on its own even when the model asked for tools. Fall back
+/// to what actually arrived in that case: tool calls mean `ToolUse`,
+/// anything else means `Stop`.
+fn resolve_stop_reason(
+    saw_finish_reason: bool,
+    reported: StopReason,
+    content: &[AssistantContentBlock],
+) -> StopReason {
+    if saw_finish_reason {
+        return reported;
+    }
+    if content
+        .iter()
+        .any(|block| matches!(block, AssistantContentBlock::ToolCall(_)))
+    {
+        StopReason::ToolUse
+    } else {
+        StopReason::Stop
+    }
+}
+
 fn sanitize_surrogates(text: &str) -> String {
     text.chars()
         .filter(|&c| !(0xD800..=0xDFFF).contains(&(c as u32)))
@@ -2549,6 +2580,63 @@ mod tests {
     #[test]
     fn test_map_stop_reason_unknown() {
         assert_eq!(map_stop_reason("unknown_reason"), StopReason::Stop);
+    }
+
+    /// A `finish_reason` from the provider is authoritative, including
+    /// the reasons that disagree with the content — `length` on a
+    /// message that still managed to emit a tool call must stay
+    /// `Length`, since that is what makes the caller treat the call's
+    /// arguments as truncated.
+    #[test]
+    fn reported_finish_reason_wins_over_inference() {
+        let with_tool_call = vec![AssistantContentBlock::ToolCall(ToolCall::new(
+            "call-1",
+            "lookup",
+            serde_json::json!({}),
+        ))];
+        assert_eq!(
+            resolve_stop_reason(true, StopReason::Length, &with_tool_call),
+            StopReason::Length
+        );
+        assert_eq!(
+            resolve_stop_reason(true, StopReason::Stop, &with_tool_call),
+            StopReason::Stop
+        );
+    }
+
+    /// Endpoints that close the stream without ever sending a
+    /// `finish_reason` used to leave the pre-stream `Stop` default in
+    /// place, reporting a self-terminated turn even though the model
+    /// asked for tools. Infer the reason from what arrived instead.
+    #[test]
+    fn missing_finish_reason_infers_tool_use_from_content() {
+        let content = vec![
+            AssistantContentBlock::Text(TextContent::new("on it")),
+            AssistantContentBlock::ToolCall(ToolCall::new(
+                "call-1",
+                "lookup",
+                serde_json::json!({"q": "x"}),
+            )),
+        ];
+        assert_eq!(
+            resolve_stop_reason(false, StopReason::Stop, &content),
+            StopReason::ToolUse
+        );
+    }
+
+    /// Without tool calls a missing `finish_reason` is an ordinary end
+    /// of turn, and an empty stream is too.
+    #[test]
+    fn missing_finish_reason_without_tool_calls_is_stop() {
+        let text_only = vec![AssistantContentBlock::Text(TextContent::new("done"))];
+        assert_eq!(
+            resolve_stop_reason(false, StopReason::Stop, &text_only),
+            StopReason::Stop
+        );
+        assert_eq!(
+            resolve_stop_reason(false, StopReason::Stop, &[]),
+            StopReason::Stop
+        );
     }
 
     #[test]
