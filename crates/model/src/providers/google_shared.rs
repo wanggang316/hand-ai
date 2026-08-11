@@ -245,41 +245,56 @@ pub(crate) fn convert_messages(messages: &[Message], model: &Model) -> Vec<Value
                 for block in &assistant.content {
                     match block {
                         AssistantContentBlock::Text(t) => {
-                            if t.text.trim().is_empty() {
+                            let signature = t.text_signature.as_deref().filter(|sig| {
+                                is_same_provider_and_model && is_valid_thought_signature(sig)
+                            });
+                            // An empty block is dropped only when it carries
+                            // no signature. Gemini can attach the signature to
+                            // a part whose visible text is empty and expects it
+                            // echoed back; dropping the block breaks the
+                            // reasoning chain, after which the model
+                            // intermittently ends a mid-task turn with a
+                            // thought-only stop and no tool call.
+                            if t.text.trim().is_empty() && signature.is_none() {
                                 continue;
                             }
                             let mut part =
                                 serde_json::json!({"text": sanitize_surrogates(&t.text)});
-                            if let Some(sig) = &t.text_signature
-                                && is_same_provider_and_model
-                                && is_valid_thought_signature(sig)
-                            {
+                            if let Some(sig) = signature {
                                 part.as_object_mut().unwrap().insert(
                                     "thoughtSignature".to_string(),
-                                    Value::String(sig.clone()),
+                                    Value::String(sig.to_string()),
                                 );
                             }
                             parts.push(part);
                         }
                         AssistantContentBlock::Thinking(t) => {
-                            if t.thinking.trim().is_empty() {
-                                continue;
-                            }
                             if is_same_provider_and_model {
+                                let signature = t
+                                    .thinking_signature
+                                    .as_deref()
+                                    .filter(|sig| is_valid_thought_signature(sig));
+                                // Same rule as text blocks above.
+                                if t.thinking.trim().is_empty() && signature.is_none() {
+                                    continue;
+                                }
                                 let mut part = serde_json::json!({
                                     "thought": true,
                                     "text": sanitize_surrogates(&t.thinking),
                                 });
-                                if let Some(sig) = &t.thinking_signature
-                                    && is_valid_thought_signature(sig)
-                                {
+                                if let Some(sig) = signature {
                                     part.as_object_mut().unwrap().insert(
                                         "thoughtSignature".to_string(),
-                                        Value::String(sig.clone()),
+                                        Value::String(sig.to_string()),
                                     );
                                 }
                                 parts.push(part);
                             } else {
+                                // Across providers or models the signature is
+                                // unusable, so an empty block carries nothing.
+                                if t.thinking.trim().is_empty() {
+                                    continue;
+                                }
                                 parts.push(
                                     serde_json::json!({"text": sanitize_surrogates(&t.thinking)}),
                                 );
@@ -1071,6 +1086,110 @@ mod tests {
             part.get("thoughtSignature").and_then(Value::as_str),
             Some("dGVzdA==")
         );
+    }
+
+    fn assistant_with_blocks(model_id: &str, content: Vec<AssistantContentBlock>) -> Message {
+        Message::Assistant(AssistantMessage {
+            role: "assistant".to_string(),
+            content,
+            api: Api::GoogleGenerativeAi,
+            provider: Provider::Google,
+            model: model_id.to_string(),
+            usage: Usage::default(),
+            stop_reason: StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        })
+    }
+
+    fn signed_text(text: &str, signature: Option<&str>) -> AssistantContentBlock {
+        let mut t = crate::types::TextContent::new(text);
+        t.text_signature = signature.map(|s| s.to_string());
+        AssistantContentBlock::Text(t)
+    }
+
+    fn signed_thinking(thinking: &str, signature: Option<&str>) -> AssistantContentBlock {
+        let mut t = crate::types::ThinkingContent::new(thinking);
+        t.thinking_signature = signature.map(|s| s.to_string());
+        AssistantContentBlock::Thinking(t)
+    }
+
+    /// Gemini can attach a `thoughtSignature` to a part whose visible
+    /// text is empty and expects it echoed back on the next turn.
+    /// Dropping such a block together with its signature breaks the
+    /// reasoning chain, after which the model intermittently ends a
+    /// mid-task turn with a thought-only stop and no tool call.
+    #[test]
+    fn google_signed_empty_blocks_survive_history_replay() {
+        let model = gemini3_model("gemini-3-pro");
+        let msg = assistant_with_blocks(
+            "gemini-3-pro",
+            vec![
+                signed_text("", Some("dGVzdA==")),
+                signed_thinking("", Some("c2ln")),
+            ],
+        );
+        let contents = convert_messages(&[msg], &model);
+        let parts = contents[0]
+            .get("parts")
+            .and_then(Value::as_array)
+            .expect("parts array");
+        assert_eq!(
+            parts.len(),
+            2,
+            "signed empty blocks must survive: {parts:?}"
+        );
+        assert_eq!(
+            parts[0].get("thoughtSignature").and_then(Value::as_str),
+            Some("dGVzdA==")
+        );
+        assert_eq!(parts[0].get("text").and_then(Value::as_str), Some(""));
+        assert_eq!(parts[1].get("thought").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            parts[1].get("thoughtSignature").and_then(Value::as_str),
+            Some("c2ln")
+        );
+    }
+
+    /// Without a signature an empty block carries nothing, so it stays
+    /// dropped — and a message left with no parts contributes no entry
+    /// at all rather than an empty `parts: []` the API would reject.
+    #[test]
+    fn google_unsigned_empty_blocks_are_dropped() {
+        let model = gemini3_model("gemini-3-pro");
+        let msg = assistant_with_blocks(
+            "gemini-3-pro",
+            vec![signed_text("   ", None), signed_thinking("", None)],
+        );
+        assert!(convert_messages(&[msg], &model).is_empty());
+    }
+
+    /// A signature minted by another model is unusable on replay, so an
+    /// empty block carrying one is still dropped.
+    #[test]
+    fn google_empty_blocks_from_another_model_are_dropped() {
+        let model = gemini3_model("gemini-3-pro");
+        let msg = assistant_with_blocks(
+            "gemini-2.5-flash",
+            vec![
+                signed_text("", Some("dGVzdA==")),
+                signed_thinking("", Some("c2ln")),
+            ],
+        );
+        assert!(convert_messages(&[msg], &model).is_empty());
+    }
+
+    /// An empty block whose signature isn't valid base64 is dropped too
+    /// — the signature would be rejected on the wire, so keeping the
+    /// otherwise empty part gains nothing.
+    #[test]
+    fn google_empty_block_with_invalid_signature_is_dropped() {
+        let model = gemini3_model("gemini-3-pro");
+        let msg = assistant_with_blocks("gemini-3-pro", vec![signed_text("", Some("not base64"))]);
+        assert!(convert_messages(&[msg], &model).is_empty());
     }
 
     /// Google's `promptTokenCount` already INCLUDES
