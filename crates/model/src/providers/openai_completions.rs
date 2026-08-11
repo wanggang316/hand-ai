@@ -1527,7 +1527,12 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
 
     let is_qwen = base_url.contains("dashscope.aliyuncs.com");
 
-    let is_deepseek = *provider == Provider::Deepseek || base_url.contains("deepseek.com");
+    // Match the host case-insensitively: a base URL is free to spell the
+    // authority in any case, and a `DeepSeek.com` endpoint is the same API
+    // as `deepseek.com` — missing it silently downgrades every DeepSeek
+    // quirk below (max-tokens field, think tags, `reasoning_content`).
+    let is_deepseek =
+        *provider == Provider::Deepseek || base_url.to_ascii_lowercase().contains("deepseek.com");
 
     let is_openrouter = *provider == Provider::Openrouter || base_url.contains("openrouter.ai");
 
@@ -1556,9 +1561,13 @@ fn detect_compat(model: &Model) -> ResolvedCompat {
         || base_url.contains("opencode.ai")
         || is_cloudflare_workers_ai;
 
+    // DeepSeek's native API only understands `max_tokens`; it ignores
+    // `max_completion_tokens`, so an output cap set by the caller silently
+    // does nothing there.
     let use_max_tokens = *provider == Provider::Mistral
         || base_url.contains("mistral.ai")
         || base_url.contains("chutes.ai")
+        || is_deepseek
         || is_moonshot;
 
     let is_grok = *provider == Provider::Xai || base_url.contains("api.x.ai");
@@ -2632,6 +2641,42 @@ mod tests {
         assert!(!compat.supports_reasoning_effort);
         assert!(!compat.supports_strict_mode);
         assert_eq!(compat.max_tokens_field, Some("max_tokens".to_string()));
+    }
+
+    /// DeepSeek's native API caps output with `max_tokens` and ignores
+    /// `max_completion_tokens`, so a caller-supplied cap sent under the
+    /// OpenAI field name has no effect. Pin the detection across the
+    /// provider enum and the public base URL.
+    #[test]
+    fn test_detect_compat_deepseek_uses_max_tokens() {
+        let mut by_provider = test_model(Provider::Deepseek);
+        by_provider.base_url = "https://api.deepseek.com".to_string();
+        assert_eq!(
+            detect_compat(&by_provider).max_tokens_field,
+            Some("max_tokens".to_string())
+        );
+
+        let mut by_base_url = test_model(Provider::OpenAI);
+        by_base_url.base_url = "https://api.deepseek.com/v1".to_string();
+        assert_eq!(
+            detect_compat(&by_base_url).max_tokens_field,
+            Some("max_tokens".to_string())
+        );
+    }
+
+    /// The host in a configured base URL may be spelled in any case. An
+    /// exact-case match would drop every DeepSeek quirk — the token
+    /// field, the think-tag format, and the `reasoning_content` replay
+    /// requirement — for the same endpoint.
+    #[test]
+    fn test_detect_compat_deepseek_base_url_is_case_insensitive() {
+        let mut model = test_model(Provider::OpenAI);
+        model.base_url = "https://API.DeepSeek.com/v1".to_string();
+        let compat = detect_compat(&model);
+        assert_eq!(compat.max_tokens_field, Some("max_tokens".to_string()));
+        assert_eq!(compat.thinking_format.as_deref(), Some("deepseek"));
+        assert!(compat.requires_reasoning_content_on_assistant_messages);
+        assert!(!compat.supports_store);
     }
 
     #[test]
