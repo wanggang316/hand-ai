@@ -1,8 +1,10 @@
 //! System prompt generation for the coding agent.
 
+use crate::core::git_utils;
 use crate::core::skills::Skill;
 use chrono::Local;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// Render the `# Project Guidelines` section from a single
 /// `custom_guidelines` string. The string is split on blank-line
@@ -263,31 +265,123 @@ fn escape_xml(s: &str) -> String {
     out
 }
 
-/// Load context files (HAND.md / HAND.MD) from the working directory.
+/// The context files one directory contributes, as paths relative to it.
 ///
-/// Case-insensitive resolution mirrors users who land on a project whose
-/// context file shipped with an uppercase extension (e.g. created on a
-/// case-insensitive filesystem). The lowercase variant wins when both
-/// exist so a project that ships `HAND.md` plus a stray `HAND.MD` from a
-/// merge conflict still gets a single, deterministic file.
-pub fn load_context_files(cwd: &Path) -> Vec<String> {
-    let mut files = Vec::new();
+/// `HAND.md` and `HAND.MD` are the same file under two spellings, so at
+/// most one of them is taken. Case-insensitive resolution mirrors users
+/// who land on a project whose context file shipped with an uppercase
+/// extension (e.g. created on a case-insensitive filesystem). The
+/// lowercase variant wins when both exist so a project that ships
+/// `HAND.md` plus a stray `HAND.MD` from a merge conflict still gets a
+/// single, deterministic file. `.hand/context.md` is independent and
+/// loads alongside whichever won.
+fn context_file_names_in(dir: &Path) -> Vec<PathBuf> {
+    let mut names = Vec::new();
 
     for candidate in ["HAND.md", "HAND.MD"] {
-        let path = cwd.join(candidate);
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            files.push(content);
+        if dir.join(candidate).is_file() {
+            names.push(PathBuf::from(candidate));
             break;
         }
     }
 
-    // Check for .hand/context.md
-    let context_md = cwd.join(".hand").join("context.md");
-    if let Ok(content) = std::fs::read_to_string(&context_md) {
-        files.push(content);
+    let context_md = PathBuf::from(".hand").join("context.md");
+    if dir.join(&context_md).is_file() {
+        names.push(context_md);
     }
 
-    files
+    names
+}
+
+/// The main repository's context files that a nested linked worktree's
+/// own copies shadow.
+///
+/// A worktree created inside its own repository (`git worktree add
+/// .claude/worktrees/feat`) checks out the same tracked `HAND.md` that
+/// sits at the main repository root, and the ancestor walk climbs
+/// through both. They are one file, so loading both applies the same
+/// project context twice.
+///
+/// Returns an empty list whenever nothing is shadowed, which leaves
+/// ordinary ancestor inheritance alone: a worktree with no context file
+/// of its own still inherits the main repository's copy, and directories
+/// above the main repository keep loading either way.
+fn shadowed_context_files(cwd: &Path) -> Vec<PathBuf> {
+    let Some(paths) = git_utils::find_git_paths(cwd) else {
+        return Vec::new();
+    };
+    let Some(main_repo_root) = paths.common_git_dir.parent() else {
+        return Vec::new();
+    };
+    // Equal for an ordinary repository; unrelated for a sibling worktree
+    // (`git worktree add ../feat`), whose main repository is not an
+    // ancestor. Neither can shadow anything.
+    if paths.repo_dir == main_repo_root || !paths.repo_dir.starts_with(main_repo_root) {
+        return Vec::new();
+    }
+    // The parent of the common git dir is the main worktree root only
+    // when that directory is itself checked out from the same
+    // repository. In a bare layout (`proj/.bare` + `proj/main`) it is
+    // just the directory holding `.bare`, which tracks nothing.
+    if std::fs::canonicalize(main_repo_root.join(".git")).ok() != Some(paths.common_git_dir.clone())
+    {
+        return Vec::new();
+    }
+    context_file_names_in(&paths.repo_dir)
+        .into_iter()
+        .map(|name| main_repo_root.join(name))
+        .collect()
+}
+
+/// Load context files (HAND.md / HAND.MD, `.hand/context.md`) for a
+/// working directory, inheriting them from ancestor directories.
+///
+/// The walk climbs from `cwd` to the filesystem root, so a project nested
+/// in a monorepo picks up the conventions declared above it. Contents come
+/// back with the furthest ancestor first and `cwd` last, which puts the
+/// most specific context closest to the model's instructions.
+pub fn load_context_files(cwd: &Path) -> Vec<String> {
+    collect_context_files(cwd, None)
+}
+
+/// `load_context_files` with an optional inclusive ceiling on the walk,
+/// so tests can bound it inside a temporary directory instead of
+/// inheriting whatever the machine happens to have above it.
+fn collect_context_files(cwd: &Path, ceiling: Option<&Path>) -> Vec<String> {
+    let shadowed = shadowed_context_files(cwd);
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    // One group per directory, nearest first. Only the group order is
+    // reversed at the end — within a directory `HAND.md` still precedes
+    // `.hand/context.md`.
+    let mut by_dir: Vec<Vec<String>> = Vec::new();
+
+    let mut dir = Some(cwd);
+    while let Some(current) = dir {
+        let mut group = Vec::new();
+        for name in context_file_names_in(current) {
+            let path = current.join(name);
+            let Ok(canonical) = path.canonicalize() else {
+                continue;
+            };
+            if shadowed.contains(&canonical) || !seen.insert(canonical) {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                group.push(content);
+            }
+        }
+        if !group.is_empty() {
+            by_dir.push(group);
+        }
+
+        if ceiling.is_some_and(|c| c == current) {
+            break;
+        }
+        dir = current.parent();
+    }
+
+    by_dir.reverse();
+    by_dir.into_iter().flatten().collect()
 }
 
 #[cfg(test)]
@@ -600,10 +694,18 @@ mod tests {
         assert!(prompt.contains("Prefer `edit` for modifying"));
     }
 
+    /// Every context-file test bounds the ancestor walk at the temporary
+    /// directory. Without a ceiling the walk climbs to the filesystem
+    /// root and the assertions would depend on whatever context files the
+    /// machine running the tests happens to have above `$TMPDIR`.
+    fn context_files_under(root: &Path, cwd: &Path) -> Vec<String> {
+        collect_context_files(cwd, Some(root))
+    }
+
     #[test]
     fn test_load_context_files_empty() {
         let dir = tempfile::TempDir::new().unwrap();
-        let files = load_context_files(dir.path());
+        let files = context_files_under(dir.path(), dir.path());
         assert!(files.is_empty());
     }
 
@@ -611,7 +713,7 @@ mod tests {
     fn test_load_context_files_with_hand_md() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("HAND.md"), "# My Project").unwrap();
-        let files = load_context_files(dir.path());
+        let files = context_files_under(dir.path(), dir.path());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], "# My Project");
     }
@@ -623,7 +725,7 @@ mod tests {
     fn test_load_context_files_with_uppercase_hand_md() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("HAND.MD"), "# upper-case ext").unwrap();
-        let files = load_context_files(dir.path());
+        let files = context_files_under(dir.path(), dir.path());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], "# upper-case ext");
     }
@@ -646,9 +748,140 @@ mod tests {
             // Filesystem collapsed the two writes — nothing to assert.
             return;
         }
-        let files = load_context_files(dir.path());
+        let files = context_files_under(dir.path(), dir.path());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], "lowercase wins");
+    }
+
+    /// A project nested in a monorepo picks up the conventions declared
+    /// above it. The furthest ancestor comes first so the most specific
+    /// context sits closest to the model's instructions.
+    #[test]
+    fn context_files_inherit_from_ancestor_directories() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let nested = dir.path().join("packages").join("api");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.path().join("HAND.md"), "monorepo rules").unwrap();
+        std::fs::write(nested.join("HAND.md"), "api rules").unwrap();
+
+        let files = context_files_under(dir.path(), &nested);
+        assert_eq!(files, vec!["monorepo rules", "api rules"]);
+    }
+
+    /// A directory with no context file of its own is transparent — it
+    /// neither contributes nor blocks what sits above it.
+    #[test]
+    fn context_files_skip_directories_without_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.path().join("HAND.md"), "root rules").unwrap();
+
+        let files = context_files_under(dir.path(), &nested);
+        assert_eq!(files, vec!["root rules"]);
+    }
+
+    /// Reversing the walk must reverse whole directories, not individual
+    /// files: within one directory `HAND.md` still precedes
+    /// `.hand/context.md`.
+    #[test]
+    fn context_files_keep_within_directory_order_across_the_walk() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let nested = dir.path().join("child");
+        std::fs::create_dir_all(nested.join(".hand")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".hand")).unwrap();
+        std::fs::write(dir.path().join("HAND.md"), "root hand").unwrap();
+        std::fs::write(dir.path().join(".hand").join("context.md"), "root context").unwrap();
+        std::fs::write(nested.join("HAND.md"), "child hand").unwrap();
+        std::fs::write(nested.join(".hand").join("context.md"), "child context").unwrap();
+
+        let files = context_files_under(dir.path(), &nested);
+        assert_eq!(
+            files,
+            vec!["root hand", "root context", "child hand", "child context"]
+        );
+    }
+
+    /// Build a main repository plus a linked worktree checked out inside
+    /// it, the layout `git worktree add .claude/worktrees/feat` produces.
+    /// Returns `(main_repo_root, worktree_root)`.
+    fn nested_worktree_layout(root: &Path) -> (PathBuf, PathBuf) {
+        let main = root.join("main");
+        let worktree_git_dir = main.join(".git").join("worktrees").join("feat");
+        std::fs::create_dir_all(&worktree_git_dir).unwrap();
+        std::fs::write(main.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(worktree_git_dir.join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+        // Relative, the way git writes it: resolves back to `main/.git`.
+        std::fs::write(worktree_git_dir.join("commondir"), "../..\n").unwrap();
+
+        let worktree = main.join(".claude").join("worktrees").join("feat");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", worktree_git_dir.display()),
+        )
+        .unwrap();
+
+        (main, worktree)
+    }
+
+    /// A worktree nested inside its own repository checks out the same
+    /// tracked `HAND.md` that sits at the main repository root, and the
+    /// ancestor walk climbs through both. They are one file, so the
+    /// shadowed copy must not be applied a second time.
+    #[test]
+    fn nested_worktree_loads_the_shared_context_file_once() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (main, worktree) = nested_worktree_layout(dir.path());
+        std::fs::write(main.join("HAND.md"), "project rules").unwrap();
+        std::fs::write(worktree.join("HAND.md"), "project rules").unwrap();
+
+        let files = context_files_under(dir.path(), &worktree);
+        assert_eq!(files, vec!["project rules"]);
+    }
+
+    /// Shadowing is keyed on the worktree having its own copy. A worktree
+    /// whose branch deleted the file still inherits the main repository's,
+    /// exactly as any other nested directory would.
+    #[test]
+    fn nested_worktree_without_its_own_copy_still_inherits() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (main, worktree) = nested_worktree_layout(dir.path());
+        std::fs::write(main.join("HAND.md"), "project rules").unwrap();
+
+        let files = context_files_under(dir.path(), &worktree);
+        assert_eq!(files, vec!["project rules"]);
+    }
+
+    /// Only the main repository root's copy is shadowed. Directories
+    /// above it are unrelated to the worktree and keep loading.
+    #[test]
+    fn nested_worktree_keeps_loading_directories_above_the_repo() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let (main, worktree) = nested_worktree_layout(dir.path());
+        std::fs::write(dir.path().join("HAND.md"), "workspace rules").unwrap();
+        std::fs::write(main.join("HAND.md"), "project rules").unwrap();
+        std::fs::write(worktree.join("HAND.md"), "project rules").unwrap();
+
+        let files = context_files_under(dir.path(), &worktree);
+        assert_eq!(files, vec!["workspace rules", "project rules"]);
+    }
+
+    /// An ordinary clone has no shadowing to do: a repository root and a
+    /// subdirectory that both carry a context file contribute both.
+    #[test]
+    fn ordinary_repository_inherits_without_shadowing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let nested = repo.join("crates").join("api");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(repo.join("HAND.md"), "repo rules").unwrap();
+        std::fs::write(nested.join("HAND.md"), "crate rules").unwrap();
+
+        let files = context_files_under(dir.path(), &nested);
+        assert_eq!(files, vec!["repo rules", "crate rules"]);
     }
 
     // T2.5 — Skills section emission.

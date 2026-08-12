@@ -191,10 +191,18 @@ Available settings:
 
 `hand` loads context files at startup and injects them into the system prompt:
 
-- `HAND.md` — Project instructions (from cwd)
+- `HAND.md` (or `HAND.MD`) — Project instructions
 - `.hand/context.md` — Additional context
 
 Use these for project conventions, common commands, and instructions.
+
+Both are looked up in the working directory **and inherited from every
+ancestor directory up to the filesystem root**, so a crate nested in a
+monorepo picks up the conventions declared above it. They are ordered
+furthest ancestor first, which puts the most specific context closest to
+the model's instructions. A linked worktree checked out inside its own
+repository shares the main repository root's tracked copy, and that copy
+is applied once rather than twice.
 
 ### System Prompt
 
