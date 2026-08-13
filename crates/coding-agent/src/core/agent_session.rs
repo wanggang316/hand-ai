@@ -1197,13 +1197,22 @@ impl AgentSession {
         };
 
         let first_kept_id = format!("compaction_{}", chrono::Utc::now().timestamp_millis());
-        self.session_manager
-            .append_compaction(&summary, &first_kept_id)?;
+        let appended = self
+            .session_manager
+            .append_compaction(&summary, &first_kept_id);
+
+        // Clear before the `?` and before the end event, for two
+        // reasons. A failed append used to leave the flag set for the
+        // rest of the session, so `get_state` reported a compaction that
+        // was long over. And a listener reacting to the end event by
+        // submitting a queued prompt has to observe an idle session, not
+        // the one it is being notified about the end of.
+        self.is_compacting = false;
+        appended?;
 
         self.emit(AgentSessionEvent::CompactionEnd {
             summary: summary.clone(),
         });
-        self.is_compacting = false;
 
         Ok(summary)
     }

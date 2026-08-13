@@ -16,6 +16,10 @@ read this file. Add new entries above the previous version with a
 
 - `HAND.md` is inherited from ancestor directories. The lookup read the working directory alone, so a crate nested in a monorepo — or any subdirectory you happened to start `hand` from — saw none of the conventions declared above it, and the only workaround was to run from the root or duplicate the file. The walk now climbs from the working directory to the filesystem root, collecting each directory's `HAND.md` (or `HAND.MD`) plus its `.hand/context.md`, and orders them furthest ancestor first so the most specific context sits closest to the model's instructions. A linked worktree checked out inside its own repository is the one case where the walk would double up — the worktree and the main repository root hold the same tracked file — and that shared copy is now applied once ([#154](https://github.com/wanggang316/hand-ai/pull/154))
 
+### Fixed
+
+- A session no longer reports itself as compacting after compaction is over. Writing the compaction entry to the session log could fail — a full disk, a revoked permission — and the in-progress flag was never cleared on that path, so `get_state` reported a compaction still running for the rest of the session. The flag is also cleared before the `compaction_end` event is emitted rather than after, so an RPC client that reacts to that event sees an idle session instead of the one it was just told had finished
+
 ## [0.4.2] - 2026-08-06
 
 ### Added
