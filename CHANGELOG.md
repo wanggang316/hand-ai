@@ -16,6 +16,10 @@ read this file. Add new entries above the previous version with a
 
 - `HAND.md` is inherited from ancestor directories. The lookup read the working directory alone, so a crate nested in a monorepo — or any subdirectory you happened to start `hand` from — saw none of the conventions declared above it, and the only workaround was to run from the root or duplicate the file. The walk now climbs from the working directory to the filesystem root, collecting each directory's `HAND.md` (or `HAND.MD`) plus its `.hand/context.md`, and orders them furthest ancestor first so the most specific context sits closest to the model's instructions. A linked worktree checked out inside its own repository is the one case where the walk would double up — the worktree and the main repository root hold the same tracked file — and that shared copy is now applied once ([#154](https://github.com/wanggang316/hand-ai/pull/154))
 
+### Fixed
+
+- Sessions stored behind a symlink are listed again. The scan over stored projects tested each entry with a check that describes the entry itself rather than what it points at, so a session directory that was a symlink — sessions relocated to another volume, or a project directory that is itself a link — reported as "not a directory" and was skipped. Every session under it was invisible to `/resume` and to session listings, with no error to suggest anything had been dropped
+
 ## [0.4.2] - 2026-08-06
 
 ### Added
