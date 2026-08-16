@@ -666,14 +666,7 @@ pub(crate) async fn parse_sse_stream(
             }
 
             if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str()) {
-                output.stop_reason = map_stop_reason(reason);
-                if output
-                    .content
-                    .iter()
-                    .any(|b| matches!(b, AssistantContentBlock::ToolCall(_)))
-                {
-                    output.stop_reason = StopReason::ToolUse;
-                }
+                output.stop_reason = resolve_stop_reason(reason, &output.content);
             }
         }
 
@@ -954,6 +947,29 @@ pub(crate) fn map_stop_reason(reason: &str) -> StopReason {
     }
 }
 
+/// Final stop reason for a candidate that reported `reason`, given what
+/// the turn actually produced.
+///
+/// Google reports a plain `STOP` for a turn that asked for tools, so
+/// tool calls in the content promote it to `ToolUse`. That promotion
+/// applies only to `Stop`. Promoting a `MAX_TOKENS` truncation would
+/// hide that the last tool call's arguments were cut off mid-encoding,
+/// and the caller — which fails truncated calls precisely by checking
+/// for `Length` — would execute it as if it were complete. A safety or
+/// recitation stop is likewise not something the presence of a tool
+/// call should paper over.
+pub(crate) fn resolve_stop_reason(reason: &str, content: &[AssistantContentBlock]) -> StopReason {
+    let mapped = map_stop_reason(reason);
+    if mapped == StopReason::Stop
+        && content
+            .iter()
+            .any(|b| matches!(b, AssistantContentBlock::ToolCall(_)))
+    {
+        return StopReason::ToolUse;
+    }
+    mapped
+}
+
 /// Check if a thought signature is valid base64.
 pub(crate) fn is_valid_thought_signature(sig: &str) -> bool {
     if sig.is_empty() || !sig.len().is_multiple_of(4) {
@@ -1209,6 +1225,61 @@ mod tests {
         let model = gemini3_model("gemini-3-pro");
         let msg = assistant_with_blocks("gemini-3-pro", vec![signed_text("", Some("not base64"))]);
         assert!(convert_messages(&[msg], &model).is_empty());
+    }
+
+    fn tool_call_content() -> Vec<AssistantContentBlock> {
+        vec![AssistantContentBlock::ToolCall(ToolCall::new(
+            "call-1",
+            "lookup",
+            serde_json::json!({"q": "x"}),
+        ))]
+    }
+
+    /// A plain `STOP` on a turn that emitted tool calls is Google
+    /// reporting the end of generation, not the end of the exchange —
+    /// the caller still has to run the tools.
+    #[test]
+    fn google_stop_with_tool_calls_becomes_tool_use() {
+        assert_eq!(
+            resolve_stop_reason("STOP", &tool_call_content()),
+            StopReason::ToolUse
+        );
+    }
+
+    /// A truncated turn must stay `Length` even when a tool call made it
+    /// into the content. The last call's arguments were cut off
+    /// mid-encoding, and the caller fails truncated calls by checking
+    /// for exactly this reason — promoting it to `ToolUse` disarms that
+    /// check and the call runs with incomplete arguments.
+    #[test]
+    fn google_truncated_turn_with_tool_calls_stays_length() {
+        assert_eq!(
+            resolve_stop_reason("MAX_TOKENS", &tool_call_content()),
+            StopReason::Length
+        );
+    }
+
+    /// Neither does a tool call paper over a stop the model was forced
+    /// into — safety, recitation, and anything else unrecognized map to
+    /// an error the caller needs to see.
+    #[test]
+    fn google_forced_stops_with_tool_calls_stay_errors() {
+        for reason in ["SAFETY", "RECITATION", "OTHER"] {
+            assert_eq!(
+                resolve_stop_reason(reason, &tool_call_content()),
+                StopReason::Error,
+                "{reason}"
+            );
+        }
+    }
+
+    /// Without tool calls the mapping is untouched.
+    #[test]
+    fn google_stop_reasons_without_tool_calls_map_directly() {
+        let text = vec![AssistantContentBlock::Text(TextContent::new("done"))];
+        assert_eq!(resolve_stop_reason("STOP", &text), StopReason::Stop);
+        assert_eq!(resolve_stop_reason("MAX_TOKENS", &text), StopReason::Length);
+        assert_eq!(resolve_stop_reason("STOP", &[]), StopReason::Stop);
     }
 
     /// The version sits between the family name and the variant, with an
