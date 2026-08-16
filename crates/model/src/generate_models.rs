@@ -1546,6 +1546,12 @@ fn static_deepseek_models() -> Vec<Model> {
     // level; `xhigh` stays unmapped and clamps up to it.
     thinking_map.insert("max".to_string(), Some("max".to_string()));
 
+    // Flash is the one native entry that also accepts `low`. Offering it
+    // is the difference between a cheap shallow-reasoning pass and having
+    // to jump straight to `high` on the model built for the former.
+    let mut flash_thinking_map = thinking_map.clone();
+    flash_thinking_map.insert("low".to_string(), Some("low".to_string()));
+
     let compat = Compat::OpenAICompletions(Box::new(OpenAICompletionsCompat {
         thinking_format: Some("deepseek".to_string()),
         requires_reasoning_content_on_assistant_messages: Some(true),
@@ -1566,7 +1572,7 @@ fn static_deepseek_models() -> Vec<Model> {
             max_tokens: 384_000,
             headers: None,
             compat: Some(compat.clone()),
-            thinking_level_map: Some(thinking_map.clone()),
+            thinking_level_map: Some(flash_thinking_map),
         },
         Model {
             id: "deepseek-v4-pro".to_string(),
@@ -2022,6 +2028,52 @@ mod tests {
                 }
                 _ => panic!("{id}: expected OpenAICompletions compat"),
             }
+        }
+    }
+
+    /// The native DeepSeek entries share a thinking-level table except
+    /// for `low`, which only Flash accepts. Pro leaving it unmapped is
+    /// what keeps the level out of the picker for a model that would
+    /// reject it.
+    #[test]
+    fn deepseek_flash_maps_low_effort_and_pro_does_not() {
+        let models = static_deepseek_models();
+        let flash = models
+            .iter()
+            .find(|m| m.id == "deepseek-v4-flash")
+            .expect("flash entry");
+        let pro = models
+            .iter()
+            .find(|m| m.id == "deepseek-v4-pro")
+            .expect("pro entry");
+
+        let flash_map = flash.thinking_level_map.as_ref().expect("flash map");
+        assert_eq!(flash_map.get("low"), Some(&Some("low".to_string())));
+        let pro_map = pro.thinking_level_map.as_ref().expect("pro map");
+        assert_eq!(pro_map.get("low"), Some(&None));
+
+        // Everything else stays identical across the two entries.
+        for key in ["minimal", "medium", "high", "max"] {
+            assert_eq!(flash_map.get(key), pro_map.get(key), "{key}");
+        }
+    }
+
+    /// The map drives what the model advertises, so the difference has
+    /// to show up in the supported-level list the picker reads.
+    #[test]
+    fn deepseek_flash_advertises_low_as_a_supported_level() {
+        let models = static_deepseek_models();
+        let supported = |id: &str| {
+            let model = models.iter().find(|m| m.id == id).expect("entry");
+            model::models::get_supported_thinking_levels(model)
+        };
+
+        assert!(supported("deepseek-v4-flash").contains(&Some(ThinkingLevel::Low)));
+        assert!(!supported("deepseek-v4-pro").contains(&Some(ThinkingLevel::Low)));
+        // The shared top end is unaffected either way.
+        for id in ["deepseek-v4-flash", "deepseek-v4-pro"] {
+            assert!(supported(id).contains(&Some(ThinkingLevel::High)), "{id}");
+            assert!(supported(id).contains(&Some(ThinkingLevel::Max)), "{id}");
         }
     }
 
