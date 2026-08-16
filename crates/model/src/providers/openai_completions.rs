@@ -157,6 +157,7 @@ fn make_error_stream(
                 model: model_id,
                 usage: crate::types::Usage::default(),
                 stop_reason: StopReason::Error,
+                raw_stop_reason: None,
                 error_message: Some(error_msg),
                 timestamp: current_timestamp_ms(),
                 content: vec![],
@@ -198,6 +199,7 @@ pub fn stream_openai_completions(
                 },
             },
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: current_timestamp_ms(),
             response_model: None,
@@ -292,6 +294,7 @@ pub fn stream_openai_completions(
 
             if let Some(finish_reason) = &choice.finish_reason {
                 saw_finish_reason = true;
+                output.raw_stop_reason = Some(finish_reason.clone());
                 output.stop_reason = map_stop_reason(finish_reason);
             }
 
@@ -1936,6 +1939,7 @@ mod tests {
             model: "test-model".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -2814,6 +2818,7 @@ mod tests {
             model: "test".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -2908,6 +2913,7 @@ mod tests {
             model: model.id.clone(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -2980,6 +2986,7 @@ mod tests {
             model: model.id.clone(),
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: now,
             response_model: None,
@@ -3048,6 +3055,7 @@ mod tests {
             model: model.id.clone(),
             usage: Usage::default(),
             stop_reason: StopReason::ToolUse,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -3171,6 +3179,7 @@ mod tests {
             model: "test".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -3218,6 +3227,7 @@ mod tests {
             model: "test".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,

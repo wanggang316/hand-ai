@@ -99,6 +99,7 @@ fn stream_anthropic_messages_with_reasoning(
                     model: String::new(),
                     usage: crate::types::Usage::default(),
                     stop_reason: StopReason::Error,
+                    raw_stop_reason: None,
                     error_message: Some(e),
                     timestamp: current_timestamp_ms(),
                     response_model: None,
@@ -897,6 +898,7 @@ struct SseParser {
     output: AssistantMessage,
     content_blocks: HashMap<usize, ContentBlockState>,
     current_stop_reason: StopReason,
+    current_raw_stop_reason: Option<String>,
     saw_message_start: bool,
     saw_message_stop: bool,
     /// Whether a `Done` or `Error` event has already been emitted.
@@ -914,6 +916,7 @@ impl SseParser {
                 model: model.id.clone(),
                 usage: crate::types::Usage::default(),
                 stop_reason: StopReason::Stop,
+                raw_stop_reason: None,
                 error_message: None,
                 timestamp: current_timestamp_ms(),
                 response_model: None,
@@ -922,6 +925,7 @@ impl SseParser {
             },
             content_blocks: HashMap::new(),
             current_stop_reason: StopReason::Stop,
+            current_raw_stop_reason: None,
             saw_message_start: false,
             saw_message_stop: false,
             emitted_terminal: false,
@@ -1235,6 +1239,7 @@ impl SseParser {
             "message_delta" => {
                 if let Some(delta) = event.get("delta") {
                     let stop_reason_str = delta.get("stop_reason").and_then(|v| v.as_str());
+                    self.current_raw_stop_reason = stop_reason_str.map(str::to_string);
                     self.current_stop_reason = match stop_reason_str {
                         Some("end_turn") => StopReason::Stop,
                         Some("max_tokens") => StopReason::Length,
@@ -1274,6 +1279,7 @@ impl SseParser {
                 self.saw_message_stop = true;
                 // Final message
                 output.stop_reason = self.current_stop_reason;
+                output.raw_stop_reason = self.current_raw_stop_reason.clone();
 
                 // Calculate cost
                 crate::models::calculate_cost(model, &mut output.usage);
@@ -1662,6 +1668,58 @@ mod tests {
         assert!(thinking.thinking_signature.is_none());
     }
 
+    /// The mapping onto `StopReason` is lossy by design — `refusal` and
+    /// `sensitive` both land on `Error`, and anything unrecognized falls
+    /// back to `Stop`. Keeping the provider's own word is what lets a
+    /// diagnosis tell those apart afterwards.
+    #[test]
+    fn raw_stop_reason_survives_the_mapping() {
+        for (wire, mapped) in [
+            ("max_tokens", StopReason::Length),
+            ("refusal", StopReason::Error),
+            ("tool_use", StopReason::ToolUse),
+        ] {
+            let body = format!(
+                concat!(
+                    "data: {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":10}},\"model\":\"claude-test\"}}}}\n",
+                    "data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"{wire}\"}},\"usage\":{{\"output_tokens\":5}}}}\n",
+                    "data: {{\"type\":\"message_stop\"}}\n",
+                ),
+                wire = wire
+            );
+            let events = parse_sse_body(&body, &test_model()).expect("parse should succeed");
+            let done = events
+                .last()
+                .and_then(|e| match e {
+                    AssistantMessageEvent::Done { message, .. } => Some(message),
+                    _ => None,
+                })
+                .expect("Done event with message");
+            assert_eq!(done.stop_reason, mapped, "{wire}");
+            assert_eq!(done.raw_stop_reason.as_deref(), Some(wire), "{wire}");
+        }
+    }
+
+    /// A stream that never reports one leaves the field empty rather
+    /// than inventing the default the mapping falls back to.
+    #[test]
+    fn raw_stop_reason_is_absent_when_the_provider_reports_none() {
+        let body = concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        );
+        let events = parse_sse_body(body, &test_model()).expect("parse should succeed");
+        let done = events
+            .last()
+            .and_then(|e| match e {
+                AssistantMessageEvent::Done { message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("Done event with message");
+        assert_eq!(done.stop_reason, StopReason::Stop);
+        assert!(done.raw_stop_reason.is_none());
+    }
+
     #[test]
     fn test_normalize_tool_call_id() {
         assert_eq!(normalize_tool_call_id("call_123"), "call_123");
@@ -1772,6 +1830,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             usage: crate::types::Usage::default(),
             stop_reason: StopReason::ToolUse,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -1808,6 +1867,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             usage: crate::types::Usage::default(),
             stop_reason: StopReason::ToolUse,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -2311,6 +2371,7 @@ mod tests {
                     model: "test".to_string(),
                     usage: Default::default(),
                     stop_reason: StopReason::Stop,
+                    raw_stop_reason: None,
                     error_message: None,
                     timestamp: 0,
                     response_model: None,
@@ -2482,6 +2543,7 @@ mod tests {
             model: "gpt-4".to_string(),
             usage: crate::types::Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -2521,6 +2583,7 @@ mod tests {
             model: model.id.clone(),
             usage: crate::types::Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -2547,6 +2610,7 @@ mod tests {
             model: model.id.clone(),
             usage: crate::types::Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,

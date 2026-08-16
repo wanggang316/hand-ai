@@ -2500,6 +2500,7 @@ mod tests {
             model: "mock-model".to_string(),
             usage: model::Usage::default(),
             stop_reason,
+            raw_stop_reason: None,
             error_message: Some("mock provider error".to_string()),
             timestamp: 0,
             response_model: None,

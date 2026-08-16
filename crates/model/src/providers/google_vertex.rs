@@ -283,6 +283,7 @@ fn stream_vertex(
             model: model.id.clone(),
             usage: crate::types::Usage::default(),
             stop_reason: crate::types::StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: google_shared::current_timestamp_ms(),
             response_model: None,

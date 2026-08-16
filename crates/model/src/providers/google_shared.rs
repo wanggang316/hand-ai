@@ -443,6 +443,7 @@ pub(crate) async fn parse_sse_stream(
         model: model.id.clone(),
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
+        raw_stop_reason: None,
         error_message: None,
         timestamp: current_timestamp_ms(),
         response_model: None,
@@ -666,6 +667,7 @@ pub(crate) async fn parse_sse_stream(
             }
 
             if let Some(reason) = candidate.get("finishReason").and_then(|r| r.as_str()) {
+                output.raw_stop_reason = Some(reason.to_string());
                 output.stop_reason = resolve_stop_reason(reason, &output.content);
             }
         }
@@ -1039,6 +1041,7 @@ mod tests {
             model: model_id.to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -1093,6 +1096,7 @@ mod tests {
             model: "gemini-2.5-flash".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -1132,6 +1136,7 @@ mod tests {
             model: model_id.to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,

@@ -131,6 +131,7 @@ mod tests {
                         model: "test".to_string(),
                         usage: crate::types::Usage::default(),
                         stop_reason: crate::types::StopReason::Stop,
+                        raw_stop_reason: None,
                         error_message: None,
                         timestamp: 0,
                         response_model: None,

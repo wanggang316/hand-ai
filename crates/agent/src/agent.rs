@@ -627,6 +627,7 @@ impl Agent {
                     diagnostics: None,
                     usage: Usage::default(),
                     stop_reason,
+                    raw_stop_reason: None,
                     error_message: Some(e.to_string()),
                     timestamp: now_ms(),
                 };

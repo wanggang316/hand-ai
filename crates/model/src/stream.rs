@@ -163,6 +163,7 @@ pub fn stream_simple(
                             content: vec![],
                             usage: Usage::default(),
                             stop_reason: StopReason::Aborted,
+                            raw_stop_reason: None,
                             error_message: Some(error_message),
                             timestamp: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)

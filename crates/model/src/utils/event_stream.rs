@@ -151,6 +151,7 @@ fn aborted_default_message(p: &Provenance) -> AssistantMessage {
         model: p.model.clone(),
         usage: Usage::default(),
         stop_reason: StopReason::Aborted,
+        raw_stop_reason: None,
         error_message: None,
         timestamp: 0,
         response_model: None,

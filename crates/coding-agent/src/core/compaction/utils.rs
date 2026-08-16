@@ -473,6 +473,7 @@ mod tests {
             response_id: None,
             diagnostics: None,
             stop_reason: StopReason::ToolUse,
+            raw_stop_reason: None,
             usage: Default::default(),
             error_message: None,
             timestamp: 0,

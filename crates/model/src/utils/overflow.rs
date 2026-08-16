@@ -126,6 +126,7 @@ mod tests {
             model: "test".to_string(),
             usage: Usage::default(),
             stop_reason: StopReason::Error,
+            raw_stop_reason: None,
             error_message: Some(error_msg.to_string()),
             timestamp: 0,
             response_model: None,
@@ -146,6 +147,7 @@ mod tests {
                 ..Default::default()
             },
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,
@@ -306,6 +308,7 @@ mod tests {
                 cost: Default::default(),
             },
             stop_reason: StopReason::Length,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,

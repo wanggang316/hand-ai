@@ -173,6 +173,7 @@ fn empty_partial(api: Api, provider: Provider, model_id: &str) -> AssistantMessa
         model: model_id.to_string(),
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
+        raw_stop_reason: None,
         error_message: None,
         timestamp: 0,
         response_model: None,
