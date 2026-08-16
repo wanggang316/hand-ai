@@ -193,8 +193,7 @@ pub async fn generate_branch_summary(
 
     // Branch summaries cap at 2048 output tokens — the summary itself is
     // short and the surrounding context is already large.
-    let mut stream_options = SimpleStreamOptions::default();
-    stream_options.base.max_tokens = Some(2048);
+    let stream_options = crate::core::compaction::utils::summarization_stream_options(2048);
 
     let response = match client.complete(model, context, stream_options).await {
         Ok(msg) => msg,

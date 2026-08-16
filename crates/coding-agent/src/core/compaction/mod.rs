@@ -31,7 +31,7 @@ pub use utils::{
     CompactionResult, FileOperations, SUMMARIZATION_SYSTEM_PROMPT, build_compaction_prompt,
     build_compaction_prompt_with, compute_file_lists, estimate_context_tokens, estimate_tokens,
     extract_file_operations, extract_file_ops_from_message, format_file_operations,
-    serialize_conversation, should_compact, split_for_compaction,
+    serialize_conversation, should_compact, split_for_compaction, summarization_stream_options,
 };
 
 pub use branch_summarization::{

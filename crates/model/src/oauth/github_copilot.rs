@@ -446,12 +446,32 @@ async fn enable_all_github_copilot_models(
     enterprise_domain: Option<&str>,
 ) {
     let base_url = github_copilot_base_url(Some(token), enterprise_domain);
-    let models = get_models("github-copilot");
-    let mut futs = Vec::with_capacity(models.len());
-    for model in models {
-        let model_id = model.id;
+    let model_ids: Vec<String> = get_models("github-copilot")
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+    enable_model_policies(http, &base_url, token, &model_ids).await;
+}
+
+/// Send one policy request per model, **one at a time**.
+///
+/// The catalog holds a few dozen Copilot models, and firing their policy
+/// updates together drains the API's rate-limit bucket: the requests come
+/// back 429 and the models they were meant to enable stay disabled. Since
+/// failures here are swallowed by design, that surfaces to the user much
+/// later and with no explanation — a model that should be available is
+/// simply missing. Issuing them serially keeps the burst under the limit,
+/// and this runs detached from login so the extra wall time is not on
+/// anyone's critical path.
+pub(crate) async fn enable_model_policies(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    model_ids: &[String],
+) {
+    for model_id in model_ids {
         let url = format!("{base_url}/models/{model_id}/policy");
-        let req = http
+        let _ = http
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {token}"))
@@ -462,8 +482,112 @@ async fn enable_all_github_copilot_models(
             .header("openai-intent", "chat-policy")
             .header("x-interaction-type", "chat-policy")
             .json(&json!({ "state": "enabled" }))
-            .send();
-        futs.push(req);
+            .send()
+            .await;
     }
-    let _ = futures::future::join_all(futs).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    /// A mock that answers each request on its own thread, so the test can
+    /// observe how many the client had in flight at once.
+    ///
+    /// The shared harness in `tests/oauth_test.rs` answers on a single
+    /// thread, which flattens concurrency by construction and cannot tell
+    /// a serial caller from a parallel one.
+    struct ConcurrencyProbe {
+        base_url: String,
+        server: Arc<tiny_http::Server>,
+        max_in_flight: Arc<AtomicUsize>,
+        paths: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl ConcurrencyProbe {
+        fn start() -> Self {
+            let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind mock"));
+            let port = server.server_addr().to_ip().expect("ip addr").port();
+            let base_url = format!("http://127.0.0.1:{port}");
+            let max_in_flight = Arc::new(AtomicUsize::new(0));
+            let paths = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+            let accept = Arc::clone(&server);
+            let max = Arc::clone(&max_in_flight);
+            let seen = Arc::clone(&paths);
+            thread::spawn(move || {
+                let in_flight = Arc::new(AtomicUsize::new(0));
+                for req in accept.incoming_requests() {
+                    let in_flight = Arc::clone(&in_flight);
+                    let max = Arc::clone(&max);
+                    let seen = Arc::clone(&seen);
+                    thread::spawn(move || {
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        max.fetch_max(now, Ordering::SeqCst);
+                        seen.lock().unwrap().push(req.url().to_string());
+                        // Hold the request open long enough that a caller
+                        // issuing them together would overlap here.
+                        thread::sleep(Duration::from_millis(40));
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                        let _ = req.respond(tiny_http::Response::empty(200));
+                    });
+                }
+            });
+
+            ConcurrencyProbe {
+                base_url,
+                server,
+                max_in_flight,
+                paths,
+            }
+        }
+    }
+
+    impl Drop for ConcurrencyProbe {
+        fn drop(&mut self) {
+            self.server.unblock();
+        }
+    }
+
+    /// Firing the whole catalog's policy updates together drains the
+    /// provider's rate-limit bucket, and because failures here are
+    /// swallowed by design the models they were meant to enable just stay
+    /// disabled, with nothing to explain it. Every request must go out on
+    /// its own.
+    #[tokio::test]
+    async fn model_policies_are_enabled_one_at_a_time() {
+        let probe = ConcurrencyProbe::start();
+        let http = reqwest::Client::new();
+        let model_ids: Vec<String> = (0..6).map(|i| format!("model-{i}")).collect();
+
+        enable_model_policies(&http, &probe.base_url, "token", &model_ids).await;
+
+        assert_eq!(
+            probe.max_in_flight.load(Ordering::SeqCst),
+            1,
+            "policy requests must not overlap"
+        );
+        let paths = probe.paths.lock().unwrap().clone();
+        assert_eq!(paths.len(), model_ids.len(), "one request per model");
+        for (i, id) in model_ids.iter().enumerate() {
+            assert_eq!(
+                paths[i],
+                format!("/models/{id}/policy"),
+                "requests must follow catalog order"
+            );
+        }
+    }
+
+    /// An empty catalog issues nothing rather than erroring.
+    #[tokio::test]
+    async fn no_models_means_no_requests() {
+        let probe = ConcurrencyProbe::start();
+        let http = reqwest::Client::new();
+        enable_model_policies(&http, &probe.base_url, "token", &[]).await;
+        assert!(probe.paths.lock().unwrap().is_empty());
+    }
 }

@@ -16,6 +16,10 @@ read this file. Add new entries above the previous version with a
 
 - `HAND.md` is inherited from ancestor directories. The lookup read the working directory alone, so a crate nested in a monorepo — or any subdirectory you happened to start `hand` from — saw none of the conventions declared above it, and the only workaround was to run from the root or duplicate the file. The walk now climbs from the working directory to the filesystem root, collecting each directory's `HAND.md` (or `HAND.MD`) plus its `.hand/context.md`, and orders them furthest ancestor first so the most specific context sits closest to the model's instructions. A linked worktree checked out inside its own repository is the one case where the walk would double up — the worktree and the main repository root hold the same tracked file — and that shared copy is now applied once ([#154](https://github.com/wanggang316/hand-ai/pull/154))
 
+### Fixed
+
+- Summarization requests no longer pay for a prompt-cache write. Compaction summaries, turn-prefix summaries, and branch summaries each wrap a transcript that is never sent again, so the entry they cached could never be hit — but they inherited the default cache retention and were billed at the provider's cache-write premium anyway (25% over base input on Anthropic). Every long session paid it on each compaction. They now opt out and are billed as plain input; nothing else about the summaries changes
+
 ## [0.4.2] - 2026-08-06
 
 ### Added
