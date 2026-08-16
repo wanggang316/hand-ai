@@ -1566,10 +1566,16 @@ impl SessionManager {
 
         if let Ok(read_dir) = std::fs::read_dir(&root_sessions) {
             for entry in read_dir.flatten() {
-                if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                // `DirEntry::file_type` describes the entry itself, so a
+                // symlink reports as a symlink and never as a directory.
+                // Stat the target instead: a project directory reached
+                // through a link holds real sessions, and skipping it made
+                // them invisible to every listing.
+                let path = entry.path();
+                if !path.is_dir() {
                     continue;
                 }
-                sessions.extend(list_sessions_from_dir(&entry.path())?);
+                sessions.extend(list_sessions_from_dir(&path)?);
             }
         }
 
@@ -2715,6 +2721,52 @@ mod tests {
         let cwds: std::collections::HashSet<_> = listed.iter().map(|i| i.cwd.as_str()).collect();
         assert!(cwds.iter().any(|c| c.ends_with("/a")));
         assert!(cwds.iter().any(|c| c.ends_with("/b")));
+    }
+
+    /// A project directory reached through a symlink holds real
+    /// sessions. `DirEntry::file_type` describes the link rather than
+    /// its target, so filtering on it dropped those projects and their
+    /// sessions never appeared in any listing.
+    #[cfg(unix)]
+    #[test]
+    fn test_list_all_follows_symlinked_project_directories() {
+        let root = TempDir::new().unwrap();
+        let _g = scoped_hand_home(root.path());
+
+        let proj = root.path().join("linked");
+        std::fs::create_dir_all(&proj).unwrap();
+        let _s = SessionManager::create(&proj).unwrap();
+
+        // Move the project's session directory aside and leave a symlink
+        // in its place — the shape you get when sessions live on another
+        // volume, or when a project directory is itself a link.
+        let session_dir = SessionManager::default_session_dir(&proj);
+        let moved = root.path().join("elsewhere");
+        std::fs::rename(&session_dir, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &session_dir).unwrap();
+
+        let listed = SessionManager::list_all(root.path()).unwrap();
+        assert_eq!(listed.len(), 1, "sessions behind a symlink must list");
+    }
+
+    /// A symlink pointing at a file is still not a project directory.
+    #[cfg(unix)]
+    #[test]
+    fn test_list_all_ignores_symlinks_to_non_directories() {
+        let root = TempDir::new().unwrap();
+        let _g = scoped_hand_home(root.path());
+
+        let proj = root.path().join("real");
+        std::fs::create_dir_all(&proj).unwrap();
+        let _s = SessionManager::create(&proj).unwrap();
+
+        let sessions_root = root.path().join(".hand").join("agent").join("sessions");
+        let target = root.path().join("stray.txt");
+        std::fs::write(&target, "not a project").unwrap();
+        std::os::unix::fs::symlink(&target, sessions_root.join("stray-link")).unwrap();
+
+        let listed = SessionManager::list_all(root.path()).unwrap();
+        assert_eq!(listed.len(), 1, "only the real project should list");
     }
 
     #[test]
