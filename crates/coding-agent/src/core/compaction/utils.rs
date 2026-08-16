@@ -12,8 +12,26 @@
 //! [`super::compactor`] and [`super::branch_summarization`].
 
 use crate::core::settings::CompactionSettings;
-use model::{AssistantContentBlock, Message, UserContent, UserContentBlock};
+use model::{
+    AssistantContentBlock, CacheRetention, Message, SimpleStreamOptions, UserContent,
+    UserContentBlock,
+};
 use std::collections::BTreeSet;
+
+/// Stream options shared by every summarization request.
+///
+/// Summaries are one-shot: each one wraps a transcript that is never sent
+/// again, so the prompt it caches can never be hit. Left to the default,
+/// retention resolves to `Short` and the request is billed at the
+/// provider's cache-write premium — Anthropic charges 25% over base
+/// input — for a cache entry nobody reads. `CacheRetention::None`
+/// suppresses the breakpoints so a summary is billed as plain input.
+pub fn summarization_stream_options(max_tokens: u32) -> SimpleStreamOptions {
+    let mut options = SimpleStreamOptions::default();
+    options.base.max_tokens = Some(max_tokens);
+    options.base.cache_retention = Some(CacheRetention::None);
+    options
+}
 
 // ============================================================================
 // CompactionResult (legacy) — kept verbatim until the entry-tree port lands.

@@ -1028,7 +1028,18 @@ impl SseParser {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let thinking_content = ThinkingContent::new(&thinking);
+                        let mut thinking_content = ThinkingContent::new(&thinking);
+                        // The signature normally arrives in a later
+                        // `signature_delta`, but a start event that
+                        // already carries the finished block holds it
+                        // here instead. Dropping it costs the whole
+                        // block: replaying an unsigned thinking block
+                        // is rejected upstream.
+                        if let Some(sig) = content_block.get("signature").and_then(|v| v.as_str())
+                            && !sig.is_empty()
+                        {
+                            thinking_content.thinking_signature = Some(sig.to_string());
+                        }
                         content_blocks
                             .insert(index, ContentBlockState::Thinking(thinking_content.clone()));
                         output
@@ -1581,6 +1592,74 @@ mod tests {
             })
             .expect("Done event with message");
         assert!(done.response_id.is_none());
+    }
+
+    /// Pull the thinking block out of a completed stream body.
+    fn thinking_block_of(body: &str) -> ThinkingContent {
+        let events = parse_sse_body(body, &test_model()).expect("parse should succeed");
+        let done = events
+            .last()
+            .and_then(|e| match e {
+                AssistantMessageEvent::Done { message, .. } => Some(message),
+                _ => None,
+            })
+            .expect("Done event with message");
+        match done.content.first().expect("one content block") {
+            AssistantContentBlock::Thinking(t) => t.clone(),
+            other => panic!("expected thinking block, got {other:?}"),
+        }
+    }
+
+    /// The signature normally arrives in its own delta, but a start
+    /// event that already carries the finished block holds it inline.
+    /// Reading only `thinking` there dropped the signature, and an
+    /// unsigned thinking block is rejected when the turn is replayed —
+    /// costing the whole block, not just its provenance.
+    #[test]
+    fn initial_thinking_block_keeps_its_inline_signature() {
+        let thinking = thinking_block_of(concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"weighing it up\",\"signature\":\"sig-abc\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ));
+        assert_eq!(thinking.thinking, "weighing it up");
+        assert_eq!(thinking.thinking_signature.as_deref(), Some("sig-abc"));
+    }
+
+    /// The ordinary shape is unchanged: an empty signature on the start
+    /// event is not a signature, and the deltas that follow still
+    /// accumulate into one value.
+    #[test]
+    fn signature_deltas_still_accumulate_without_an_inline_signature() {
+        let thinking = thinking_block_of(concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"step\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig-\"}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"tail\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ));
+        assert_eq!(thinking.thinking, "step");
+        assert_eq!(thinking.thinking_signature.as_deref(), Some("sig-tail"));
+    }
+
+    /// A start event with no signature field at all leaves the block
+    /// unsigned rather than signed with an empty string, which is what
+    /// the replay path checks for.
+    #[test]
+    fn thinking_block_without_any_signature_stays_unsigned() {
+        let thinking = thinking_block_of(concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10},\"model\":\"claude-test\"}}\n",
+            "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"quiet\"}}\n",
+            "data: {\"type\":\"content_block_stop\",\"index\":0}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n",
+            "data: {\"type\":\"message_stop\"}\n",
+        ));
+        assert!(thinking.thinking_signature.is_none());
     }
 
     #[test]

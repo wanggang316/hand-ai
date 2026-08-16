@@ -1756,9 +1756,14 @@ impl AgentSession {
             tools: None,
         };
 
+        // Cap output at the model's own limit — the helper's real job
+        // here is suppressing the prompt-cache write this one-shot
+        // request would otherwise be billed for.
+        let options = compaction::summarization_stream_options(self.config.model.max_tokens as u32);
+
         let mut stream = self
             .client
-            .stream_simple(&self.config.model, context, None)
+            .stream_simple(&self.config.model, context, Some(options))
             .map_err(|e| CodingAgentError::Other(format!("Compaction LLM error: {e}")))?;
 
         let mut summary = String::new();

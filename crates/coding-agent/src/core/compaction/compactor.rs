@@ -23,11 +23,11 @@
 use crate::core::compaction::branch_summarization::SummarizationClient;
 use crate::core::compaction::utils::{
     FileOperations, SUMMARIZATION_SYSTEM_PROMPT, compute_file_lists, format_file_operations,
-    serialize_conversation,
+    serialize_conversation, summarization_stream_options,
 };
 use model::{
     AssistantContent as AssistantContentBlock, AssistantMessage, Context, Message, Model,
-    SimpleStreamOptions, StopReason, ThinkingLevel, Usage, UserMessage,
+    StopReason, ThinkingLevel, Usage, UserMessage,
 };
 use std::sync::Arc;
 
@@ -368,8 +368,7 @@ pub async fn generate_summary(
         tools: None,
     };
 
-    let mut options = SimpleStreamOptions::default();
-    options.base.max_tokens = Some(max_tokens);
+    let mut options = summarization_stream_options(max_tokens);
     // Only forward `reasoning` when the model supports it AND the
     // caller passed a non-"off" level. `ThinkingLevel` has no `Off`
     // variant — absence is encoded as `None` — so a `Some` value
@@ -414,8 +413,7 @@ pub async fn generate_turn_prefix_summary(
         tools: None,
     };
 
-    let mut options = SimpleStreamOptions::default();
-    options.base.max_tokens = Some(max_tokens);
+    let mut options = summarization_stream_options(max_tokens);
     // Only forward `reasoning` when the model supports it AND the
     // caller passed a non-"off" level. `ThinkingLevel` has no `Off`
     // variant — absence is encoded as `None` — so a `Some` value
@@ -570,8 +568,9 @@ mod tests {
     use async_trait::async_trait;
     use model::types::Provider;
     use model::{
-        Api, AssistantContentBlock, AssistantMessage, Cost, StopReason, TextContent, ThinkingLevel,
-        ToolCall, ToolResultContent, ToolResultMessage, Usage, UserMessage,
+        Api, AssistantContentBlock, AssistantMessage, Cost, SimpleStreamOptions, StopReason,
+        TextContent, ThinkingLevel, ToolCall, ToolResultContent, ToolResultMessage, Usage,
+        UserMessage,
     };
     use std::sync::Mutex;
 
@@ -896,6 +895,48 @@ mod tests {
         // Inspect the captured options' max_tokens (0.8 × 16384 = 13107).
         let opts = client.calls.lock().unwrap()[0].clone();
         assert_eq!(opts.base.max_tokens, Some(13_107));
+    }
+
+    /// A summary wraps a transcript that is never sent again, so the
+    /// prompt it would cache can never be hit. Left at the default,
+    /// retention resolves to `Short` and the provider bills the request
+    /// at its cache-write premium for an entry nobody reads.
+    #[tokio::test]
+    async fn generate_summary_opts_out_of_prompt_cache_writes() {
+        let client = ScriptedClient::new(vec![ok_assistant("summary text")]);
+        let model = dummy_model(false);
+        let messages = vec![Message::User(UserMessage::new_text("hi"))];
+        let _ = generate_summary(&messages, &model, 16_384, client.clone(), None, None, None)
+            .await
+            .unwrap();
+        let opts = client.calls.lock().unwrap()[0].clone();
+        assert_eq!(opts.base.cache_retention, Some(model::CacheRetention::None));
+    }
+
+    /// The turn-prefix summary is the same kind of one-shot request and
+    /// must opt out on the same grounds.
+    #[tokio::test]
+    async fn generate_turn_prefix_summary_opts_out_of_prompt_cache_writes() {
+        let client = ScriptedClient::new(vec![ok_assistant("prefix summary")]);
+        let model = dummy_model(false);
+        let messages = vec![Message::User(UserMessage::new_text("hi"))];
+        let _ = generate_turn_prefix_summary(&messages, &model, 16_384, client.clone(), None)
+            .await
+            .unwrap();
+        let opts = client.calls.lock().unwrap()[0].clone();
+        assert_eq!(opts.base.cache_retention, Some(model::CacheRetention::None));
+    }
+
+    /// Opting out of the cache must not disturb the output cap the
+    /// summary paths already computed.
+    #[tokio::test]
+    async fn summary_options_keep_their_output_cap() {
+        let options = crate::core::compaction::summarization_stream_options(2048);
+        assert_eq!(options.base.max_tokens, Some(2048));
+        assert_eq!(
+            options.base.cache_retention,
+            Some(model::CacheRetention::None)
+        );
     }
 
     #[tokio::test]

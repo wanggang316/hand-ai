@@ -740,10 +740,29 @@ fn get_last_thinking_content(output: &AssistantMessage) -> String {
         .unwrap_or_default()
 }
 
+/// Major version of a Gemini model id — `gemini-3-pro` and
+/// `gemini-live-3-flash` both yield `3`, `gemini-2.5-flash` yields `2`.
+/// `None` for anything that isn't a versioned Gemini id, including other
+/// model families reached through the same Google APIs.
+pub(crate) fn gemini_major_version(model_id: &str) -> Option<u32> {
+    let lower = model_id.to_lowercase();
+    let rest = lower.strip_prefix("gemini-")?;
+    let rest = rest.strip_prefix("live-").unwrap_or(rest);
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
 /// Models reached via Google APIs that require explicit tool call IDs in
 /// function calls/responses (e.g. Claude / gpt-oss models hosted on Vertex).
+///
+/// Gemini 3 joined them: it pairs a `functionResponse` with its call by
+/// id rather than by position, so replaying a multi-call turn without
+/// ids either mismatches results or is rejected outright. Keyed on the
+/// major version so later generations inherit the requirement.
 pub(crate) fn requires_tool_call_id(model_id: &str) -> bool {
-    model_id.starts_with("claude-") || model_id.starts_with("gpt-oss-")
+    model_id.starts_with("claude-")
+        || model_id.starts_with("gpt-oss-")
+        || gemini_major_version(model_id).is_some_and(|major| major >= 3)
 }
 
 /// Whether a streamed Gemini `Part` should be treated as a thinking
@@ -963,7 +982,7 @@ mod tests {
     use super::*;
     use crate::types::{
         Api, AssistantContentBlock, AssistantMessage, Cost, InputType, Message, Provider,
-        StopReason, ToolCall, Usage,
+        StopReason, TextContent, ToolCall, ToolResultContent, ToolResultMessage, Usage,
     };
 
     fn gemini3_model(id: &str) -> Model {
@@ -1190,6 +1209,79 @@ mod tests {
         let model = gemini3_model("gemini-3-pro");
         let msg = assistant_with_blocks("gemini-3-pro", vec![signed_text("", Some("not base64"))]);
         assert!(convert_messages(&[msg], &model).is_empty());
+    }
+
+    /// The version sits between the family name and the variant, with an
+    /// optional `live-` infix. A minor version (`2.5`) belongs to its
+    /// major, and unversioned or non-Gemini ids have none.
+    #[test]
+    fn gemini_major_version_parses_the_family_generation() {
+        assert_eq!(gemini_major_version("gemini-3-pro"), Some(3));
+        assert_eq!(gemini_major_version("gemini-3.1-flash"), Some(3));
+        assert_eq!(gemini_major_version("gemini-live-3-flash"), Some(3));
+        assert_eq!(gemini_major_version("Gemini-3-Pro"), Some(3));
+        assert_eq!(gemini_major_version("gemini-2.5-flash"), Some(2));
+        assert_eq!(gemini_major_version("gemini-embedding-001"), None);
+        assert_eq!(gemini_major_version("claude-sonnet-5"), None);
+    }
+
+    /// Gemini 3 pairs a `functionResponse` with its call by id instead of
+    /// by position, so it joins the families that need ids emitted.
+    /// Earlier generations must not start receiving them — they pair by
+    /// position and the extra field is not part of that contract.
+    #[test]
+    fn gemini_3_and_later_require_tool_call_ids() {
+        assert!(requires_tool_call_id("gemini-3-pro"));
+        assert!(requires_tool_call_id("gemini-3-flash"));
+        assert!(requires_tool_call_id("gemini-live-3-flash"));
+        // A later generation inherits the requirement.
+        assert!(requires_tool_call_id("gemini-4-pro"));
+        assert!(!requires_tool_call_id("gemini-2.5-flash"));
+        assert!(!requires_tool_call_id("gemini-2.5-pro"));
+    }
+
+    /// End to end over the converter: both halves of a tool exchange
+    /// carry the id, since a call the model can't match to its result is
+    /// as broken as a result it can't match to its call.
+    #[test]
+    fn gemini_3_tool_exchange_carries_ids_on_both_halves() {
+        let model = gemini3_model("gemini-3-pro");
+        let call = assistant_with_tool_call("gemini-3-pro", Provider::Google, None);
+        let result = Message::ToolResult(ToolResultMessage {
+            role: "toolResult".to_string(),
+            tool_call_id: "call-1".to_string(),
+            tool_name: "lookup".to_string(),
+            content: vec![ToolResultContent::Text(TextContent::new("42"))],
+            details: None,
+            is_error: false,
+            timestamp: 0,
+        });
+
+        let contents = convert_messages(&[call, result], &model);
+        let function_call = &contents[0]["parts"][0]["functionCall"];
+        assert_eq!(
+            function_call.get("id").and_then(Value::as_str),
+            Some("call-1"),
+            "functionCall must carry the id: {function_call}"
+        );
+        let function_response = &contents[1]["parts"][0]["functionResponse"];
+        assert_eq!(
+            function_response.get("id").and_then(Value::as_str),
+            Some("call-1"),
+            "functionResponse must carry the id: {function_response}"
+        );
+    }
+
+    /// Gemini 2.5 pairs by position and its payloads stay as they were.
+    #[test]
+    fn gemini_2_5_tool_exchange_omits_ids() {
+        let model = gemini3_model("gemini-2.5-flash");
+        let call = assistant_with_tool_call("gemini-2.5-flash", Provider::Google, None);
+        let contents = convert_messages(&[call], &model);
+        assert!(
+            contents[0]["parts"][0]["functionCall"].get("id").is_none(),
+            "gemini-2.5 must not receive tool call ids"
+        );
     }
 
     /// Google's `promptTokenCount` already INCLUDES

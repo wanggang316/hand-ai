@@ -18,6 +18,7 @@ read this file. Add new entries above the previous version with a
 
 ### Fixed
 
+- Summarization requests no longer pay for a prompt-cache write. Compaction summaries, turn-prefix summaries, and branch summaries each wrap a transcript that is never sent again, so the entry they cached could never be hit — but they inherited the default cache retention and were billed at the provider's cache-write premium anyway (25% over base input on Anthropic). Every long session paid it on each compaction. They now opt out and are billed as plain input; nothing else about the summaries changes
 - Sessions stored behind a symlink are listed again. The scan over stored projects tested each entry with a check that describes the entry itself rather than what it points at, so a session directory that was a symlink — sessions relocated to another volume, or a project directory that is itself a link — reported as "not a directory" and was skipped. Every session under it was invisible to `/resume` and to session listings, with no error to suggest anything had been dropped
 
 ## [0.4.2] - 2026-08-06
