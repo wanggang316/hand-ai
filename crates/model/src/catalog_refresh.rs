@@ -14,11 +14,22 @@
 //! in-memory catalog is left untouched.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::models::{Registry, install_catalog};
 
 const CATALOG_FILE: &str = "models.json";
 const ETAG_FILE: &str = "models.etag";
+
+/// Time budget for the whole catalog request.
+///
+/// The refresh runs detached at startup and nothing waits on it, which is
+/// exactly why it needs a ceiling: a server that accepts the connection
+/// and then never answers would otherwise keep the task and its socket
+/// alive for the life of the process, and the catalog would silently
+/// never refresh. Generous enough for a cold connection on a slow link,
+/// since one attempt is all this makes.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Stable rolling-release asset URL. CI regenerates the catalog daily and
 /// republishes it under the `catalog` release tag
@@ -152,11 +163,18 @@ fn load_cached_catalog_from(dir: &Path) -> bool {
 /// a single `304`. On any error the in-memory catalog is left untouched and
 /// the previous data keeps serving.
 pub async fn refresh_from_remote(url: &str) -> Result<RefreshOutcome, RefreshError> {
-    refresh_from_remote_in(url, &default_cache_dir()).await
+    refresh_from_remote_in(url, &default_cache_dir(), REQUEST_TIMEOUT).await
 }
 
-async fn refresh_from_remote_in(url: &str, dir: &Path) -> Result<RefreshOutcome, RefreshError> {
-    let client = reqwest::Client::new();
+async fn refresh_from_remote_in(
+    url: &str,
+    dir: &Path,
+    timeout: Duration,
+) -> Result<RefreshOutcome, RefreshError> {
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let mut request = client.get(url);
     if let Some(etag) = read_cached_etag(dir) {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -189,6 +207,48 @@ async fn refresh_from_remote_in(url: &str, dir: &Path) -> Result<RefreshOutcome,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that accepts the connection and then never answers used
+    /// to hang the request forever. Nothing awaits this refresh, so the
+    /// task and its socket would stay alive for the life of the process
+    /// and the catalog would silently never update. The request must give
+    /// up on its own.
+    #[tokio::test]
+    async fn a_server_that_never_answers_times_out_instead_of_hanging() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind mock"));
+        let port = server.server_addr().to_ip().expect("ip addr").port();
+        let accept = Arc::clone(&server);
+        // Hold every request without responding, keeping the connection
+        // open exactly the way a wedged server would.
+        let held = thread::spawn(move || {
+            let mut parked = Vec::new();
+            for req in accept.incoming_requests() {
+                parked.push(req);
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("hand-catalog-timeout-{port}"));
+        let started = std::time::Instant::now();
+        let result = refresh_from_remote_in(
+            &format!("http://127.0.0.1:{port}/models.json"),
+            &dir,
+            Duration::from_millis(300),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        server.unblock();
+        drop(held);
+
+        assert!(result.is_err(), "a wedged server must not report success");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the request must give up on its own budget, took {elapsed:?}"
+        );
+    }
 
     #[test]
     fn parse_and_validate_rejects_empty_and_garbage() {
