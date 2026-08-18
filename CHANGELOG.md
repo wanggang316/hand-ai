@@ -12,6 +12,10 @@ read this file. Add new entries above the previous version with a
 
 ## [Unreleased]
 
+### Added
+
+- `HAND.override.md` takes a directory's place in the context-file lookup. A project's `HAND.md` is normally tracked and shared with everyone working on it, which left nowhere to put instructions that are only yours — a machine-specific path, a convention you don't want to commit. Gitignore an override next to it and that directory's contribution comes from the override instead. The shadowing is per directory, not per chain: overriding your own crate's instructions still inherits whatever the repository root declared, and `.hand/context.md` is a separate slot the override does not displace
+
 ## [0.4.3] - 2026-08-17
 
 ### Added

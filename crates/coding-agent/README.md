@@ -191,10 +191,18 @@ Available settings:
 
 `hand` loads context files at startup and injects them into the system prompt:
 
+- `HAND.override.md` — Local instructions that replace `HAND.md` for that directory
 - `HAND.md` (or `HAND.MD`) — Project instructions
 - `.hand/context.md` — Additional context
 
 Use these for project conventions, common commands, and instructions.
+
+`HAND.md` is normally tracked and shared with everyone on the project.
+Gitignore a `HAND.override.md` next to it to keep instructions that are
+yours alone — a machine-specific path, a convention you don't want to
+commit. The override takes that directory's place; the shadowing is per
+directory, so overriding your own crate's instructions still inherits
+what the repository root declared.
 
 Both are looked up in the working directory **and inherited from every
 ancestor directory up to the filesystem root**, so a crate nested in a

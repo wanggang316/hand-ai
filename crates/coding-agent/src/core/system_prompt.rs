@@ -267,18 +267,30 @@ fn escape_xml(s: &str) -> String {
 
 /// The context files one directory contributes, as paths relative to it.
 ///
-/// `HAND.md` and `HAND.MD` are the same file under two spellings, so at
-/// most one of them is taken. Case-insensitive resolution mirrors users
-/// who land on a project whose context file shipped with an uppercase
-/// extension (e.g. created on a case-insensitive filesystem). The
-/// lowercase variant wins when both exist so a project that ships
-/// `HAND.md` plus a stray `HAND.MD` from a merge conflict still gets a
-/// single, deterministic file. `.hand/context.md` is independent and
-/// loads alongside whichever won.
+/// The first name that exists wins, so the list is a priority order:
+///
+/// - `HAND.override.md` shadows the directory's `HAND.md`. A project's
+///   `HAND.md` is normally tracked and shared, which leaves nowhere to
+///   put instructions that are yours alone — a machine-specific path, a
+///   scratch convention you don't want to commit. Gitignore the override
+///   and it takes that directory's place without touching the shared
+///   file.
+/// - `HAND.md` and `HAND.MD` are the same file under two spellings, so
+///   at most one of them is taken. Case-insensitive resolution mirrors
+///   users who land on a project whose context file shipped with an
+///   uppercase extension (e.g. created on a case-insensitive
+///   filesystem). The lowercase variant wins when both exist so a
+///   project that ships `HAND.md` plus a stray `HAND.MD` from a merge
+///   conflict still gets a single, deterministic file.
+///
+/// The shadowing is per directory, not per chain: an override in one
+/// directory replaces that directory's contribution and leaves every
+/// ancestor's alone. `.hand/context.md` is independent and loads
+/// alongside whichever won.
 fn context_file_names_in(dir: &Path) -> Vec<PathBuf> {
     let mut names = Vec::new();
 
-    for candidate in ["HAND.md", "HAND.MD"] {
+    for candidate in ["HAND.override.md", "HAND.md", "HAND.MD"] {
         if dir.join(candidate).is_file() {
             names.push(PathBuf::from(candidate));
             break;
@@ -751,6 +763,51 @@ mod tests {
         let files = context_files_under(dir.path(), dir.path());
         assert_eq!(files.len(), 1);
         assert_eq!(files[0], "lowercase wins");
+    }
+
+    /// A tracked `HAND.md` is shared with everyone on the project, so an
+    /// override file is the only place to put instructions that are
+    /// yours alone. It takes that directory's place entirely rather than
+    /// stacking on top — two sets of project instructions in one
+    /// directory is exactly the ambiguity it exists to avoid.
+    #[test]
+    fn context_files_prefer_a_local_override_over_the_shared_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("HAND.md"), "shared rules").unwrap();
+        std::fs::write(dir.path().join("HAND.override.md"), "my rules").unwrap();
+
+        let files = context_files_under(dir.path(), dir.path());
+        assert_eq!(files, vec!["my rules"]);
+    }
+
+    /// The override replaces one directory's contribution, not the whole
+    /// chain — a child overriding its own instructions still inherits
+    /// what the repository root declared.
+    #[test]
+    fn a_local_override_shadows_only_its_own_directory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let nested = dir.path().join("crate");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(dir.path().join("HAND.md"), "repo rules").unwrap();
+        std::fs::write(nested.join("HAND.md"), "crate rules").unwrap();
+        std::fs::write(nested.join("HAND.override.md"), "my crate rules").unwrap();
+
+        let files = context_files_under(dir.path(), &nested);
+        assert_eq!(files, vec!["repo rules", "my crate rules"]);
+    }
+
+    /// `.hand/context.md` is a separate slot, so an override does not
+    /// displace it.
+    #[test]
+    fn a_local_override_leaves_the_context_file_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".hand")).unwrap();
+        std::fs::write(dir.path().join("HAND.md"), "shared rules").unwrap();
+        std::fs::write(dir.path().join("HAND.override.md"), "my rules").unwrap();
+        std::fs::write(dir.path().join(".hand").join("context.md"), "context").unwrap();
+
+        let files = context_files_under(dir.path(), dir.path());
+        assert_eq!(files, vec!["my rules", "context"]);
     }
 
     /// A project nested in a monorepo picks up the conventions declared
