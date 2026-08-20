@@ -243,7 +243,7 @@ impl AuthStorage {
     /// error so the caller can decide whether to surface or recover.
     pub fn load(&self) -> Result<HashMap<String, AuthRecord>, AuthStorageError> {
         let raw = match fs::read_to_string(&self.path) {
-            Ok(s) => s,
+            Ok(s) => crate::utils::text::strip_bom(&s).to_string(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
             Err(source) => {
                 return Err(AuthStorageError::Io {
@@ -542,6 +542,28 @@ mod tests {
 
     fn storage_in(dir: &TempDir) -> AuthStorage {
         AuthStorage::at(dir.path().join("auth.json"))
+    }
+
+    /// A credential file that picked up a byte-order mark — saved by a
+    /// Windows editor, or round-tripped through a shell redirect — used
+    /// to fail to parse. Failing to load credentials reads to the user
+    /// as having been logged out, with nothing to explain it.
+    #[test]
+    fn credentials_load_despite_a_byte_order_mark() {
+        let dir = TempDir::new().unwrap();
+        let storage = storage_in(&dir);
+        let path = dir.path().join("auth.json");
+        std::fs::write(
+            &path,
+            "\u{FEFF}{\"anthropic\":{\"type\":\"api_key\",\"key\":\"sk-test\"}}",
+        )
+        .unwrap();
+
+        let loaded = storage.load().expect("a marked file must still parse");
+        assert!(
+            loaded.contains_key("anthropic"),
+            "the record must survive the mark: {loaded:?}"
+        );
     }
 
     // ===== Anthropic subscription detection =====

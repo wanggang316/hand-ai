@@ -12,6 +12,10 @@ read this file. Add new entries above the previous version with a
 
 ## [Unreleased]
 
+### Fixed
+
+- A credential store or legacy settings file that carries a byte-order mark loads again. Editors on Windows prefix UTF-8 files with one, and a shell redirect can add it too; the JSON parser then rejected the whole document over a character sitting before it began. Failing to read credentials reads to you as having been logged out, with nothing to explain it, and a legacy settings file that failed to parse lost its migration to the current format. The YAML settings layer was never affected — that parser accepts a leading mark by spec
+
 ## [0.4.3] - 2026-08-17
 
 ### Added

@@ -18,6 +18,7 @@ pub mod mime;
 pub mod paths;
 pub mod shell;
 pub mod sleep;
+pub mod text;
 pub mod tools_manager;
 pub mod user_agent;
 pub mod version_check;
