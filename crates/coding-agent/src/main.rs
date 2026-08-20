@@ -16,8 +16,27 @@ use tracing_subscriber::EnvFilter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Cross-vendor marker telling anything we spawn that a coding agent is
+/// driving it.
+///
+/// Hooks, `Makefile`s, and shell profiles often want to behave
+/// differently under an agent than under a person — skip the interactive
+/// confirm, drop the progress spinner, choose the machine-readable
+/// output. The key is deliberately shared across agents so a script can
+/// test for it once; the value names which one is running.
+const AGENT_ENV_VAR: &str = "AI_AGENT";
+const AGENT_ENV_VALUE: &str = "hand";
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Set before anything is spawned so every descendant inherits it.
+    //
+    // SAFETY: `set_var` requires that no other thread reads or writes the
+    // environment concurrently. This is the first statement of `main`;
+    // the runtime has not started any tasks and nothing has been spawned.
+    unsafe {
+        std::env::set_var(AGENT_ENV_VAR, AGENT_ENV_VALUE);
+    }
     timings::reset();
     // Rewrite multi-char short flags (`-nc`, `-nt`, `-nbt`, …) before
     // clap sees argv. Without this, scripts using them would be

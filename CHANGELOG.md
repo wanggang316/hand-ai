@@ -12,6 +12,10 @@ read this file. Add new entries above the previous version with a
 
 ## [Unreleased]
 
+### Added
+
+- Anything `hand` spawns now sees `AI_AGENT=hand` in its environment. Hooks, `Makefile`s, and shell profiles routinely want to behave differently under an agent than under a person — skip the interactive confirm, drop the progress spinner, pick the machine-readable output — and had no way to tell. The key is the cross-vendor one so a script can test for it once; the value names which agent is running
+
 ## [0.4.3] - 2026-08-17
 
 ### Added
