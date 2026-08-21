@@ -172,7 +172,11 @@ impl Sha256 {
         }
         msg.extend_from_slice(&bit_len.to_be_bytes());
 
-        for chunk in msg.chunks_exact(64) {
+        // `as_chunks` yields fixed-size arrays rather than slices, so the
+        // indexing below is bounds-checked once per block instead of on
+        // every access. The padding above guarantees a whole number of
+        // blocks, so the remainder is empty by construction.
+        for chunk in msg.as_chunks::<64>().0 {
             let mut w = [0u32; 64];
             for (i, word) in w.iter_mut().take(16).enumerate() {
                 *word = u32::from_be_bytes([

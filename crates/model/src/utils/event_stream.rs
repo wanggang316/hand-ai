@@ -81,6 +81,14 @@ impl EventStream {
     /// message has stop reason `Aborted`). When no `partial` ever arrived,
     /// the synthesized message uses the [`Provenance`] captured at
     /// construction.
+    // Both variants are the same type on purpose: a failed turn still
+    // carries everything that arrived before it failed, and callers read
+    // the content, usage, and stop reason off it exactly as they would a
+    // successful one. `result_large_err` asks for the error to be boxed,
+    // which would save nothing here — the `Ok` variant is the same type
+    // and sets the width of the `Result` either way — while making the
+    // two halves asymmetric to construct and to match on.
+    #[allow(clippy::result_large_err)]
     pub async fn collect_to_message(mut self) -> Result<AssistantMessage, AssistantMessage> {
         let mut last_partial: Option<AssistantMessage> = None;
         while let Some(event) = self.inner.as_mut().next().await {
