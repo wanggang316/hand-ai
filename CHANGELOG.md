@@ -12,6 +12,10 @@ read this file. Add new entries above the previous version with a
 
 ## [Unreleased]
 
+### Fixed
+
+- A settings file keeps the permissions you gave it. Saving replaces the file by writing a temporary one and renaming it into place, and the mode was then forced back to owner-only every time — so a `chmod` you made deliberately, to share a project's settings with a group, was silently reverted on the next edit. An existing file now keeps its mode; a newly created one is still owner-only, so nothing lands world-readable just because the umask was loose. Settings hold no credentials, only counts, names, and toggles
+
 ## [0.4.3] - 2026-08-17
 
 ### Added

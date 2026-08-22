@@ -982,6 +982,10 @@ fn write_yaml_layer_atomic(path: &Path, layer: &Settings) -> Result<(), Settings
         source,
     })?;
 
+    // Captured before the rename: the file that lands is a new one
+    // carrying the temporary file's mode, not this.
+    let previous_mode = crate::utils::fs_perms::current_mode(path);
+
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(|source| SettingsError::Io {
         path: parent.to_path_buf(),
@@ -1003,24 +1007,15 @@ fn write_yaml_layer_atomic(path: &Path, layer: &Settings) -> Result<(), Settings
         source: e.error,
     })?;
 
-    // Reassert 0o600 on Unix. The tempfile is created with the process
-    // umask which is commonly 0644; tighten post-rename so the visible
-    // file is never world-readable. No-op on Windows.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path)
-            .map_err(|source| SettingsError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?
-            .permissions();
-        perms.set_mode(0o600);
-        std::fs::set_permissions(path, perms).map_err(|source| SettingsError::Io {
+    // A settings file that already existed keeps the mode its owner
+    // chose; a new one is created 0600 so it never lands
+    // world-readable. No-op on Windows.
+    crate::utils::fs_perms::apply_mode_after_replace(path, previous_mode, 0o600).map_err(
+        |source| SettingsError::Io {
             path: path.to_path_buf(),
             source,
-        })?;
-    }
+        },
+    )?;
 
     Ok(())
 }
@@ -3474,19 +3469,48 @@ themes:
         assert!(p.exists());
     }
 
+    /// A settings file the owner widened stays widened. Saving replaces
+    /// the file by rename, and re-imposing a fixed mode afterwards would
+    /// silently revert a deliberate `chmod` on every edit. Settings hold
+    /// no credentials — only counts, names, and toggles — so there is
+    /// nothing here to protect the owner from their own choice.
+    ///
+    /// This reverses what the previous test pinned, which asserted the
+    /// mode was reasserted to 0600 on every save.
     #[cfg(unix)]
     #[test]
-    fn save_writes_unix_mode_0600() {
+    fn save_keeps_the_existing_file_mode() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let g = dir.path().join("global.yaml");
         let p = dir.path().join("project.yaml");
         std::fs::write(&g, "").unwrap();
         std::fs::write(&p, "").unwrap();
-        // Loosen the existing mode so we can detect the reassert.
         let mut perms = std::fs::metadata(&p).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&p, perms).unwrap();
+
+        let mut mgr = manager_with_layers(g, p.clone());
+        mgr.set_packages(
+            SettingsScope::Project,
+            Some(vec![PackageSource::Bare("npm:foo".into())]),
+        );
+        mgr.save(SettingsScope::Project).unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644, "expected 0644, got {:o}", mode & 0o777);
+    }
+
+    /// With no file to inherit a mode from, the restrictive creation
+    /// default still applies — a settings file must not appear
+    /// world-readable just because the umask was loose.
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_a_new_file_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let g = dir.path().join("global.yaml");
+        let p = dir.path().join("project.yaml");
+        std::fs::write(&g, "").unwrap();
 
         let mut mgr = manager_with_layers(g, p.clone());
         mgr.set_packages(
