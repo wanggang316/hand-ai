@@ -12,6 +12,10 @@ read this file. Add new entries above the previous version with a
 
 ## [Unreleased]
 
+### Fixed
+
+- Text after `--` is passed through exactly as typed. The short-flag aliases (`-nc`, `-nt`, `-ns`, …) were expanded across the whole command line, including the part after the end-of-options delimiter, so `hand -- -nc` sent `--no-context-files` as the prompt instead of the literal `-nc` you asked about. Aliases before the delimiter still expand as they always did
+
 ## [0.4.3] - 2026-08-17
 
 ### Added

@@ -341,8 +341,24 @@ impl Args {
 ///
 /// Returns a new Vec; the input is consumed.
 pub fn expand_short_aliases(argv: impl IntoIterator<Item = String>) -> Vec<String> {
-    argv.into_iter()
-        .map(|arg| match arg.as_str() {
+    let mut out = Vec::new();
+    let mut past_end_of_options = false;
+
+    for arg in argv {
+        // `--` ends the options; everything after it is content the user
+        // wants passed through verbatim. Rewriting there would silently
+        // edit the prompt — `hand -- -nc` is a request to say "-nc", not
+        // a request to disable context files.
+        if past_end_of_options {
+            out.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            past_end_of_options = true;
+            out.push(arg);
+            continue;
+        }
+        out.push(match arg.as_str() {
             "-nc" => "--no-context-files".to_string(),
             "-nt" => "--no-tools".to_string(),
             "-nbt" => "--no-builtin-tools".to_string(),
@@ -350,13 +366,59 @@ pub fn expand_short_aliases(argv: impl IntoIterator<Item = String>) -> Vec<Strin
             "-ne" => "--no-extensions".to_string(),
             "-np" => "--no-prompt-templates".to_string(),
             _ => arg,
-        })
-        .collect()
+        });
+    }
+
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--` ends the options. Text after it is the user's, and the
+    /// alias rewrite used to edit it: `hand -- -nc` asked to say "-nc"
+    /// and instead sent "--no-context-files" as the prompt.
+    #[test]
+    fn end_of_options_text_is_passed_through_unrewritten() {
+        let argv = expand_short_aliases(["hand", "--", "-nc"].into_iter().map(String::from));
+        assert_eq!(argv, vec!["hand", "--", "-nc"]);
+
+        let parsed = Args::try_parse_from(argv).expect("parse");
+        assert_eq!(parsed.positional, vec!["-nc"]);
+        assert!(
+            !parsed.no_context_files,
+            "text after -- must not be read as a flag"
+        );
+    }
+
+    /// Only what follows the delimiter is protected — aliases before it
+    /// still expand, which is the whole point of having them.
+    #[test]
+    fn aliases_before_the_delimiter_still_expand() {
+        let argv = expand_short_aliases(["hand", "-nc", "--", "-nt"].into_iter().map(String::from));
+        assert_eq!(argv, vec!["hand", "--no-context-files", "--", "-nt"]);
+
+        let parsed = Args::try_parse_from(argv).expect("parse");
+        assert!(parsed.no_context_files, "the alias before -- must apply");
+        assert!(!parsed.no_tools, "the token after -- must not");
+        assert_eq!(parsed.positional, vec!["-nt"]);
+    }
+
+    /// Every token after the first delimiter is content, including a
+    /// second `--`.
+    #[test]
+    fn a_second_delimiter_is_content() {
+        let argv = expand_short_aliases(["hand", "--", "--", "-ns"].into_iter().map(String::from));
+        assert_eq!(argv, vec!["hand", "--", "--", "-ns"]);
+    }
+
+    /// Without a delimiter nothing changes.
+    #[test]
+    fn aliases_expand_when_no_delimiter_is_present() {
+        let argv = expand_short_aliases(["hand", "-ns", "hi"].into_iter().map(String::from));
+        assert_eq!(argv, vec!["hand", "--no-skills", "hi"]);
+    }
 
     #[test]
     fn parses_with_no_args() {
