@@ -263,25 +263,7 @@ fn convert_one(message: &AgentMessage) -> Option<Message> {
                 timestamp: m.timestamp,
             }))
         }
-        AgentMessage::Custom(m) => {
-            let blocks = match &m.content {
-                CustomMessageContent::Text(s) => {
-                    vec![UserContentBlock::Text(TextContent::new(s.clone()))]
-                }
-                CustomMessageContent::Blocks(blocks) => blocks
-                    .iter()
-                    .map(|b| match b {
-                        CustomMessageBlock::Text(t) => UserContentBlock::Text(t.clone()),
-                        CustomMessageBlock::Image(i) => UserContentBlock::Image(i.clone()),
-                    })
-                    .collect(),
-            };
-            Some(Message::User(UserMessage {
-                role: "user".into(),
-                content: UserContent::Blocks(blocks),
-                timestamp: m.timestamp,
-            }))
-        }
+        AgentMessage::Custom(m) => Some(custom_message_to_llm(&m.content, m.timestamp)),
         AgentMessage::BranchSummary(m) => {
             let text = format!(
                 "{}{}{}",
@@ -308,6 +290,58 @@ fn convert_one(message: &AgentMessage) -> Option<Message> {
         AgentMessage::Assistant(m) => Some(Message::Assistant(m.clone())),
         AgentMessage::ToolResult(m) => Some(Message::ToolResult(m.clone())),
     }
+}
+
+/// Flatten custom-message content into an LLM user message. Shared
+/// between [`convert_to_llm`] and the session-entry path below.
+fn custom_message_to_llm(content: &CustomMessageContent, timestamp: u64) -> Message {
+    let blocks = match content {
+        CustomMessageContent::Text(s) => {
+            vec![UserContentBlock::Text(TextContent::new(s.clone()))]
+        }
+        CustomMessageContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|b| match b {
+                CustomMessageBlock::Text(t) => UserContentBlock::Text(t.clone()),
+                CustomMessageBlock::Image(i) => UserContentBlock::Image(i.clone()),
+            })
+            .collect(),
+    };
+    Message::User(UserMessage {
+        role: "user".into(),
+        content: UserContent::Blocks(blocks),
+        timestamp,
+    })
+}
+
+/// Convert a persisted `CustomMessage` session entry's raw JSON
+/// `content` into the LLM user message it contributes to context.
+///
+/// Returns `None` — with a warning — when the content matches neither
+/// the string nor the blocks shape of
+/// [`CustomMessageContent`]: a malformed entry costs its own context
+/// contribution, never the rest of the transcript.
+pub(crate) fn custom_message_entry_to_llm(
+    custom_type: &str,
+    content: &serde_json::Value,
+    timestamp_ms: i64,
+) -> Option<Message> {
+    let parsed: CustomMessageContent = match serde_json::from_value(content.clone()) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            tracing::warn!(
+                custom_type,
+                error = %err,
+                "custom message entry has unparseable content; \
+                 excluding it from LLM context"
+            );
+            return None;
+        }
+    };
+    Some(custom_message_to_llm(
+        &parsed,
+        u64::try_from(timestamp_ms).unwrap_or(0),
+    ))
 }
 
 #[cfg(test)]
