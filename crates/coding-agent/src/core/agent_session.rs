@@ -6,8 +6,8 @@
 use crate::core::compaction;
 use crate::core::error::CodingAgentError;
 use crate::core::extensions::api::{
-    Extension, ExtensionContext, ExtensionContextFactory, HookDecision, SlashCommandSpec,
-    ToolCallEvent, ToolResultEvent, TurnEndEvent, UserMessageEvent,
+    Extension, ExtensionContext, ExtensionContextFactory, HookDecision, SessionSink, SessionWrite,
+    SlashCommandSpec, ToolCallEvent, ToolResultEvent, TurnEndEvent, UserMessageEvent,
 };
 #[cfg(test)]
 use crate::core::extensions::api::{ResultDecision, UserMessageOutcome};
@@ -176,6 +176,12 @@ pub struct AgentSession {
     /// dropped from the dispatch chain; hosts surface this the way they
     /// surface `skill_errors`.
     extension_errors: Vec<(String, String)>,
+    /// Shared queue for `Custom` / `CustomMessage` session entries written
+    /// by extension hooks. Every [`ExtensionContextFactory`] this session
+    /// builds carries a clone, and [`Self::send_message`] drains it into
+    /// the session manager at the end of each turn — hooks run inside
+    /// `'static` closures that cannot borrow the session manager directly.
+    extension_sink: SessionSink,
     /// Aggregate model catalog for this session. Built eagerly from the
     /// owned [`model::Client`] at construction time and rebuilt by
     /// [`Self::register_extension`] (extensions may contribute models in
@@ -453,6 +459,7 @@ impl AgentSession {
             extensions,
             extensions_loaded,
             extension_errors: Vec::new(),
+            extension_sink: SessionSink::default(),
             model_registry,
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
@@ -516,6 +523,7 @@ impl AgentSession {
             extensions: Vec::new(),
             extensions_loaded: Vec::new(),
             extension_errors: Vec::new(),
+            extension_sink: SessionSink::default(),
             model_registry,
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
@@ -780,10 +788,45 @@ impl AgentSession {
             let _ = self.session_manager.append_message(msg.clone());
         }
 
+        // Apply session writes queued by extension hooks during this turn,
+        // after the turn's messages so an entry's position in the transcript
+        // is (at coarsest) the turn where it happened.
+        self.drain_extension_session_writes();
+
         // Check for compaction
         self.maybe_compact_if_needed().await?;
 
         Ok(result.messages)
+    }
+
+    /// Apply session writes queued by extension hooks (see
+    /// [`SessionSink`]) to the transcript, in the order they were queued.
+    /// A write that fails to persist is logged and dropped — one bad
+    /// entry never aborts the turn that produced it.
+    fn drain_extension_session_writes(&mut self) {
+        for write in self.extension_sink.drain() {
+            let applied = match write {
+                SessionWrite::Custom { custom_type, data } => self
+                    .session_manager
+                    .append_custom(&custom_type, data)
+                    .map(|_| ()),
+                SessionWrite::CustomMessage {
+                    custom_type,
+                    content,
+                    details,
+                    display,
+                } => self
+                    .session_manager
+                    .append_custom_message(&custom_type, content, details, display)
+                    .map(|_| ()),
+            };
+            if let Err(err) = applied {
+                tracing::warn!(
+                    error = %err,
+                    "failed to persist extension session write; dropping the entry"
+                );
+            }
+        }
     }
 
     /// Get the session ID.
@@ -1743,6 +1786,7 @@ impl AgentSession {
             self.session_manager.id().to_string(),
             root.join("extensions"),
         )
+        .with_session_sink(self.extension_sink.clone())
     }
 
     /// Build the [`ExtensionContext`] for one named extension. Shorthand for
@@ -3788,6 +3832,100 @@ mod tests {
         );
         assert_eq!(after_calls[0].tool_name, "noop");
         assert!(after_calls[0].success, "noop tool should report success");
+    }
+
+    /// Issue #172 end-to-end: a hook queues session writes on
+    /// `cx.session_sink`; when the turn ends they land in the transcript
+    /// after that turn's messages — `Custom` outside the LLM context,
+    /// `CustomMessage` inside it.
+    #[tokio::test]
+    async fn extension_session_writes_land_in_transcript_at_turn_end() {
+        struct SinkWriter {
+            manifest: ExtensionManifest,
+        }
+
+        #[async_trait]
+        impl Extension for SinkWriter {
+            fn manifest(&self) -> &ExtensionManifest {
+                &self.manifest
+            }
+
+            async fn on_after_tool_call(
+                &self,
+                cx: &ExtensionContext,
+                event: &ToolResultEvent,
+            ) -> Result<ResultDecision, ExtensionError> {
+                cx.session_sink.append_custom(
+                    "hook-log",
+                    Some(serde_json::json!({"tool": event.tool_name})),
+                );
+                cx.session_sink.append_custom_message(
+                    "hook-note",
+                    serde_json::json!("the hook fired"),
+                    None,
+                    false,
+                );
+                Ok(ResultDecision::Continue)
+            }
+        }
+
+        let client = model::Client::new();
+        client.registry.register(
+            Api::OpenAICompletions,
+            Box::new(ToolThenTextProvider {
+                tool_name: "noop".into(),
+                args: serde_json::json!({}),
+                invocation: AtomicUsize::new(0),
+                tool_results: Default::default(),
+            }),
+            Some("test".into()),
+        );
+
+        let mut session =
+            AgentSession::in_memory_with_client(openai_test_model(), vec![noop_tool()], client);
+        session.register_extension(Arc::new(SinkWriter {
+            manifest: ext_manifest("sink-writer"),
+        }));
+
+        let _ = session
+            .send_message("please call noop")
+            .await
+            .expect("send_message should succeed");
+
+        let sm = session.session_manager_mut();
+        let entries = sm.entries();
+        let custom_idx = entries
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    SessionEntry::Custom { custom_type, data, .. }
+                        if custom_type == "hook-log"
+                            && *data == Some(serde_json::json!({"tool": "noop"}))
+                )
+            })
+            .expect("the Custom write must land in the transcript");
+        assert!(
+            entries.iter().any(|e| matches!(
+                e,
+                SessionEntry::CustomMessage { custom_type, .. } if custom_type == "hook-note"
+            )),
+            "the CustomMessage write must land in the transcript"
+        );
+        let last_message_idx = entries
+            .iter()
+            .rposition(|e| matches!(e, SessionEntry::Message { .. }))
+            .expect("the turn must have persisted messages");
+        assert!(
+            custom_idx > last_message_idx,
+            "extension writes belong after the turn that produced them"
+        );
+
+        // The two variants split exactly as documented: the note reaches
+        // the model, the log never does.
+        let ctx_json = serde_json::to_string(&sm.build_context()).unwrap();
+        assert!(ctx_json.contains("the hook fired"));
+        assert!(!ctx_json.contains("hook-log"));
     }
 
     /// `send_message` drives the lifecycle itself: an extension registered

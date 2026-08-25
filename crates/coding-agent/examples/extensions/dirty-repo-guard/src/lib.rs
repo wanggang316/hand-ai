@@ -113,6 +113,7 @@ mod tests {
             cwd: cwd.clone(),
             session_id: "test-session".to_string(),
             data_dir: cwd.join(".data"),
+            session_sink: Default::default(),
         }
     }
 
