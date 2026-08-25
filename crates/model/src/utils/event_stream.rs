@@ -81,6 +81,10 @@ impl EventStream {
     /// message has stop reason `Aborted`). When no `partial` ever arrived,
     /// the synthesized message uses the [`Provenance`] captured at
     /// construction.
+    // Ok and Err deliberately carry the same type — Err is the message
+    // that ended in error, not an error code. Boxing one side would
+    // break that symmetry for no practical gain on this cold path.
+    #[allow(clippy::result_large_err)]
     pub async fn collect_to_message(mut self) -> Result<AssistantMessage, AssistantMessage> {
         let mut last_partial: Option<AssistantMessage> = None;
         while let Some(event) = self.inner.as_mut().next().await {
