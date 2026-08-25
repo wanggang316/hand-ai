@@ -786,10 +786,14 @@ impl Extension for SubprocessExtension {
                 let data_dir = data_dir.clone();
                 let fut: BoxFuture<'static, Result<ToolResult, hand_agent::types::ToolError>> =
                     Box::pin(async move {
+                        // Only projected into the wire shape below; a Tier 2
+                        // subprocess cannot hold a Rust sink, so a default
+                        // (never-drained) one is correct here.
                         let cx = ExtensionContext {
                             cwd,
                             session_id,
                             data_dir,
+                            session_sink: Default::default(),
                         };
                         let result = match inner
                             .rpc_hook(
@@ -944,6 +948,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             session_id: "test-session".to_string(),
             data_dir: PathBuf::from("/tmp/data"),
+            session_sink: Default::default(),
         }
     }
 
@@ -1742,6 +1747,7 @@ done
             cwd: real_cwd.clone(),
             session_id: real_session.clone(),
             data_dir: dir.path().join("data"),
+            session_sink: Default::default(),
         };
         let tools = ext.custom_tools(&host_ctx);
         let tool = &tools[0];
