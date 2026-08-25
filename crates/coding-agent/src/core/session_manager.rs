@@ -1,6 +1,7 @@
 //! Session management — JSONL-based session persistence.
 
 use crate::core::error::CodingAgentError;
+use crate::core::messages::custom_message_entry_to_llm;
 use chrono::Utc;
 #[cfg(feature = "sqlite")]
 use hand_agent::session::SqliteStore;
@@ -1183,6 +1184,60 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Append a custom (opaque) entry — extension state that stays out
+    /// of the LLM context but belongs to the transcript, so it survives
+    /// reload and travels on fork. Returns the assigned entry id.
+    ///
+    /// Mirrors the TS `appendCustomEntry` writer for `CustomEntry`.
+    pub fn append_custom(
+        &mut self,
+        custom_type: &str,
+        data: Option<serde_json::Value>,
+    ) -> Result<String, CodingAgentError> {
+        let id = generate_entry_id();
+        let entry = SessionEntry::Custom {
+            id: id.clone(),
+            parent_id: None,
+            custom_type: custom_type.into(),
+            data,
+            timestamp: Utc::now().timestamp_millis(),
+        };
+        self.entries.push(entry);
+        self.persist_entry(self.entries.last().unwrap())?;
+        Ok(id)
+    }
+
+    /// Append a custom message entry — an extension-injected message
+    /// that DOES participate in LLM context (see [`Self::build_context`]).
+    /// `content` carries either a JSON string or a list of
+    /// text/image blocks, matching
+    /// [`crate::core::messages::CustomMessageContent`]; `display`
+    /// controls rendering only, never context membership. Returns the
+    /// assigned entry id.
+    ///
+    /// Mirrors the TS writer for `CustomMessageEntry`.
+    pub fn append_custom_message(
+        &mut self,
+        custom_type: &str,
+        content: serde_json::Value,
+        details: Option<serde_json::Value>,
+        display: bool,
+    ) -> Result<String, CodingAgentError> {
+        let id = generate_entry_id();
+        let entry = SessionEntry::CustomMessage {
+            id: id.clone(),
+            parent_id: None,
+            custom_type: custom_type.into(),
+            content,
+            details,
+            display,
+            timestamp: Utc::now().timestamp_millis(),
+        };
+        self.entries.push(entry);
+        self.persist_entry(self.entries.last().unwrap())?;
+        Ok(id)
+    }
+
     /// Get the session label (name), if any.
     pub fn label(&self) -> Option<&str> {
         self.entries.iter().rev().find_map(|e| {
@@ -1213,15 +1268,42 @@ impl SessionManager {
         let mut found_start = start_id.is_none();
 
         for entry in &self.entries {
-            if let SessionEntry::Message { id, message, .. } = entry {
-                if !found_start {
-                    if Some(id.as_str()) == start_id.as_deref() {
-                        found_start = true;
-                    } else {
-                        continue;
+            match entry {
+                SessionEntry::Message { id, message, .. } => {
+                    if !found_start {
+                        if Some(id.as_str()) == start_id.as_deref() {
+                            found_start = true;
+                        } else {
+                            continue;
+                        }
+                    }
+                    messages.push((**message).clone());
+                }
+                // Custom messages DO participate in LLM context (their
+                // documented contract); `display` governs rendering only.
+                // Plain `Custom` entries stay out — that's the whole
+                // difference between the two variants.
+                SessionEntry::CustomMessage {
+                    id,
+                    custom_type,
+                    content,
+                    timestamp,
+                    ..
+                } => {
+                    if !found_start {
+                        if Some(id.as_str()) == start_id.as_deref() {
+                            found_start = true;
+                        } else {
+                            continue;
+                        }
+                    }
+                    if let Some(message) =
+                        custom_message_entry_to_llm(custom_type, content, *timestamp)
+                    {
+                        messages.push(message);
                     }
                 }
-                messages.push((**message).clone());
+                _ => {}
             }
         }
 
@@ -2071,6 +2153,157 @@ mod tests {
         let path = mgr.path().to_path_buf();
         let loaded = SessionManager::open(&path).unwrap();
         assert_eq!(loaded.message_count(), 2);
+    }
+
+    /// Text of the first (only) text block of a user message; panics on
+    /// any other shape. Assertion helper for the custom-entry tests.
+    fn user_text(msg: &Message) -> &str {
+        match msg {
+            Message::User(u) => match &u.content {
+                model::UserContent::Text(s) => s,
+                model::UserContent::Blocks(blocks) => match &blocks[0] {
+                    model::UserContentBlock::Text(t) => &t.text,
+                    other => panic!("expected text block, got {other:?}"),
+                },
+            },
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    /// Issue #172: `Custom` entries — extension state that belongs to
+    /// the transcript (survives reload, with its payload intact) but
+    /// never participates in LLM context.
+    #[test]
+    fn custom_entry_survives_reload_and_stays_out_of_context() {
+        let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
+        let mut mgr = SessionManager::create(dir.path()).unwrap();
+
+        mgr.append_message(Message::User(UserMessage::new_text("hello")))
+            .unwrap();
+        let data = serde_json::json!({"rule": "notify", "fired": true});
+        let id = mgr.append_custom("hook-log", Some(data.clone())).unwrap();
+
+        let path = mgr.path().to_path_buf();
+        let loaded = SessionManager::open(&path).unwrap();
+        let found = loaded
+            .entries()
+            .iter()
+            .find_map(|e| match e {
+                SessionEntry::Custom {
+                    id: eid,
+                    custom_type,
+                    data,
+                    ..
+                } if *eid == id => Some((custom_type.clone(), data.clone())),
+                _ => None,
+            })
+            .expect("custom entry must survive reload");
+        assert_eq!(found, ("hook-log".to_string(), Some(data)));
+
+        let context = loaded.build_context();
+        assert_eq!(context.len(), 1, "custom entry must not reach the model");
+        assert_eq!(user_text(&context[0]), "hello");
+    }
+
+    /// Issue #172: `CustomMessage` entries DO participate in LLM context
+    /// (their documented contract), in both content shapes — a bare JSON
+    /// string and a block list — and `display: false` has no bearing on
+    /// context membership (it governs rendering only).
+    #[test]
+    fn custom_message_entry_reaches_context_in_both_shapes() {
+        let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
+        let mut mgr = SessionManager::create(dir.path()).unwrap();
+
+        mgr.append_custom_message("note", serde_json::json!("remember the tests"), None, false)
+            .unwrap();
+        mgr.append_custom_message(
+            "note",
+            serde_json::json!([{"type": "text", "text": "block form"}]),
+            Some(serde_json::json!({"origin": "unit-test"})),
+            true,
+        )
+        .unwrap();
+
+        let path = mgr.path().to_path_buf();
+        let loaded = SessionManager::open(&path).unwrap();
+        let context = loaded.build_context();
+        assert_eq!(context.len(), 2);
+        assert_eq!(user_text(&context[0]), "remember the tests");
+        assert_eq!(user_text(&context[1]), "block form");
+    }
+
+    /// Issue #172: a `.jsonl` written by another implementation of the
+    /// same envelope, carrying both custom variants, round-trips
+    /// read → write unchanged — kinds and payloads land verbatim.
+    #[test]
+    fn custom_variant_jsonl_lines_round_trip_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("fixture.jsonl");
+        let header = serde_json::json!({
+            "type": "session",
+            "data": {
+                "version": CURRENT_SESSION_VERSION,
+                "id": "fixture",
+                "timestamp": 1000,
+                "cwd": "/tmp"
+            }
+        });
+        let custom = serde_json::json!({
+            "type": "custom",
+            "data": {
+                "id": "e_1",
+                "custom_type": "hook-log",
+                "data": {"fired": true},
+                "timestamp": 1001
+            }
+        });
+        let custom_message = serde_json::json!({
+            "type": "custom_message",
+            "data": {
+                "id": "e_2",
+                "custom_type": "note",
+                "content": [{"type": "text", "text": "hi"}],
+                "details": {"origin": "fixture"},
+                "display": false,
+                "timestamp": 1002
+            }
+        });
+        let jsonl = [&header, &custom, &custom_message]
+            .iter()
+            .map(|v| v.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, jsonl + "\n").unwrap();
+
+        let loaded = SessionManager::open(&path).unwrap();
+        assert_eq!(loaded.entries().len(), 3);
+        assert_eq!(serde_json::to_value(&loaded.entries()[1]).unwrap(), custom);
+        assert_eq!(
+            serde_json::to_value(&loaded.entries()[2]).unwrap(),
+            custom_message
+        );
+    }
+
+    /// A `CustomMessage` whose content matches neither shape costs its
+    /// own context contribution — never the rest of the transcript.
+    #[test]
+    fn malformed_custom_message_content_is_excluded_not_fatal() {
+        let dir = TempDir::new().unwrap();
+        let _g = scoped_hand_home(dir.path());
+        let mut mgr = SessionManager::create(dir.path()).unwrap();
+
+        mgr.append_message(Message::User(UserMessage::new_text("hello")))
+            .unwrap();
+        mgr.append_custom_message("bad", serde_json::json!(42), None, true)
+            .unwrap();
+
+        let path = mgr.path().to_path_buf();
+        let loaded = SessionManager::open(&path).unwrap();
+        let context = loaded.build_context();
+        assert_eq!(context.len(), 1);
+        assert_eq!(user_text(&context[0]), "hello");
     }
 
     #[test]

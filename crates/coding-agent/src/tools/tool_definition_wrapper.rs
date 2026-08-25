@@ -22,7 +22,7 @@ use hand_agent::types::{
     AgentTool, PrepareArgumentsFn, ToolExecuteCtx, ToolExecuteFn, ToolExecutionMode,
 };
 
-use crate::core::extensions::api::ExtensionContext;
+use crate::core::extensions::api::{ExtensionContext, SessionSink};
 
 /// Factory that builds an [`ExtensionContext`] on demand.
 ///
@@ -79,6 +79,7 @@ pub fn wrap_tool_definition(
                 cwd: fallback_cwd.clone(),
                 session_id: String::new(),
                 data_dir: fallback_cwd.clone(),
+                session_sink: SessionSink::default(),
             });
         exec(call_ctx, cx)
     });
@@ -149,6 +150,7 @@ mod tests {
                 cwd: PathBuf::from("/tmp/from-factory"),
                 session_id: "sess-1".into(),
                 data_dir: PathBuf::from("/tmp/data"),
+                session_sink: SessionSink::default(),
             })
         });
 

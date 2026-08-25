@@ -282,6 +282,7 @@ async fn notify_sh_subprocess_logs_tool_call() {
         cwd: ext_root.path().to_path_buf(),
         session_id: "e2e-test".into(),
         data_dir: data_dir.path().to_path_buf(),
+        session_sink: Default::default(),
     };
 
     // Fire one after-tool-call event. The subprocess greps the wire frame
