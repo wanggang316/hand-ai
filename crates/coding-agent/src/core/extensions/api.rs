@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use hand_agent::types::AgentTool;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 /// What an extension declares about itself.
 ///
@@ -330,6 +331,80 @@ pub struct CustomToolSpec {
     pub schema: String,
 }
 
+/// A session-entry write queued by an extension via [`SessionSink`].
+///
+/// Hooks run inside `'static` closures owned by the agent loop, where
+/// nothing can borrow the session manager — so a write is described
+/// here and applied by the host once it regains control at the end of
+/// the turn that fired the hook.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionWrite {
+    /// Becomes a `Custom` session entry: extension state that stays out
+    /// of the LLM context but belongs to the transcript, so it survives
+    /// reload and travels on fork.
+    Custom {
+        custom_type: String,
+        data: Option<serde_json::Value>,
+    },
+    /// Becomes a `CustomMessage` session entry: an extension-injected
+    /// message that participates in LLM context from the next turn on.
+    /// `content` is either a JSON string or a list of text/image blocks
+    /// (see `CustomMessageContent` in `core::messages`); `display`
+    /// governs rendering only, never context membership.
+    CustomMessage {
+        custom_type: String,
+        content: serde_json::Value,
+        details: Option<serde_json::Value>,
+        display: bool,
+    },
+}
+
+/// Extension-facing writer for session entries.
+///
+/// Cloning shares the queue: every [`ExtensionContext`] stamped from
+/// one factory appends into the same sink, and the host drains it in
+/// FIFO order. Writes are not persisted until the host applies them —
+/// a write queued during a turn that errors out is applied on the next
+/// successful drain rather than lost.
+#[derive(Clone, Debug, Default)]
+pub struct SessionSink {
+    queue: Arc<Mutex<Vec<SessionWrite>>>,
+}
+
+impl SessionSink {
+    /// Queue a `Custom` entry — see [`SessionWrite::Custom`].
+    pub fn append_custom(&self, custom_type: impl Into<String>, data: Option<serde_json::Value>) {
+        self.queue.lock().unwrap().push(SessionWrite::Custom {
+            custom_type: custom_type.into(),
+            data,
+        });
+    }
+
+    /// Queue a `CustomMessage` entry — see [`SessionWrite::CustomMessage`].
+    pub fn append_custom_message(
+        &self,
+        custom_type: impl Into<String>,
+        content: serde_json::Value,
+        details: Option<serde_json::Value>,
+        display: bool,
+    ) {
+        self.queue
+            .lock()
+            .unwrap()
+            .push(SessionWrite::CustomMessage {
+                custom_type: custom_type.into(),
+                content,
+                details,
+                display,
+            });
+    }
+
+    /// Host side: take every queued write, oldest first.
+    pub fn drain(&self) -> Vec<SessionWrite> {
+        std::mem::take(&mut *self.queue.lock().unwrap())
+    }
+}
+
 /// Per-extension load-time and per-event context. Provided by the host.
 ///
 /// Field set is intentionally minimal in v1; expand as Tier 1 examples
@@ -346,6 +421,10 @@ pub struct ExtensionContext {
     /// else `<cwd>/.hand/`. Created lazily — the host does not mkdir it
     /// until something is about to write there.
     pub data_dir: PathBuf,
+    /// Writer for `Custom` / `CustomMessage` session entries. Writes are
+    /// queued here and appended to the transcript by the host at the end
+    /// of the turn that fired the hook.
+    pub session_sink: SessionSink,
 }
 
 /// Session-level inputs from which a per-extension [`ExtensionContext`] is
@@ -360,6 +439,7 @@ pub struct ExtensionContextFactory {
     cwd: PathBuf,
     session_id: String,
     data_root: PathBuf,
+    session_sink: SessionSink,
 }
 
 impl ExtensionContextFactory {
@@ -374,7 +454,16 @@ impl ExtensionContextFactory {
             cwd: cwd.into(),
             session_id: session_id.into(),
             data_root: data_root.into(),
+            session_sink: SessionSink::default(),
         }
+    }
+
+    /// Share the host's [`SessionSink`] with every context this factory
+    /// stamps. Without this the factory allocates a private sink whose
+    /// writes nobody drains — fine for tests, wrong for a live session.
+    pub fn with_session_sink(mut self, sink: SessionSink) -> Self {
+        self.session_sink = sink;
+        self
     }
 
     /// Working directory shared by every extension in this session.
@@ -400,6 +489,7 @@ impl ExtensionContextFactory {
             cwd: self.cwd.clone(),
             session_id: self.session_id.clone(),
             data_dir: self.data_root.join(sanitize_segment(name)).join("data"),
+            session_sink: self.session_sink.clone(),
         }
     }
 }
@@ -634,7 +724,44 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             session_id: "test-session".to_string(),
             data_dir: PathBuf::from("/tmp/data"),
+            session_sink: SessionSink::default(),
         }
+    }
+
+    #[test]
+    fn session_sink_shares_queue_across_contexts_and_drains_fifo() {
+        let sink = SessionSink::default();
+        let factory =
+            ExtensionContextFactory::new("/work", "sess-1", PathBuf::from("/state/extensions"))
+                .with_session_sink(sink.clone());
+
+        // Contexts stamped for different extensions write into the same
+        // queue, and the host's handle sees both in write order.
+        factory
+            .for_extension("a")
+            .session_sink
+            .append_custom("a-state", None);
+        factory
+            .for_extension("b")
+            .session_sink
+            .append_custom_message("b-note", serde_json::json!("hi"), None, true);
+
+        assert_eq!(
+            sink.drain(),
+            vec![
+                SessionWrite::Custom {
+                    custom_type: "a-state".into(),
+                    data: None,
+                },
+                SessionWrite::CustomMessage {
+                    custom_type: "b-note".into(),
+                    content: serde_json::json!("hi"),
+                    details: None,
+                    display: true,
+                },
+            ]
+        );
+        assert!(sink.drain().is_empty(), "drain must consume the queue");
     }
 
     #[test]

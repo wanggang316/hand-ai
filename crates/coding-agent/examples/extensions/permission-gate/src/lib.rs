@@ -108,6 +108,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             session_id: "test-session".to_string(),
             data_dir: PathBuf::from("/tmp/data"),
+            session_sink: Default::default(),
         }
     }
 
