@@ -20,6 +20,10 @@ read this file. Add new entries above the previous version with a
 
 - **Breaking (embedders only):** `ExtensionContext` gains a public `session_sink` field, so Tier 1 extensions that construct the context literally need a one-line addition. Extensions that merely receive the context, all Tier 2 (subprocess) extensions, and the `hand` binary itself are unaffected. One behavioural note for resumed sessions: a transcript that already carries `CustomMessage` entries now feeds them to the model as its contract always documented, which can shift the assembled context slightly compared with earlier builds ([#173](https://github.com/wanggang316/hand-ai/pull/173))
 
+### Added
+
+- `HAND.override.md` takes a directory's place in the context-file lookup. A project's `HAND.md` is normally tracked and shared with everyone working on it, which left nowhere to put instructions that are only yours — a machine-specific path, a convention you don't want to commit. Gitignore an override next to it and that directory's contribution comes from the override instead. The shadowing is per directory, not per chain: overriding your own crate's instructions still inherits whatever the repository root declared, and `.hand/context.md` is a separate slot the override does not displace
+
 ## [0.4.3] - 2026-08-17
 
 ### Added
