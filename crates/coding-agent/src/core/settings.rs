@@ -2061,7 +2061,9 @@ pub fn migrate_legacy_json_settings(base: &Path) -> MigrationOutcome {
     }
 
     // 1. Read + parse JSON.
-    let raw = match std::fs::read_to_string(&json_path) {
+    let raw = match std::fs::read_to_string(&json_path)
+        .map(|s| crate::utils::text::strip_bom(&s).to_string())
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(
@@ -2840,6 +2842,39 @@ mod tests {
             std::fs::create_dir_all(parent).unwrap();
         }
         std::fs::write(path, body).unwrap();
+    }
+
+    /// The YAML spec allows a byte-order mark at the start of a stream
+    /// and the parser honors that, so the YAML layer needs no stripping
+    /// of its own. Pinned because the JSON paths next to it do need it,
+    /// and the asymmetry is worth stating rather than rediscovering.
+    #[test]
+    fn settings_layer_loads_despite_a_byte_order_mark() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.yaml");
+        write_text(&path, "\u{FEFF}quiet-startup: true\n");
+
+        let loaded = load_yaml_layer(&path)
+            .expect("a marked file must still parse")
+            .expect("file exists so a layer is returned");
+        assert_eq!(loaded.quiet_startup, Some(true));
+    }
+
+    /// The legacy JSON path is read by the migration, which is the one
+    /// chance to carry an old configuration forward.
+    #[test]
+    fn legacy_json_migrates_despite_a_byte_order_mark() {
+        let dir = TempDir::new().unwrap();
+        write_text(
+            &dir.path().join("settings.json"),
+            "\u{FEFF}{\"quiet-startup\": true}",
+        );
+
+        let outcome = migrate_legacy_json_settings(dir.path());
+        assert!(
+            matches!(outcome, MigrationOutcome::Migrated { .. }),
+            "a marked legacy file must migrate, got {outcome:?}"
+        );
     }
 
     #[test]

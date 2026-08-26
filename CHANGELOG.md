@@ -20,6 +20,10 @@ read this file. Add new entries above the previous version with a
 
 - **Breaking (embedders only):** `ExtensionContext` gains a public `session_sink` field, so Tier 1 extensions that construct the context literally need a one-line addition. Extensions that merely receive the context, all Tier 2 (subprocess) extensions, and the `hand` binary itself are unaffected. One behavioural note for resumed sessions: a transcript that already carries `CustomMessage` entries now feeds them to the model as its contract always documented, which can shift the assembled context slightly compared with earlier builds ([#173](https://github.com/wanggang316/hand-ai/pull/173))
 
+### Fixed
+
+- A credential store or legacy settings file that carries a byte-order mark loads again. Editors on Windows prefix UTF-8 files with one, and a shell redirect can add it too; the JSON parser then rejected the whole document over a character sitting before it began. Failing to read credentials reads to you as having been logged out, with nothing to explain it, and a legacy settings file that failed to parse lost its migration to the current format. The YAML settings layer was never affected — that parser accepts a leading mark by spec
+
 ## [0.4.3] - 2026-08-17
 
 ### Added
