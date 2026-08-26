@@ -10,7 +10,15 @@ The `/changelog` slash command and the M5.4 startup auto-display both
 read this file. Add new entries above the previous version with a
 `## [X.Y.Z] - YYYY-MM-DD` header — the parser only accepts that shape.
 
-## [Unreleased]
+## [0.4.4] - 2026-08-26
+
+### Added
+
+- Extensions can write their own entries into the session transcript. The two extension-facing entry variants (`Custom`, `CustomMessage`) were readable but unproducible — nothing could write one, so whatever an extension recorded lived only in host memory and was gone on reload, and `CustomMessage` was silently dropped on read despite documenting that it takes part in the model's context. Hooks now queue writes through `cx.session_sink`, drained after the turn's own messages, so an extension's record survives reload and travels on fork; writes queued during a turn that errors out are kept for the next successful drain. The split between the two variants is now what it always claimed to be: `CustomMessage` enters the model's context, plain `Custom` stays out, and a malformed entry costs only its own contribution instead of the rest of the transcript ([#173](https://github.com/wanggang316/hand-ai/pull/173))
+
+### Changed
+
+- **Breaking (embedders only):** `ExtensionContext` gains a public `session_sink` field, so Tier 1 extensions that construct the context literally need a one-line addition. Extensions that merely receive the context, all Tier 2 (subprocess) extensions, and the `hand` binary itself are unaffected. One behavioural note for resumed sessions: a transcript that already carries `CustomMessage` entries now feeds them to the model as its contract always documented, which can shift the assembled context slightly compared with earlier builds ([#173](https://github.com/wanggang316/hand-ai/pull/173))
 
 ## [0.4.3] - 2026-08-17
 
