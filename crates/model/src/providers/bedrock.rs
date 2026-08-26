@@ -209,6 +209,7 @@ fn stream_bedrock(
             provider: model.provider,
             model: model.id.clone(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             usage: Usage::default(),
             error_message: None,
             timestamp: current_timestamp_ms(),
@@ -390,6 +391,7 @@ fn stream_bedrock(
                     }
                     "messageStop" => {
                         if let Some(reason) = event.get("stopReason").and_then(|r| r.as_str()) {
+                            output.raw_stop_reason = Some(reason.to_string());
                             output.stop_reason = match reason {
                                 "end_turn" | "stop" => StopReason::Stop,
                                 "tool_use" => StopReason::ToolUse,

@@ -246,6 +246,7 @@ impl model::ApiProvider for SignalIgnoringProvider {
                     content: vec![],
                     usage: Usage::default(),
                     stop_reason: StopReason::Stop,
+                    raw_stop_reason: None,
                     error_message: None,
                     timestamp: 0,
                     response_model: None,

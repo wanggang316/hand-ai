@@ -544,6 +544,7 @@ fn synthesize_aborted_message(model: &model::Model, reason: &str) -> AssistantMe
         diagnostics: None,
         usage: model::Usage::default(),
         stop_reason: StopReason::Aborted,
+        raw_stop_reason: None,
         error_message: Some(reason.into()),
         timestamp: now_ms(),
     }

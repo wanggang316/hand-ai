@@ -188,6 +188,7 @@ mod tests {
             model: "claude".to_string(),
             usage: Usage::default(),
             stop_reason,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: 0,
             response_model: None,

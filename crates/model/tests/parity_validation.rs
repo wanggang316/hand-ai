@@ -191,6 +191,7 @@ fn validate_context_reports_missing_assistant_between_tool_result_and_user() {
         model: "faux-1".to_string(),
         usage: Usage::default(),
         stop_reason: StopReason::ToolUse,
+        raw_stop_reason: None,
         error_message: None,
         timestamp: 0,
         response_model: None,

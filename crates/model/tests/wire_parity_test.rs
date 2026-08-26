@@ -21,6 +21,7 @@ fn empty_assistant_message() -> AssistantMessage {
         model: "test-model".to_string(),
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
+        raw_stop_reason: None,
         error_message: None,
         timestamp: 0,
         response_model: None,
@@ -238,4 +239,47 @@ fn deserializes_canonical_wire_shaped_json() {
         }
         other => panic!("expected ToolCallEnd, got {other:?}"),
     }
+}
+
+/// The raw stop reason is additive on the wire: it serializes under
+/// `rawStopReason` when present and disappears entirely when absent, so
+/// a consumer written against the previous shape sees no change and a
+/// payload written by one keeps parsing.
+#[test]
+fn raw_stop_reason_is_additive_on_the_wire() {
+    use model::{Api, AssistantMessage, StopReason, Usage, types::Provider};
+
+    let mut msg = AssistantMessage {
+        role: "assistant".to_string(),
+        content: vec![],
+        api: Api::AnthropicMessages,
+        provider: Provider::Anthropic,
+        model: "claude-test".to_string(),
+        usage: Usage::default(),
+        stop_reason: StopReason::Length,
+        raw_stop_reason: None,
+        error_message: None,
+        timestamp: 0,
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+    };
+
+    let without = serde_json::to_value(&msg).expect("serialize");
+    assert!(
+        without.get("rawStopReason").is_none(),
+        "absent reason must not reach the wire: {without}"
+    );
+
+    msg.raw_stop_reason = Some("max_tokens".to_string());
+    let with = serde_json::to_value(&msg).expect("serialize");
+    assert_eq!(
+        with.get("rawStopReason").and_then(|v| v.as_str()),
+        Some("max_tokens")
+    );
+
+    // A payload from before the field existed still parses.
+    let legacy: AssistantMessage = serde_json::from_value(without).expect("parse legacy payload");
+    assert!(legacy.raw_stop_reason.is_none());
+    assert_eq!(legacy.stop_reason, StopReason::Length);
 }

@@ -51,6 +51,7 @@ pub fn test_assistant_message(text: &str) -> AssistantMessage {
         diagnostics: None,
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
+        raw_stop_reason: None,
         error_message: None,
         timestamp: 0,
     }
@@ -74,6 +75,7 @@ pub fn test_assistant_message_with_tool_call(
         diagnostics: None,
         usage: Usage::default(),
         stop_reason: StopReason::ToolUse,
+        raw_stop_reason: None,
         error_message: None,
         timestamp: 0,
     }
@@ -97,6 +99,7 @@ pub fn test_assistant_message_with_tool_calls(
         diagnostics: None,
         usage: Usage::default(),
         stop_reason: StopReason::ToolUse,
+        raw_stop_reason: None,
         error_message: None,
         timestamp: 0,
     }

@@ -291,6 +291,7 @@ fn stream_mistral(
             model: model.id.clone(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             error_message: None,
             timestamp: current_timestamp_ms(),
             response_model: None,
@@ -725,6 +726,7 @@ async fn parse_sse_stream(
         model: model.id.clone(),
         usage: Usage::default(),
         stop_reason: StopReason::Stop,
+        raw_stop_reason: None,
         error_message: None,
         timestamp: current_timestamp_ms(),
         response_model: None,
@@ -801,6 +803,7 @@ async fn parse_sse_stream(
         };
 
         if let Some(reason) = choice.get("finish_reason").and_then(|v| v.as_str()) {
+            output.raw_stop_reason = Some(reason.to_string());
             output.stop_reason = map_stop_reason(reason);
         }
 

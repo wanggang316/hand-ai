@@ -525,6 +525,14 @@ pub(crate) fn dispatch_responses_event(
                 {
                     output.response_id = Some(rid.to_string());
                 }
+                // The status is the provider's own account of how the
+                // turn ended. Nothing here maps it — the stop reason is
+                // derived from the items that arrived — so without this
+                // an `incomplete` completion is indistinguishable from a
+                // clean one after the fact.
+                if let Some(status) = response.get("status").and_then(|v| v.as_str()) {
+                    output.raw_stop_reason = Some(status.to_string());
+                }
                 if let Some(usage) = response.get("usage") {
                     output.usage.input = usage
                         .get("input_tokens")
@@ -578,6 +586,12 @@ pub(crate) fn dispatch_responses_event(
         // with empty content.
         "response.failed" => {
             let response = data.get("response");
+            if let Some(status) = response
+                .and_then(|r| r.get("status"))
+                .and_then(|v| v.as_str())
+            {
+                output.raw_stop_reason = Some(status.to_string());
+            }
             let msg = response
                 .and_then(|r| r.get("error"))
                 .map(|err| {
@@ -738,6 +752,7 @@ mod tests {
             provider: Provider::OpenAI,
             model: "test".to_string(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             usage: Usage::default(),
             error_message: None,
             timestamp: 0,

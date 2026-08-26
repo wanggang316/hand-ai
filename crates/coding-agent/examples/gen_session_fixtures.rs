@@ -28,6 +28,7 @@ fn assistant(text: &str, thinking: Option<&str>, stop: StopReason, err: Option<&
         model: "claude-fixture".to_string(),
         usage: Usage::default(),
         stop_reason: stop,
+        raw_stop_reason: None,
         error_message: err.map(str::to_string),
         timestamp: 0,
         response_model: None,

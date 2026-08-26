@@ -1020,6 +1020,18 @@ pub struct AssistantMessage {
     pub usage: Usage,
     #[serde(rename = "stopReason")]
     pub stop_reason: StopReason,
+    /// The provider's own stop-reason string, before it was mapped onto
+    /// [`StopReason`].
+    ///
+    /// The mapping is lossy on purpose — callers branch on a handful of
+    /// cases and should not learn each provider's vocabulary. But the
+    /// distinctions it discards are exactly what a diagnosis needs:
+    /// `MAX_TOKENS` and `SAFETY` both arrive as errors or truncations
+    /// with nothing left to say which, and a reason the mapping does not
+    /// recognize disappears entirely. `None` when the provider reported
+    /// none, or when the reason was inferred rather than reported.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "rawStopReason")]
+    pub raw_stop_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "errorMessage")]
     pub error_message: Option<String>,
     pub timestamp: u64,

@@ -533,6 +533,7 @@ fn stream_openai_codex_responses(
             provider: model.provider,
             model: model.id.clone(),
             stop_reason: StopReason::Stop,
+            raw_stop_reason: None,
             usage: Usage::default(),
             error_message: None,
             timestamp: current_timestamp_ms(),
