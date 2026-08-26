@@ -10,7 +10,7 @@
 //! which [`JsonlStore::load`] tolerates.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::store::{SessionStore, entries_up_to, forked_header};
@@ -51,6 +51,65 @@ impl JsonlStore {
     /// first non-blank line to be a parseable session envelope. A line
     /// the cap truncated fails to parse and lands in the Corrupt arm,
     /// so oversized headers error instead of hanging on a full read.
+    /// Make the file end on a line boundary before anything is appended.
+    ///
+    /// A write interrupted mid-line — the process is killed, the disk
+    /// fills — leaves a final line with no terminator. [`Self::load`]
+    /// tolerates that: an unterminated line that fails to parse can only
+    /// be the last one, so the complete prefix is returned and the
+    /// session still opens.
+    ///
+    /// Appending onto it is what turns a survivable state into a fatal
+    /// one. The new record fuses onto the fragment, and the resulting
+    /// line *does* carry a terminator, so the next load reads it as a
+    /// fully written malformed entry — corruption, which fails the whole
+    /// session rather than one line.
+    ///
+    /// The trailing fragment is judged the same way the reader judges
+    /// it:
+    ///
+    /// - It parses — a complete entry that merely lost its newline.
+    ///   Terminate it and keep it.
+    /// - It does not parse — a torn write the reader already refuses to
+    ///   interpret. Drop it, which discards nothing that was ever
+    ///   readable.
+    ///
+    /// Either way the file ends on a boundary and the append lands on
+    /// its own line.
+    fn terminate_torn_tail(path: &Path) -> Result<(), SessionStoreError> {
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        let len = file.metadata()?.len();
+        if len == 0 {
+            return Ok(());
+        }
+
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::Start(len - 1))?;
+        file.read_exact(&mut last)?;
+        if last[0] == b'\n' {
+            return Ok(());
+        }
+
+        // Find where the unterminated fragment starts.
+        let mut contents = String::new();
+        file.seek(SeekFrom::Start(0))?;
+        file.read_to_string(&mut contents)?;
+        let fragment_start = match contents.rfind('\n') {
+            Some(i) => i + 1,
+            None => 0,
+        };
+        let fragment = contents[fragment_start..].trim();
+
+        if serde_json::from_str::<SessionEntry>(fragment).is_ok() {
+            file.seek(SeekFrom::End(0))?;
+            writeln!(file)?;
+        } else {
+            file.set_len(fragment_start as u64)?;
+        }
+        file.sync_all()?;
+        Ok(())
+    }
+
     fn scan_header(path: &Path, session: &str) -> Result<SessionHeader, SessionStoreError> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file.take(MAX_HEADER_SCAN_BYTES));
@@ -144,6 +203,7 @@ impl SessionStore for JsonlStore {
         if !path.exists() {
             return Err(SessionStoreError::NotFound(session_id.to_string()));
         }
+        Self::terminate_torn_tail(&path)?;
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
         let line = serde_json::to_string(entry)?;
         writeln!(file, "{line}")?;
