@@ -10,6 +10,12 @@ The `/changelog` slash command and the M5.4 startup auto-display both
 read this file. Add new entries above the previous version with a
 `## [X.Y.Z] - YYYY-MM-DD` header — the parser only accepts that shape.
 
+## [Unreleased]
+
+### Fixed
+
+- A session interrupted mid-write no longer becomes unopenable later. Killing the process while an entry is being written leaves the last line without its terminator; that state was survivable on its own — the reader treats an unterminated final line as a truncated write and opens the session anyway — but the next entry appended onto it fused the two into one line that *did* carry a terminator, which then read as a fully written malformed entry and failed the whole session. Appending now closes the file on a line boundary first: a final entry that is complete and merely lost its newline is kept, and a genuinely torn fragment the reader already refuses to interpret is dropped
+
 ## [0.4.4] - 2026-08-26
 
 ### Added

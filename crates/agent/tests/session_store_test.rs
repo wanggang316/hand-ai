@@ -262,6 +262,72 @@ fn jsonl_truncated_tail_loads_complete_prefix() {
     assert_eq!(entries[0].id(), Some("e_1"));
 }
 
+/// A torn tail survives one load, and the danger is what happens next:
+/// appending onto the fragment fuses the two records into a single line
+/// that *does* carry a terminator, which the reader then judges to be a
+/// fully written malformed entry — corruption that fails the whole
+/// session instead of one line. Appending must leave the session
+/// loadable.
+#[test]
+fn jsonl_append_after_a_torn_tail_keeps_the_session_loadable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = JsonlStore::new(dir.path());
+    store.create(&header("s_torn", 100)).unwrap();
+    store
+        .append("s_torn", &message_entry("e_1", 101, "hi"))
+        .unwrap();
+
+    let path = dir.path().join("s_torn.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(br#"{"type":"mess"#).unwrap();
+    drop(file);
+
+    store
+        .append("s_torn", &message_entry("e_2", 102, "after"))
+        .unwrap();
+
+    let (loaded_header, entries) = store.load("s_torn").unwrap();
+    assert_eq!(loaded_header.id, "s_torn");
+    let ids: Vec<_> = entries.iter().filter_map(|e| e.id()).collect();
+    assert_eq!(
+        ids,
+        vec!["e_1", "e_2"],
+        "the torn fragment is dropped and the new entry lands on its own line"
+    );
+}
+
+/// A final entry that is complete but merely lost its newline is not
+/// torn — it is readable, so appending must keep it rather than discard
+/// it along with the terminator it is missing.
+#[test]
+fn jsonl_append_keeps_a_complete_but_unterminated_last_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = JsonlStore::new(dir.path());
+    store.create(&header("s_noeol", 100)).unwrap();
+
+    // A whole entry written without its trailing newline.
+    let entry = message_entry("e_1", 101, "hi");
+    let path = dir.path().join("s_noeol.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    file.write_all(serde_json::to_string(&entry).unwrap().as_bytes())
+        .unwrap();
+    drop(file);
+
+    store
+        .append("s_noeol", &message_entry("e_2", 102, "after"))
+        .unwrap();
+
+    let (_, entries) = store.load("s_noeol").unwrap();
+    let ids: Vec<_> = entries.iter().filter_map(|e| e.id()).collect();
+    assert_eq!(ids, vec!["e_1", "e_2"], "the readable entry must survive");
+}
+
 #[test]
 fn jsonl_malformed_middle_line_is_corrupt() {
     let dir = tempfile::tempdir().unwrap();
