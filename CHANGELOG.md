@@ -10,6 +10,12 @@ The `/changelog` slash command and the M5.4 startup auto-display both
 read this file. Add new entries above the previous version with a
 `## [X.Y.Z] - YYYY-MM-DD` header — the parser only accepts that shape.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- `--mode json` streaming updates now carry the delta alone. Every `message_update` used to repeat the whole assistant message accumulated so far — twice, once as the event's own `partial` and once as a sibling `message` — so each token re-emitted everything before it and the stream grew with the square of the response: a 5 KB answer streamed in 200 chunks wrote 1.2 MB to stdout, and doubling the answer quadrupled that. `message_start` opens the message, the deltas build it, and `message_end` still carries the authoritative final one, so nothing is lost; a consumer that read `message_update.message` should accumulate the deltas or wait for `message_end` (PR_LINK)
+
 ## [0.4.4] - 2026-08-26
 
 ### Added

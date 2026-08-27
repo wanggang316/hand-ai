@@ -397,16 +397,53 @@ fn format_iso8601(secs: u64, millis: u32) -> String {
 
 /// JSON-mode counterpart to [`handle_agent_event`]. Emits the
 /// `--mode json` event stream: `agent_start`, `turn_start`,
-/// `message_start`, `message_update` (with the inner streaming event),
-/// `message_end`, `turn_end`, `tool_execution_start` / `_end`,
-/// `agent_end`. Payload shapes are camelCased
-/// `Message` / `AssistantMessageEvent` JSON via
+/// `message_start`, `message_update` (the streaming delta alone — see
+/// [`delta_without_snapshot`]), `message_end`, `turn_end`,
+/// `tool_execution_start` / `_end`, `agent_end`. Payload shapes are
+/// camelCased `Message` / `AssistantMessageEvent` JSON via
 /// `serde rename_all = "camelCase"`.
 fn handle_agent_event_json(event: &hand_agent::types::AgentEvent) {
     use hand_agent::types::AgentEvent;
     use std::sync::atomic::Ordering;
 
-    let payload = match event {
+    // Mirror text-mode SAW_ERROR semantics so JSON consumers also get a
+    // non-zero exit when the model errored out.
+    if let AgentEvent::MessageEnd { message } = event {
+        use model::{Message as ModelMessage, StopReason};
+        if let ModelMessage::Assistant(a) = message
+            && matches!(a.stop_reason, StopReason::Error | StopReason::Aborted)
+        {
+            SAW_ERROR.store(true, Ordering::Relaxed);
+        }
+    }
+
+    println!("{}", agent_event_payload(event));
+    let _ = io::stdout().flush();
+}
+
+/// Serialize one streaming delta without the cumulative snapshot it
+/// carries.
+///
+/// Every streaming [`model::AssistantMessageEvent`] variant carries a
+/// `partial` — the whole assistant message accumulated so far — next to
+/// its own delta. Emitting that on every event makes the JSON stream grow
+/// with the square of the response length, so the wire keeps the delta
+/// only. Stripped at the JSON level rather than by rebuilding each
+/// variant, so a streaming variant added later stays covered without a
+/// change here.
+fn delta_without_snapshot(event: &model::AssistantMessageEvent) -> serde_json::Value {
+    let mut value = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+    if let Some(fields) = value.as_object_mut() {
+        fields.remove("partial");
+    }
+    value
+}
+
+/// Build the `--mode json` payload for a single agent event.
+fn agent_event_payload(event: &hand_agent::types::AgentEvent) -> serde_json::Value {
+    use hand_agent::types::AgentEvent;
+
+    match event {
         AgentEvent::AgentStart => serde_json::json!({"type": "agent_start"}),
         AgentEvent::AgentEnd { messages } => {
             serde_json::json!({"type": "agent_end", "messages": messages})
@@ -423,23 +460,18 @@ fn handle_agent_event_json(event: &hand_agent::types::AgentEvent) {
         AgentEvent::MessageStart { message } => {
             serde_json::json!({"type": "message_start", "message": message})
         }
+        // The delta only: `message_start` opens the message, the deltas
+        // build it, and `message_end` carries the authoritative final
+        // one, so repeating the accumulated message here would be the
+        // same bytes a second (and third) time.
         AgentEvent::MessageUpdate {
-            message,
             assistant_message_event,
+            ..
         } => serde_json::json!({
             "type": "message_update",
-            "assistantMessageEvent": assistant_message_event,
-            "message": message,
+            "assistantMessageEvent": delta_without_snapshot(assistant_message_event),
         }),
         AgentEvent::MessageEnd { message } => {
-            // Mirror text-mode SAW_ERROR semantics so JSON consumers also
-            // get a non-zero exit when the model errored out.
-            use model::{Message as ModelMessage, StopReason};
-            if let ModelMessage::Assistant(a) = message
-                && matches!(a.stop_reason, StopReason::Error | StopReason::Aborted)
-            {
-                SAW_ERROR.store(true, Ordering::Relaxed);
-            }
             serde_json::json!({"type": "message_end", "message": message})
         }
         AgentEvent::ToolExecutionStart {
@@ -480,9 +512,7 @@ fn handle_agent_event_json(event: &hand_agent::types::AgentEvent) {
                 "isError": is_error,
             })
         }
-    };
-    println!("{}", payload);
-    let _ = io::stdout().flush();
+    }
 }
 
 fn handle_export(
@@ -855,6 +885,96 @@ fn resolve_session_path_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An assistant message whose only text block is `text` — stands in
+    /// for the snapshot a streaming delta accumulates.
+    fn assistant_with_text(text: &str) -> model::AssistantMessage {
+        model::AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![model::AssistantContentBlock::Text(
+                model::types::TextContent::new(text),
+            )],
+            api: model::types::Api::AnthropicMessages,
+            provider: model::types::Provider::Anthropic,
+            model: "claude".to_string(),
+            usage: model::types::Usage::default(),
+            stop_reason: model::StopReason::Stop,
+            error_message: None,
+            timestamp: 0,
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+        }
+    }
+
+    /// A `text_delta` update whose snapshot has grown to `accumulated`.
+    fn text_delta_update(delta: &str, accumulated: &str) -> hand_agent::types::AgentEvent {
+        let partial = assistant_with_text(accumulated);
+        hand_agent::types::AgentEvent::MessageUpdate {
+            message: model::Message::Assistant(partial.clone()),
+            assistant_message_event: Box::new(model::AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: delta.to_string(),
+                partial,
+            }),
+        }
+    }
+
+    /// A streaming update is a delta, not a snapshot. The accumulated
+    /// message used to ride along twice — once as the event's own
+    /// `partial` and once as a sibling `message` — so a consumer read the
+    /// entire response back on every single token.
+    #[test]
+    fn json_streaming_update_carries_only_the_delta() {
+        let payload = super::agent_event_payload(&text_delta_update(" world", "hello world"));
+
+        assert_eq!(payload["type"], "message_update");
+        assert!(
+            payload.get("message").is_none(),
+            "the accumulated message must not ride along: {payload}"
+        );
+
+        let inner = &payload["assistantMessageEvent"];
+        assert_eq!(inner["type"], "text_delta");
+        assert_eq!(inner["delta"], " world");
+        assert_eq!(inner["contentIndex"], 0);
+        assert!(
+            inner.get("partial").is_none(),
+            "the accumulated message must not ride inside the delta: {inner}"
+        );
+    }
+
+    /// Total bytes emitted while streaming `tokens` deltas.
+    fn streamed_bytes(tokens: usize) -> usize {
+        const TOKEN: &str = "lorem ipsum dolor sit amet ";
+        let mut accumulated = String::new();
+        let mut emitted = 0;
+        for _ in 0..tokens {
+            accumulated.push_str(TOKEN);
+            emitted += super::agent_event_payload(&text_delta_update(TOKEN, &accumulated))
+                .to_string()
+                .len();
+        }
+        emitted
+    }
+
+    /// The stream must cost what the response costs, not its square.
+    /// Carrying the accumulated message on every update means each token
+    /// re-emits everything before it, so twice the response costs four
+    /// times the bytes — the growth that stalls a consumer on a long
+    /// answer. Doubling the response must roughly double the stream.
+    #[test]
+    fn json_streaming_bytes_grow_with_the_response_not_its_square() {
+        let single = streamed_bytes(200);
+        let double = streamed_bytes(400);
+
+        // Per-event envelope overhead is a constant, so linear growth
+        // lands at ~2x; quadratic growth lands at ~4x.
+        assert!(
+            double < single * 3,
+            "doubling the response grew the stream from {single} to {double} bytes"
+        );
+    }
 
     /// Issue #62: `--print '/help'` must NOT ship `/help` to the LLM
     /// as a plain user message — the model hallucinates plausible-
